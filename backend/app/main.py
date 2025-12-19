@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
-from .api.routes import analyze, generate, gboost, assess
+from .api.routes import analyze, generate, gboost, assess, simulate
 
 # Get settings
 settings = get_settings()
@@ -31,6 +31,7 @@ app.include_router(analyze.router)
 app.include_router(generate.router)
 app.include_router(gboost.router)
 app.include_router(assess.router)
+app.include_router(simulate.router)
 
 
 @app.get("/")
@@ -43,7 +44,7 @@ async def root():
         "endpoints": {
             "analyze": "/api/analyze",
             "generate": "/api/generate",
-            "simulate": "/api/simulate",
+            "simulate_visual": "/api/simulate/visual",
             "assess_multibot": "/api/assess/multibot",
             "assess_comprehensive": "/api/assess/comprehensive",
             "bot_profiles": "/api/assess/profiles",

@@ -35,6 +35,10 @@ from .schemas import (
     ComprehensiveAssessResponse,
     BotProfileListResponse,
     ErrorResponse,
+    # AutoPlay schemas
+    AutoPlayRequest,
+    AutoPlayResponse,
+    BotClearStats,
 )
 
 __all__ = [
@@ -69,4 +73,8 @@ __all__ = [
     "ComprehensiveAssessResponse",
     "BotProfileListResponse",
     "ErrorResponse",
+    # AutoPlay schemas
+    "AutoPlayRequest",
+    "AutoPlayResponse",
+    "BotClearStats",
 ]

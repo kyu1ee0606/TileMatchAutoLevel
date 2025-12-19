@@ -10,6 +10,7 @@ import { simulateLevel } from '../../api/generate';
 import type { SimulationResult } from '../../types';
 import { Button, Tooltip } from '../ui';
 import { Search, Dices, Lightbulb } from 'lucide-react';
+import { AutoPlayPanel } from '../AutoPlayPanel';
 
 // Skeleton for analysis loading state
 function AnalysisSkeleton() {
@@ -221,6 +222,9 @@ export function DifficultyPanel({ className }: DifficultyPanelProps) {
             </div>
           </div>
         )}
+
+        {/* AutoPlay Analysis Panel */}
+        <AutoPlayPanel className="border-t border-gray-700 pt-4" embedded />
       </div>
     </CollapsiblePanel>
   );

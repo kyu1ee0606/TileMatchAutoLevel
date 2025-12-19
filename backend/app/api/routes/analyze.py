@@ -1,6 +1,8 @@
 """Level analysis API routes."""
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from fastapi import APIRouter, Depends, HTTPException
-from typing import List
+from typing import List, Dict, Any
 
 from ...models.schemas import (
     AnalyzeRequest,
@@ -8,11 +10,43 @@ from ...models.schemas import (
     BatchAnalyzeRequest,
     BatchAnalyzeResponse,
     BatchAnalyzeResultItem,
+    AutoPlayRequest,
+    AutoPlayResponse,
+    BotClearStats,
 )
+from ...models.bot_profile import BotType, get_profile, PREDEFINED_PROFILES
 from ...core.analyzer import LevelAnalyzer
+from ...core.bot_simulator import BotSimulator
 from ..deps import get_level_analyzer
 
 router = APIRouter(prefix="/api", tags=["analyze"])
+
+# Bot target clear rates (expected performance)
+BOT_TARGET_CLEAR_RATES = {
+    "novice": 0.40,
+    "casual": 0.60,
+    "average": 0.75,
+    "expert": 0.90,
+    "optimal": 0.98,
+}
+
+# Bot display names (Korean)
+BOT_DISPLAY_NAMES = {
+    "novice": "초보자",
+    "casual": "캐주얼",
+    "average": "일반",
+    "expert": "숙련자",
+    "optimal": "최적",
+}
+
+# Bot weights for difficulty calculation (mid-tier bots weighted higher)
+BOT_WEIGHTS = {
+    "novice": 1.0,
+    "casual": 1.5,
+    "average": 2.0,  # Most weight on average player
+    "expert": 1.5,
+    "optimal": 1.0,
+}
 
 
 @router.post("/analyze", response_model=AnalyzeResponse)
@@ -86,3 +120,280 @@ async def batch_analyze_levels(
         )
 
     return BatchAnalyzeResponse(results=results)
+
+
+def _calculate_max_moves(level_json: Dict[str, Any]) -> int:
+    """Calculate max moves based on total tiles.
+
+    Stack/craft tiles count as multiple tiles based on their totalCount.
+    """
+    total_tiles = 0
+    num_layers = level_json.get("layer", 8)
+
+    for i in range(num_layers):
+        layer_key = f"layer_{i}"
+        layer_data = level_json.get(layer_key, {})
+        tiles = layer_data.get("tiles", {})
+        for pos, tile_data in tiles.items():
+            if isinstance(tile_data, list) and len(tile_data) > 0:
+                tile_type = tile_data[0]
+                # Check for stack/craft tiles (e.g., stack_t1, craft_t2)
+                if isinstance(tile_type, str) and (tile_type.startswith("stack_") or tile_type.startswith("craft_")):
+                    # Get totalCount from extra_data: [totalCount] or [totalCount, "types"]
+                    extra_data = tile_data[2] if len(tile_data) > 2 else None
+                    if extra_data and isinstance(extra_data, list) and len(extra_data) >= 1:
+                        stack_count = int(extra_data[0]) if extra_data[0] else 1
+                        total_tiles += stack_count
+                    else:
+                        total_tiles += 1
+                else:
+                    total_tiles += 1
+            else:
+                total_tiles += 1
+
+    # Max moves = total tiles + buffer (10)
+    return total_tiles + 10
+
+
+def _calculate_autoplay_difficulty(bot_stats: List[BotClearStats]) -> float:
+    """
+    Calculate difficulty based on bot clear rates vs expected rates.
+
+    Scoring logic:
+    - Base score is 50 (balanced)
+    - If bots clear less than target: score increases (harder)
+    - If bots clear more than target: score decreases (easier)
+    """
+    if not bot_stats:
+        return 50.0
+
+    weighted_score = 0.0
+    total_weight = 0.0
+
+    for stats in bot_stats:
+        weight = BOT_WEIGHTS.get(stats.profile, 1.0)
+        # gap > 0 means harder than expected (target - actual)
+        gap = stats.target_clear_rate - stats.clear_rate
+        weighted_score += gap * weight * 100  # Scale to percentage points
+        total_weight += weight
+
+    base_score = 50.0  # Balanced baseline
+    adjustment = weighted_score / total_weight if total_weight > 0 else 0
+
+    # Clamp to 0-100 range
+    return max(0.0, min(100.0, base_score + adjustment))
+
+
+def _get_grade_from_score(score: float) -> str:
+    """Convert score to grade."""
+    if score <= 20:
+        return "S"
+    elif score <= 40:
+        return "A"
+    elif score <= 60:
+        return "B"
+    elif score <= 80:
+        return "C"
+    else:
+        return "D"
+
+
+def _assess_balance(bot_stats: List[BotClearStats]) -> tuple[str, List[str]]:
+    """
+    Assess level balance and generate recommendations.
+
+    Returns:
+        Tuple of (balance_status, recommendations)
+    """
+    recommendations = []
+    all_below_target = True
+    all_above_target = True
+    any_extreme = False
+
+    for stats in bot_stats:
+        gap = stats.clear_rate - stats.target_clear_rate
+
+        if gap >= 0:
+            all_below_target = False
+        if gap <= 0:
+            all_above_target = False
+
+        # Check for extreme deviations (>20% from target)
+        if abs(gap) > 0.20:
+            any_extreme = True
+
+            if gap < -0.20:
+                # Much harder than expected
+                recommendations.append(
+                    f"{stats.profile_display} 클리어율이 목표보다 {abs(gap)*100:.0f}%p 낮음 - 기믹 감소 권장"
+                )
+            elif gap > 0.20:
+                # Much easier than expected
+                recommendations.append(
+                    f"{stats.profile_display} 클리어율이 목표보다 {gap*100:.0f}%p 높음 - 난이도 상향 권장"
+                )
+
+    # Determine balance status
+    if any_extreme:
+        balance_status = "unbalanced"
+    elif all_below_target:
+        balance_status = "too_hard"
+        if not recommendations:
+            recommendations.append("전체적으로 난이도가 높음 - 기믹 수 감소 또는 레이어 축소 권장")
+    elif all_above_target:
+        balance_status = "too_easy"
+        if not recommendations:
+            recommendations.append("전체적으로 난이도가 낮음 - 기믹 추가 또는 레이어 증가 권장")
+    else:
+        balance_status = "balanced"
+        if not recommendations:
+            recommendations.append("난이도 균형이 적절함")
+
+    return balance_status, recommendations
+
+
+def _run_bot_simulation(
+    profile_name: str,
+    level_json: Dict[str, Any],
+    iterations: int,
+    max_moves: int,
+    seed: int | None,
+) -> BotClearStats:
+    """Run simulation for a single bot profile."""
+    simulator = BotSimulator()
+    profile = get_profile(profile_name)
+
+    result = simulator.simulate_with_profile(
+        level_json=level_json,
+        profile=profile,
+        iterations=iterations,
+        max_moves=max_moves,
+        seed=seed,
+    )
+
+    return BotClearStats(
+        profile=profile_name,
+        profile_display=BOT_DISPLAY_NAMES.get(profile_name, profile_name),
+        clear_rate=result.clear_rate,
+        target_clear_rate=BOT_TARGET_CLEAR_RATES.get(profile_name, 0.5),
+        avg_moves=result.avg_moves,
+        min_moves=result.min_moves,
+        max_moves=result.max_moves,
+        std_moves=result.std_moves,
+        avg_combo=result.avg_combo,
+        iterations=result.iterations,
+    )
+
+
+@router.post("/analyze/autoplay", response_model=AutoPlayResponse)
+async def analyze_autoplay(
+    request: AutoPlayRequest,
+    analyzer: LevelAnalyzer = Depends(get_level_analyzer),
+) -> AutoPlayResponse:
+    """
+    Analyze level difficulty using auto-play bot simulations.
+
+    Runs multiple bot profiles with repeated simulations to measure
+    actual clear rates and compare against expected performance.
+
+    Args:
+        request: AutoPlayRequest with level_json, iterations, and optional bot_profiles.
+        analyzer: LevelAnalyzer dependency for static analysis comparison.
+
+    Returns:
+        AutoPlayResponse with bot statistics, difficulty scores, and recommendations.
+    """
+    start_time = time.time()
+
+    try:
+        level_json = request.level_json
+        iterations = request.iterations
+        seed = request.seed
+
+        # Determine which bot profiles to use
+        if request.bot_profiles:
+            profiles = [p.lower() for p in request.bot_profiles if p.lower() in BOT_TARGET_CLEAR_RATES]
+        else:
+            profiles = list(BOT_TARGET_CLEAR_RATES.keys())
+
+        if not profiles:
+            raise HTTPException(
+                status_code=400,
+                detail="No valid bot profiles specified"
+            )
+
+        # Calculate max moves based on level
+        max_moves = _calculate_max_moves(level_json)
+
+        # Run simulations in parallel
+        bot_stats: List[BotClearStats] = []
+        with ThreadPoolExecutor(max_workers=min(5, len(profiles))) as executor:
+            futures = {
+                executor.submit(
+                    _run_bot_simulation,
+                    profile,
+                    level_json,
+                    iterations,
+                    max_moves,
+                    seed,
+                ): profile
+                for profile in profiles
+            }
+
+            for future in as_completed(futures):
+                try:
+                    stats = future.result()
+                    bot_stats.append(stats)
+                except Exception as e:
+                    profile = futures[future]
+                    # Create a failed stats entry
+                    bot_stats.append(BotClearStats(
+                        profile=profile,
+                        profile_display=BOT_DISPLAY_NAMES.get(profile, profile),
+                        clear_rate=0.0,
+                        target_clear_rate=BOT_TARGET_CLEAR_RATES.get(profile, 0.5),
+                        avg_moves=0.0,
+                        min_moves=0,
+                        max_moves=0,
+                        std_moves=0.0,
+                        avg_combo=0.0,
+                        iterations=0,
+                    ))
+
+        # Sort by profile order
+        profile_order = list(BOT_TARGET_CLEAR_RATES.keys())
+        bot_stats.sort(key=lambda x: profile_order.index(x.profile) if x.profile in profile_order else 999)
+
+        # Calculate autoplay difficulty score
+        autoplay_score = _calculate_autoplay_difficulty(bot_stats)
+        autoplay_grade = _get_grade_from_score(autoplay_score)
+
+        # Get static analysis for comparison
+        static_report = analyzer.analyze(level_json)
+        static_score = static_report.score
+        static_grade = static_report.grade.value
+
+        # Assess balance
+        balance_status, recommendations = _assess_balance(bot_stats)
+
+        # Calculate execution time
+        execution_time_ms = int((time.time() - start_time) * 1000)
+        total_simulations = sum(s.iterations for s in bot_stats)
+
+        return AutoPlayResponse(
+            bot_stats=bot_stats,
+            autoplay_score=round(autoplay_score, 2),
+            autoplay_grade=autoplay_grade,
+            static_score=round(static_score, 2),
+            static_grade=static_grade,
+            score_difference=round(autoplay_score - static_score, 2),
+            balance_status=balance_status,
+            recommendations=recommendations,
+            total_simulations=total_simulations,
+            execution_time_ms=execution_time_ms,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"AutoPlay analysis failed: {str(e)}")

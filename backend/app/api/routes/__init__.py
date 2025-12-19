@@ -6,10 +6,12 @@ from . import analyze
 from . import generate
 from . import gboost
 from . import assess
+from . import simulate
 
 __all__ = [
     "analyze",
     "generate",
     "gboost",
     "assess",
+    "simulate",
 ]

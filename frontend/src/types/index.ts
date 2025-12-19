@@ -118,10 +118,54 @@ export const SPECIAL_IMAGES: Record<string, string> = {
   ice_1: '/tiles/special/tile_ice_1.png',
   ice_2: '/tiles/special/tile_ice_2.png',
   ice_3: '/tiles/special/tile_ice_3.png',
+  ice: '/tiles/special/tile_ice_1.png', // Default ice
   grass: '/tiles/special/tile_grass.png',
+  grass_1: '/tiles/special/tile_grass.png',
+  grass_2: '/tiles/special/tile_grass.png',
   crate: '/tiles/special/tile_crate.png',
   bomb: '/tiles/special/bomb.png',
   unknown: '/tiles/special/tile_unknown.png',
+  // Curtain gimmick
+  curtain_open: '/tiles/special/curtain_open.png',
+  curtain_close: '/tiles/special/curtain_close.png',
+  curtain: '/tiles/special/curtain_close.png', // Default curtain
+  // Teleport gimmick
+  teleport: '/tiles/special/teleport.png',
+  // Stack gimmick icons (direction-based)
+  stack_e: '/tiles/special/stack_e.png',
+  stack_w: '/tiles/special/stack_w.png',
+  stack_s: '/tiles/special/stack_s.png',
+  stack_n: '/tiles/special/stack_n.png',
+  // Craft gimmick icon
+  craft: '/tiles/special/tile_craft.png',
+};
+
+// Gimmick effect definitions for visualization
+export interface GimmickEffect {
+  name: string;
+  icon: string;
+  color: string;
+  description: string;
+}
+
+export const GIMMICK_EFFECTS: Record<string, GimmickEffect> = {
+  ice: { name: 'Ice', icon: '❄️', color: '#60a5fa', description: '얼음 - 인접 타일 제거 시 녹음' },
+  ice_1: { name: 'Ice 1', icon: '❄️', color: '#93c5fd', description: '얼음 1단계' },
+  ice_2: { name: 'Ice 2', icon: '❄️', color: '#60a5fa', description: '얼음 2단계' },
+  ice_3: { name: 'Ice 3', icon: '❄️', color: '#3b82f6', description: '얼음 3단계' },
+  chain: { name: 'Chain', icon: '⛓️', color: '#a1a1aa', description: '체인 - 수평 인접 타일 제거 시 해제' },
+  grass: { name: 'Grass', icon: '🌿', color: '#22c55e', description: '풀 - 인접 타일 제거 시 제거' },
+  grass_1: { name: 'Grass 1', icon: '🌿', color: '#4ade80', description: '풀 1단계' },
+  grass_2: { name: 'Grass 2', icon: '🌿', color: '#22c55e', description: '풀 2단계' },
+  frog: { name: 'Frog', icon: '🐸', color: '#16a34a', description: '개구리 - 매 턴 이동' },
+  bomb: { name: 'Bomb', icon: '💣', color: '#ef4444', description: '폭탄 - 카운트다운 후 폭발' },
+  curtain_open: { name: 'Curtain Open', icon: '🎭', color: '#a855f7', description: '커튼 열림' },
+  curtain_close: { name: 'Curtain Closed', icon: '🎪', color: '#7c3aed', description: '커튼 닫힘 - 선택 불가' },
+  teleport: { name: 'Teleport', icon: '🌀', color: '#06b6d4', description: '텔레포트 - 위치 이동' },
+  link_n: { name: 'Link North', icon: '🔗↑', color: '#f59e0b', description: '북쪽 연결' },
+  link_s: { name: 'Link South', icon: '🔗↓', color: '#f59e0b', description: '남쪽 연결' },
+  link_e: { name: 'Link East', icon: '🔗→', color: '#f59e0b', description: '동쪽 연결' },
+  link_w: { name: 'Link West', icon: '🔗←', color: '#f59e0b', description: '서쪽 연결' },
 };
 
 // Attribute definitions
@@ -150,3 +194,6 @@ export const GRADE_DESCRIPTIONS: Record<DifficultyGrade, string> = {
   C: '어려움',
   D: '매우 어려움',
 };
+
+// Re-export simulation types
+export * from './simulation';

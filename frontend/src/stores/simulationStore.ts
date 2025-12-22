@@ -19,7 +19,7 @@ interface SimulationState {
   playbackSpeed: PlaybackSpeed;
 
   // Actions - Data fetching
-  fetchSimulation: (levelJson: LevelJSON, botTypes?: BotProfile[]) => Promise<void>;
+  fetchSimulation: (levelJson: LevelJSON, botTypes?: BotProfile[], maxMoves?: number, seed?: number) => Promise<void>;
   clearResults: () => void;
 
   // Actions - Playback control
@@ -48,11 +48,11 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
   playbackSpeed: 1,
 
   // Fetch simulation from API
-  fetchSimulation: async (levelJson, botTypes) => {
+  fetchSimulation: async (levelJson, botTypes, maxMoves, seed) => {
     set({ isLoading: true, error: null });
 
     try {
-      const results = await simulateVisual(levelJson, botTypes);
+      const results = await simulateVisual(levelJson, botTypes, maxMoves, seed);
       set({
         results,
         isLoading: false,

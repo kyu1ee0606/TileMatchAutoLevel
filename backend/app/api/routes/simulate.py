@@ -1,6 +1,10 @@
 """Visual simulation API routes for level playback visualization."""
 import random
 import time
+import json
+import os
+from pathlib import Path
+from datetime import datetime
 from copy import deepcopy
 from typing import Dict, List, Any, Optional, Set, Tuple
 from dataclasses import dataclass, field
@@ -22,9 +26,20 @@ from ...core.bot_simulator import (
     TileEffectType,
     Move,
 )
+from ...models.benchmark_level import (
+    DifficultyTier,
+    get_benchmark_level_by_id,
+    get_benchmark_set,
+    BenchmarkLevel,
+)
 
 
 router = APIRouter(prefix="/api/simulate", tags=["Visual Simulation"])
+
+
+# Local levels storage path
+LOCAL_LEVELS_DIR = Path(__file__).parent.parent.parent / "storage" / "local_levels"
+LOCAL_LEVELS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # Bot display names (Korean)
@@ -133,7 +148,7 @@ class VisualSimulator:
         max_moves: int,
         seed: Optional[int] = None,
         initial_state_seed: Optional[int] = None,
-    ) -> Tuple[VisualBotResult, Dict[str, List[str]]]:
+    ) -> Tuple[VisualBotResult, Dict[str, List[str]], Dict[Tuple[int, str], str]]:
         """Run a single simulation for a bot and record all moves.
 
         Args:
@@ -144,8 +159,9 @@ class VisualSimulator:
             initial_state_seed: Seed for initial state (same for all bots for consistent tiles)
 
         Returns:
-            Tuple of (VisualBotResult, stack_craft_types_map)
+            Tuple of (VisualBotResult, stack_craft_types_map, t0_assignments)
             stack_craft_types_map: {layerIdx_pos: [tile_types]} for stack/craft tiles
+            t0_assignments: {(layer_idx, pos): converted_tile_type} for t0 tiles
         """
         # Use initial_state_seed for tile generation (consistent across all bots)
         # Use seed for bot behavior (varied gameplay)
@@ -183,6 +199,14 @@ class VisualSimulator:
             if tile_types:
                 stack_craft_types_map[craft_box_key] = tile_types
 
+        # Extract tile type assignments from initialized state
+        # This ensures frontend visualization uses the exact same types as simulation
+        t0_assignments: Dict[Tuple[int, str], str] = {}
+        for layer_idx, layer_tiles in state.tiles.items():
+            for pos, tile_state in layer_tiles.items():
+                # All tiles in state.tiles already have their resolved types
+                # We need to track all tiles (originally t0 or not) for consistency
+                t0_assignments[(layer_idx, pos)] = tile_state.tile_type
 
         # Store initial goals for calculating completed goals
         initial_goals = dict(state.goals_remaining)
@@ -363,6 +387,7 @@ class VisualSimulator:
                 },
             ),
             stack_craft_types_map,
+            t0_assignments,
         )
 
     def _is_game_over(self, state: GameState) -> bool:
@@ -466,7 +491,13 @@ def extract_initial_state(
 
             if t0_assignments:
                 for pos, tile_data in layer_tiles.items():
-                    if isinstance(tile_data, list) and tile_data[0] == "t0":
+                    if isinstance(tile_data, list) and len(tile_data) > 0:
+                        tile_type = tile_data[0]
+                        # Skip stack/craft tiles - they're handled separately below
+                        if isinstance(tile_type, str) and (tile_type.startswith("stack_") or tile_type.startswith("craft_")):
+                            continue
+                        # Use simulation's tile type for all regular tiles (not just t0)
+                        # This ensures frontend displays exact same types as simulation
                         converted_type = t0_assignments.get((i, pos))
                         if converted_type:
                             tile_data[0] = converted_type
@@ -616,6 +647,237 @@ def extract_dock_info(level_json: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+@router.get(
+    "/benchmark/list",
+    summary="List all benchmark levels",
+    description="Get a list of all available benchmark levels with metadata",
+)
+async def list_benchmark_levels():
+    """List all available benchmark levels grouped by difficulty tier."""
+    try:
+        result = {}
+        for tier in [DifficultyTier.EASY, DifficultyTier.MEDIUM, DifficultyTier.HARD,
+                     DifficultyTier.EXPERT, DifficultyTier.IMPOSSIBLE]:
+            try:
+                benchmark_set = get_benchmark_set(tier)
+                result[tier.value] = [
+                    {
+                        "id": level.id,
+                        "name": level.name,
+                        "description": level.description,
+                        "tags": level.tags,
+                        "difficulty": level.difficulty_tier.value,
+                    }
+                    for level in benchmark_set.levels
+                ]
+            except ValueError:
+                # Tier not yet implemented
+                result[tier.value] = []
+
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get(
+    "/benchmark/{level_id}",
+    summary="Get benchmark level by ID",
+    description="Retrieve a specific benchmark level in simulator-compatible format",
+)
+async def get_benchmark_level(level_id: str):
+    """Get a specific benchmark level by ID, converted to simulator format."""
+    try:
+        level = get_benchmark_level_by_id(level_id)
+
+        # Convert to simulator format
+        level_data = level.to_simulator_format()
+
+        # Add metadata
+        return {
+            "level_data": level_data,
+            "metadata": {
+                "id": level.id,
+                "name": level.name,
+                "description": level.description,
+                "tags": level.tags,
+                "difficulty": level.difficulty_tier.value,
+                "max_moves": level.level_json.get("max_moves", 50),
+            }
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get(
+    "/benchmark/dashboard/summary",
+    summary="Get benchmark system dashboard summary",
+    description="Comprehensive overview of all benchmark levels with statistics",
+)
+async def get_benchmark_dashboard():
+    """Get comprehensive dashboard data for benchmark system."""
+    try:
+        dashboard_data = {
+            "tiers": {},
+            "overall_stats": {
+                "total_levels": 0,
+                "implemented_tiers": [],
+                "pending_tiers": [],
+            }
+        }
+
+        simulator = BotSimulator()
+
+        for tier in [DifficultyTier.EASY, DifficultyTier.MEDIUM, DifficultyTier.HARD,
+                     DifficultyTier.EXPERT, DifficultyTier.IMPOSSIBLE]:
+            try:
+                benchmark_set = get_benchmark_set(tier)
+
+                # Quick test: Run optimal bot on first level to get performance snapshot
+                first_level = benchmark_set.levels[0]
+                level_data = first_level.to_simulator_format()
+                max_moves = first_level.level_json.get("max_moves", 50)
+
+                profile = get_profile(BotType.OPTIMAL)
+                quick_result = simulator.simulate_with_profile(
+                    level_data,
+                    profile,
+                    iterations=10,  # Quick test
+                    max_moves=max_moves,
+                    seed=42,
+                )
+
+                tier_info = {
+                    "tier": tier.value,
+                    "level_count": len(benchmark_set.levels),
+                    "description": benchmark_set.description,
+                    "status": "implemented",
+                    "levels": [
+                        {
+                            "id": level.id,
+                            "name": level.name,
+                            "description": level.description,
+                            "tags": level.tags,
+                            "expected_clear_rates": level.expected_clear_rates,
+                            "max_moves": level.level_json.get("max_moves", 50),
+                            "tile_count": len(level.level_json.get("tiles", [])),
+                        }
+                        for level in benchmark_set.levels
+                    ],
+                    "sample_performance": {
+                        "level_id": first_level.id,
+                        "optimal_clear_rate": quick_result.clear_rate,
+                        "avg_moves": quick_result.avg_moves,
+                    }
+                }
+
+                dashboard_data["tiers"][tier.value] = tier_info
+                dashboard_data["overall_stats"]["total_levels"] += len(benchmark_set.levels)
+                dashboard_data["overall_stats"]["implemented_tiers"].append(tier.value)
+
+            except ValueError:
+                # Tier not implemented yet
+                dashboard_data["tiers"][tier.value] = {
+                    "tier": tier.value,
+                    "level_count": 0,
+                    "status": "pending",
+                    "description": f"{tier.value.upper()} tier not yet implemented"
+                }
+                dashboard_data["overall_stats"]["pending_tiers"].append(tier.value)
+
+        return dashboard_data
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post(
+    "/benchmark/validate/{level_id}",
+    summary="Validate level difficulty",
+    description="Run validation test on a specific level and return detailed results",
+)
+async def validate_level_difficulty(
+    level_id: str,
+    iterations: int = 100,
+    tolerance: float = 15.0,
+):
+    """
+    Validate level difficulty by testing all bot types.
+
+    Args:
+        level_id: Level to validate
+        iterations: Number of test iterations (default: 100)
+        tolerance: Acceptable deviation percentage (default: 15)
+
+    Returns:
+        Validation results with pass/fail status for each bot type
+    """
+    try:
+        level = get_benchmark_level_by_id(level_id)
+        simulator = BotSimulator()
+        level_data = level.to_simulator_format()
+        max_moves = level.level_json.get("max_moves", 50)
+
+        validation_results = {
+            "level_id": level.id,
+            "level_name": level.name,
+            "iterations": iterations,
+            "tolerance": tolerance,
+            "bot_results": [],
+            "overall_pass": True,
+            "warnings": 0,
+            "failures": 0,
+        }
+
+        bot_types = [BotType.NOVICE, BotType.CASUAL, BotType.AVERAGE,
+                     BotType.EXPERT, BotType.OPTIMAL]
+
+        for bot_type in bot_types:
+            profile = get_profile(bot_type)
+            expected_rate = level.expected_clear_rates.get(bot_type.value, 0.0)
+
+            # Run simulation
+            result = simulator.simulate_with_profile(
+                level_data,
+                profile,
+                iterations=iterations,
+                max_moves=max_moves,
+                seed=42,
+            )
+
+            actual_rate = result.clear_rate
+            deviation = abs(actual_rate - expected_rate) * 100
+
+            # Determine status
+            if deviation <= tolerance:
+                status = "PASS"
+            elif deviation <= tolerance * 1.5:
+                status = "WARN"
+                validation_results["warnings"] += 1
+            else:
+                status = "FAIL"
+                validation_results["failures"] += 1
+                validation_results["overall_pass"] = False
+
+            bot_result = {
+                "bot_type": bot_type.value,
+                "expected_rate": expected_rate,
+                "actual_rate": actual_rate,
+                "deviation": deviation,
+                "status": status,
+                "within_tolerance": (deviation <= tolerance),
+            }
+            validation_results["bot_results"].append(bot_result)
+
+        return validation_results
+
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.post(
     "/visual",
     response_model=VisualSimulationResponse,
@@ -654,9 +916,12 @@ async def simulate_visual(request: VisualSimulationRequest):
                     detail=f"Invalid bot type: {bt}. Valid types: {valid_types}"
                 )
 
-        # Create simulator and get t0 assignments first
+        # Create simulator
         simulator = VisualSimulator()
-        t0_assignments = simulator.get_t0_assignments(request.level_json, request.seed)
+        rand_seed = request.level_json.get("randSeed", 0)
+        effective_seed = request.seed if request.seed is not None else rand_seed
+        # Note: t0_assignments will be extracted from simulation results (first bot)
+        # This ensures frontend displays exact same types as simulation uses
 
         # Calculate total tiles to determine max_moves
         # Stack/craft tiles count as multiple tiles based on their totalCount
@@ -689,16 +954,19 @@ async def simulate_visual(request: VisualSimulationRequest):
         effective_max_moves = max(request.max_moves, total_tiles)
 
         # Run simulations (reuse simulator created earlier)
-        # All bots use the same initial_state_seed for consistent tile types
+        # All bots use the same initial_state_seed (effective_seed) for consistent tile types
         # Each bot uses a different behavior seed for varied gameplay
         bot_results: List[VisualBotResult] = []
         stack_craft_types: Optional[Dict[str, List[str]]] = None
-        initial_state_seed = request.seed  # Same seed for all bots' initial state
+        t0_assignments: Optional[Dict[Tuple[int, str], str]] = None
+
+        # effective_seed was already calculated above from randSeed or request.seed
+        initial_state_seed = effective_seed
 
         for i, bot_type in enumerate(bot_types):
             # Different behavior seed per bot, but same initial state seed
-            behavior_seed = request.seed + i if request.seed is not None else None
-            result, types_map = simulator.simulate_bot(
+            behavior_seed = initial_state_seed + i if initial_state_seed else i
+            result, types_map, tile_assignments = simulator.simulate_bot(
                 request.level_json,
                 bot_type,
                 effective_max_moves,
@@ -706,18 +974,32 @@ async def simulate_visual(request: VisualSimulationRequest):
                 initial_state_seed=initial_state_seed,
             )
             bot_results.append(result)
-            # Use the first bot's stack/craft types for initial state
+            # Use the first bot's types for initial state
             # (all bots now have the same types due to same initial_state_seed)
             if i == 0:
                 stack_craft_types = types_map
+                t0_assignments = tile_assignments
 
-        # Extract initial state with t0 tiles and stack/craft types from simulation
+        # Extract initial state with tile types from simulation (not separately generated)
+        # This ensures frontend displays exact same types as simulation uses
         initial_state = extract_initial_state(request.level_json, t0_assignments, stack_craft_types)
 
         # Calculate max steps
         max_steps = max(len(r.moves) for r in bot_results) if bot_results else 0
 
         elapsed_ms = int((time.time() - start_time) * 1000)
+
+        # Validate tile count (must be multiple of 3 for level to be clearable)
+        tile_count_remainder = total_tiles % 3
+        tile_count_valid = tile_count_remainder == 0
+        tile_count_message = ""
+        if not tile_count_valid:
+            if tile_count_remainder == 1:
+                tile_count_message = f"타일 {total_tiles}개 (3의 배수가 아님 - 1개 초과 또는 2개 부족)"
+            else:
+                tile_count_message = f"타일 {total_tiles}개 (3의 배수가 아님 - 2개 초과 또는 1개 부족)"
+        else:
+            tile_count_message = f"타일 {total_tiles}개 ({total_tiles // 3}세트)"
 
         return VisualSimulationResponse(
             initial_state=initial_state,
@@ -730,8 +1012,267 @@ async def simulate_visual(request: VisualSimulationRequest):
                 "max_moves_setting": effective_max_moves,
                 "dock_slots": 7,  # Add dock info to metadata
                 "game_rules": "sp_template",  # Indicate which rules are used
+                # Tile count validation
+                "tile_count_valid": tile_count_valid,
+                "tile_count_remainder": tile_count_remainder,
+                "tile_count_message": tile_count_message,
             },
         )
 
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+# =============================================================================
+# Local Levels Management API
+# =============================================================================
+
+
+@router.get(
+    "/local/list",
+    summary="List all locally saved levels",
+    description="Get a list of all levels saved locally (not from game server)",
+)
+async def list_local_levels():
+    """List all locally saved levels."""
+    try:
+        levels = []
+
+        for file_path in LOCAL_LEVELS_DIR.glob("*.json"):
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+
+                    # Extract metadata
+                    level_id = file_path.stem
+                    metadata = data.get("metadata", {})
+
+                    levels.append({
+                        "id": level_id,
+                        "name": metadata.get("name", level_id),
+                        "description": metadata.get("description", ""),
+                        "tags": metadata.get("tags", []),
+                        "difficulty": metadata.get("difficulty", "custom"),
+                        "created_at": metadata.get("created_at", ""),
+                        "source": metadata.get("source", "local"),
+                        "validation_status": metadata.get("validation_status", "unknown"),
+                    })
+            except Exception as e:
+                # Skip invalid files
+                continue
+
+        # Sort by creation date (newest first)
+        levels.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+
+        return {
+            "levels": levels,
+            "count": len(levels),
+            "storage_path": str(LOCAL_LEVELS_DIR),
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/local/{level_id}",
+    summary="Get a specific local level",
+    description="Retrieve a locally saved level by ID",
+)
+async def get_local_level(level_id: str):
+    """Get a specific locally saved level."""
+    try:
+        file_path = LOCAL_LEVELS_DIR / f"{level_id}.json"
+
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail=f"Level {level_id} not found")
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        return data
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post(
+    "/local/save",
+    summary="Save a level locally",
+    description="Save a generated or custom level to local storage",
+)
+async def save_local_level(data: Dict[str, Any]):
+    """Save a level to local storage."""
+    try:
+        # Extract level ID and metadata
+        level_id = data.get("level_id")
+        if not level_id:
+            raise HTTPException(status_code=400, detail="level_id is required")
+
+        # Add metadata
+        if "metadata" not in data:
+            data["metadata"] = {}
+
+        data["metadata"]["saved_at"] = datetime.now().isoformat()
+        data["metadata"]["source"] = data.get("metadata", {}).get("source", "local")
+
+        # Ensure level_data exists
+        if "level_data" not in data:
+            raise HTTPException(status_code=400, detail="level_data is required")
+
+        # Save to file
+        file_path = LOCAL_LEVELS_DIR / f"{level_id}.json"
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+        return {
+            "success": True,
+            "level_id": level_id,
+            "file_path": str(file_path),
+            "message": f"Level {level_id} saved successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete(
+    "/local/{level_id}",
+    summary="Delete a local level",
+    description="Delete a locally saved level by ID",
+)
+async def delete_local_level(level_id: str):
+    """Delete a locally saved level."""
+    try:
+        file_path = LOCAL_LEVELS_DIR / f"{level_id}.json"
+
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail=f"Level {level_id} not found")
+
+        file_path.unlink()
+
+        return {
+            "success": True,
+            "level_id": level_id,
+            "message": f"Level {level_id} deleted successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post(
+    "/local/import-generated",
+    summary="Import generated levels from generator output",
+    description="Import levels from generate_benchmark_levels.py output file",
+)
+async def import_generated_levels(file_content: Dict[str, Any]):
+    """Import levels from generator output."""
+    try:
+        levels = file_content.get("levels", [])
+        if not levels:
+            raise HTTPException(status_code=400, detail="No levels found in file")
+
+        imported = []
+        errors = []
+
+        for level_data in levels:
+            try:
+                config = level_data.get("config", {})
+                level_id = config.get("level_id")
+
+                if not level_id:
+                    errors.append({"error": "Missing level_id", "data": config})
+                    continue
+
+                # Prepare data for saving
+                save_data = {
+                    "level_id": level_id,
+                    "level_data": level_data.get("level_json", {}),
+                    "metadata": {
+                        "name": config.get("name", level_id),
+                        "description": config.get("description", ""),
+                        "tags": config.get("tags", []) + ["generated"],
+                        "difficulty": config.get("tier", "custom"),
+                        "created_at": datetime.now().isoformat(),
+                        "source": "generated",
+                        "validation_status": level_data.get("validation_status", "unknown"),
+                        "actual_clear_rates": level_data.get("actual_clear_rates", {}),
+                        "suggestions": level_data.get("suggestions", []),
+                        "generation_config": config,
+                    }
+                }
+
+                # Save level
+                file_path = LOCAL_LEVELS_DIR / f"{level_id}.json"
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(save_data, f, indent=2, ensure_ascii=False)
+
+                imported.append(level_id)
+
+            except Exception as e:
+                errors.append({"level_id": level_id, "error": str(e)})
+
+        return {
+            "success": True,
+            "imported_count": len(imported),
+            "error_count": len(errors),
+            "imported_levels": imported,
+            "errors": errors if errors else None,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post(
+    "/local/upload-to-server",
+    summary="Upload local level to game server",
+    description="Upload a locally saved level to the game boost server (future feature)",
+)
+async def upload_to_server(level_id: str, server_config: Optional[Dict[str, Any]] = None):
+    """
+    Upload a locally saved level to the game server.
+    
+    This is a placeholder for future integration with game boost server.
+    """
+    try:
+        # Get local level
+        file_path = LOCAL_LEVELS_DIR / f"{level_id}.json"
+
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail=f"Level {level_id} not found")
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            level_data = json.load(f)
+
+        # TODO: Implement actual server upload
+        # This will require:
+        # 1. Game server API endpoint configuration
+        # 2. Authentication/authorization
+        # 3. Level format conversion if needed
+        # 4. Upload protocol implementation
+
+        return {
+            "success": False,
+            "message": "Server upload feature not yet implemented",
+            "level_id": level_id,
+            "todo": [
+                "Configure game server API endpoint",
+                "Implement authentication",
+                "Add level format conversion",
+                "Complete upload protocol"
+            ]
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

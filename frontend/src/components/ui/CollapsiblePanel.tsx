@@ -28,11 +28,11 @@ export function CollapsiblePanel({
       )}
     >
       {/* Header - always visible */}
-      <button
-        onClick={() => setIsCollapsed(!isCollapsed)}
-        className="flex items-center justify-between p-4 w-full text-left hover:bg-gray-750 transition-colors rounded-t-xl"
-      >
-        <div className="flex items-center gap-2">
+      <div className="flex items-center justify-between p-4 w-full rounded-t-xl">
+        <button
+          onClick={() => setIsCollapsed(!isCollapsed)}
+          className="flex items-center gap-2 text-left hover:opacity-80 transition-opacity"
+        >
           <span
             className={clsx(
               'text-gray-400 transition-transform duration-200',
@@ -45,11 +45,9 @@ export function CollapsiblePanel({
             {icon && <span className="mr-2">{icon}</span>}
             {title}
           </h2>
-        </div>
-        {headerRight && (
-          <div onClick={(e) => e.stopPropagation()}>{headerRight}</div>
-        )}
-      </button>
+        </button>
+        {headerRight && <div>{headerRight}</div>}
+      </div>
 
       {/* Content - collapsible */}
       <div

@@ -114,30 +114,30 @@ PREDEFINED_PROFILES: Dict[BotType, BotProfile] = {
         name="Expert Bot",
         bot_type=BotType.EXPERT,
         description="숙련 플레이어를 시뮬레이션. 최적화 전략, 매우 적은 실수.",
-        mistake_rate=0.03,
-        lookahead_depth=4,
-        goal_priority=0.9,
-        blocking_awareness=0.9,
+        mistake_rate=0.02,  # 0.03 → 0.02 (실수율 감소)
+        lookahead_depth=5,  # 4 → 5 (더 깊은 예측)
+        goal_priority=0.95,  # 0.9 → 0.95 (목표 우선순위 증가)
+        blocking_awareness=0.95,  # 0.9 → 0.95
         chain_preference=0.8,
-        patience=0.7,
-        risk_tolerance=0.3,
-        pattern_recognition=0.8,
+        patience=0.8,  # 0.7 → 0.8 (더 신중한 플레이)
+        risk_tolerance=0.25,  # 0.3 → 0.25 (더 보수적)
+        pattern_recognition=0.85,  # 0.8 → 0.85
         weight=0.8,  # 중간 가중치
     ),
 
     BotType.OPTIMAL: BotProfile(
         name="Optimal Bot",
         bot_type=BotType.OPTIMAL,
-        description="이론적 최적 플레이를 시뮬레이션. MCTS 기반 완벽한 플레이.",
-        mistake_rate=0.0,
-        lookahead_depth=8,
-        goal_priority=1.0,
-        blocking_awareness=1.0,
-        chain_preference=1.0,
-        patience=1.0,
-        risk_tolerance=0.2,
-        pattern_recognition=1.0,
-        weight=0.3,  # 낮은 가중치 (현실적이지 않음)
+        description="최고 수준의 전략적 플레이 - 실수율 0%, 최대 예측 깊이.",
+        mistake_rate=0.0,  # Perfect execution - never makes mistakes
+        lookahead_depth=10,  # Maximum lookahead depth
+        goal_priority=1.0,  # Perfect goal focus
+        blocking_awareness=1.0,  # Perfect blocking awareness
+        chain_preference=1.0,  # Maximum chain preference
+        patience=1.0,  # Maximum patience - always waits for best move
+        risk_tolerance=0.1,  # Minimal risk tolerance
+        pattern_recognition=1.0,  # Perfect information - knows everything
+        weight=0.3,  # Target: near-perfect play
     ),
 }
 

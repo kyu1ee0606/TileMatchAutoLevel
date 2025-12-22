@@ -147,6 +147,9 @@ class GameState:
     # Teleport tracking
     teleport_click_count: int = 0  # Click counter for teleport (activates every 3 clicks)
     teleport_tiles: List[Tuple[int, str]] = field(default_factory=list)  # (layer_idx, pos) of teleport tiles
+    # Complete tile type counts (including hidden tiles in stack/craft)
+    # This allows optimal bot to know ALL tile information for perfect play
+    all_tile_type_counts: Dict[str, int] = field(default_factory=dict)  # tile_type -> total count
 
 
 @dataclass
@@ -373,8 +376,12 @@ class BotSimulator:
         if use_tile_count <= 0:
             use_tile_count = self.DEFAULT_USE_TILE_COUNT
 
-        # First pass: collect all t0 tiles that need random assignment
-        t0_tiles: List[Tuple[int, str, Any]] = []  # (layer_idx, pos, tile_data)
+        # First pass: collect ALL t0 tiles across ALL layers
+        # This includes:
+        # 1. Regular t0 tiles on the board
+        # 2. t0 tiles INSIDE stack/craft containers
+        # All t0 tiles must be assigned types in sets of 3 for guaranteed matchability
+        t0_tiles: List[Tuple[int, str, Any]] = []  # (layer_idx, pos_key, tile_data)
 
         for layer_idx in range(num_layers):
             layer_key = f"layer_{layer_idx}"
@@ -386,10 +393,28 @@ class BotSimulator:
                     if not isinstance(tile_data, list) or not tile_data:
                         continue
                     tile_type = tile_data[0]
-                    if tile_type == "t0":
+
+                    # Check if this is a stack/craft tile with hidden t0 tiles inside
+                    is_stack = isinstance(tile_type, str) and tile_type.startswith("stack_")
+                    is_craft = isinstance(tile_type, str) and tile_type.startswith("craft_")
+
+                    if is_stack or is_craft:
+                        # Stack/craft tiles contain hidden t0 tiles
+                        # Format: [type, attr, [count]] or [type, attr, [count, "types"]]
+                        stack_info = tile_data[2] if len(tile_data) > 2 else None
+                        if stack_info and isinstance(stack_info, list) and len(stack_info) >= 1:
+                            total_count = int(stack_info[0]) if stack_info[0] else 1
+                            # All tiles inside stack/craft are t0 (random)
+                            # Add each internal tile to the t0 collection with unique key
+                            for stack_idx in range(total_count):
+                                stack_key = f"{pos}_stack_{stack_idx}"
+                                t0_tiles.append((layer_idx, stack_key, tile_data))
+                    elif tile_type == "t0":
+                        # Regular t0 tile
                         t0_tiles.append((layer_idx, pos, tile_data))
 
-        # Generate tile type assignments for t0 tiles (3 tiles per set)
+        # Generate tile type assignments for ALL t0 tiles (3 tiles per set)
+        # This ensures every tile type appears exactly 3 times for guaranteed matchability
         # Following sp_template's DistributeTiles logic
         t0_assignments = self._distribute_t0_tiles(
             len(t0_tiles), use_tile_count, rand_seed
@@ -527,7 +552,38 @@ class BotSimulator:
         if goal_count:
             state.goals_remaining = dict(goal_count)
 
+        # Calculate complete tile type counts (including hidden tiles in stack/craft)
+        # This allows optimal bot to have perfect information about all tiles
+        self._calculate_all_tile_counts(state)
+
         return state
+
+    def _calculate_all_tile_counts(self, state: GameState) -> None:
+        """Calculate complete counts of all tile types including hidden tiles.
+
+        This gives optimal bot perfect information about:
+        - Regular tiles on the board
+        - Tiles hidden inside stack/craft containers
+
+        Used for perfect play decisions.
+        """
+        counts: Dict[str, int] = {}
+
+        # Count regular tiles (not stack/craft tiles themselves)
+        for layer_tiles in state.tiles.values():
+            for tile in layer_tiles.values():
+                if not tile.is_stack_tile and not tile.is_craft_tile:
+                    tile_type = tile.tile_type
+                    if tile_type in self.MATCHABLE_TYPES:
+                        counts[tile_type] = counts.get(tile_type, 0) + 1
+
+        # Count all stacked tiles (inside stack/craft containers)
+        for tile in state.stacked_tiles.values():
+            tile_type = tile.tile_type
+            if tile_type in self.MATCHABLE_TYPES:
+                counts[tile_type] = counts.get(tile_type, 0) + 1
+
+        state.all_tile_type_counts = counts
 
     def _distribute_t0_tiles(
         self, t0_count: int, use_tile_count: int, rand_seed: int = 0
@@ -666,11 +722,14 @@ class BotSimulator:
                 # Handle t0 random assignment
                 actual_tile_type = tile_type
                 if tile_type == "t0":
-                    # Use pre-computed assignment or generate new one
+                    # Use pre-computed assignment from first pass
+                    # All stack/craft internal tiles should be in t0_assignment_map
                     assignment_key = (layer_idx, f"{pos}_stack_{stack_idx}")
                     if assignment_key in t0_assignment_map:
                         actual_tile_type = t0_assignment_map[assignment_key]
                     else:
+                        # This should not happen if first pass collected all tiles correctly
+                        # Fallback to random (but this breaks 3-set rule)
                         actual_tile_type = self._rng.choice(self.RANDOM_TILE_POOL[:use_tile_count])
 
                 # Determine effect type
@@ -876,9 +935,12 @@ class BotSimulator:
                 topmost_unpicked.x_idx = spawn_x
                 topmost_unpicked.y_idx = spawn_y
 
-                # Add to tiles dict
+                # Add to tiles dict (remove any picked tile at spawn position first)
                 if layer_idx not in state.tiles:
                     state.tiles[layer_idx] = {}
+                # Remove picked tile if exists at spawn position
+                if spawn_pos in state.tiles[layer_idx] and state.tiles[layer_idx][spawn_pos].picked:
+                    del state.tiles[layer_idx][spawn_pos]
                 state.tiles[layer_idx][spawn_pos] = topmost_unpicked
 
     def _process_craft_after_pick(self, state: GameState, picked_tile: TileState) -> None:
@@ -924,8 +986,11 @@ class BotSimulator:
                     next_tile.x_idx = spawn_x
                     next_tile.y_idx = spawn_y
 
-                    # Update tiles dict
+                    # Update tiles dict (remove any picked tile at spawn position first)
                     pos_key = next_tile.position_key
+                    # Remove picked tile if exists at spawn position
+                    if spawn_pos in layer_tiles and layer_tiles[spawn_pos].picked:
+                        del layer_tiles[spawn_pos]
                     layer_tiles[pos_key] = next_tile
                 else:
                     # Spawn position still blocked - tile remains in craft box
@@ -1071,6 +1136,22 @@ class BotSimulator:
 
         return accessible
 
+    def _can_pick_tile(self, state: GameState, tile: TileState) -> bool:
+        """Check if a tile can be picked (not blocked, pickable)."""
+        if tile.picked:
+            return False
+        if tile.tile_type not in self.MATCHABLE_TYPES:
+            return False
+        if not tile.can_pick():
+            return False
+        if self._is_blocked_by_upper(state, tile):
+            return False
+        if tile.is_stack_tile and self._is_stack_blocked(state, tile):
+            return False
+        if tile.is_craft_tile and not self._is_craft_tile_pickable(state, tile):
+            return False
+        return True
+
     def _is_blocked_by_upper(self, state: GameState, tile: TileState) -> bool:
         """Check if a tile is blocked by tiles in upper layers.
 
@@ -1128,8 +1209,38 @@ class BotSimulator:
         if tile_state is None:
             return 0
 
+        # Check if this is a LINK tile and find its linked tile (forward direction)
+        linked_tile = None
+        if tile_state.effect_type in (TileEffectType.LINK_EAST, TileEffectType.LINK_WEST,
+                                       TileEffectType.LINK_SOUTH, TileEffectType.LINK_NORTH):
+            linked_pos = tile_state.effect_data.get("linked_pos", "")
+            # Find linked tile
+            for lt in state.tiles.values():
+                if linked_pos in lt:
+                    linked_tile = lt[linked_pos]
+                    break
+        else:
+            # Check reverse direction: is there a LINK tile pointing to this tile?
+            my_pos = tile_state.position_key
+            for layer_tiles in state.tiles.values():
+                for tile in layer_tiles.values():
+                    if tile.picked:
+                        continue
+                    if tile.effect_type in (TileEffectType.LINK_EAST, TileEffectType.LINK_WEST,
+                                             TileEffectType.LINK_SOUTH, TileEffectType.LINK_NORTH):
+                        if tile.effect_data.get("linked_pos", "") == my_pos:
+                            linked_tile = tile
+                            break
+                if linked_tile:
+                    break
+
         # Mark tile as picked
         tile_state.picked = True
+
+        # Update all_tile_type_counts when tile is picked
+        tile_type = tile_state.tile_type
+        if tile_type in state.all_tile_type_counts:
+            state.all_tile_type_counts[tile_type] = max(0, state.all_tile_type_counts[tile_type] - 1)
 
         # Handle stack tile removal - update the tiles dict with the next tile
         if tile_state.is_stack_tile and not tile_state.is_craft_tile:
@@ -1141,6 +1252,29 @@ class BotSimulator:
 
         # Add to dock
         state.dock_tiles.append(tile_state)
+
+        # If this is a LINK tile, also pick the linked tile
+        if linked_tile is not None and not linked_tile.picked:
+            linked_tile.picked = True
+
+            # Update all_tile_type_counts for linked tile
+            linked_type = linked_tile.tile_type
+            if linked_type in state.all_tile_type_counts:
+                state.all_tile_type_counts[linked_type] = max(0, state.all_tile_type_counts[linked_type] - 1)
+
+            # Handle stack tile removal for linked tile
+            if linked_tile.is_stack_tile and not linked_tile.is_craft_tile:
+                self._process_stack_after_pick(state, linked_tile)
+
+            # Handle craft tile for linked tile
+            if linked_tile.is_craft_tile:
+                self._process_craft_after_pick(state, linked_tile)
+
+            # Add linked tile to dock
+            state.dock_tiles.append(linked_tile)
+
+            # Update adjacent effects for linked tile
+            self._update_adjacent_effects(state, linked_tile)
 
         # Update adjacent tile effects (ice, chain, grass)
         self._update_adjacent_effects(state, tile_state)
@@ -1157,6 +1291,13 @@ class BotSimulator:
         for tile_type, count in cleared_by_type.items():
             if tile_type in state.goals_remaining:
                 state.goals_remaining[tile_type] = max(0, state.goals_remaining[tile_type] - count)
+
+        # Progress craft_s/stack_s goals when craft/stack tiles are cleared
+        # The goal is to clear tiles FROM craft/stack boxes, not the tile types
+        if tile_state.is_craft_tile and "craft_s" in state.goals_remaining:
+            state.goals_remaining["craft_s"] = max(0, state.goals_remaining["craft_s"] - 1)
+        if tile_state.is_stack_tile and not tile_state.is_craft_tile and "stack_s" in state.goals_remaining:
+            state.goals_remaining["stack_s"] = max(0, state.goals_remaining["stack_s"] - 1)
 
         return total_tiles_cleared
 
@@ -1202,6 +1343,8 @@ class BotSimulator:
                     removed = tiles.pop(0)
                     state.dock_tiles.remove(removed)
                     cleared_by_type[tile_type] = cleared_by_type.get(tile_type, 0) + 1
+                    # Note: all_tile_type_counts is already decremented in _apply_move
+                    # when tile is picked, so no need to decrement again here
 
         return cleared_by_type
 
@@ -1454,14 +1597,100 @@ class BotSimulator:
     ) -> float:
         """Score a move based on bot profile characteristics."""
         base_score = 1.0
+        dock_count = len(state.dock_tiles)
 
-        # Major bonus for moves that will complete a 3-match
+        # CRITICAL: Moves that complete a 3-match get MASSIVE bonus
+        # This is the most important factor - always prefer matching
         if move.will_match:
-            base_score += profile.pattern_recognition * 5.0
+            base_score += 100.0  # Very high - matching is always best
 
-        # Bonus for tiles that are close to matching (2 in dock)
+        # IMPORTANT: Tiles that bring us to 2-in-dock are valuable
+        # because they set up the next match
         if move.match_count == 2:
+            # Check if there's a 3rd tile of this type accessible
+            accessible = self._get_accessible_tiles(state)
+            same_type_accessible = sum(
+                1 for t in accessible
+                if t.tile_type == move.tile_type
+                and t.position_key != move.position
+                and self._can_pick_tile(state, t)
+            )
+            if same_type_accessible >= 1:
+                # Good setup - we can complete match next move
+                base_score += profile.pattern_recognition * 20.0
+            else:
+                # For optimal bot: check if there are hidden tiles of this type
+                # that will become available later (perfect information)
+                if profile.pattern_recognition >= 1.0:
+                    # Optimal bot knows ALL tile counts including hidden
+                    total_of_type = state.all_tile_type_counts.get(move.tile_type, 0)
+                    in_dock = sum(1 for t in state.dock_tiles if t.tile_type == move.tile_type)
+                    # Total includes this tile we're about to pick, so subtract 1
+                    remaining_hidden = total_of_type - same_type_accessible - in_dock - 1
+                    if remaining_hidden >= 1:
+                        # There are hidden tiles that will appear later
+                        base_score += 15.0  # Good - can complete later
+                    else:
+                        # No hidden tiles either - this is truly risky
+                        base_score -= 10.0
+                else:
+                    # Risky - might fill dock without completing match
+                    base_score += profile.pattern_recognition * 3.0
+
+        # DOCK DANGER MANAGEMENT
+        # As dock fills, non-matching moves become increasingly dangerous
+        if dock_count >= 6 and not move.will_match:
+            base_score -= 50.0  # Critical danger - avoid non-matching
+        elif dock_count >= 5 and not move.will_match:
+            base_score -= 20.0  # High danger
+        elif dock_count >= 4 and not move.will_match:
+            base_score -= profile.blocking_awareness * 5.0
+
+        # Prefer tiles that exist multiple times on the board
+        # For optimal bot, also consider hidden tiles in stack/craft
+        accessible = self._get_accessible_tiles(state)
+        same_type_on_board = sum(
+            1 for t in accessible
+            if t.tile_type == move.tile_type and t.position_key != move.position
+        )
+
+        # Optimal bot uses perfect information about total tile counts
+        if profile.pattern_recognition >= 1.0:
+            total_of_type = state.all_tile_type_counts.get(move.tile_type, 0)
+            in_dock = sum(1 for t in state.dock_tiles if t.tile_type == move.tile_type)
+            # Check if this type can form complete sets of 3
+            remaining_after_pick = total_of_type - 1  # After picking this tile
+            remaining_in_dock = in_dock + 1 if not move.will_match else max(0, in_dock - 2)
+
+            # If total remaining (board + dock) is divisible by 3, good
+            total_remaining = remaining_after_pick
+            if total_remaining % 3 == 0 and total_remaining > 0:
+                base_score += 5.0  # Clean matchable count
+            elif remaining_after_pick >= 2:
+                base_score += 3.0  # At least 2 more to potentially match
+
+        if same_type_on_board >= 2:
             base_score += profile.pattern_recognition * 2.0
+        elif same_type_on_board == 0 and move.match_count < 2:
+            # This type has no other accessible tiles - check hidden tiles for optimal bot
+            if profile.pattern_recognition >= 1.0:
+                total_of_type = state.all_tile_type_counts.get(move.tile_type, 0)
+                in_dock = sum(1 for t in state.dock_tiles if t.tile_type == move.tile_type)
+                hidden_remaining = total_of_type - in_dock - 1  # -1 for this tile
+                if hidden_remaining >= 2:
+                    # There are hidden tiles that can complete a match
+                    base_score += 5.0
+                elif hidden_remaining >= 1 and move.match_count == 1:
+                    # One in dock + this + one hidden = 3
+                    base_score += 3.0
+                else:
+                    # Truly risky - no hidden tiles to help
+                    # FIXED: Optimal bot will filter these out later, so don't penalize here
+                    # Just give neutral score - the filtering will handle safety
+                    pass  # No penalty - let the safe move filtering handle it
+            else:
+                # Non-optimal bot doesn't know about hidden tiles
+                base_score -= profile.blocking_awareness * 3.0
 
         # Goal priority bonus
         if state.goals_remaining:
@@ -1477,14 +1706,184 @@ class BotSimulator:
             attribute_bonus = profile.chain_preference * 1.5
             base_score += attribute_bonus
 
-        # Penalty for moves that might fill dock without matching
-        dock_count = len(state.dock_tiles)
-        if dock_count >= 5 and not move.will_match:
-            base_score -= profile.blocking_awareness * 2.0
+        # STACK/CRAFT TILE PRIORITY (for Expert+ bots)
+        # Expert bots: Basic priority for stack/craft tiles
+        # Optimal bot: Perfect information - knows what's inside and strategizes accordingly
+        if profile.blocking_awareness >= 0.95:  # Expert, Optimal bots only
+            tile_state = move.tile_state
+            if tile_state:
+                # EXPERT BOT: Basic priority (pattern_recognition < 1.0)
+                if profile.pattern_recognition < 1.0:
+                    # Prioritize craft tiles (they spawn new tiles when cleared)
+                    if tile_state.is_craft_tile:
+                        if dock_count <= 4:
+                            base_score += profile.goal_priority * 15.0
+                        elif dock_count <= 5:
+                            base_score += profile.goal_priority * 10.0
+                        else:
+                            base_score += profile.goal_priority * 5.0
 
-        # Add randomness based on profile
-        randomness = (1 - profile.pattern_recognition) * self._rng.random() * 2
-        base_score += randomness
+                    # Prioritize stack tiles (they have multiple layers)
+                    elif tile_state.is_stack_tile:
+                        if dock_count <= 4:
+                            base_score += profile.goal_priority * 12.0
+                        elif dock_count <= 5:
+                            base_score += profile.goal_priority * 8.0
+                        else:
+                            base_score += profile.goal_priority * 4.0
+
+                # OPTIMAL BOT: Perfect information - analyze contents (pattern_recognition >= 1.0)
+                else:
+                    # CRAFT TILES: Analyze craft box contents
+                    if tile_state.is_craft_tile:
+                        craft_box_key = f"{tile_state.layer_idx}_{tile_state.position_key}"
+                        craft_tile_keys = state.craft_boxes.get(craft_box_key, [])
+
+                        # Count matching types in craft box
+                        matching_in_craft = 0
+                        goal_tiles_in_craft = 0
+                        for tile_key in craft_tile_keys:
+                            craft_tile = state.stacked_tiles.get(tile_key)
+                            if craft_tile:
+                                # Count tiles matching current dock tiles
+                                if any(d.tile_type == craft_tile.tile_type for d in state.dock_tiles):
+                                    matching_in_craft += 1
+                                # Count goal tiles in craft box
+                                if craft_tile.tile_type in state.goals_remaining:
+                                    goal_tiles_in_craft += 1
+
+                        # Strategic priority based on contents
+                        base_priority = 10.0
+                        if matching_in_craft >= 2:
+                            # Contains tiles that match dock - HIGH PRIORITY (can complete matches)
+                            base_priority += 10.0
+                        if goal_tiles_in_craft >= 2:
+                            # Contains many goal tiles - HIGH PRIORITY
+                            base_priority += 8.0
+
+                        # Adjust by dock state
+                        if dock_count <= 4:
+                            base_score += base_priority * 1.5
+                        elif dock_count <= 5:
+                            base_score += base_priority
+                        else:
+                            base_score += base_priority * 0.5
+
+                    # STACK TILES: Analyze stack contents
+                    elif tile_state.is_stack_tile:
+                        # Count stack depth and analyze contents
+                        current_tile = tile_state
+                        stack_depth = 0
+                        matching_in_stack = 0
+                        goal_tiles_in_stack = 0
+
+                        # Traverse down the stack
+                        while current_tile:
+                            stack_depth += 1
+                            # Check if this tile matches dock tiles
+                            if any(d.tile_type == current_tile.tile_type for d in state.dock_tiles):
+                                matching_in_stack += 1
+                            # Check if this is a goal tile
+                            if current_tile.tile_type in state.goals_remaining:
+                                goal_tiles_in_stack += 1
+
+                            # Move to next tile in stack
+                            if current_tile.under_stacked_tile_key:
+                                current_tile = state.stacked_tiles.get(current_tile.under_stacked_tile_key)
+                            else:
+                                break
+
+                        # Strategic priority based on stack contents
+                        base_priority = 8.0
+                        if matching_in_stack >= 2:
+                            # Contains tiles that match dock - HIGH PRIORITY
+                            base_priority += 8.0
+                        if goal_tiles_in_stack >= 2:
+                            # Contains many goal tiles - HIGH PRIORITY
+                            base_priority += 6.0
+                        if stack_depth >= 3:
+                            # Deep stack - extra priority to clear early
+                            base_priority += 4.0
+
+                        # Adjust by dock state
+                        if dock_count <= 4:
+                            base_score += base_priority * 1.5
+                        elif dock_count <= 5:
+                            base_score += base_priority
+                        else:
+                            base_score += base_priority * 0.5
+
+        # SPECIAL GAME OVER PREVENTION (for Average+ bots)
+        # Learn to avoid moves that lead to effect-based game over scenarios
+        if profile.blocking_awareness >= 0.7:  # Average, Expert, Optimal bots
+            tile_state = move.tile_state
+
+            # 1. ICE tiles: Penalty if dock is filling and ice tiles are blocking critical tiles
+            if tile_state and tile_state.effect_type == TileEffectType.ICE:
+                remaining_ice = tile_state.effect_data.get("remaining", 0)
+                if remaining_ice > 0 and dock_count >= 4:
+                    # Can't pick ice tiles directly - this shouldn't happen, but safety check
+                    base_score -= profile.blocking_awareness * 10.0
+
+            # 2. CHAIN tiles: Penalize if many chain tiles remain locked with high dock count
+            locked_chains = 0
+            for layer in state.tiles.values():
+                for tile in layer.values():
+                    if not tile.picked and tile.effect_type == TileEffectType.CHAIN:
+                        if not tile.effect_data.get("unlocked", False):
+                            locked_chains += 1
+            if locked_chains >= 3 and dock_count >= 5 and not move.will_match:
+                # High risk: many locked chains + filling dock = potential deadlock
+                base_score -= profile.blocking_awareness * 8.0
+
+            # 3. GRASS tiles: Penalty if grass tiles are blocking and dock is filling
+            blocking_grass = 0
+            for layer in state.tiles.values():
+                for tile in layer.values():
+                    if not tile.picked and tile.effect_type == TileEffectType.GRASS:
+                        remaining_grass = tile.effect_data.get("remaining", 0)
+                        if remaining_grass > 0:
+                            blocking_grass += 1
+            if blocking_grass >= 3 and dock_count >= 5 and not move.will_match:
+                # High risk: many grass tiles blocking + filling dock
+                base_score -= profile.blocking_awareness * 8.0
+
+            # 4. LINK tiles: Bonus for completing link pairs (clears 2 tiles at once)
+            if tile_state and tile_state.effect_type in (
+                TileEffectType.LINK_EAST, TileEffectType.LINK_WEST,
+                TileEffectType.LINK_SOUTH, TileEffectType.LINK_NORTH
+            ):
+                # Link tiles are valuable - they clear 2 tiles in one move
+                if dock_count >= 4:
+                    # Extra bonus when dock is filling - link moves are efficient
+                    base_score += profile.blocking_awareness * 5.0
+                else:
+                    base_score += profile.blocking_awareness * 2.0
+
+            # 5. General effect tile deadlock detection
+            # If many effect tiles remain and accessible tiles are limited
+            accessible = self._get_accessible_tiles(state)
+            effect_tiles = sum(
+                1 for t in accessible
+                if t.effect_type in (TileEffectType.ICE, TileEffectType.CHAIN,
+                                     TileEffectType.GRASS, TileEffectType.LINK_EAST,
+                                     TileEffectType.LINK_WEST, TileEffectType.LINK_SOUTH,
+                                     TileEffectType.LINK_NORTH)
+                and not self._can_pick_tile(state, t)
+            )
+            total_accessible = len(accessible)
+            if total_accessible > 0:
+                effect_ratio = effect_tiles / total_accessible
+                if effect_ratio > 0.5 and dock_count >= 5 and not move.will_match:
+                    # More than 50% of accessible tiles are blocked by effects
+                    # and dock is filling without a match - HIGH RISK
+                    base_score -= profile.blocking_awareness * 15.0
+
+        # Add randomness based on profile (NONE for optimal bot)
+        if profile.pattern_recognition < 1.0:
+            randomness = (1 - profile.pattern_recognition) * self._rng.random() * 2
+            base_score += randomness
+        # Optimal bot (pattern_recognition=1.0) is perfectly deterministic
 
         return base_score
 
@@ -1502,6 +1901,12 @@ class BotSimulator:
         if self._rng.random() < profile.mistake_rate:
             return self._rng.choice(moves)
 
+        # CRITICAL: Always prefer moves that complete a match (3-in-dock)
+        matching_moves = [m for m in moves if m.will_match]
+        if matching_moves:
+            # Among matching moves, prefer by score
+            return max(matching_moves, key=lambda m: m.score)
+
         # Sort by score
         sorted_moves = sorted(moves, key=lambda m: m.score, reverse=True)
 
@@ -1510,13 +1915,18 @@ class BotSimulator:
             cutoff = max(1, int(len(sorted_moves) * profile.patience))
             return self._rng.choice(sorted_moves[:cutoff])
 
-        # Lookahead for higher skill bots
-        if profile.lookahead_depth > 0 and len(sorted_moves) > 1:
-            best_move = sorted_moves[0]
-            best_future_score = self._estimate_future_score(state, best_move)
+        # OPTIMAL BOT: Use perfect information to avoid unsafe moves
+        if profile.pattern_recognition >= 1.0:
+            return self._optimal_perfect_information_strategy(sorted_moves, state, profile)
 
-            for move in sorted_moves[1:min(3, len(sorted_moves))]:
-                future_score = self._estimate_future_score(state, move)
+        # For high-skill bots, use enhanced lookahead
+        if profile.lookahead_depth > 0 and len(sorted_moves) > 1:
+            candidates_count = min(5, len(sorted_moves))
+            best_move = sorted_moves[0]
+            best_future_score = self._estimate_future_score(state, best_move, profile.lookahead_depth)
+
+            for move in sorted_moves[1:candidates_count]:
+                future_score = self._estimate_future_score(state, move, profile.lookahead_depth)
                 if future_score > best_future_score:
                     best_move = move
                     best_future_score = future_score
@@ -1525,32 +1935,884 @@ class BotSimulator:
 
         return sorted_moves[0]
 
-    def _estimate_future_score(self, state: GameState, move: Move) -> float:
-        """Estimate future position quality after making a move."""
+    def _optimal_perfect_information_strategy(
+        self,
+        sorted_moves: List[Move],
+        state: GameState,
+        profile: BotProfile,
+    ) -> Move:
+        """Optimal bot strategy - perfect information with maximum lookahead.
+
+        Uses full lookahead depth and explores ALL possible moves,
+        not just top 5. This ensures optimal bot always finds the best path
+        if one exists.
+        """
+        if len(sorted_moves) <= 1:
+            return sorted_moves[0]
+
+        # OPTIMAL BOT: Explore ALL moves with MAXIMUM lookahead depth
+        # No shortcuts - exhaustive search for guaranteed optimal play
+        best_move = sorted_moves[0]
+        best_future_score = self._estimate_future_score_with_deadlock_detection(
+            state, best_move, 10
+        )
+
+        # Check ALL moves, not just top 5
+        for move in sorted_moves[1:]:
+            future_score = self._estimate_future_score_with_deadlock_detection(
+                state, move, 10
+            )
+            if future_score > best_future_score:
+                best_move = move
+                best_future_score = future_score
+
+        return best_move
+
+    def _evaluate_move_sequence(
+        self,
+        state: GameState,
+        first_move: Move,
+        profile: BotProfile,
+        depth: int,
+        max_width: int,
+    ) -> float:
+        """Recursively evaluate a move sequence to find best continuation.
+
+        Args:
+            state: Current game state
+            first_move: The first move to evaluate
+            profile: Bot profile for scoring
+            depth: How many moves ahead to look
+            max_width: Maximum number of moves to consider at each level
+
+        Returns:
+            Score representing the best achievable outcome from this move
+        """
+        # Base case: no more depth
+        if depth <= 0:
+            return self._score_move_with_profile(
+                first_move, state, profile
+            )
+
+        # Check if this move leads to immediate problems
+        sim_info = self._simulate_move(state, first_move)
+        if not sim_info:
+            return float('-inf')
+
+        # Immediate game over from dock overflow
+        if sim_info.get("dock_full", False):
+            return -10000.0
+
+        # Deadlock detection
+        if self._is_deadlock_likely_from_sim(state, sim_info):
+            return -5000.0
+
+        # Simulate this move to get new state
+        # We need to create a copy of the state and apply the move
+        try:
+            next_state = self._copy_state_and_apply_move(state, first_move)
+            if not next_state:
+                return float('-inf')
+
+            # Check if game is over after this move
+            if self._is_game_over(next_state):
+                if next_state.cleared:
+                    return 10000.0  # Victory!
+                else:
+                    return -10000.0  # Defeat
+
+            # Get available moves in the new state
+            next_moves = self._get_available_moves(next_state)
+            if not next_moves:
+                # No moves available = game over
+                return -10000.0
+
+            # Score all next moves
+            for m in next_moves:
+                m.score = self._score_move_with_profile(m, next_state, profile)
+
+            # Sort and take top candidates
+            next_moves.sort(key=lambda m: m.score, reverse=True)
+            candidates = next_moves[:max_width]
+
+            # Recursively evaluate the BEST continuation
+            best_continuation_score = float('-inf')
+            for next_move in candidates:
+                continuation_score = self._evaluate_move_sequence(
+                    next_state, next_move, profile, depth - 1, max_width
+                )
+                best_continuation_score = max(best_continuation_score, continuation_score)
+
+            # Score = immediate move score + discounted future score
+            immediate_score = self._score_move_with_profile(
+                first_move, state, profile
+            )
+            discount = 0.95  # Slightly prefer immediate rewards
+            return immediate_score + (discount * best_continuation_score)
+
+        except Exception:
+            # If simulation fails, return very negative score
+            return float('-inf')
+
+    def _copy_state_and_apply_move(
+        self,
+        state: GameState,
+        move: Move
+    ) -> Optional[GameState]:
+        """Create a deep copy of state and apply the move.
+
+        Returns the new state after the move is applied.
+        """
+        try:
+            # Deep copy the state
+            import copy
+            new_state = copy.deepcopy(state)
+
+            # Apply the move
+            self._apply_move(new_state, move)
+
+            # Update link tile statuses
+            self._update_link_tiles_status(new_state)
+
+            return new_state
+
+        except Exception:
+            return None
+
+    def _estimate_future_score_with_deadlock_detection(
+        self,
+        state: GameState,
+        move: Move,
+        depth: int,
+    ) -> float:
+        """Enhanced future score estimation with deadlock detection.
+
+        Returns very negative score if this move leads to game over.
+        """
+        # Get simulated state info (Dict, not GameState)
+        sim_info = self._simulate_move(state, move)
+        if sim_info:
+            # Check for immediate game over (dock full)
+            if sim_info.get("dock_full", False):
+                return -10000.0  # Catastrophic - leads to dock overflow
+
+            # Check for deadlock patterns using the simulation info
+            if self._is_deadlock_likely_from_sim(state, sim_info):
+                return -5000.0  # High risk of deadlock
+
+        # Use standard future score estimation
+        return self._estimate_future_score(state, move, depth)
+
+    def _is_deadlock_likely_from_sim(
+        self,
+        state: GameState,
+        sim_info: Dict,
+    ) -> bool:
+        """Detect deadlock using simulation info.
+
+        Args:
+            state: Current game state
+            sim_info: Simulated move result from _simulate_move
+        """
+        dock_size = sim_info.get("dock_size", 0)
+        dock_types = sim_info.get("dock_types", {})
+
+        # Check 1: Dock nearly full with no matches possible
+        if dock_size >= 6:
+            # If no type has 2+ tiles in dock, very risky
+            has_pair = any(count >= 2 for count in dock_types.values())
+            if not has_pair:
+                # Check if any accessible tiles match dock
+                pickable = sim_info.get("pickable_tiles", {})
+                dock_type_set = set(dock_types.keys())
+                matching_pickable = sum(
+                    count for tile_type, count in pickable.items()
+                    if tile_type in dock_type_set
+                )
+
+                if matching_pickable == 0:
+                    return True  # No way to form pairs
+
+        # Check 2: Too few pickable tiles with filling dock
+        total_pickable = sum(sim_info.get("pickable_tiles", {}).values())
+        if total_pickable <= 2 and dock_size >= 5:
+            return True
+
+        return False
+
+    def _get_craft_spawn_positions(self, state: GameState) -> Set[str]:
+        """Get all craft spawn positions that need to be cleared.
+
+        Returns a set of "layer_idx_position" keys for all spawn positions
+        where craft boxes need to emit tiles.
+        """
+        spawn_positions = set()
+
+        for craft_box_key, tile_keys in state.craft_boxes.items():
+            # Parse craft box position
+            parts = craft_box_key.split("_")
+            if len(parts) < 3:
+                continue
+            layer_idx = int(parts[0])
+            box_x = int(parts[1])
+            box_y = int(parts[2])
+
+            # Find topmost unpicked tile
+            topmost_unpicked = None
+            for key in reversed(tile_keys):
+                tile = state.stacked_tiles.get(key)
+                if tile and not tile.picked:
+                    topmost_unpicked = tile
+                    break
+
+            if not topmost_unpicked:
+                continue
+
+            # Skip if already crafted (already at spawn position)
+            if topmost_unpicked.is_crafted:
+                continue
+
+            # Calculate spawn position
+            direction = topmost_unpicked.craft_direction
+            spawn_offset_x, spawn_offset_y = 0, 0
+            if direction == "e":
+                spawn_offset_x = 1
+            elif direction == "w":
+                spawn_offset_x = -1
+            elif direction == "s":
+                spawn_offset_y = 1
+            elif direction == "n":
+                spawn_offset_y = -1
+
+            spawn_x = box_x + spawn_offset_x
+            spawn_y = box_y + spawn_offset_y
+            spawn_pos = f"{spawn_x}_{spawn_y}"
+
+            # Check if spawn position is occupied
+            layer_tiles = state.tiles.get(layer_idx, {})
+            if spawn_pos in layer_tiles and not layer_tiles[spawn_pos].picked:
+                # This spawn position needs to be cleared
+                spawn_positions.add(f"{layer_idx}_{spawn_pos}")
+
+        return spawn_positions
+
+    def _find_craft_spawn_blocking_tile(
+        self,
+        state: GameState,
+        sorted_moves: List[Move],
+    ) -> Optional[Move]:
+        """Find tiles at craft/stack spawn positions that should be prioritized.
+
+        When craft_s/stack_s goal exists, we need to prioritize:
+        1. Already emitted craft tiles (is_crafted=True) + Tiles at spawn positions (SAME PRIORITY)
+        2. Stack tiles (is_stack_tile=True) - pick these for stack_s goals
+
+        CRITICAL: Only return these tiles if they are SAFE to pick (can complete match).
+
+        Returns the move to pick the prioritized tile.
+        """
+        # Count dock types
+        dock_counts: Dict[str, int] = {}
+        for t in state.dock_tiles:
+            dock_counts[t.tile_type] = dock_counts.get(t.tile_type, 0) + 1
+
+        # Helper function to check if move is safe
+        def is_safe_move(move: Move) -> bool:
+            tile_type = move.tile_type
+            dock_has = dock_counts.get(tile_type, 0)
+            total_remaining = state.all_tile_type_counts.get(tile_type, 0)
+            after_pick = dock_has + 1
+            needed_for_match = 3 - after_pick
+            return total_remaining - 1 >= needed_for_match
+
+        emitted_craft_moves = []
+        spawn_blocking_moves = []
+        stack_moves = []
+
+        # Collect already emitted craft tiles (ONLY if safe)
+        for move in sorted_moves:
+            if move.tile_state and move.tile_state.is_craft_tile and move.tile_state.is_crafted:
+                if is_safe_move(move):
+                    emitted_craft_moves.append(move)
+
+        # Collect tiles at craft spawn positions (ONLY if safe)
+        craft_spawn_positions = self._get_craft_spawn_positions(state)
+        for move in sorted_moves:
+            spawn_key = f"{move.layer_idx}_{move.position}"
+            if spawn_key in craft_spawn_positions:
+                if is_safe_move(move):
+                    spawn_blocking_moves.append(move)
+
+        # Collect stack tiles (ONLY if safe)
+        if "stack_s" in state.goals_remaining and state.goals_remaining["stack_s"] > 0:
+            for move in sorted_moves:
+                if move.tile_state and move.tile_state.is_stack_tile:
+                    if is_safe_move(move):
+                        stack_moves.append(move)
+
+        # Return in priority order
+        # PRIORITY 1: Emitted craft tiles and spawn blocking tiles (SAME PRIORITY)
+        high_priority_moves = emitted_craft_moves + spawn_blocking_moves
+        if high_priority_moves:
+            return high_priority_moves[0]
+
+        # PRIORITY 2: Stack tiles
+        if stack_moves:
+            return stack_moves[0]
+
+        # No priority moves found
+        return None
+
+    def _find_triple_pickable_type(
+        self,
+        state: GameState,
+        available_moves: List[Move],
+    ) -> Optional[str]:
+        """Find a tile type that has 3+ pickable tiles available right now.
+
+        This is the BEST scenario - we can pick 3 tiles consecutively and
+        immediately complete a match without filling the dock.
+        """
+        # Count pickable tiles by type
+        pickable_counts: Dict[str, int] = {}
+        for move in available_moves:
+            tile_type = move.tile_type
+            pickable_counts[tile_type] = pickable_counts.get(tile_type, 0) + 1
+
+        # Find types with 3+ pickable tiles
+        for tile_type, count in pickable_counts.items():
+            if count >= 3:
+                # Perfect! We can pick 3 of this type right now
+                return tile_type
+
+        return None
+
+    def _evaluate_sacrifice_strategy(
+        self,
+        state: GameState,
+        sorted_moves: List[Move],
+        dock_counts: Dict[str, int],
+    ) -> Optional[Move]:
+        """Evaluate if we should sacrifice dock space to pick blocking tiles.
+
+        When dock has room (0-2 tiles), we can afford to pick a "blocking" tile
+        (one that doesn't immediately help with goals) if it unlocks access to valuable
+        hidden tiles in stack/craft containers.
+
+        Strategy:
+        1. Identify stack/craft containers with goal tiles (craft_s/stack_s) hidden inside
+        2. Check if the topmost tile is blocking access to goal tiles underneath
+        3. Verify the blocking tile can eventually be matched (exists in all_tile_type_counts)
+        4. Return the blocking tile move if the sacrifice is beneficial
+
+        Returns the blocking tile move if sacrifice is beneficial, None otherwise.
+        """
+        dock_size = len(state.dock_tiles)
+
+        # Only consider sacrifice when dock has plenty of room
+        if dock_size > 2:
+            return None
+
+        # Check craft boxes for valuable hidden tiles
+        for craft_pos, craft_tile_keys in state.craft_boxes.items():
+            if not craft_tile_keys:
+                continue
+
+            # Check if this craft box has goal tiles (craft_s)
+            has_goal_tiles = False
+            topmost_tile = None
+
+            for tile_key in craft_tile_keys:
+                tile = state.stacked_tiles.get(tile_key)
+                if not tile:
+                    continue
+
+                # Check if this is a goal tile
+                if tile.tile_type == "craft_s" and not tile.picked:
+                    has_goal_tiles = True
+
+                # Find the topmost unpicked tile (highest stack_index)
+                if not tile.picked:
+                    if topmost_tile is None or tile.stack_index > topmost_tile.stack_index:
+                        topmost_tile = tile
+
+            # If we have goal tiles underneath and a blocking tile on top
+            if has_goal_tiles and topmost_tile and topmost_tile.tile_type != "craft_s":
+                # Check if the blocking tile can eventually be matched
+                blocking_type = topmost_tile.tile_type
+                total_count = state.all_tile_type_counts.get(blocking_type, 0)
+                in_dock = dock_counts.get(blocking_type, 0)
+
+                # Need at least 3 total to make a match eventually
+                if total_count >= 3:
+                    # Check if topmost tile is currently pickable from sorted_moves
+                    for move in sorted_moves:
+                        if (move.tile_state and
+                            move.tile_state.full_key == topmost_tile.full_key):
+                            # Found the blocking tile - sacrifice dock space to pick it!
+                            return move
+
+        # Check stacked tiles for valuable hidden tiles
+        # Group stacked tiles by root position
+        stack_groups: Dict[str, List[TileState]] = {}
+        for tile_key, tile in state.stacked_tiles.items():
+            if tile.picked or not tile.is_stack_tile:
+                continue
+
+            root_key = tile.root_stacked_tile_key or tile_key
+            if root_key not in stack_groups:
+                stack_groups[root_key] = []
+            stack_groups[root_key].append(tile)
+
+        # Check each stack group for goal tiles
+        for root_key, stack_tiles in stack_groups.items():
+            if not stack_tiles:
+                continue
+
+            # Sort by stack_index to find topmost and check for goals underneath
+            stack_tiles_sorted = sorted(stack_tiles, key=lambda t: t.stack_index)
+
+            has_goal_tiles = False
+            topmost_tile = stack_tiles_sorted[-1]  # Highest stack_index
+
+            # Check if any tiles underneath are goal tiles (stack_s)
+            for tile in stack_tiles_sorted[:-1]:  # All except topmost
+                if tile.tile_type == "stack_s":
+                    has_goal_tiles = True
+                    break
+
+            # If we have goal tiles underneath and topmost is blocking
+            if has_goal_tiles and topmost_tile.tile_type != "stack_s":
+                # Check if the blocking tile can eventually be matched
+                blocking_type = topmost_tile.tile_type
+                total_count = state.all_tile_type_counts.get(blocking_type, 0)
+
+                # Need at least 3 total to make a match eventually
+                if total_count >= 3:
+                    # Check if topmost tile is currently pickable from sorted_moves
+                    for move in sorted_moves:
+                        if (move.tile_state and
+                            move.tile_state.full_key == topmost_tile.full_key):
+                            # Found the blocking tile - sacrifice dock space to pick it!
+                            return move
+
+        return None
+
+    def _estimate_future_score(
+        self,
+        state: GameState,
+        move: Move,
+        depth: int = 3,
+    ) -> float:
+        """Calculate deep search score for a move by simulating future states.
+
+        Returns a score based on:
+        - Whether the move leads to dead-end (very negative)
+        - Number of matches that can be completed in the next few moves
+        - Dock fill level after the sequence
+        - Accessibility of matching tiles
+        """
+        # Simulate the move
+        sim_state = self._simulate_move(state, move)
+
+        if sim_state is None:
+            return float('-inf')  # Invalid move
+
+        # Check for immediate game over (dock full)
+        if sim_state['dock_full']:
+            return -10000.0
+
+        # Base score from matches made
+        score = sim_state['matches'] * 100.0
+
+        # CRITICAL: Strong penalty for dock fill level
+        dock_level = sim_state['dock_size']
+        if dock_level >= 6:
+            score -= 2000.0  # Critical danger - almost game over
+        elif dock_level >= 5:
+            score -= 800.0   # Very high danger
+        elif dock_level >= 4:
+            score -= 300.0   # High danger
+        elif dock_level >= 3:
+            score -= 50.0    # Moderate danger
+
+        # Bonus for reducing dock size (making matches)
+        current_dock = len(state.dock_tiles)
+        if sim_state['matches'] > 0:
+            dock_reduction = current_dock - dock_level
+            score += dock_reduction * 50.0  # Reward clearing dock
+
+        # Check if we're setting up for future matches
+        score += self._evaluate_matching_potential(sim_state) * 10.0
+
+        # Recurse for deeper analysis if depth > 1
+        if depth > 1 and not sim_state['dock_full']:
+            # Find the best next move from simulated state
+            next_moves = self._get_simulated_moves(sim_state)
+            if next_moves:
+                # Check if any next move leads to a match
+                matching_next = [m for m in next_moves if m['will_match']]
+                if matching_next:
+                    # Great - we can match next turn
+                    score += 50.0
+                    # Recursively evaluate the best matching move
+                    best_next_score = float('-inf')
+                    for nm in matching_next[:3]:  # Limit to top 3 for performance
+                        next_score = self._deep_search_score_simulated(
+                            sim_state, nm, depth - 1
+                        )
+                        best_next_score = max(best_next_score, next_score)
+                    score += best_next_score * 0.5  # Discount future scores
+                else:
+                    # No immediate match - check for dead-end
+                    if self._is_simulated_dead_end(sim_state, next_moves):
+                        score -= 1000.0  # Avoid dead-end paths
+                    else:
+                        # Evaluate best non-matching move
+                        best_next_score = float('-inf')
+                        for nm in next_moves[:5]:  # Limit for performance
+                            next_score = self._deep_search_score_simulated(
+                                sim_state, nm, depth - 1
+                            )
+                            best_next_score = max(best_next_score, next_score)
+                        score += best_next_score * 0.3
+            else:
+                # No moves available - this is bad (but might mean game cleared)
+                if sim_state['remaining_tiles'] == 0:
+                    score += 5000.0  # Game cleared!
+                else:
+                    score -= 2000.0  # Stuck
+
+        return score
+
+    def _simulate_move(self, state: GameState, move: Move) -> Optional[Dict]:
+        """Simulate a move and return the resulting state information.
+
+        Returns a dictionary with:
+        - dock_types: Dict of tile_type -> count in dock after move
+        - dock_size: Number of tiles in dock after matches
+        - matches: Number of 3-matches that occurred
+        - dock_full: Whether dock is full (game over)
+        - remaining_tiles: Tiles remaining on board
+        - pickable_tiles: Dict of tile_type -> count of pickable tiles after move
+        - all_tile_counts: Dict of tile_type -> total count (including hidden)
+        """
+        if move.tile_state is None:
+            return None
+
+        # Copy dock state
+        dock_types: Dict[str, int] = {}
+        for tile in state.dock_tiles:
+            dock_types[tile.tile_type] = dock_types.get(tile.tile_type, 0) + 1
+
+        # Add the moved tile to dock
+        move_type = move.tile_type
+        dock_types[move_type] = dock_types.get(move_type, 0) + 1
+
+        # Calculate matches
+        matches = 0
+        for tile_type, count in list(dock_types.items()):
+            while count >= 3:
+                matches += 1
+                count -= 3
+            dock_types[tile_type] = count
+
+        # Calculate dock size after matches
+        dock_size = sum(dock_types.values())
+        dock_full = dock_size >= 7
+
+        # Count remaining tiles (excluding the one we're picking)
+        remaining_tiles = 0
+        pickable_tiles: Dict[str, int] = {}
+
+        for layer_tiles in state.tiles.values():
+            for pos, tile in layer_tiles.items():
+                if tile.picked:
+                    continue
+                if pos == move.position and tile.layer_idx == move.layer_idx:
+                    continue  # Skip the tile we're picking
+                remaining_tiles += 1
+
+                # Check if this tile would be pickable after the move
+                # Simplified check - we'll count all unpicked tiles
+                tile_type = tile.tile_type
+                if tile_type in self.MATCHABLE_TYPES:
+                    pickable_tiles[tile_type] = pickable_tiles.get(tile_type, 0) + 1
+
+        # Copy all_tile_type_counts and decrement the picked tile
+        all_tile_counts = dict(state.all_tile_type_counts)
+        if move_type in all_tile_counts:
+            all_tile_counts[move_type] = max(0, all_tile_counts[move_type] - 1)
+        # Also decrement for matched tiles
+        if matches > 0 and move_type in all_tile_counts:
+            all_tile_counts[move_type] = max(0, all_tile_counts[move_type] - (matches * 3 - 1))
+
+        return {
+            'dock_types': dock_types,
+            'dock_size': dock_size,
+            'matches': matches,
+            'dock_full': dock_full,
+            'remaining_tiles': remaining_tiles,
+            'pickable_tiles': pickable_tiles,
+            'all_tile_counts': all_tile_counts,
+            'picked_type': move_type,
+        }
+
+    def _get_simulated_moves(self, sim_state: Dict) -> List[Dict]:
+        """Get available moves from a simulated state."""
+        moves = []
+        for tile_type, count in sim_state['pickable_tiles'].items():
+            if count <= 0:
+                continue
+
+            # Check if picking this tile would create a match
+            dock_count = sim_state['dock_types'].get(tile_type, 0)
+            will_match = dock_count >= 2
+
+            moves.append({
+                'tile_type': tile_type,
+                'count': count,
+                'will_match': will_match,
+                'dock_count': dock_count,
+            })
+
+        # Sort by: matches first, then by dock count (setup for match)
+        moves.sort(key=lambda m: (m['will_match'], m['dock_count']), reverse=True)
+        return moves
+
+    def _deep_search_score_simulated(
+        self,
+        sim_state: Dict,
+        move: Dict,
+        depth: int,
+    ) -> float:
+        """Calculate score for a simulated move."""
+        # Simulate this move
+        dock_types = dict(sim_state['dock_types'])
+        move_type = move['tile_type']
+        dock_types[move_type] = dock_types.get(move_type, 0) + 1
+
+        # Calculate matches
+        matches = 0
+        for tile_type, count in list(dock_types.items()):
+            while count >= 3:
+                matches += 1
+                count -= 3
+            dock_types[tile_type] = count
+
+        dock_size = sum(dock_types.values())
+
+        # Base score
+        score = matches * 100.0
+
+        # Dock danger
+        if dock_size >= 7:
+            return -10000.0
+        elif dock_size >= 6:
+            score -= 500.0
+        elif dock_size >= 5:
+            score -= 200.0
+        elif dock_size >= 4:
+            score -= 50.0
+
+        # Recursion
+        if depth > 1:
+            # Create next simulated state
+            pickable_tiles = dict(sim_state['pickable_tiles'])
+            if move_type in pickable_tiles:
+                pickable_tiles[move_type] = max(0, pickable_tiles[move_type] - 1)
+
+            next_sim_state = {
+                'dock_types': dock_types,
+                'dock_size': dock_size,
+                'pickable_tiles': pickable_tiles,
+                'all_tile_counts': sim_state['all_tile_counts'],
+            }
+
+            next_moves = self._get_simulated_moves(next_sim_state)
+            if next_moves:
+                matching_next = [m for m in next_moves if m['will_match']]
+                if matching_next:
+                    score += 50.0
+                    for nm in matching_next[:2]:
+                        next_score = self._deep_search_score_simulated(
+                            next_sim_state, nm, depth - 1
+                        )
+                        score = max(score, score + next_score * 0.3)
+
+        return score
+
+    def _evaluate_matching_potential(self, sim_state: Dict) -> float:
+        """Evaluate the matching potential of a simulated state."""
         score = 0.0
 
-        # Bonus if move completes a match
+        dock_types = sim_state['dock_types']
+        pickable_tiles = sim_state['pickable_tiles']
+        all_tile_counts = sim_state['all_tile_counts']
+
+        for tile_type, dock_count in dock_types.items():
+            if dock_count == 0:
+                continue
+
+            pickable_count = pickable_tiles.get(tile_type, 0)
+            total_remaining = all_tile_counts.get(tile_type, 0)
+            hidden_count = total_remaining - pickable_count
+
+            if dock_count == 2:
+                # We need 1 more to match
+                if pickable_count >= 1:
+                    score += 20.0  # Can match immediately
+                elif hidden_count >= 1:
+                    score += 5.0   # Can match later
+                else:
+                    score -= 30.0  # Dead tiles in dock!
+            elif dock_count == 1:
+                # We need 2 more to match
+                if pickable_count >= 2:
+                    score += 10.0  # Can match soon
+                elif pickable_count >= 1 and hidden_count >= 1:
+                    score += 3.0   # Can match eventually
+                elif hidden_count >= 2:
+                    score += 1.0   # Can match much later
+                else:
+                    score -= 15.0  # Risky
+
+        return score
+
+    def _is_simulated_dead_end(self, sim_state: Dict, next_moves: List[Dict]) -> bool:
+        """Check if a simulated state is a dead-end.
+
+        A dead-end is when:
+        1. Dock is nearly full (5+ tiles)
+        2. No matching moves available
+        3. Any move would fill the dock without matching
+        """
+        if sim_state['dock_size'] < 5:
+            return False  # Not dangerous yet
+
+        # Check if any move can lead to a match
+        for move in next_moves:
+            if move['will_match']:
+                return False  # There's a way out
+
+            # Check if this move would overfill dock
+            dock_after = sim_state['dock_size'] + 1
+            if dock_after >= 7:
+                continue  # This move would lose
+
+            # Check if next move after this could match
+            tile_type = move['tile_type']
+            new_dock_count = sim_state['dock_types'].get(tile_type, 0) + 1
+            if new_dock_count == 2:
+                # Would have 2 in dock - check if 3rd exists
+                total = sim_state['all_tile_counts'].get(tile_type, 0)
+                remaining = total - 1  # -1 for this tile
+                if remaining >= 1:
+                    return False  # Can complete this match
+
+        # No safe path found
+        return True
+
+    def _estimate_future_score(self, state: GameState, move: Move, depth: int = 1) -> float:
+        """Estimate future position quality after making a move.
+
+        Uses a combination of immediate effects and future potential analysis.
+        """
+        score = move.score  # Start with the move's current score
+
+        # Major bonus if move completes a match
         if move.will_match:
-            score += 10.0
+            score += 50.0
 
-        # Count how many potential matches would be available
+        # Analyze dock state after this move
         dock_type = move.tile_type
-        dock_count = sum(1 for t in state.dock_tiles if t.tile_type == dock_type)
+        current_dock_count = sum(1 for t in state.dock_tiles if t.tile_type == dock_type)
+        new_dock_count = current_dock_count + 1
 
-        if dock_count == 1:  # Would become 2 in dock
-            # Check if there are more of this type on the board
-            accessible = self._get_accessible_tiles(state)
-            same_type_count = sum(
-                1 for t in accessible
-                if t.tile_type == dock_type and t.position_key != move.position
-            )
-            if same_type_count >= 1:
-                score += 3.0  # Good - can complete match next turn
+        # Get pickable tiles
+        accessible = self._get_accessible_tiles(state)
+        pickable = [t for t in accessible if self._can_pick_tile(state, t) and t.position_key != move.position]
 
-        # Penalty for filling dock without matching
-        if dock_count == 0 and not move.will_match:
-            current_dock = len(state.dock_tiles)
-            if current_dock >= 5:
+        if new_dock_count == 2:
+            # Will have 2 in dock - check if 3rd is available
+            same_type_pickable = sum(1 for t in pickable if t.tile_type == dock_type)
+            if same_type_pickable >= 1:
+                score += 30.0  # Excellent - can complete match next turn
+            else:
+                # Check hidden tiles (perfect information for optimal bot)
+                total_of_type = state.all_tile_type_counts.get(dock_type, 0)
+                # Hidden = total - pickable - in_dock - this_tile
+                hidden_of_type = total_of_type - same_type_pickable - new_dock_count
+                if hidden_of_type >= 1:
+                    # 3rd tile exists but is hidden - will appear later
+                    score += 15.0  # Still good - can complete eventually
+                else:
+                    # 2 in dock but no 3rd anywhere - very dangerous!
+                    score -= 25.0
+
+        elif new_dock_count == 1 and not move.will_match:
+            # Starting a new type in dock - check if we can complete it
+            same_type_pickable = sum(1 for t in pickable if t.tile_type == dock_type)
+            if same_type_pickable >= 2:
+                score += 10.0  # Good - 2 more available
+            elif same_type_pickable == 1:
+                # Check for hidden tiles
+                total_of_type = state.all_tile_type_counts.get(dock_type, 0)
+                hidden_of_type = total_of_type - same_type_pickable - 1  # -1 for this tile
+                if hidden_of_type >= 1:
+                    score += 5.0  # One pickable + one hidden = can match
+                else:
+                    score += 2.0  # Only one more - risky
+            else:
+                # No more pickable - check hidden
+                total_of_type = state.all_tile_type_counts.get(dock_type, 0)
+                hidden_of_type = total_of_type - 1  # -1 for this tile
+                if hidden_of_type >= 2:
+                    score += 3.0  # 2 hidden tiles can complete match
+                elif hidden_of_type >= 1:
+                    score -= 5.0  # Only 1 hidden - partial match risk
+                else:
+                    # No more of this type anywhere - very risky
+                    score -= 20.0
+
+        # Dock fill danger assessment
+        current_dock_size = len(state.dock_tiles)
+        projected_dock_size = current_dock_size + 1 if not move.will_match else max(0, current_dock_size - 2)
+
+        if projected_dock_size >= 6:
+            score -= 40.0  # Critical danger
+        elif projected_dock_size >= 5:
+            score -= 20.0  # High danger
+        elif projected_dock_size >= 4:
+            score -= 5.0  # Caution
+
+        # Analyze future matching potential using COMPLETE tile information
+        # This gives optimal bot perfect knowledge of all tiles (including hidden)
+        for tile_type, total_count in state.all_tile_type_counts.items():
+            if tile_type not in self.MATCHABLE_TYPES:
+                continue
+
+            dock_has = sum(1 for t in state.dock_tiles if t.tile_type == tile_type)
+            pickable_count = sum(1 for t in pickable if t.tile_type == tile_type)
+
+            # Total available = on board (pickable) + in dock
+            available_now = pickable_count + dock_has
+            # Hidden = total - available_now
+            hidden_count = total_count - available_now
+
+            # Check if this type can form complete matches
+            if total_count >= 3:
+                if available_now >= 3:
+                    score += 5.0  # Can match immediately
+                elif available_now >= 2 and hidden_count >= 1:
+                    score += 3.0  # Can match soon
+                elif available_now >= 1 and hidden_count >= 2:
+                    score += 1.0  # Can match eventually
+            elif total_count == 2:
+                # Only 2 of this type - potential problem
+                score -= 2.0
+            elif total_count == 1:
+                # Only 1 of this type - will cause dock fill!
                 score -= 5.0
 
         return score

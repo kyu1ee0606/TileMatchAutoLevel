@@ -5,6 +5,7 @@ import { DifficultyPanel } from './components/DifficultyPanel';
 import { GeneratorPanel } from './components/GeneratorPanel';
 import { GBoostPanel } from './components/GBoostPanel';
 import { LevelBrowser } from './components/GridEditor/LevelBrowser';
+import { LocalLevelBrowser } from './components/GridEditor/LocalLevelBrowser';
 import { SimulationViewer } from './components/SimulationViewer';
 import { useLevelStore } from './stores/levelStore';
 import { useUIStore } from './stores/uiStore';
@@ -233,12 +234,12 @@ function Notifications() {
   );
 }
 
-type TabId = 'editor' | 'simulation' | 'generator' | 'gboost';
+type TabId = 'editor' | 'simulation' | 'generator' | 'gboost' | 'local';
 
 function AppContent() {
   const [activeTab, setActiveTab] = useState<TabId>('editor');
   const [isDragging, setIsDragging] = useState(false);
-  const { importJson, level } = useLevelStore();
+  const { importJson, level, setLevel } = useLevelStore();
   const { addNotification } = useUIStore();
   const { fetchSimulation, clearResults } = useSimulationStore();
   const dragCounterRef = useRef(0);
@@ -247,6 +248,7 @@ function AppContent() {
     { id: 'editor', label: '에디터', icon: '🎮' },
     { id: 'simulation', label: '시뮬레이션', icon: '🎬' },
     { id: 'generator', label: '자동 생성', icon: '🎲' },
+    { id: 'local', label: '로컬 레벨', icon: '💾' },
     { id: 'gboost', label: '게임부스트', icon: '☁️' },
   ];
 
@@ -389,6 +391,23 @@ function AppContent() {
         )}
         {activeTab === 'simulation' && (
           <SimulationViewer />
+        )}
+        {activeTab === 'local' && (
+          <div className="flex flex-col gap-4">
+            {/* Top Row: Editor + Local Level Browser */}
+            <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
+              {/* Left: Grid Editor */}
+              <div className="lg:col-span-3">
+                <GridEditor />
+              </div>
+              {/* Right: Local Level Browser */}
+              <div className="lg:col-span-1">
+                <LocalLevelBrowser className="h-full" />
+              </div>
+            </div>
+            {/* Bottom: Difficulty Panel */}
+            <DifficultyPanel />
+          </div>
         )}
         {activeTab === 'gboost' && (
           <div className="max-w-2xl mx-auto">

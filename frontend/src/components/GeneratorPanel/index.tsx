@@ -3,6 +3,7 @@ import { DifficultySlider } from './DifficultySlider';
 import { useLevelStore } from '../../stores/levelStore';
 import { useUIStore } from '../../stores/uiStore';
 import { generateLevel, generateMultipleLevels } from '../../api/generate';
+import { saveLocalLevel } from '../../services/localLevelsApi';
 import { TILE_TYPES } from '../../types';
 import type { GenerationParams, GoalConfig } from '../../types';
 import { Button, Tooltip } from '../ui';
@@ -87,16 +88,61 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
       if (count === 1) {
         const result = await generateLevel(params);
         setLevel(result.level_json);
-        addNotification(
-          'success',
-          `레벨이 생성되었습니다 (실제 난이도: ${(result.actual_difficulty * 100).toFixed(0)}%, 등급: ${result.grade})`
-        );
+
+        // Save to local storage
+        try {
+          const timestamp = Date.now();
+          const levelId = `generated_${timestamp}`;
+          await saveLocalLevel({
+            level_id: levelId,
+            level_data: result.level_json,
+            metadata: {
+              name: `Generated Level (${result.grade})`,
+              description: `Target difficulty: ${(targetDifficulty * 100).toFixed(0)}%, Actual: ${(result.actual_difficulty * 100).toFixed(0)}%`,
+              tags: ['generated', result.grade.toLowerCase(), `${gridSize[0]}x${gridSize[1]}`],
+              difficulty: result.grade.toLowerCase(),
+            }
+          });
+          addNotification(
+            'success',
+            `레벨 생성 완료! (난이도: ${(result.actual_difficulty * 100).toFixed(0)}%, 등급: ${result.grade}) - 로컬 레벨에 저장됨`
+          );
+        } catch (saveError) {
+          console.error('Failed to save to local storage:', saveError);
+          addNotification(
+            'warning',
+            `레벨은 생성되었으나 로컬 저장 실패 (난이도: ${(result.actual_difficulty * 100).toFixed(0)}%, 등급: ${result.grade})`
+          );
+        }
       } else {
         const results = await generateMultipleLevels(params, count);
         // Use the first generated level
         if (results.length > 0) {
           setLevel(results[0].level_json);
-          addNotification('success', `${results.length}개의 레벨이 생성되었습니다`);
+
+          // Save all generated levels to local storage
+          let savedCount = 0;
+          for (let i = 0; i < results.length; i++) {
+            try {
+              const timestamp = Date.now() + i;
+              const levelId = `generated_${timestamp}`;
+              await saveLocalLevel({
+                level_id: levelId,
+                level_data: results[i].level_json,
+                metadata: {
+                  name: `Generated Level #${i + 1} (${results[i].grade})`,
+                  description: `Batch generation - Actual difficulty: ${(results[i].actual_difficulty * 100).toFixed(0)}%`,
+                  tags: ['generated', 'batch', results[i].grade.toLowerCase(), `${gridSize[0]}x${gridSize[1]}`],
+                  difficulty: results[i].grade.toLowerCase(),
+                }
+              });
+              savedCount++;
+            } catch (saveError) {
+              console.error(`Failed to save level ${i + 1}:`, saveError);
+            }
+          }
+
+          addNotification('success', `${results.length}개 레벨 생성 완료 - ${savedCount}개 로컬 레벨에 저장됨`);
         }
       }
     } catch (error) {

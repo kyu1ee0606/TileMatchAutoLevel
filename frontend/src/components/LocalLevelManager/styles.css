@@ -1,0 +1,272 @@
+.local-level-manager {
+  padding: 20px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.local-level-manager .header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.local-level-manager .header h2 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 600;
+}
+
+.local-level-manager .header-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.local-level-manager .loading {
+  text-align: center;
+  padding: 40px;
+  font-size: 18px;
+  color: #666;
+}
+
+.local-level-manager .error-card {
+  padding: 20px;
+  background: #fee;
+  border: 1px solid #fcc;
+  border-radius: 8px;
+}
+
+.local-level-manager .error-card h3 {
+  margin: 0 0 12px 0;
+  color: #c00;
+}
+
+.local-level-manager .error-card p {
+  margin: 0 0 16px 0;
+  color: #600;
+}
+
+.local-level-manager .import-dialog {
+  padding: 24px;
+  margin-bottom: 24px;
+  background: #fff;
+  border: 2px solid #2196F3;
+  border-radius: 8px;
+}
+
+.local-level-manager .import-dialog h3 {
+  margin: 0 0 12px 0;
+  color: #1976D2;
+}
+
+.local-level-manager .import-dialog p {
+  margin: 0 0 16px 0;
+  color: #666;
+}
+
+.local-level-manager .import-dialog input[type="file"] {
+  margin-bottom: 16px;
+  padding: 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  width: 100%;
+}
+
+.local-level-manager .dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.local-level-manager .empty-state {
+  padding: 60px 40px;
+  text-align: center;
+  background: #f5f5f5;
+  border-radius: 8px;
+}
+
+.local-level-manager .empty-state h3 {
+  margin: 0 0 12px 0;
+  font-size: 20px;
+  color: #666;
+}
+
+.local-level-manager .empty-state p {
+  margin: 0 0 24px 0;
+  color: #999;
+}
+
+.local-level-manager .level-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 20px;
+}
+
+.local-level-manager .level-card {
+  padding: 20px;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  transition: all 0.2s;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.local-level-manager .level-card:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  transform: translateY(-2px);
+}
+
+.local-level-manager .level-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.local-level-manager .level-header h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  flex: 1;
+  line-height: 1.3;
+}
+
+.local-level-manager .difficulty-badge {
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: white;
+  white-space: nowrap;
+}
+
+.local-level-manager .level-description {
+  margin: 0;
+  font-size: 14px;
+  color: #666;
+  line-height: 1.5;
+  min-height: 42px;
+}
+
+.local-level-manager .level-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.local-level-manager .level-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.local-level-manager .tag {
+  padding: 3px 8px;
+  background: #e3f2fd;
+  color: #1976D2;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.local-level-manager .level-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.local-level-manager .status-icon {
+  font-size: 14px;
+}
+
+.local-level-manager .status-text {
+  color: #666;
+  text-transform: uppercase;
+  font-weight: 500;
+  font-size: 11px;
+}
+
+.local-level-manager .level-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 8px;
+  border-top: 1px solid #f0f0f0;
+  font-size: 12px;
+  color: #999;
+}
+
+.local-level-manager .level-source {
+  padding: 2px 8px;
+  background: #f5f5f5;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.local-level-manager .level-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.local-level-manager .level-actions button {
+  flex: 1;
+  padding: 10px 8px;
+  font-size: 13px;
+  font-weight: 500;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: white;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.local-level-manager .level-actions button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+}
+
+.local-level-manager .play-button:hover {
+  background: #4CAF50;
+  color: white;
+  border-color: #4CAF50;
+}
+
+.local-level-manager .simulate-button:hover {
+  background: #2196F3;
+  color: white;
+  border-color: #2196F3;
+}
+
+.local-level-manager .delete-button:hover {
+  background: #F44336;
+  color: white;
+  border-color: #F44336;
+}
+
+.local-level-manager .selected-level-info {
+  margin-top: 24px;
+  padding: 20px;
+  background: #f9f9f9;
+  border-radius: 8px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.local-level-manager .selected-level-info h3 {
+  margin: 0 0 16px 0;
+  font-size: 16px;
+}
+
+.local-level-manager .selected-level-info pre {
+  margin: 0;
+  padding: 16px;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  font-size: 12px;
+  overflow-x: auto;
+}

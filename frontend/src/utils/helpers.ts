@@ -45,6 +45,73 @@ export function getTileCount(level: LevelJSON): number {
 }
 
 /**
+ * Tile validation result type.
+ */
+export interface TileValidationResult {
+  totalTiles: number;
+  isValid: boolean;
+  remainder: number;
+  message: string;
+}
+
+/**
+ * Check if level has a valid tile count (multiple of 3).
+ * Includes tiles inside stack/craft boxes.
+ * @param level Level JSON to validate
+ * @returns Validation result with total count, validity, and message
+ */
+export function validateTileCount(level: LevelJSON): TileValidationResult {
+  let totalTiles = 0;
+
+  for (let i = 0; i < level.layer; i++) {
+    const layerKey = `layer_${i}` as `layer_${number}`;
+    const layer = level[layerKey];
+    if (!layer?.tiles) continue;
+
+    for (const [_pos, tileData] of Object.entries(layer.tiles)) {
+      const tileType = tileData[0];
+      const extra = tileData[2];
+
+      // Check if this is a stack/craft tile with hidden tiles
+      if (tileType.startsWith('stack_') || tileType.startsWith('craft_')) {
+        // stack/craft tile extra format: [count] or [count, "t1_t2_t3"]
+        if (extra && Array.isArray(extra) && extra.length >= 1) {
+          const tileCount = typeof extra[0] === 'number' ? extra[0] : 1;
+          totalTiles += tileCount;
+        } else {
+          // Default to 1 if no extra info
+          totalTiles += 1;
+        }
+      } else {
+        // Regular tile counts as 1
+        totalTiles += 1;
+      }
+    }
+  }
+
+  const remainder = totalTiles % 3;
+  const isValid = remainder === 0;
+
+  let message = '';
+  if (!isValid) {
+    if (remainder === 1) {
+      message = `타일 ${totalTiles}개 (3의 배수가 아님 - 1개 초과 또는 2개 부족)`;
+    } else {
+      message = `타일 ${totalTiles}개 (3의 배수가 아님 - 2개 초과 또는 1개 부족)`;
+    }
+  } else {
+    message = `타일 ${totalTiles}개 (${totalTiles / 3}세트)`;
+  }
+
+  return {
+    totalTiles,
+    isValid,
+    remainder,
+    message,
+  };
+}
+
+/**
  * Get active layer count from a level.
  */
 export function getActiveLayerCount(level: LevelJSON): number {

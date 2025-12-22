@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { TileGrid } from './TileGrid';
 import { LayerSelector } from './LayerSelector';
 import { ToolPalette } from './ToolPalette';
@@ -5,15 +6,16 @@ import { Minimap } from './Minimap';
 import { useLevelStore } from '../../stores/levelStore';
 import { useUIStore } from '../../stores/uiStore';
 import { Button, Tooltip } from '../ui';
-import { Eye, EyeOff, FileJson, RotateCcw, ZoomIn, Grid3X3, Map } from 'lucide-react';
+import { Eye, EyeOff, FileJson, RotateCcw, ZoomIn, Grid3X3, Map, AlertTriangle, CheckCircle } from 'lucide-react';
 import clsx from 'clsx';
+import { validateTileCount } from '../../utils/helpers';
 
 interface GridEditorProps {
   className?: string;
 }
 
 export function GridEditor({ className }: GridEditorProps) {
-  const { resetLevel } = useLevelStore();
+  const { level, resetLevel } = useLevelStore();
   const {
     setJsonModalOpen,
     addNotification,
@@ -38,8 +40,35 @@ export function GridEditor({ className }: GridEditorProps) {
     setJsonModalOpen(true);
   };
 
+  // Validate tile count
+  const tileValidation = useMemo(() => validateTileCount(level), [level]);
+
   return (
     <div className={clsx('flex flex-col gap-4 p-4 bg-gray-800 rounded-xl shadow-lg border border-gray-700', className)}>
+      {/* Tile count validation warning */}
+      {tileValidation.totalTiles > 0 && (
+        <div
+          className={clsx(
+            'flex items-center gap-2 px-3 py-2 rounded-lg text-sm',
+            tileValidation.isValid
+              ? 'bg-green-900/30 border border-green-700 text-green-300'
+              : 'bg-amber-900/30 border border-amber-600 text-amber-300'
+          )}
+        >
+          {tileValidation.isValid ? (
+            <CheckCircle className="w-4 h-4 text-green-400 flex-shrink-0" />
+          ) : (
+            <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+          )}
+          <span>{tileValidation.message}</span>
+          {!tileValidation.isValid && (
+            <span className="text-amber-500 ml-auto text-xs">
+              ⚠️ 3의 배수가 아니면 클리어 불가능합니다
+            </span>
+          )}
+        </div>
+      )}
+
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-bold text-gray-100">그리드 에디터</h2>
         <div className="flex gap-2">

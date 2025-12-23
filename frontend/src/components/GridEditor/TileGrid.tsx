@@ -3,6 +3,7 @@ import { useLevelStore } from '../../stores/levelStore';
 import { useUIStore } from '../../stores/uiStore';
 import { TILE_TYPES, ATTRIBUTES, SPECIAL_IMAGES, type TileData, type LevelLayer } from '../../types';
 import clsx from 'clsx';
+import type { ValidationResult } from '../../stores/levelStore';
 
 interface TileGridProps {
   className?: string;
@@ -21,7 +22,7 @@ export function TileGrid({ className }: TileGridProps) {
     removeTile,
   } = useLevelStore();
 
-  const { activeTool, showOtherLayers, gridZoom, setGridZoom, showGridCoordinates } = useUIStore();
+  const { activeTool, showOtherLayers, gridZoom, setGridZoom, showGridCoordinates, addNotification } = useUIStore();
 
   const [isDragging, setIsDragging] = useState(false);
   const [isLayerTransitioning, setIsLayerTransitioning] = useState(false);
@@ -123,16 +124,34 @@ export function TileGrid({ className }: TileGridProps) {
   const containerWidth = maxCols * TILE_SIZE + (maxCols - 1) * GAP_SIZE;
   const containerHeight = maxRows * TILE_SIZE + (maxRows - 1) * GAP_SIZE;
 
+  // Track last shown warning to avoid spamming during drag
+  const lastWarningRef = useRef<string>('');
+  const lastWarningTimeRef = useRef<number>(0);
+
   const handleTileAction = useCallback(
     (x: number, y: number) => {
+      let result: ValidationResult;
+
       if (activeTool === 'paint') {
         const tileData: TileData = [selectedTileType, selectedAttribute];
-        setTile(selectedLayer, x, y, tileData);
+        result = setTile(selectedLayer, x, y, tileData);
       } else if (activeTool === 'erase') {
-        removeTile(selectedLayer, x, y);
+        result = removeTile(selectedLayer, x, y);
+      } else {
+        return;
+      }
+
+      // Show warning if validation failed (throttle to avoid spam)
+      if (!result.valid && result.reason) {
+        const now = Date.now();
+        if (result.reason !== lastWarningRef.current || now - lastWarningTimeRef.current > 2000) {
+          addNotification('warning', result.reason);
+          lastWarningRef.current = result.reason;
+          lastWarningTimeRef.current = now;
+        }
       }
     },
-    [activeTool, selectedLayer, selectedTileType, selectedAttribute, setTile, removeTile]
+    [activeTool, selectedLayer, selectedTileType, selectedAttribute, setTile, removeTile, addNotification]
   );
 
   const handleMouseDown = (x: number, y: number) => {

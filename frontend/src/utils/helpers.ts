@@ -56,11 +56,15 @@ export interface TileValidationResult {
 
 /**
  * Check if level has a valid tile count (multiple of 3).
- * Includes tiles inside stack/craft boxes.
+ * IMPORTANT: Only counts NORMAL tiles (excludes goal tiles like craft_s, stack_s).
+ * Goal tiles are collected, not matched, so they don't need to be divisible by 3.
  * @param level Level JSON to validate
  * @returns Validation result with total count, validity, and message
  */
 export function validateTileCount(level: LevelJSON): TileValidationResult {
+  // Goal tile types that should be excluded from the count
+  const GOAL_TYPES = ['craft_s', 'stack_s'];
+
   let totalTiles = 0;
 
   for (let i = 0; i < level.layer; i++) {
@@ -72,7 +76,12 @@ export function validateTileCount(level: LevelJSON): TileValidationResult {
       const tileType = tileData[0];
       const extra = tileData[2];
 
-      // Check if this is a stack/craft tile with hidden tiles
+      // Skip goal tiles - they are collected, not matched
+      if (GOAL_TYPES.includes(tileType)) {
+        continue;
+      }
+
+      // Check if this is a stack/craft box tile with hidden tiles
       if (tileType.startsWith('stack_') || tileType.startsWith('craft_')) {
         // stack/craft tile extra format: [count] or [count, "t1_t2_t3"]
         if (extra && Array.isArray(extra) && extra.length >= 1) {

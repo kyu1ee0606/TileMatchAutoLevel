@@ -15,7 +15,7 @@ interface GridEditorProps {
 }
 
 export function GridEditor({ className }: GridEditorProps) {
-  const { level, resetLevel } = useLevelStore();
+  const { level, selectedLayer, resetLevel } = useLevelStore();
   const {
     setJsonModalOpen,
     addNotification,
@@ -43,31 +43,86 @@ export function GridEditor({ className }: GridEditorProps) {
   // Validate tile count
   const tileValidation = useMemo(() => validateTileCount(level), [level]);
 
+  // Helper to count tiles including hidden tiles in craft/stack boxes
+  const countTilesInLayer = (layerData: typeof level[`layer_${number}`] | undefined): number => {
+    if (!layerData?.tiles) return 0;
+    let count = 0;
+    for (const tileData of Object.values(layerData.tiles)) {
+      const tileType = tileData[0];
+      const extra = tileData[2];
+      // Check if this is a stack/craft box tile with hidden tiles
+      if (tileType.startsWith('stack_') || tileType.startsWith('craft_')) {
+        if (extra && Array.isArray(extra) && extra.length >= 1) {
+          const tileCount = typeof extra[0] === 'number' ? extra[0] : 1;
+          count += tileCount;
+        } else {
+          count += 1;
+        }
+      } else {
+        count += 1;
+      }
+    }
+    return count;
+  };
+
+  // Count tiles in current layer (including hidden tiles in craft/stack)
+  const currentLayerTileCount = useMemo(() => {
+    const layerKey = `layer_${selectedLayer}` as `layer_${number}`;
+    return countTilesInLayer(level[layerKey]);
+  }, [level, selectedLayer]);
+
+  // Count total tiles across all layers (including hidden tiles in craft/stack)
+  const totalTileCount = useMemo(() => {
+    let total = 0;
+    for (let i = 0; i < level.layer; i++) {
+      const layerKey = `layer_${i}` as `layer_${number}`;
+      total += countTilesInLayer(level[layerKey]);
+    }
+    return total;
+  }, [level]);
+
   return (
     <div className={clsx('flex flex-col gap-4 p-4 bg-gray-800 rounded-xl shadow-lg border border-gray-700', className)}>
-      {/* Tile count validation warning */}
-      {tileValidation.totalTiles > 0 && (
-        <div
-          className={clsx(
-            'flex items-center gap-2 px-3 py-2 rounded-lg text-sm',
-            tileValidation.isValid
-              ? 'bg-green-900/30 border border-green-700 text-green-300'
-              : 'bg-amber-900/30 border border-amber-600 text-amber-300'
-          )}
-        >
-          {tileValidation.isValid ? (
-            <CheckCircle className="w-4 h-4 text-green-400 flex-shrink-0" />
-          ) : (
-            <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
-          )}
-          <span>{tileValidation.message}</span>
-          {!tileValidation.isValid && (
-            <span className="text-amber-500 ml-auto text-xs">
-              ⚠️ 3의 배수가 아니면 클리어 불가능합니다
-            </span>
-          )}
+      {/* Tile count info and validation */}
+      <div className="flex items-center gap-4">
+        {/* Current layer tile count */}
+        <div className="flex items-center gap-2 px-3 py-2 bg-gray-700/50 rounded-lg text-sm">
+          <span className="text-gray-400">레이어 {selectedLayer}:</span>
+          <span className="font-mono font-bold text-blue-300">{currentLayerTileCount}</span>
+          <span className="text-gray-500">타일</span>
         </div>
-      )}
+
+        {/* Total tile count */}
+        <div className="flex items-center gap-2 px-3 py-2 bg-gray-700/50 rounded-lg text-sm">
+          <span className="text-gray-400">전체:</span>
+          <span className="font-mono font-bold text-purple-300">{totalTileCount}</span>
+          <span className="text-gray-500">타일</span>
+        </div>
+
+        {/* Validation status */}
+        {tileValidation.totalTiles > 0 && (
+          <div
+            className={clsx(
+              'flex items-center gap-2 px-3 py-2 rounded-lg text-sm flex-1',
+              tileValidation.isValid
+                ? 'bg-green-900/30 border border-green-700 text-green-300'
+                : 'bg-amber-900/30 border border-amber-600 text-amber-300'
+            )}
+          >
+            {tileValidation.isValid ? (
+              <CheckCircle className="w-4 h-4 text-green-400 flex-shrink-0" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+            )}
+            <span>{tileValidation.message}</span>
+            {!tileValidation.isValid && (
+              <span className="text-amber-500 ml-auto text-xs">
+                3의 배수가 아니면 클리어 불가
+              </span>
+            )}
+          </div>
+        )}
+      </div>
 
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-bold text-gray-100">그리드 에디터</h2>

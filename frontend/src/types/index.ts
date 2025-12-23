@@ -47,6 +47,12 @@ export interface GoalConfig {
   count: number;
 }
 
+// Obstacle count configuration
+export interface ObstacleCountConfig {
+  min: number;
+  max: number;
+}
+
 // Level generation parameters
 export interface GenerationParams {
   target_difficulty: number;
@@ -55,6 +61,7 @@ export interface GenerationParams {
   tile_types?: string[];
   obstacle_types?: string[];
   goals?: GoalConfig[];
+  obstacle_counts?: Record<string, ObstacleCountConfig>;
 }
 
 // Level generation result

@@ -53,13 +53,17 @@ class LevelGenerator:
         # Adjust to target difficulty
         level = self._adjust_difficulty(level, params.target_difficulty)
 
-        # CRITICAL: Final validation to ensure tile count is divisible by 3
-        # MUST be called AFTER all modifications (including difficulty adjustment)
+        # CRITICAL: First ensure tile count is divisible by 3
+        # This may add/remove tiles which could affect obstacle validity
         level = self._ensure_tile_count_divisible_by_3(level, params)
 
-        # CRITICAL: Final validation to ensure obstacles follow game rules
-        # Remove any invalid chains/links that were broken by difficulty adjustment
+        # CRITICAL: Then validate obstacles AFTER all tile modifications
+        # This ensures all obstacles (chain, link, grass) have valid clearable neighbors
+        # Must be called LAST to catch any issues from tile count adjustment
         level = self._validate_and_fix_obstacles(level)
+
+        # Final check: if obstacle removal broke divisibility, fix it again
+        level = self._ensure_tile_count_divisible_by_3(level, params)
 
         # Calculate final metrics
         analyzer = get_analyzer()
@@ -209,24 +213,39 @@ class LevelGenerator:
             for i in range(num_layers)
         )
 
-        # Obstacle count scales with difficulty
-        chain_target = int(total_tiles * target * 0.15)  # Up to 15% chains
-        frog_target = int(total_tiles * target * 0.08)  # Up to 8% frogs
-        link_target = int(total_tiles * target * 0.05)  # Up to 5% links (pairs)
+        # Helper to get target count for an obstacle type
+        def get_target(obstacle_type: str, default_ratio: float) -> int:
+            if params.obstacle_counts and obstacle_type in params.obstacle_counts:
+                config = params.obstacle_counts[obstacle_type]
+                min_count = config.get("min", 0)
+                max_count = config.get("max", 10)
+                return random.randint(min_count, max_count)
+            # Legacy behavior: scale with difficulty
+            return int(total_tiles * target * default_ratio)
 
-        obstacles_added = {"chain": 0, "frog": 0, "link": 0}
+        # Get target counts (use configured values or calculate from difficulty)
+        chain_target = get_target("chain", 0.15)  # Up to 15% chains
+        frog_target = get_target("frog", 0.08)  # Up to 8% frogs
+        link_target = get_target("link", 0.05)  # Up to 5% links (pairs)
+        grass_target = get_target("grass", 0.10)  # Up to 10% grass
+
+        obstacles_added = {"chain": 0, "frog": 0, "link": 0, "grass": 0}
 
         # Add frog obstacles (no special rules)
         if "frog" in obstacle_types:
             level = self._add_frog_obstacles(level, frog_target, obstacles_added)
 
-        # Add chain obstacles (must validate chain connection rules)
+        # Add chain obstacles (must have clearable LEFT or RIGHT neighbor)
         if "chain" in obstacle_types:
             level = self._add_chain_obstacles(level, chain_target, obstacles_added)
 
-        # Add link obstacles (must create valid pairs)
+        # Add link obstacles (must create valid pairs with clearable neighbor)
         if "link" in obstacle_types:
             level = self._add_link_obstacles(level, link_target, obstacles_added)
+
+        # Add grass obstacles (must have at least 2 clearable neighbors in 4 directions)
+        if "grass" in obstacle_types:
+            level = self._add_grass_obstacles(level, grass_target, obstacles_added)
 
         return level
 
@@ -265,7 +284,8 @@ class LevelGenerator:
     ) -> Dict[str, Any]:
         """
         Add chain obstacles following the rule:
-        At least one of the two chained tiles must be a regular tile (not blocked).
+        Chain tiles MUST have at least one clearable neighbor on LEFT or RIGHT (same row).
+        Chain is released by clearing adjacent tiles on the left or right side only.
         """
         num_layers = level.get("layer", 8)
 
@@ -317,10 +337,11 @@ class LevelGenerator:
             except:
                 continue
 
-            # Find a valid neighbor for chain connection
-            # Check all 4 directions (row_col format)
+            # Chain only checks LEFT and RIGHT neighbors (same column, row±1)
+            # In frontend display: row maps to x-axis (horizontal), so row±1 is left/right on screen
             neighbors = [
-                (row+1, col), (row-1, col), (row, col+1), (row, col-1)
+                (row-1, col),  # Left (on screen)
+                (row+1, col),  # Right (on screen)
             ]
 
             valid_chain = False
@@ -337,12 +358,11 @@ class LevelGenerator:
                 if neighbor_data[0] in self.GOAL_TYPES:
                     continue
 
-                # RULE: At least one tile must not have an obstacle attribute
-                # So if neighbor has chain/frog/link, skip this pair
-                if neighbor_data[1] in ["chain", "frog", "link_w", "link_n", "link_e", "link_s"]:
+                # RULE: Neighbor must be clearable (no obstacle or frog only)
+                if neighbor_data[1] and neighbor_data[1] != "frog":
                     continue
 
-                # Valid chain pair found!
+                # Valid chain position found!
                 valid_chain = True
                 break
 
@@ -352,12 +372,87 @@ class LevelGenerator:
 
         return level
 
+    def _add_grass_obstacles(
+        self, level: Dict[str, Any], target: int, counter: Dict[str, int]
+    ) -> Dict[str, Any]:
+        """
+        Add grass obstacles following the rule:
+        Grass tiles MUST have at least 2 clearable neighbors in 4 directions (up/down/left/right).
+        Grass is released by clearing adjacent tiles (needs at least 2 to be clearable).
+        """
+        num_layers = level.get("layer", 8)
+
+        # Collect all tiles by layer
+        layer_tiles = {}
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            if tiles:
+                layer_tiles[i] = tiles
+
+        attempts = 0
+        max_attempts = target * 10
+
+        while counter["grass"] < target and attempts < max_attempts:
+            attempts += 1
+
+            available_layers = list(layer_tiles.keys())
+            if not available_layers:
+                break
+
+            layer_idx = random.choice(available_layers)
+            tiles = layer_tiles[layer_idx]
+
+            positions = list(tiles.keys())
+            if not positions:
+                continue
+
+            pos = random.choice(positions)
+            tile_data = tiles[pos]
+
+            if not isinstance(tile_data, list) or len(tile_data) < 2:
+                continue
+            if tile_data[0] in self.GOAL_TYPES or tile_data[1]:
+                continue
+
+            try:
+                row, col = map(int, pos.split('_'))
+            except:
+                continue
+
+            # Grass checks all 4 directions
+            neighbors = [
+                (row-1, col),  # Up
+                (row+1, col),  # Down
+                (row, col-1),  # Left
+                (row, col+1),  # Right
+            ]
+
+            clearable_count = 0
+            for nrow, ncol in neighbors:
+                npos = f"{nrow}_{ncol}"
+                if npos in tiles:
+                    ndata = tiles[npos]
+                    if (isinstance(ndata, list) and len(ndata) >= 2 and
+                        (not ndata[1] or ndata[1] == "frog") and
+                        ndata[0] not in self.GOAL_TYPES):
+                        clearable_count += 1
+
+            # RULE: Must have at least 2 clearable neighbors
+            if clearable_count >= 2:
+                tile_data[1] = "grass"
+                counter["grass"] += 1
+
+        return level
+
     def _add_link_obstacles(
         self, level: Dict[str, Any], target: int, counter: Dict[str, int]
     ) -> Dict[str, Any]:
         """
-        Add link obstacles following the rule:
-        Linked tiles must have their partner tile exist in the connected direction.
+        Add link obstacles following the rules:
+        1. Linked tiles must have their partner tile exist in the connected direction.
+        2. At least ONE of the link pair must have a clearable neighbor (excluding the link partner).
+           This ensures the link can be released.
         """
         num_layers = level.get("layer", 8)
 
@@ -415,7 +510,7 @@ class LevelGenerator:
             for link_type, (row2, col2) in directions:
                 pos2 = f"{row2}_{col2}"
 
-                # RULE: Partner tile MUST exist
+                # RULE 1: Partner tile MUST exist
                 if pos2 not in tiles:
                     continue
 
@@ -425,6 +520,14 @@ class LevelGenerator:
 
                 # Skip goal tiles and tiles with attributes
                 if tile_data2[0] in self.GOAL_TYPES or tile_data2[1]:
+                    continue
+
+                # RULE 2: At least one of the link pair must have a clearable neighbor
+                # (excluding the link partner itself)
+                has_clearable = self._link_pair_has_clearable_neighbor(
+                    tiles, pos1, pos2, row1, col1, row2, col2
+                )
+                if not has_clearable:
                     continue
 
                 # Valid link pair found!
@@ -447,11 +550,59 @@ class LevelGenerator:
 
         return level
 
+    def _link_pair_has_clearable_neighbor(
+        self, tiles: Dict, pos1: str, pos2: str,
+        row1: int, col1: int, row2: int, col2: int
+    ) -> bool:
+        """
+        Check if at least one tile in the link pair has a clearable neighbor.
+        A clearable neighbor is a tile without obstacle attribute (or frog only).
+        The link partner itself doesn't count as a clearable neighbor.
+        """
+        # Get all neighbors for both tiles (excluding each other)
+        neighbors1 = [
+            (row1+1, col1), (row1-1, col1), (row1, col1+1), (row1, col1-1)
+        ]
+        neighbors2 = [
+            (row2+1, col2), (row2-1, col2), (row2, col2+1), (row2, col2-1)
+        ]
+
+        # Check neighbors of tile 1 (excluding pos2)
+        for nrow, ncol in neighbors1:
+            npos = f"{nrow}_{ncol}"
+            if npos == pos2:
+                continue
+            if npos in tiles:
+                ndata = tiles[npos]
+                if (isinstance(ndata, list) and len(ndata) >= 2 and
+                    (not ndata[1] or ndata[1] == "frog") and
+                    ndata[0] not in self.GOAL_TYPES):
+                    return True
+
+        # Check neighbors of tile 2 (excluding pos1)
+        for nrow, ncol in neighbors2:
+            npos = f"{nrow}_{ncol}"
+            if npos == pos1:
+                continue
+            if npos in tiles:
+                ndata = tiles[npos]
+                if (isinstance(ndata, list) and len(ndata) >= 2 and
+                    (not ndata[1] or ndata[1] == "frog") and
+                    ndata[0] not in self.GOAL_TYPES):
+                    return True
+
+        return False
+
     def _add_goals(
         self, level: Dict[str, Any], params: GenerationParams
     ) -> Dict[str, Any]:
         """Add goal tiles to the level."""
-        goals = params.goals or [{"type": "craft_s", "count": 3}]
+        # Use None check instead of falsy check to allow empty list
+        goals = params.goals if params.goals is not None else [{"type": "craft_s", "count": 3}]
+
+        # If goals is empty list, skip adding goals
+        if not goals:
+            return level
 
         # Find the topmost active layer
         num_layers = level.get("layer", 8)
@@ -519,10 +670,13 @@ class LevelGenerator:
         return level
 
     def _increase_difficulty(self, level: Dict[str, Any]) -> Dict[str, Any]:
-        """Apply a random modification to increase difficulty."""
+        """Apply a random modification to increase difficulty.
+
+        Note: Obstacle modifications (chain, frog) are removed to respect
+        user-specified obstacle counts from obstacle_counts parameter.
+        Difficulty is adjusted primarily through tile count and goal changes.
+        """
         modifications = [
-            self._add_chain_to_tile,
-            self._add_frog_to_tile,
             self._add_tile_to_layer,
             self._increase_goal_count,
         ]
@@ -531,10 +685,13 @@ class LevelGenerator:
         return modifier(level)
 
     def _decrease_difficulty(self, level: Dict[str, Any]) -> Dict[str, Any]:
-        """Apply a random modification to decrease difficulty."""
+        """Apply a random modification to decrease difficulty.
+
+        Note: Obstacle modifications (chain, frog) are removed to respect
+        user-specified obstacle counts from obstacle_counts parameter.
+        Difficulty is adjusted primarily through tile count and goal changes.
+        """
         modifications = [
-            self._remove_chain_from_tile,
-            self._remove_frog_from_tile,
             self._remove_tile_from_layer,
             self._decrease_goal_count,
         ]
@@ -543,8 +700,58 @@ class LevelGenerator:
         return modifier(level)
 
     def _add_chain_to_tile(self, level: Dict[str, Any]) -> Dict[str, Any]:
-        """Add chain attribute to a random tile."""
-        return self._add_attribute_to_tile(level, "chain")
+        """
+        Add chain attribute to a random tile.
+        RULE: Chain tiles MUST have at least one clearable neighbor on LEFT or RIGHT (same row).
+        Chain is released by clearing adjacent tiles on the left or right side.
+        """
+        num_layers = level.get("layer", 8)
+
+        # Collect candidates: tiles without attributes that have a clearable LEFT or RIGHT neighbor
+        candidates = []
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+
+            for pos, tile_data in tiles.items():
+                # Skip if already has attribute or is goal tile
+                if not isinstance(tile_data, list) or len(tile_data) < 2:
+                    continue
+                if tile_data[1] or tile_data[0] in self.GOAL_TYPES:
+                    continue
+
+                # Check if has clearable neighbor on LEFT or RIGHT
+                try:
+                    row, col = map(int, pos.split('_'))
+                except:
+                    continue
+
+                # Only check LEFT (row-1) and RIGHT (row+1) neighbors (on screen)
+                neighbors = [
+                    (row-1, col),  # Left (on screen)
+                    (row+1, col),  # Right (on screen)
+                ]
+
+                has_clearable_neighbor = False
+                for nrow, ncol in neighbors:
+                    npos = f"{nrow}_{ncol}"
+                    if npos in tiles:
+                        ndata = tiles[npos]
+                        # Clearable = no obstacle or frog only
+                        if (isinstance(ndata, list) and len(ndata) >= 2 and
+                            (not ndata[1] or ndata[1] == "frog") and
+                            ndata[0] not in self.GOAL_TYPES):
+                            has_clearable_neighbor = True
+                            break
+
+                if has_clearable_neighbor:
+                    candidates.append((layer_key, pos))
+
+        if candidates:
+            layer_key, pos = random.choice(candidates)
+            level[layer_key]["tiles"][pos][1] = "chain"
+
+        return level
 
     def _add_frog_to_tile(self, level: Dict[str, Any]) -> Dict[str, Any]:
         """Add frog attribute to a random tile."""
@@ -638,7 +845,11 @@ class LevelGenerator:
         return level
 
     def _remove_tile_from_layer(self, level: Dict[str, Any]) -> Dict[str, Any]:
-        """Remove a tile from a random layer."""
+        """Remove a tile from a random layer.
+
+        IMPORTANT: Do not remove tiles that are neighbors of chain/link/grass obstacles,
+        as this would make them impossible to clear.
+        """
         num_layers = level.get("layer", 8)
 
         # Find layers with tiles that can be removed
@@ -649,7 +860,45 @@ class LevelGenerator:
 
             for pos, tile_data in tiles.items():
                 # Don't remove goal tiles
-                if isinstance(tile_data, list) and tile_data[0] not in self.GOAL_TYPES:
+                if not isinstance(tile_data, list) or tile_data[0] in self.GOAL_TYPES:
+                    continue
+
+                # Don't remove tiles with obstacles
+                if len(tile_data) >= 2 and tile_data[1]:
+                    continue
+
+                # Check if this tile is a neighbor of a chain (left or right on screen)
+                # If removed, the chain would have no clearable neighbor
+                try:
+                    row, col = map(int, pos.split('_'))
+                except:
+                    continue
+
+                is_critical_neighbor = False
+
+                # Check if left neighbor (row-1) is chain (on screen)
+                left_pos = f"{row-1}_{col}"
+                if left_pos in tiles:
+                    left_data = tiles[left_pos]
+                    if isinstance(left_data, list) and len(left_data) >= 2 and left_data[1] == "chain":
+                        # Check if chain has other clearable neighbor (left side = row-2)
+                        other_side = f"{row-2}_{col}"
+                        if other_side not in tiles:
+                            # This tile is the only clearable neighbor for the chain
+                            is_critical_neighbor = True
+
+                # Check if right neighbor (row+1) is chain (on screen)
+                right_pos = f"{row+1}_{col}"
+                if right_pos in tiles:
+                    right_data = tiles[right_pos]
+                    if isinstance(right_data, list) and len(right_data) >= 2 and right_data[1] == "chain":
+                        # Check if chain has other clearable neighbor (right side = row+2)
+                        other_side = f"{row+2}_{col}"
+                        if other_side not in tiles:
+                            # This tile is the only clearable neighbor for the chain
+                            is_critical_neighbor = True
+
+                if not is_critical_neighbor:
                     candidates.append((layer_key, pos))
 
         if candidates:
@@ -722,7 +971,6 @@ class LevelGenerator:
         remainder = normal_tiles % 3
 
         if remainder == 0:
-            # Already divisible by 3
             return level
 
         tiles_to_adjust = 3 - remainder
@@ -767,21 +1015,6 @@ class LevelGenerator:
                 level[layer_key]["num"] = str(len(tiles))
                 break
 
-        # Verify the fix worked (count only normal tiles)
-        new_normal_count = 0
-        for i in range(num_layers):
-            layer_key = f"layer_{i}"
-            tiles = level.get(layer_key, {}).get("tiles", {})
-            for pos, tile_data in tiles.items():
-                if isinstance(tile_data, list) and len(tile_data) > 0:
-                    tile_type = tile_data[0]
-                    if tile_type not in self.GOAL_TYPES:
-                        new_normal_count += 1
-
-        if new_normal_count % 3 != 0:
-            # If we still can't fix it, log a warning
-            print(f"WARNING: Could not ensure normal tile count divisible by 3. Normal tiles: {new_normal_count}")
-
         return level
 
     def _validate_and_fix_obstacles(self, level: Dict[str, Any]) -> Dict[str, Any]:
@@ -790,8 +1023,8 @@ class LevelGenerator:
         This is called AFTER all modifications (difficulty adjustment, tile addition, etc.)
 
         Rules:
-        1. Link tiles: Partner tile MUST exist in the connected direction
-        2. Chain tiles: At least ONE neighbor must be clearable (no obstacle attribute)
+        1. Chain tiles: At least ONE neighbor must be clearable (no obstacle attribute)
+        2. Link tiles: Partner tile MUST exist AND at least one of the pair must have clearable neighbor
         """
         num_layers = level.get("layer", 8)
 
@@ -803,6 +1036,8 @@ class LevelGenerator:
 
             # Collect invalid obstacles to remove
             invalid_obstacles = []
+            # Track validated link pairs to avoid double-checking
+            validated_link_pairs = set()
 
             for pos, tile_data in tiles.items():
                 if not isinstance(tile_data, list) or len(tile_data) < 2:
@@ -810,11 +1045,13 @@ class LevelGenerator:
 
                 attr = tile_data[1]
 
-                # Validate chain tiles
+                # Validate chain tiles - Chain only checks LEFT and RIGHT (on screen)
                 if attr == "chain":
                     row, col = map(int, pos.split('_'))
+                    # Only LEFT (row-1) and RIGHT (row+1) neighbors on screen
                     neighbors = [
-                        (row+1, col), (row-1, col), (row, col+1), (row, col-1)
+                        (row-1, col),  # Left (on screen)
+                        (row+1, col),  # Right (on screen)
                     ]
 
                     has_clearable_neighbor = False
@@ -822,7 +1059,7 @@ class LevelGenerator:
                         npos = f"{nrow}_{ncol}"
                         if npos in tiles:
                             ndata = tiles[npos]
-                            # Check if neighbor is clearable
+                            # Check if neighbor is clearable (no obstacle or frog only)
                             if (isinstance(ndata, list) and len(ndata) >= 2 and
                                 (not ndata[1] or ndata[1] == "frog")):
                                 has_clearable_neighbor = True
@@ -839,19 +1076,29 @@ class LevelGenerator:
                     if attr == "link_n":
                         partner_pos = f"{row-1}_{col}"
                         expected = "link_s"
+                        prow, pcol = row-1, col
                     elif attr == "link_s":
                         partner_pos = f"{row+1}_{col}"
                         expected = "link_n"
+                        prow, pcol = row+1, col
                     elif attr == "link_w":
                         partner_pos = f"{row}_{col-1}"
                         expected = "link_e"
+                        prow, pcol = row, col-1
                     elif attr == "link_e":
                         partner_pos = f"{row}_{col+1}"
                         expected = "link_w"
+                        prow, pcol = row, col+1
                     else:
                         continue
 
-                    # Check if partner exists and has correct link type
+                    # Create pair key (sorted to avoid duplicates)
+                    pair_key = tuple(sorted([pos, partner_pos]))
+                    if pair_key in validated_link_pairs:
+                        continue
+                    validated_link_pairs.add(pair_key)
+
+                    # RULE 1: Check if partner exists and has correct link type
                     valid_link = False
                     if partner_pos in tiles:
                         partner_data = tiles[partner_pos]
@@ -861,10 +1108,44 @@ class LevelGenerator:
 
                     if not valid_link:
                         invalid_obstacles.append(pos)
+                        continue
+
+                    # RULE 2: At least one of the link pair must have clearable neighbor
+                    has_clearable = self._link_pair_has_clearable_neighbor(
+                        tiles, pos, partner_pos, row, col, prow, pcol
+                    )
+                    if not has_clearable:
+                        # Remove both link tiles
+                        invalid_obstacles.append(pos)
+                        invalid_obstacles.append(partner_pos)
+
+                # Validate grass tiles - must have at least 2 clearable neighbors in 4 directions
+                elif attr == "grass" or attr.startswith("grass_"):
+                    row, col = map(int, pos.split('_'))
+                    neighbors = [
+                        (row-1, col),  # Up
+                        (row+1, col),  # Down
+                        (row, col-1),  # Left
+                        (row, col+1),  # Right
+                    ]
+
+                    clearable_count = 0
+                    for nrow, ncol in neighbors:
+                        npos = f"{nrow}_{ncol}"
+                        if npos in tiles:
+                            ndata = tiles[npos]
+                            if (isinstance(ndata, list) and len(ndata) >= 2 and
+                                (not ndata[1] or ndata[1] == "frog")):
+                                clearable_count += 1
+
+                    # RULE: Must have at least 2 clearable neighbors
+                    if clearable_count < 2:
+                        invalid_obstacles.append(pos)
 
             # Remove invalid obstacles
             for pos in invalid_obstacles:
-                tiles[pos][1] = ""
+                if pos in tiles and tiles[pos][1]:
+                    tiles[pos][1] = ""
 
         return level
 

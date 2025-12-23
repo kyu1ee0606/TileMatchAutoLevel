@@ -32,9 +32,18 @@ async def generate_level(
     """
     try:
         # Convert goals from Pydantic models to dicts
+        # Use None check to allow empty list (empty list means no goals)
         goals = None
-        if request.goals:
+        if request.goals is not None:
             goals = [{"type": g.type, "count": g.count} for g in request.goals]
+
+        # Convert obstacle_counts from Pydantic models to dicts
+        obstacle_counts = None
+        if request.obstacle_counts is not None:
+            obstacle_counts = {
+                k: {"min": v.min, "max": v.max}
+                for k, v in request.obstacle_counts.items()
+            }
 
         params = GenerationParams(
             target_difficulty=request.target_difficulty,
@@ -43,6 +52,7 @@ async def generate_level(
             tile_types=request.tile_types,
             obstacle_types=request.obstacle_types,
             goals=goals,
+            obstacle_counts=obstacle_counts,
         )
 
         result = generator.generate(params)

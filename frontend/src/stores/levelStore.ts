@@ -1,6 +1,68 @@
 import { create } from 'zustand';
 import type { LevelJSON, TileData, DifficultyReport } from '../types';
 
+// Check if a tile is clearable (no obstacle or only frog)
+function isTileClearable(tileData: TileData | undefined): boolean {
+  if (!tileData || !Array.isArray(tileData) || tileData.length < 2) return false;
+  const attr = tileData[1];
+  return !attr || attr === 'frog';
+}
+
+// Check if a chain tile has at least one clearable neighbor on LEFT or RIGHT
+// Backend uses row_col format, frontend reads as x_y where x=row, y=col
+// Chain LEFT/RIGHT in backend = row±1 = x±1 in frontend string (horizontal on screen)
+function hasChainClearableNeighbor(
+  tiles: Record<string, TileData>,
+  x: number,
+  y: number
+): boolean {
+  const leftPos = `${x - 1}_${y}`;  // x-1 = row-1 = LEFT on screen (horizontal)
+  const rightPos = `${x + 1}_${y}`; // x+1 = row+1 = RIGHT on screen (horizontal)
+
+  return isTileClearable(tiles[leftPos]) || isTileClearable(tiles[rightPos]);
+}
+
+// Check if removing a tile would break any chain's clearability
+// Backend uses row_col format, frontend reads as x_y where x=row, y=col
+// Chain LEFT/RIGHT in backend = row±1 = x±1 in frontend string (horizontal on screen)
+function wouldBreakChainClearability(
+  tiles: Record<string, TileData>,
+  removeX: number,
+  removeY: number
+): { wouldBreak: boolean; chainPos?: string } {
+  // Check if left neighbor (x-1 = row-1) is a chain
+  const leftChainPos = `${removeX - 1}_${removeY}`;
+  const leftTile = tiles[leftChainPos];
+  if (leftTile && Array.isArray(leftTile) && leftTile[1] === 'chain') {
+    // This tile is the RIGHT neighbor of the chain
+    // Check if chain has any other clearable neighbor (only LEFT of chain = x-2)
+    const chainLeftPos = `${removeX - 2}_${removeY}`;
+    if (!isTileClearable(tiles[chainLeftPos])) {
+      return { wouldBreak: true, chainPos: leftChainPos };
+    }
+  }
+
+  // Check if right neighbor (x+1 = row+1) is a chain
+  const rightChainPos = `${removeX + 1}_${removeY}`;
+  const rightTile = tiles[rightChainPos];
+  if (rightTile && Array.isArray(rightTile) && rightTile[1] === 'chain') {
+    // This tile is the LEFT neighbor of the chain
+    // Check if chain has any other clearable neighbor (only RIGHT of chain = x+2)
+    const chainRightPos = `${removeX + 2}_${removeY}`;
+    if (!isTileClearable(tiles[chainRightPos])) {
+      return { wouldBreak: true, chainPos: rightChainPos };
+    }
+  }
+
+  return { wouldBreak: false };
+}
+
+// Validation result type
+export interface ValidationResult {
+  valid: boolean;
+  reason?: string;
+}
+
 // Create empty level structure
 function createEmptyLevel(layers: number = 8, gridSize: [number, number] = [7, 7]): LevelJSON {
   const level: LevelJSON = { layer: layers };
@@ -39,9 +101,9 @@ interface LevelState {
   setSelectedTileType: (tileType: string) => void;
   setSelectedAttribute: (attribute: string) => void;
 
-  // Tile operations
-  setTile: (layer: number, x: number, y: number, tileData: TileData) => void;
-  removeTile: (layer: number, x: number, y: number) => void;
+  // Tile operations (with validation)
+  setTile: (layer: number, x: number, y: number, tileData: TileData) => ValidationResult;
+  removeTile: (layer: number, x: number, y: number) => ValidationResult;
   clearLayer: (layer: number) => void;
   fillLayer: (layer: number, tileData: TileData) => void;
 
@@ -82,16 +144,38 @@ export const useLevelStore = create<LevelState>((set, get) => ({
   setSelectedTileType: (tileType) => set({ selectedTileType: tileType }),
   setSelectedAttribute: (attribute) => set({ selectedAttribute: attribute }),
 
-  // Tile operations
+  // Tile operations with validation
   setTile: (layer, x, y, tileData) => {
     const { level } = get();
     const layerKey = `layer_${layer}` as `layer_${number}`;
     const layerData = level[layerKey];
 
-    if (!layerData) return;
+    if (!layerData) return { valid: false, reason: '레이어를 찾을 수 없습니다' };
 
     const position = `${x}_${y}`;
     const newTiles = { ...layerData.tiles, [position]: tileData };
+
+    // Validate: If placing a chain, check if it has clearable neighbors
+    const attr = tileData[1];
+    if (attr === 'chain') {
+      if (!hasChainClearableNeighbor(newTiles, x, y)) {
+        return {
+          valid: false,
+          reason: 'Chain 타일은 좌우 중 최소 1개의 클리어 가능한 타일이 필요합니다',
+        };
+      }
+    }
+
+    // Validate: If placing an obstacle on a clearable tile, check if it breaks any chain
+    if (attr && attr !== 'frog') {
+      const breakCheck = wouldBreakChainClearability(layerData.tiles, x, y);
+      if (breakCheck.wouldBreak) {
+        return {
+          valid: false,
+          reason: `이 타일에 장애물을 배치하면 Chain(${breakCheck.chainPos})을 해제할 수 없게 됩니다`,
+        };
+      }
+    }
 
     set({
       level: {
@@ -104,6 +188,8 @@ export const useLevelStore = create<LevelState>((set, get) => ({
       },
       analysisResult: null,
     });
+
+    return { valid: true };
   },
 
   removeTile: (layer, x, y) => {
@@ -111,9 +197,19 @@ export const useLevelStore = create<LevelState>((set, get) => ({
     const layerKey = `layer_${layer}` as `layer_${number}`;
     const layerData = level[layerKey];
 
-    if (!layerData) return;
+    if (!layerData) return { valid: false, reason: '레이어를 찾을 수 없습니다' };
 
     const position = `${x}_${y}`;
+
+    // Validate: Check if removing this tile would break any chain's clearability
+    const breakCheck = wouldBreakChainClearability(layerData.tiles, x, y);
+    if (breakCheck.wouldBreak) {
+      return {
+        valid: false,
+        reason: `이 타일을 삭제하면 Chain(${breakCheck.chainPos})을 해제할 수 없게 됩니다`,
+      };
+    }
+
     const newTiles = { ...layerData.tiles };
     delete newTiles[position];
 
@@ -128,6 +224,8 @@ export const useLevelStore = create<LevelState>((set, get) => ({
       },
       analysisResult: null,
     });
+
+    return { valid: true };
   },
 
   clearLayer: (layer) => {

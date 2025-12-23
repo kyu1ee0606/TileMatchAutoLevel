@@ -74,6 +74,13 @@ class DifficultyReport:
 
 
 @dataclass
+class ObstacleConfig:
+    """Configuration for obstacle generation."""
+    min_count: int = 0
+    max_count: int = 10
+
+
+@dataclass
 class GenerationParams:
     """Parameters for level generation."""
     target_difficulty: float  # 0.0 ~ 1.0
@@ -82,6 +89,8 @@ class GenerationParams:
     tile_types: Optional[List[str]] = None
     obstacle_types: Optional[List[str]] = None
     goals: Optional[List[Dict[str, Any]]] = None
+    # Obstacle count settings (min, max for each type)
+    obstacle_counts: Optional[Dict[str, Dict[str, int]]] = None
 
     def __post_init__(self):
         """Set default values after initialization."""
@@ -89,8 +98,18 @@ class GenerationParams:
             self.tile_types = ["t0", "t2", "t4", "t5", "t6", "t8", "t9", "t10", "t11", "t12", "t14", "t15"]
         if self.obstacle_types is None:
             self.obstacle_types = ["chain", "frog"]
+        # Only set default goals if None, not if empty list (empty list means no goals)
         if self.goals is None:
             self.goals = [{"type": "craft_s", "count": 3}]
+        # If goals is empty list, keep it as empty (user explicitly wants no goals)
+
+    def get_obstacle_count(self, obstacle_type: str, total_tiles: int, difficulty: float) -> Tuple[int, int]:
+        """Get min/max count for an obstacle type."""
+        if self.obstacle_counts and obstacle_type in self.obstacle_counts:
+            config = self.obstacle_counts[obstacle_type]
+            return config.get("min", 0), config.get("max", 10)
+        # Default: calculate based on difficulty (legacy behavior)
+        return 0, -1  # -1 means use legacy calculation
 
 
 @dataclass

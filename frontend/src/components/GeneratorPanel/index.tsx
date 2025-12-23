@@ -5,9 +5,16 @@ import { useUIStore } from '../../stores/uiStore';
 import { generateLevel, generateMultipleLevels } from '../../api/generate';
 import { saveLocalLevel } from '../../services/localLevelsApi';
 import { TILE_TYPES } from '../../types';
-import type { GenerationParams, GoalConfig } from '../../types';
+import type { GenerationParams, GoalConfig, ObstacleCountConfig } from '../../types';
 import { Button, Tooltip } from '../ui';
 import clsx from 'clsx';
+
+// Obstacle type definitions for UI
+const OBSTACLE_TYPES = [
+  { id: 'chain', label: '⛓️ Chain', name: 'chain' },
+  { id: 'frog', label: '🐸 Frog', name: 'frog' },
+  { id: 'link', label: '🔗 Link', name: 'link' },
+] as const;
 
 interface GeneratorPanelProps {
   className?: string;
@@ -27,8 +34,13 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
     't0', 't2', 't4', 't5', 't6',
   ]);
 
-  // Obstacle types selection
+  // Obstacle types selection with count ranges
   const [selectedObstacles, setSelectedObstacles] = useState<string[]>(['chain', 'frog']);
+  const [obstacleCounts, setObstacleCounts] = useState<Record<string, ObstacleCountConfig>>({
+    chain: { min: 3, max: 8 },
+    frog: { min: 2, max: 5 },
+    link: { min: 0, max: 4 },
+  });
 
   // Goals configuration
   const [goals, setGoals] = useState<GoalConfig[]>([
@@ -47,6 +59,16 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
         ? prev.filter((o) => o !== obstacle)
         : [...prev, obstacle]
     );
+  };
+
+  const updateObstacleCount = (obstacle: string, field: 'min' | 'max', value: number) => {
+    setObstacleCounts((prev) => ({
+      ...prev,
+      [obstacle]: {
+        ...prev[obstacle],
+        [field]: Math.max(0, value),
+      },
+    }));
   };
 
   const addGoal = () => {
@@ -76,13 +98,24 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
     setIsGenerating(true);
 
     try {
+      // Build obstacle_counts for selected obstacles only
+      const selectedObstacleCounts: Record<string, ObstacleCountConfig> = {};
+      for (const obstacle of selectedObstacles) {
+        if (obstacleCounts[obstacle]) {
+          selectedObstacleCounts[obstacle] = obstacleCounts[obstacle];
+        }
+      }
+
       const params: GenerationParams = {
         target_difficulty: targetDifficulty,
         grid_size: gridSize,
         max_layers: maxLayers,
         tile_types: selectedTileTypes,
         obstacle_types: selectedObstacles,
-        goals: goals.length > 0 ? goals : undefined,
+        // Send empty array explicitly when no goals (not undefined)
+        goals: goals,
+        // Include obstacle count ranges
+        obstacle_counts: Object.keys(selectedObstacleCounts).length > 0 ? selectedObstacleCounts : undefined,
       };
 
       if (count === 1) {
@@ -235,35 +268,80 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
         </div>
       </div>
 
-      {/* Obstacles */}
+      {/* Obstacles with count settings */}
       <div>
-        <label className="text-sm font-medium text-gray-300 block mb-2">장애물</label>
-        <div className="flex gap-2">
-          {[
-            { id: 'chain', label: '⛓️ Chain', name: 'chain' },
-            { id: 'frog', label: '🐸 Frog', name: 'frog' },
-            { id: 'link', label: '🔗 Link', name: 'link' },
-          ].map((obstacle) => (
-            <button
-              key={obstacle.id}
-              onClick={() => toggleObstacle(obstacle.name)}
-              className={clsx(
-                'px-3 py-1.5 text-sm rounded-md transition-colors',
-                selectedObstacles.includes(obstacle.name)
-                  ? 'bg-orange-500 text-white'
-                  : 'bg-gray-700 text-gray-400'
-              )}
-            >
-              {obstacle.label}
-            </button>
-          ))}
+        <label className="text-sm font-medium text-gray-300 block mb-2">
+          장애물 설정
+          <span className="ml-2 text-xs text-gray-500">
+            ({selectedObstacles.length}개 선택)
+          </span>
+        </label>
+        <div className="space-y-2">
+          {OBSTACLE_TYPES.map((obstacle) => {
+            const isSelected = selectedObstacles.includes(obstacle.name);
+            const counts = obstacleCounts[obstacle.name] || { min: 0, max: 5 };
+
+            return (
+              <div
+                key={obstacle.id}
+                className={clsx(
+                  'flex items-center gap-3 p-2 rounded-lg transition-colors',
+                  isSelected ? 'bg-orange-900/30 border border-orange-600' : 'bg-gray-700/30 border border-gray-600'
+                )}
+              >
+                {/* Toggle button */}
+                <button
+                  onClick={() => toggleObstacle(obstacle.name)}
+                  className={clsx(
+                    'px-3 py-1 text-sm rounded-md transition-colors min-w-[90px]',
+                    isSelected
+                      ? 'bg-orange-500 text-white'
+                      : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                  )}
+                >
+                  {obstacle.label}
+                </button>
+
+                {/* Count range inputs - only show when selected */}
+                {isSelected && (
+                  <div className="flex items-center gap-2 ml-auto">
+                    <span className="text-xs text-gray-400">최소</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max="30"
+                      value={counts.min}
+                      onChange={(e) => updateObstacleCount(obstacle.name, 'min', Number(e.target.value))}
+                      className="w-14 px-2 py-1 border border-gray-600 bg-gray-700 text-gray-100 rounded-md text-sm text-center"
+                    />
+                    <span className="text-xs text-gray-400">~</span>
+                    <span className="text-xs text-gray-400">최대</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max="30"
+                      value={counts.max}
+                      onChange={(e) => updateObstacleCount(obstacle.name, 'max', Number(e.target.value))}
+                      className="w-14 px-2 py-1 border border-gray-600 bg-gray-700 text-gray-100 rounded-md text-sm text-center"
+                    />
+                    <span className="text-xs text-gray-500">개</span>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
 
       {/* Goals */}
       <div>
         <div className="flex justify-between items-center mb-2">
-          <label className="text-sm font-medium text-gray-300">목표 설정</label>
+          <label className="text-sm font-medium text-gray-300">
+            목표 설정
+            <span className="ml-2 text-xs text-gray-500">
+              ({goals.length}개)
+            </span>
+          </label>
           <Button
             onClick={addGoal}
             variant="success"
@@ -274,26 +352,30 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
           </Button>
         </div>
         <div className="space-y-2">
-          {goals.map((goal, index) => (
-            <div key={index} className="flex gap-2 items-center">
-              <select
-                value={goal.type}
-                onChange={(e) => updateGoal(index, 'type', e.target.value)}
-                className="flex-1 px-2 py-1 border border-gray-600 bg-gray-700 text-gray-100 rounded-md text-sm"
-              >
-                <option value="craft_s">Craft</option>
-                <option value="stack_s">Stack</option>
-              </select>
-              <input
-                type="number"
-                min="1"
-                max="20"
-                value={goal.count}
-                onChange={(e) => updateGoal(index, 'count', e.target.value)}
-                className="w-16 px-2 py-1 border border-gray-600 bg-gray-700 text-gray-100 rounded-md text-sm"
-              />
-              <span className="text-sm text-gray-400">개</span>
-              {goals.length > 1 && (
+          {goals.length === 0 ? (
+            <div className="text-sm text-gray-500 py-2 px-3 bg-gray-700/30 rounded-md">
+              목표 없이 생성됩니다 (일반 타일만)
+            </div>
+          ) : (
+            goals.map((goal, index) => (
+              <div key={index} className="flex gap-2 items-center">
+                <select
+                  value={goal.type}
+                  onChange={(e) => updateGoal(index, 'type', e.target.value)}
+                  className="flex-1 px-2 py-1 border border-gray-600 bg-gray-700 text-gray-100 rounded-md text-sm"
+                >
+                  <option value="craft_s">Craft</option>
+                  <option value="stack_s">Stack</option>
+                </select>
+                <input
+                  type="number"
+                  min="1"
+                  max="20"
+                  value={goal.count}
+                  onChange={(e) => updateGoal(index, 'count', e.target.value)}
+                  className="w-16 px-2 py-1 border border-gray-600 bg-gray-700 text-gray-100 rounded-md text-sm"
+                />
+                <span className="text-sm text-gray-400">개</span>
                 <Tooltip content="목표 삭제">
                   <button
                     onClick={() => removeGoal(index)}
@@ -302,9 +384,9 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
                     🗑️
                   </button>
                 </Tooltip>
-              )}
-            </div>
-          ))}
+              </div>
+            ))
+          )}
         </div>
       </div>
 

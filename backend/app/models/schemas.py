@@ -22,6 +22,12 @@ class GoalConfig(BaseModel):
     count: int = Field(..., ge=1, description="Required count to collect")
 
 
+class ObstacleCountConfig(BaseModel):
+    """Configuration for obstacle count range."""
+    min: int = Field(default=0, ge=0, description="Minimum count")
+    max: int = Field(default=10, ge=0, description="Maximum count")
+
+
 class GenerateRequest(BaseModel):
     """Request schema for level generation."""
     target_difficulty: float = Field(..., ge=0.0, le=1.0, description="Target difficulty (0.0-1.0)")
@@ -30,6 +36,10 @@ class GenerateRequest(BaseModel):
     tile_types: Optional[List[str]] = Field(default=None, description="Tile types to use")
     obstacle_types: Optional[List[str]] = Field(default=None, description="Obstacle types to use")
     goals: Optional[List[GoalConfig]] = Field(default=None, description="Goal configurations")
+    obstacle_counts: Optional[Dict[str, ObstacleCountConfig]] = Field(
+        default=None,
+        description="Obstacle count ranges per type (e.g., {'chain': {'min': 3, 'max': 8}})"
+    )
 
 
 class GenerateResponse(BaseModel):

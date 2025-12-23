@@ -1,5 +1,5 @@
 import apiClient from './client';
-import type { LevelJSON, GenerationParams, GenerationResult, SimulationResult } from '../types';
+import type { LevelJSON, GenerationParams, GenerationResult, SimulationResult, ObstacleCountConfig } from '../types';
 
 export interface GenerateRequest {
   target_difficulty: number;
@@ -8,6 +8,7 @@ export interface GenerateRequest {
   tile_types?: string[];
   obstacle_types?: string[];
   goals?: Array<{ type: string; count: number }>;
+  obstacle_counts?: Record<string, ObstacleCountConfig>;
 }
 
 export interface SimulateRequest {
@@ -27,6 +28,7 @@ export async function generateLevel(params: GenerationParams): Promise<Generatio
     tile_types: params.tile_types,
     obstacle_types: params.obstacle_types,
     goals: params.goals,
+    obstacle_counts: params.obstacle_counts,
   };
 
   const response = await apiClient.post<GenerationResult>('/generate', request);

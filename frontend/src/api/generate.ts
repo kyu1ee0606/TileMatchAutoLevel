@@ -1,5 +1,5 @@
 import apiClient from './client';
-import type { LevelJSON, GenerationParams, GenerationResult, SimulationResult, ObstacleCountConfig } from '../types';
+import type { LevelJSON, GenerationParams, GenerationResult, SimulationResult, ObstacleCountConfig, LayerTileConfig, LayerObstacleConfig } from '../types';
 
 export interface GenerateRequest {
   target_difficulty: number;
@@ -9,6 +9,9 @@ export interface GenerateRequest {
   obstacle_types?: string[];
   goals?: Array<{ type: string; count: number }>;
   obstacle_counts?: Record<string, ObstacleCountConfig>;
+  // Per-layer configurations
+  layer_tile_configs?: LayerTileConfig[];
+  layer_obstacle_configs?: LayerObstacleConfig[];
 }
 
 export interface SimulateRequest {
@@ -29,6 +32,8 @@ export async function generateLevel(params: GenerationParams): Promise<Generatio
     obstacle_types: params.obstacle_types,
     goals: params.goals,
     obstacle_counts: params.obstacle_counts,
+    layer_tile_configs: params.layer_tile_configs,
+    layer_obstacle_configs: params.layer_obstacle_configs,
   };
 
   const response = await apiClient.post<GenerationResult>('/generate', request);

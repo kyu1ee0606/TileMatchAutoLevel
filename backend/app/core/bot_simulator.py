@@ -163,6 +163,7 @@ class Move:
     score: float = 0.0
     match_count: int = 0
     will_match: bool = False  # True if picking this will complete a 3-match
+    linked_tiles: List[Tuple[int, str]] = field(default_factory=list)  # [(layer_idx, position), ...] for link pairs
 
 
 @dataclass
@@ -376,12 +377,13 @@ class BotSimulator:
         if use_tile_count <= 0:
             use_tile_count = self.DEFAULT_USE_TILE_COUNT
 
-        # First pass: collect ALL t0 tiles across ALL layers
+        # First pass: collect ALL t0 tiles AND count existing t1~t15 tiles
         # This includes:
         # 1. Regular t0 tiles on the board
         # 2. t0 tiles INSIDE stack/craft containers
-        # All t0 tiles must be assigned types in sets of 3 for guaranteed matchability
+        # 3. Existing t1~t15 tiles (need to track for proper t0 distribution)
         t0_tiles: List[Tuple[int, str, Any]] = []  # (layer_idx, pos_key, tile_data)
+        existing_tile_counts: Dict[str, int] = {}  # t1~t15 counts
 
         for layer_idx in range(num_layers):
             layer_key = f"layer_{layer_idx}"
@@ -399,25 +401,28 @@ class BotSimulator:
                     is_craft = isinstance(tile_type, str) and tile_type.startswith("craft_")
 
                     if is_stack or is_craft:
-                        # Stack/craft tiles contain hidden t0 tiles
-                        # Format: [type, attr, [count]] or [type, attr, [count, "types"]]
+                        # Stack/craft tiles contain internal t0 tiles
+                        # [count] = number of internal tiles to output
                         stack_info = tile_data[2] if len(tile_data) > 2 else None
-                        if stack_info and isinstance(stack_info, list) and len(stack_info) >= 1:
-                            total_count = int(stack_info[0]) if stack_info[0] else 1
-                            # All tiles inside stack/craft are t0 (random)
-                            # Add each internal tile to the t0 collection with unique key
-                            for stack_idx in range(total_count):
-                                stack_key = f"{pos}_stack_{stack_idx}"
-                                t0_tiles.append((layer_idx, stack_key, tile_data))
+                        if stack_info and isinstance(stack_info, list) and len(stack_info) > 0:
+                            internal_count = int(stack_info[0]) if stack_info[0] else 1
+                            # Add internal t0 tiles for distribution
+                            for stack_idx in range(internal_count):
+                                t0_tiles.append((layer_idx, f"{pos}_stack_{stack_idx}", tile_data))
                     elif tile_type == "t0":
                         # Regular t0 tile
                         t0_tiles.append((layer_idx, pos, tile_data))
+                    elif isinstance(tile_type, str) and tile_type.startswith("t") and tile_type[1:].isdigit():
+                        # Existing t1~t15 tile - count it
+                        tile_num = int(tile_type[1:])
+                        if 1 <= tile_num <= 15:
+                            existing_tile_counts[tile_type] = existing_tile_counts.get(tile_type, 0) + 1
 
-        # Generate tile type assignments for ALL t0 tiles (3 tiles per set)
-        # This ensures every tile type appears exactly 3 times for guaranteed matchability
-        # Following sp_template's DistributeTiles logic
+        # Generate tile type assignments for ALL t0 tiles
+        # CRITICAL: Must consider existing t1~t15 counts so that final total per type is divisible by 3
+        # Following sp_template's DistributeTiles logic with enhancement
         t0_assignments = self._distribute_t0_tiles(
-            len(t0_tiles), use_tile_count, rand_seed
+            len(t0_tiles), use_tile_count, rand_seed, existing_tile_counts
         )
 
         # Create a mapping for quick lookup
@@ -586,19 +591,20 @@ class BotSimulator:
         state.all_tile_type_counts = counts
 
     def _distribute_t0_tiles(
-        self, t0_count: int, use_tile_count: int, rand_seed: int = 0
+        self, t0_count: int, use_tile_count: int, rand_seed: int = 0,
+        existing_tile_counts: Optional[Dict[str, int]] = None
     ) -> List[str]:
-        """Distribute t0 tiles into matchable sets of 3.
+        """Distribute t0 tiles so that (existing + t0) per type is divisible by 3.
 
-        Follows sp_template's DistributeTiles logic:
-        - Each tile type gets assigned in sets of 3
-        - Types are distributed across available tile types (t1-t{use_tile_count})
-        - Uses seed for deterministic distribution
+        CRITICAL FIX: Must consider existing t1~t15 tile counts!
+        - If t1 already has 4 tiles, we need to add 2 more t1 from t0 to make 6 (divisible by 3)
+        - If t2 already has 6 tiles, we can add 0 or 3 or 6... t2 from t0
 
         Args:
             t0_count: Total number of t0 tiles to assign
             use_tile_count: Number of tile types to use (1-15)
             rand_seed: Seed for random distribution
+            existing_tile_counts: Existing t1~t15 tile counts in level
 
         Returns:
             List of tile type strings (e.g., ["t1", "t1", "t1", "t2", "t2", "t2", ...])
@@ -606,49 +612,84 @@ class BotSimulator:
         if t0_count == 0:
             return []
 
-        # Use seed for deterministic distribution
-        if rand_seed > 0:
-            self._rng.seed(rand_seed)
+        existing_tile_counts = existing_tile_counts or {}
+
+        # DEBUG
+        import os
+        if os.environ.get('DEBUG_DISTRIBUTE'):
+            print(f"[DEBUG] _distribute_t0_tiles: t0_count={t0_count}, use_tile_count={use_tile_count}, existing={existing_tile_counts}")
+
+        # Use a separate random instance with the seed to avoid state pollution
+        import random
+        dist_rng = random.Random(rand_seed if rand_seed > 0 else 42)
 
         # Limit tile types to available pool
         use_tile_count = min(use_tile_count, len(self.RANDOM_TILE_POOL))
         available_types = self.RANDOM_TILE_POOL[:use_tile_count]
 
-        # Calculate number of complete sets (3 tiles each)
-        set_count = t0_count // 3
-        remainder = t0_count % 3
+        # Step 1: Calculate how many tiles each type NEEDS to become divisible by 3
+        # existing % 3 = 0 -> need 0 or 3 or 6...
+        # existing % 3 = 1 -> need 2 or 5 or 8...
+        # existing % 3 = 2 -> need 1 or 4 or 7...
+        type_needs: Dict[str, int] = {}  # tiles needed to reach next multiple of 3
+        for tile_type in available_types:
+            existing = existing_tile_counts.get(tile_type, 0)
+            remainder = existing % 3
+            if remainder == 0:
+                type_needs[tile_type] = 0  # Already divisible, can add 0/3/6...
+            else:
+                type_needs[tile_type] = 3 - remainder  # Need this many to complete
 
-        # Distribute sets across tile types
-        # Each type gets at least 1 set, then distribute remaining evenly
-        type_set_counts: List[int] = [0] * use_tile_count
-
-        # First, ensure minimum 1 set per type if possible
-        sets_to_distribute = set_count
-        for i in range(min(sets_to_distribute, use_tile_count)):
-            type_set_counts[i] = 1
-            sets_to_distribute -= 1
-
-        # Distribute remaining sets evenly
-        if sets_to_distribute > 0:
-            for i in range(sets_to_distribute):
-                type_set_counts[i % use_tile_count] += 1
-
-        # Build the assignment list (3 tiles per set)
+        # Step 2: First, fulfill the "needs" for each type
         assignments: List[str] = []
-        for type_idx, count in enumerate(type_set_counts):
-            tile_type = available_types[type_idx]
-            for _ in range(count * 3):  # 3 tiles per set
-                assignments.append(tile_type)
+        remaining_t0 = t0_count
 
-        # Handle remainder (not a complete set of 3)
-        # Add tiles that will need extra matching opportunities
-        for i in range(remainder):
-            # Pick types that already have tiles for better matching chances
-            type_idx = i % use_tile_count
-            assignments.append(available_types[type_idx])
+        # Priority: types that need 1 or 2 tiles to complete
+        types_needing = [(t, n) for t, n in type_needs.items() if n > 0]
+        # Sort by need (smaller first for efficiency)
+        types_needing.sort(key=lambda x: x[1])
+
+        for tile_type, need in types_needing:
+            if remaining_t0 >= need:
+                assignments.extend([tile_type] * need)
+                remaining_t0 -= need
+                type_needs[tile_type] = 0  # Fulfilled
+
+        # Step 3: Distribute remaining t0 tiles in complete sets of 3
+        if remaining_t0 > 0:
+            # Distribute evenly across all available types
+            complete_sets = remaining_t0 // 3
+            final_remainder = remaining_t0 % 3
+
+            if complete_sets > 0:
+                # Distribute complete sets evenly
+                sets_per_type = complete_sets // use_tile_count
+                extra_sets = complete_sets % use_tile_count
+
+                for i, tile_type in enumerate(available_types):
+                    sets_for_this_type = sets_per_type + (1 if i < extra_sets else 0)
+                    assignments.extend([tile_type] * (sets_for_this_type * 3))
+
+            # Step 4: Handle final remainder (0, 1, or 2 tiles)
+            # These are problematic - they break the 3-divisibility
+            # Strategy: Add to types that are already divisible by 3, so we'll need 2 or 1 more later
+            # But since this is the last distribution, we need to be smart
+            if final_remainder > 0:
+                # Find types where adding these won't break existing balance
+                # Or add to types that need complementary amounts
+                # For now, add to first type(s) - the level generator should ensure total is correct
+                for i in range(final_remainder):
+                    assignments.append(available_types[i % use_tile_count])
+
+        # DEBUG: Show assignment counts before shuffle
+        if os.environ.get('DEBUG_DISTRIBUTE'):
+            assign_counts = {}
+            for t in assignments:
+                assign_counts[t] = assign_counts.get(t, 0) + 1
+            print(f"[DEBUG] Assignments (count={len(assignments)}): {assign_counts}")
 
         # Shuffle assignments for random placement across board
-        self._rng.shuffle(assignments)
+        dist_rng.shuffle(assignments)
 
         return assignments
 
@@ -661,13 +702,16 @@ class BotSimulator:
     ) -> None:
         """Process stack and craft tiles from level JSON.
 
-        Based on sp_template TileCraft.cs and Tile.cs:
-        - Stack/Craft tiles have tile_type like "stack_e" or "craft_s"
-        - The direction (e/w/s/n) indicates where tiles are stacked/produced
-        - Stack info is in tile_data[2] with format [total_count, "tile_types"]
-        - Tiles are stacked vertically with upperStackedTile/underStackedTile links
-        - Only the topmost tile in a stack can be picked
-        - For craft: only the "crafted" (produced) tile can be picked
+        NOTE: Both craft_s and stack_* tiles contain internal t0 tiles that need to be distributed.
+
+        Craft tiles (craft_s/e/w/n):
+        - [count] = number of internal tiles to output
+        - When all internal tiles are output, the craft tile disappears
+        - Each craft tile counts as 1 goal (the craft tile itself, not the internal count)
+
+        Stack tiles (stack_e/w/s/n):
+        - [count] = number of internal tiles
+        - Work similarly to craft but don't have goal tracking
 
         Args:
             state: GameState to update
@@ -686,11 +730,23 @@ class BotSimulator:
             # Determine if stack or craft and get direction
             is_craft = tile_type_str.startswith("craft_")
             is_stack = tile_type_str.startswith("stack_")
+
+            # Both craft and stack tiles contain internal tiles
+            # Skip if neither
+            if not is_craft and not is_stack:
+                continue
+
+            # For craft tiles: each craft tile = 1 goal
+            # The [count] is the number of internal tiles, NOT the goal count
+            if is_craft:
+                # Each craft tile is 1 goal (when all internal tiles are output, goal is achieved)
+                state.goals_remaining[tile_type_str] = state.goals_remaining.get(tile_type_str, 0) + 1
+
             direction = tile_type_str.split("_")[1] if "_" in tile_type_str else "s"
 
             # Get stack info from tile_data[2]
             # Format from LevelEditor: [count] - single element array with count
-            # All tiles in stack/craft are "t0" (random) by default
+            # All tiles in stack are "t0" (random) by default
             stack_info = tile_data[2] if len(tile_data) > 2 else None
             if not stack_info or not isinstance(stack_info, list) or len(stack_info) < 1:
                 continue
@@ -825,11 +881,9 @@ class BotSimulator:
                         state.tiles[layer_idx] = {}
                     state.tiles[layer_idx][pos] = top_tile
 
-            # Track goals for stack_s and craft_s
-            if tile_type_str in self.GOAL_TYPES:
-                state.goals_remaining[tile_type_str] = (
-                    state.goals_remaining.get(tile_type_str, 0) + total_count
-                )
+            # NOTE: Goal tracking for craft tiles is handled earlier in this function
+            # (Line 737-738: each craft tile = 1 goal)
+            # Don't add total_count here - that's the internal tile count, not the goal count
 
     def _is_stack_blocked(self, state: GameState, tile: TileState) -> bool:
         """Check if a stack tile is blocked by upper stacked tiles.
@@ -1078,6 +1132,41 @@ class BotSimulator:
 
         return remaining_count >= state.max_dock_slots
 
+    def _find_linked_tiles(self, state: GameState, tile_state: TileState) -> List[Tuple[int, str]]:
+        """Find linked tiles for a given tile (LINK gimmick).
+
+        Returns list of (layer_idx, position) tuples for tiles that will be selected
+        together with this tile due to LINK gimmick.
+        """
+        linked_tiles = []
+
+        # Forward direction: this tile has LINK attribute pointing to another tile
+        if tile_state.effect_type in (TileEffectType.LINK_EAST, TileEffectType.LINK_WEST,
+                                       TileEffectType.LINK_SOUTH, TileEffectType.LINK_NORTH):
+            linked_pos = tile_state.effect_data.get("linked_pos", "")
+            if linked_pos:
+                # Find linked tile in the SAME LAYER only
+                my_layer_idx = tile_state.layer_idx
+                layer_tiles = state.tiles.get(my_layer_idx, {})
+                linked_tile = layer_tiles.get(linked_pos)
+                if linked_tile and not linked_tile.picked:
+                    linked_tiles.append((my_layer_idx, linked_pos))
+        else:
+            # Reverse direction: check if any LINK tile in the SAME LAYER points to this tile
+            my_pos = tile_state.position_key
+            my_layer_idx = tile_state.layer_idx
+            layer_tiles = state.tiles.get(my_layer_idx, {})
+            for pos, tile in layer_tiles.items():
+                if tile.picked:
+                    continue
+                if tile.effect_type in (TileEffectType.LINK_EAST, TileEffectType.LINK_WEST,
+                                         TileEffectType.LINK_SOUTH, TileEffectType.LINK_NORTH):
+                    if tile.effect_data.get("linked_pos", "") == my_pos:
+                        linked_tiles.append((my_layer_idx, pos))
+                        break
+
+        return linked_tiles
+
     def _get_available_moves(self, state: GameState) -> List[Move]:
         """Get all available moves (pickable tiles) in current state."""
         moves = []
@@ -1108,6 +1197,19 @@ class BotSimulator:
             if tile_state.is_craft_tile and not self._is_craft_tile_pickable(state, tile_state):
                 continue
 
+            # Find linked tiles (for LINK gimmick)
+            linked_tiles = self._find_linked_tiles(state, tile_state)
+
+            # If this tile is a link target (no link attribute but has a link source pointing to it),
+            # check if the source tile is blocked - if so, this tile cannot be picked
+            if linked_tiles and tile_state.effect_type not in (TileEffectType.LINK_EAST, TileEffectType.LINK_WEST,
+                                                                 TileEffectType.LINK_SOUTH, TileEffectType.LINK_NORTH):
+                # This is a link target tile - check if the source is blocked
+                source_layer_idx, source_pos = linked_tiles[0]
+                source_tile = state.tiles.get(source_layer_idx, {}).get(source_pos)
+                if source_tile and self._is_blocked_by_upper(state, source_tile):
+                    continue  # Source tile is blocked, so target cannot be picked either
+
             # Calculate match info
             dock_count = dock_type_counts.get(tile_state.tile_type, 0)
             will_match = dock_count >= 2  # Will complete a 3-match
@@ -1120,6 +1222,7 @@ class BotSimulator:
                 attribute=tile_state.effect_type.value,
                 match_count=dock_count + 1,
                 will_match=will_match,
+                linked_tiles=linked_tiles,
             ))
 
         return moves
@@ -1214,25 +1317,22 @@ class BotSimulator:
         if tile_state.effect_type in (TileEffectType.LINK_EAST, TileEffectType.LINK_WEST,
                                        TileEffectType.LINK_SOUTH, TileEffectType.LINK_NORTH):
             linked_pos = tile_state.effect_data.get("linked_pos", "")
-            # Find linked tile
-            for lt in state.tiles.values():
-                if linked_pos in lt:
-                    linked_tile = lt[linked_pos]
-                    break
+            # Find linked tile in the SAME LAYER only
+            my_layer_tiles = state.tiles.get(tile_state.layer_idx, {})
+            linked_tile = my_layer_tiles.get(linked_pos)
         else:
-            # Check reverse direction: is there a LINK tile pointing to this tile?
+            # Check reverse direction: is there a LINK tile in the SAME LAYER pointing to this tile?
             my_pos = tile_state.position_key
-            for layer_tiles in state.tiles.values():
-                for tile in layer_tiles.values():
-                    if tile.picked:
-                        continue
-                    if tile.effect_type in (TileEffectType.LINK_EAST, TileEffectType.LINK_WEST,
-                                             TileEffectType.LINK_SOUTH, TileEffectType.LINK_NORTH):
-                        if tile.effect_data.get("linked_pos", "") == my_pos:
-                            linked_tile = tile
-                            break
-                if linked_tile:
-                    break
+            my_layer_idx = tile_state.layer_idx
+            layer_tiles = state.tiles.get(my_layer_idx, {})
+            for tile in layer_tiles.values():
+                if tile.picked:
+                    continue
+                if tile.effect_type in (TileEffectType.LINK_EAST, TileEffectType.LINK_WEST,
+                                         TileEffectType.LINK_SOUTH, TileEffectType.LINK_NORTH):
+                    if tile.effect_data.get("linked_pos", "") == my_pos:
+                        linked_tile = tile
+                        break
 
         # Mark tile as picked
         tile_state.picked = True
@@ -1416,7 +1516,7 @@ class BotSimulator:
 
     def _update_link_tiles_status(self, state: GameState) -> None:
         """Update can_pick status for all link tiles."""
-        for layer_tiles in state.tiles.values():
+        for layer_idx, layer_tiles in state.tiles.items():
             for tile in layer_tiles.values():
                 if tile.picked:
                     continue
@@ -1425,12 +1525,8 @@ class BotSimulator:
                                          TileEffectType.LINK_SOUTH, TileEffectType.LINK_NORTH):
                     linked_pos = tile.effect_data.get("linked_pos", "")
 
-                    # Find linked tile
-                    linked_tile = None
-                    for lt in state.tiles.values():
-                        if linked_pos in lt:
-                            linked_tile = lt[linked_pos]
-                            break
+                    # Find linked tile in the SAME LAYER only
+                    linked_tile = layer_tiles.get(linked_pos)
 
                     if linked_tile is None or linked_tile.picked:
                         tile.effect_data["can_pick"] = True

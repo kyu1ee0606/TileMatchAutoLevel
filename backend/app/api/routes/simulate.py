@@ -272,12 +272,37 @@ class VisualSimulator:
                 # No match - add current tile to dock tracking
                 dock_tile_infos.append(current_tile_info)
 
+            # Also track linked tiles in dock_tile_infos for match tracking
+            for linked_layer_idx, linked_pos in selected_move.linked_tiles:
+                # Find the linked tile in state to get its tile_type
+                linked_tile = state.tiles.get(linked_layer_idx, {}).get(linked_pos)
+                if linked_tile:
+                    linked_tile_info = DockTileInfo(
+                        tile_type=linked_tile.tile_type,
+                        layer_idx=linked_layer_idx,
+                        position=linked_pos,
+                    )
+                    # Check if match would occur with linked tile
+                    linked_dock_count = sum(
+                        1 for dt in dock_tile_infos if dt.tile_type == linked_tile.tile_type
+                    )
+                    if linked_dock_count >= 2:
+                        # Linked tile causes a match - remove matching tiles
+                        same_type_in_dock = [
+                            dt for dt in dock_tile_infos if dt.tile_type == linked_tile.tile_type
+                        ]
+                        for dt in same_type_in_dock[:2]:
+                            matched_positions.append(f"{dt.layer_idx}_{dt.position}")
+                            dock_tile_infos.remove(dt)
+                    else:
+                        dock_tile_infos.append(linked_tile_info)
+
             # Process move effects (bomb, frog, curtain, teleport)
             self._core._process_move_effects(state)
             state.moves_used += 1
 
-            # Get current dock state (tile types only)
-            dock_after = [dt.tile_type for dt in dock_tile_infos]
+            # Get current dock state from actual state (includes linked tiles)
+            dock_after = [dt.tile_type for dt in state.dock_tiles]
 
             # Get frog positions after move (layerIdx_x_y format)
             # Search all layers for tiles with on_frog=True
@@ -339,12 +364,18 @@ class VisualSimulator:
                         linked_positions = tile.effect_data.get("linked_positions", [])
                         link_states_after[f"{layer_idx}_{pos}"] = linked_positions
 
+            # Convert linked_tiles to linked_positions format (layerIdx_x_y)
+            linked_positions_formatted = [
+                f"{layer_idx}_{pos}" for layer_idx, pos in selected_move.linked_tiles
+            ]
+
             # Record move
             moves.append(VisualBotMove(
                 move_number=move_number,
                 layer_idx=selected_move.layer_idx,
                 position=selected_move.position,
                 tile_type=selected_move.tile_type,
+                linked_positions=linked_positions_formatted,
                 matched_positions=matched_positions,
                 tiles_cleared=tiles_cleared,
                 goals_after=dict(state.goals_remaining),

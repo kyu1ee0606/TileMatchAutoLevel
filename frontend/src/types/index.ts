@@ -53,6 +53,18 @@ export interface ObstacleCountConfig {
   max: number;
 }
 
+// Layer tile configuration
+export interface LayerTileConfig {
+  layer: number;
+  count: number;
+}
+
+// Layer obstacle configuration
+export interface LayerObstacleConfig {
+  layer: number;
+  counts: Record<string, ObstacleCountConfig>;
+}
+
 // Level generation parameters
 export interface GenerationParams {
   target_difficulty: number;
@@ -62,6 +74,11 @@ export interface GenerationParams {
   obstacle_types?: string[];
   goals?: GoalConfig[];
   obstacle_counts?: Record<string, ObstacleCountConfig>;
+  // Enhanced layer control
+  total_tile_count?: number;
+  active_layer_count?: number;
+  layer_tile_configs?: LayerTileConfig[];
+  layer_obstacle_configs?: LayerObstacleConfig[];
 }
 
 // Level generation result

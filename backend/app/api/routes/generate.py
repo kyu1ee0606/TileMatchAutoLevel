@@ -7,7 +7,7 @@ from ...models.schemas import (
     SimulateRequest,
     SimulateResponse,
 )
-from ...models.level import GenerationParams
+from ...models.level import GenerationParams, LayerTileConfig, LayerObstacleConfig
 from ...core.generator import LevelGenerator
 from ...core.simulator import LevelSimulator
 from ..deps import get_level_generator, get_level_simulator
@@ -45,6 +45,28 @@ async def generate_level(
                 for k, v in request.obstacle_counts.items()
             }
 
+        # Convert layer_tile_configs from Pydantic models to dataclasses
+        layer_tile_configs = None
+        if request.layer_tile_configs is not None:
+            layer_tile_configs = [
+                LayerTileConfig(layer=c.layer, count=c.count)
+                for c in request.layer_tile_configs
+            ]
+
+        # Convert layer_obstacle_configs from Pydantic models to dataclasses
+        layer_obstacle_configs = None
+        if request.layer_obstacle_configs is not None:
+            layer_obstacle_configs = [
+                LayerObstacleConfig(
+                    layer=c.layer,
+                    counts={
+                        k: {"min": v.min, "max": v.max}
+                        for k, v in c.counts.items()
+                    }
+                )
+                for c in request.layer_obstacle_configs
+            ]
+
         params = GenerationParams(
             target_difficulty=request.target_difficulty,
             grid_size=tuple(request.grid_size),
@@ -53,6 +75,10 @@ async def generate_level(
             obstacle_types=request.obstacle_types,
             goals=goals,
             obstacle_counts=obstacle_counts,
+            total_tile_count=request.total_tile_count,
+            active_layer_count=request.active_layer_count,
+            layer_tile_configs=layer_tile_configs,
+            layer_obstacle_configs=layer_obstacle_configs,
         )
 
         result = generator.generate(params)

@@ -239,7 +239,7 @@ type TabId = 'editor' | 'simulation' | 'generator' | 'gboost' | 'local';
 function AppContent() {
   const [activeTab, setActiveTab] = useState<TabId>('editor');
   const [isDragging, setIsDragging] = useState(false);
-  const { importJson, level, setLevel } = useLevelStore();
+  const { importJson, level } = useLevelStore();
   const { addNotification } = useUIStore();
   const { fetchSimulation, clearResults } = useSimulationStore();
   const dragCounterRef = useRef(0);

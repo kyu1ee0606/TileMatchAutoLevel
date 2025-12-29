@@ -81,6 +81,20 @@ class ObstacleConfig:
 
 
 @dataclass
+class LayerTileConfig:
+    """Configuration for tile count on a specific layer."""
+    layer: int
+    count: int
+
+
+@dataclass
+class LayerObstacleConfig:
+    """Configuration for obstacle counts on a specific layer."""
+    layer: int
+    counts: Dict[str, Dict[str, int]]  # obstacle_type -> {min, max}
+
+
+@dataclass
 class GenerationParams:
     """Parameters for level generation."""
     target_difficulty: float  # 0.0 ~ 1.0
@@ -91,11 +105,19 @@ class GenerationParams:
     goals: Optional[List[Dict[str, Any]]] = None
     # Obstacle count settings (min, max for each type)
     obstacle_counts: Optional[Dict[str, Dict[str, int]]] = None
+    # New fields for enhanced generation control
+    total_tile_count: Optional[int] = None  # Total tiles across all layers
+    active_layer_count: Optional[int] = None  # Number of active layers
+    layer_tile_configs: Optional[List[LayerTileConfig]] = None  # Per-layer tile counts
+    layer_obstacle_configs: Optional[List[LayerObstacleConfig]] = None  # Per-layer obstacle counts
 
     def __post_init__(self):
         """Set default values after initialization."""
         if self.tile_types is None:
-            self.tile_types = ["t0", "t2", "t4", "t5", "t6", "t8", "t9", "t10", "t11", "t12", "t14", "t15"]
+            # Default to t0~t5 (useTileCount=5)
+            # t0 is random tile that becomes t1~t{useTileCount} at runtime
+            # Using t0 plus explicit types gives variety while keeping useTileCount manageable
+            self.tile_types = ["t0", "t2", "t4", "t5"]
         if self.obstacle_types is None:
             self.obstacle_types = ["chain", "frog"]
         # Only set default goals if None, not if empty list (empty list means no goals)
@@ -110,6 +132,25 @@ class GenerationParams:
             return config.get("min", 0), config.get("max", 10)
         # Default: calculate based on difficulty (legacy behavior)
         return 0, -1  # -1 means use legacy calculation
+
+    def get_layer_tile_count(self, layer_idx: int) -> Optional[int]:
+        """Get configured tile count for a specific layer, or None if not configured."""
+        if not self.layer_tile_configs:
+            return None
+        for config in self.layer_tile_configs:
+            if config.layer == layer_idx:
+                return config.count
+        return None
+
+    def get_layer_obstacle_config(self, layer_idx: int, obstacle_type: str) -> Optional[Tuple[int, int]]:
+        """Get configured obstacle count (min, max) for a specific layer and type."""
+        if not self.layer_obstacle_configs:
+            return None
+        for config in self.layer_obstacle_configs:
+            if config.layer == layer_idx and obstacle_type in config.counts:
+                obs_config = config.counts[obstacle_type]
+                return obs_config.get("min", 0), obs_config.get("max", 10)
+        return None
 
 
 @dataclass

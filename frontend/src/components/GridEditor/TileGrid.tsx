@@ -191,6 +191,8 @@ export function TileGrid({ className }: TileGridProps) {
     const [tileType, attribute] = tileData;
     const tileInfo = TILE_TYPES[tileType];
     const attrImage = attribute ? SPECIAL_IMAGES[attribute] : null;
+    const isRandomTile = tileType === 't0';
+    const t0Info = TILE_TYPES['t0'];
 
     return (
       <div
@@ -202,6 +204,17 @@ export function TileGrid({ className }: TileGridProps) {
           border: '1px solid rgba(100, 100, 100, 0.5)',
         }}
       >
+        {/* t0 background layer (for t1+ tiles) */}
+        {!isRandomTile && t0Info?.image && (
+          <div className="absolute inset-0">
+            <img
+              src={t0Info.image}
+              alt="tile background"
+              className="w-full h-full object-cover pointer-events-none"
+              draggable={false}
+            />
+          </div>
+        )}
         {tileInfo?.image ? (
           <img
             src={tileInfo.image}

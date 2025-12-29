@@ -12,6 +12,7 @@ export interface VisualBotMove {
   layer_idx: number;
   position: string;
   tile_type: string;
+  linked_positions: string[]; // Positions selected together due to LINK gimmick (layerIdx_x_y format)
   matched_positions: string[];
   tiles_cleared: number;
   goals_after: Record<string, number>;

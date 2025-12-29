@@ -462,14 +462,22 @@ export function BotTileGrid({
     return { cols: maxCols, rows: maxRows };
   }, [levelJson]);
 
-  // Find the tile being selected in the current move (before it's removed)
-  const highlightedTile = useMemo(() => {
+  // Find the tiles being selected in the current move (before they're removed)
+  // Includes both the main selected tile AND linked tiles (LINK gimmick)
+  const highlightedTiles = useMemo(() => {
+    const tiles = new Set<string>();
     if (currentStep > 0 && currentStep <= botResult.moves.length) {
       const move = botResult.moves[currentStep - 1];
-      return `${move.layer_idx}_${move.position}`;
+      // Main selected tile
+      tiles.add(`${move.layer_idx}_${move.position}`);
+      // Linked tiles (selected together due to LINK gimmick)
+      if (move.linked_positions && move.linked_positions.length > 0) {
+        move.linked_positions.forEach(pos => tiles.add(pos));
+      }
     }
-    return null;
+    return tiles;
   }, [currentStep, botResult.moves]);
+
 
   // Get current frog positions based on step
   // When game is over, keep the last state
@@ -737,6 +745,7 @@ export function BotTileGrid({
   };
 
   // Render a stack/craft tile with gimmick icon and top tile indicator
+  // Uses same structure as editor's renderCurrentTile
   const renderStackCraftTile = (
     layerIdx: number,
     pos: string,
@@ -750,6 +759,9 @@ export function BotTileGrid({
     const topTileInfo = topTileType ? TILE_TYPES[topTileType] : null;
     const brightnessPercent = Math.round(brightness * 100);
 
+    // t0 background for stack/craft (same pattern as editor)
+    const t0Info = TILE_TYPES['t0'];
+
     return (
       <div
         key={`${layerIdx}_${pos}_gimmick`}
@@ -762,23 +774,38 @@ export function BotTileGrid({
           width: TILE_SIZE,
           height: TILE_SIZE,
           filter: `brightness(${brightnessPercent}%)`,
+          backgroundColor: 'transparent',
         }}
       >
-        {/* Gimmick icon (stack/craft) as base */}
-        {gimmickImage ? (
-          <img
-            src={gimmickImage}
-            alt={stackInfo.isStack ? 'Stack' : 'Craft'}
-            className="w-full h-full object-cover"
-            draggable={false}
-          />
-        ) : (
-          <div
-            className="w-full h-full flex items-center justify-center text-[6px] font-bold bg-purple-600"
-          >
-            <span className="text-white">{stackInfo.isStack ? 'STK' : 'CRF'}</span>
+        {/* t0 background layer - same as editor */}
+        {t0Info?.image && (
+          <div className="absolute inset-0">
+            <img
+              src={t0Info.image}
+              alt="tile background"
+              className="w-full h-full object-cover pointer-events-none"
+              draggable={false}
+            />
           </div>
         )}
+
+        {/* Gimmick icon (stack/craft) as overlay */}
+        <div className="absolute inset-0 flex items-center justify-center">
+          {gimmickImage ? (
+            <img
+              src={gimmickImage}
+              alt={stackInfo.isStack ? 'Stack' : 'Craft'}
+              className="w-full h-full object-cover pointer-events-none"
+              draggable={false}
+            />
+          ) : (
+            <div
+              className="w-full h-full flex items-center justify-center text-[6px] font-bold bg-purple-600"
+            >
+              <span className="text-white">{stackInfo.isStack ? 'STK' : 'CRF'}</span>
+            </div>
+          )}
+        </div>
 
         {/* Top tile indicator (0.75 scale) - only for stack tiles */}
         {stackInfo.isStack && topTileInfo && (
@@ -790,13 +817,14 @@ export function BotTileGrid({
               top: '50%',
               left: '50%',
               transform: 'translate(-50%, -50%)',
+              zIndex: 10,
             }}
           >
             {topTileInfo.image ? (
               <img
                 src={topTileInfo.image}
                 alt={topTileInfo.name}
-                className="w-full h-full object-cover"
+                className="w-full h-full object-cover pointer-events-none"
                 draggable={false}
               />
             ) : (
@@ -812,7 +840,7 @@ export function BotTileGrid({
 
         {/* Remaining count badge */}
         <div
-          className="absolute bottom-0 right-0 w-4 h-3 text-[7px] bg-black/70 text-white flex items-center justify-center rounded-tl"
+          className="absolute bottom-0 right-0 w-4 h-3 text-[7px] bg-black/70 text-white flex items-center justify-center rounded-tl z-20"
           title={`남은 타일: ${stackInfo.remainingCount}`}
         >
           {stackInfo.remainingCount}
@@ -821,7 +849,7 @@ export function BotTileGrid({
         {/* Layer indicator badge */}
         {layerIdx > 0 && (
           <div
-            className="absolute top-0 right-0 w-3 h-3 text-[6px] bg-black/50 text-white flex items-center justify-center rounded-bl"
+            className="absolute top-0 right-0 w-3 h-3 text-[6px] bg-black/50 text-white flex items-center justify-center rounded-bl z-20"
           >
             {layerIdx}
           </div>
@@ -831,6 +859,7 @@ export function BotTileGrid({
   };
 
   // Render a spawned tile from craft (at offset position)
+  // Uses same structure as editor's renderCurrentTile
   const renderSpawnedTile = (
     layerIdx: number,
     pos: string,
@@ -842,11 +871,9 @@ export function BotTileGrid({
     const tileInfo = TILE_TYPES[tileType];
     const brightnessPercent = Math.round(brightness * 100);
 
-    // DEBUG: Log spawned tile rendering
-    console.log(`[DEBUG] renderSpawnedTile: layer=${layerIdx}, pos=${pos}, tileType=${tileType}, hasImage=${!!tileInfo?.image}`);
-
-    // Spawned tiles from craft are always from t0, so they should have t0 background frame
-    const isFromT0 = tileType.match(/^t[1-9][0-9]?$/) !== null; // t1-t15 are converted from t0
+    // t0 is random tile, t1+ shows t0 background + tile icon (same as editor)
+    const isRandomTile = tileType === 't0';
+    const t0Info = TILE_TYPES['t0'];
 
     return (
       <div
@@ -860,40 +887,43 @@ export function BotTileGrid({
           width: TILE_SIZE,
           height: TILE_SIZE,
           filter: `brightness(${brightnessPercent}%)`,
+          backgroundColor: 'transparent',
         }}
       >
-        {/* t0 (random tile) background frame - shows that this tile came from craft/stack */}
-        {isFromT0 && (
-          <div
-            className="absolute inset-0 flex items-center justify-center pointer-events-none"
-            style={{ zIndex: 0 }}
-            title="크래프트 배출 타일"
-          >
+        {/* t0 background layer (for t1+ tiles) - same as editor */}
+        {!isRandomTile && t0Info?.image && (
+          <div className="absolute inset-0">
             <img
-              src="/tiles/skin0/s0_t0.png"
-              alt="t0"
-              className="w-full h-full object-contain"
+              src={t0Info.image}
+              alt="tile background"
+              className="w-full h-full object-cover pointer-events-none"
+              draggable={false}
             />
           </div>
         )}
 
-        {/* Tile image on top of t0 background */}
-        {tileInfo?.image ? (
-          <img
-            src={tileInfo.image}
-            alt={tileInfo.name}
-            className="w-full h-full object-cover relative"
-            style={{ zIndex: 1 }}
-            draggable={false}
-          />
-        ) : (
-          <div
-            className="w-full h-full flex items-center justify-center text-[8px] font-bold relative"
-            style={{ backgroundColor: tileInfo?.color || '#888', zIndex: 1 }}
-          >
-            <span className="text-white">{tileType}</span>
-          </div>
-        )}
+        {/* Current tile icon - same as editor */}
+        <div className="absolute inset-0 flex items-center justify-center">
+          {tileInfo?.image ? (
+            <img
+              src={tileInfo.image}
+              alt={tileInfo.name}
+              className="w-full h-full object-cover pointer-events-none"
+              draggable={false}
+            />
+          ) : (
+            /* Fallback color block when no image - same as editor */
+            <div
+              className="w-full h-full flex items-center justify-center"
+              style={{ backgroundColor: tileInfo?.color || '#888' }}
+            >
+              <span className="text-white text-[8px] font-bold">
+                {tileType.replace('_s', '')}
+              </span>
+            </div>
+          )}
+        </div>
+
         {/* Frog indicator */}
         {hasFrog && (
           <div
@@ -925,7 +955,7 @@ export function BotTileGrid({
     isHighlighted: boolean,
     hasFrog: boolean,
     brightness: number,
-    wasT0?: boolean
+    _wasT0?: boolean
   ) => {
     const [tileType, attribute] = tileData;
     const tileInfo = TILE_TYPES[tileType];
@@ -978,11 +1008,18 @@ export function BotTileGrid({
       return 'transparent';
     };
 
+    // Get attribute image (same as editor)
+    const attrImage = attribute ? SPECIAL_IMAGES[attribute] : null;
+
+    // t0 is random tile, t1+ shows t0 background + tile icon (same as editor)
+    const isRandomTile = tileType === 't0';
+    const t0Info = TILE_TYPES['t0'];
+
     return (
       <div
         key={tileKey}
         className={clsx(
-          'relative flex items-center justify-center transition-all duration-200',
+          'relative flex items-center justify-center overflow-hidden transition-all duration-200',
           isHighlighted && 'ring-2 ring-yellow-400 scale-110',
           isCurtain && !isCurtainOpen && 'grayscale',
           isBomb && bombRemaining !== undefined && bombRemaining <= 3 && 'animate-pulse'
@@ -992,40 +1029,52 @@ export function BotTileGrid({
           height: TILE_SIZE,
           filter: `brightness(${brightnessPercent}%)`,
           border: hasActiveGimmick ? `2px solid ${getGimmickBorderColor()}` : undefined,
+          backgroundColor: 'transparent',
         }}
         title={gimmickEffect?.description}
       >
-        {/* t0 (random tile) indicator - shows border frame BEHIND tile image (same size as tile) */}
-        {wasT0 && (
-          <div
-            className="absolute inset-0 flex items-center justify-center pointer-events-none"
-            style={{ zIndex: 0 }}
-            title="랜덤 타일 (t0)"
-          >
+        {/* t0 background layer (for t1+ tiles) - same as editor */}
+        {!isRandomTile && t0Info?.image && (
+          <div className="absolute inset-0">
             <img
-              src="/tiles/skin0/s0_t0.png"
-              alt="t0"
-              className="w-full h-full object-contain"
+              src={t0Info.image}
+              alt="tile background"
+              className="w-full h-full object-cover pointer-events-none"
+              draggable={false}
             />
           </div>
         )}
 
-        {/* Base tile image - ALWAYS displayed ON TOP of t0 indicator */}
-        {tileInfo?.image ? (
+        {/* Current tile icon - same as editor */}
+        <div className="absolute inset-0 flex items-center justify-center">
+          {tileInfo?.image ? (
+            <img
+              src={tileInfo.image}
+              alt={tileInfo.name}
+              className="w-full h-full object-cover pointer-events-none"
+              draggable={false}
+            />
+          ) : (
+            /* Fallback color block when no image - same as editor */
+            <div
+              className="w-full h-full flex items-center justify-center"
+              style={{ backgroundColor: tileInfo?.color || '#888' }}
+            >
+              <span className="text-white text-[8px] font-bold">
+                {tileType.replace('_s', '')}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Attribute image overlay - same as editor */}
+        {attrImage && (
           <img
-            src={tileInfo.image}
-            alt={tileInfo.name}
-            className="w-full h-full object-cover overflow-hidden relative"
-            style={{ zIndex: 1 }}
+            src={attrImage}
+            alt={attribute || ''}
+            className="absolute inset-0 w-full h-full object-cover pointer-events-none opacity-80 z-20"
             draggable={false}
           />
-        ) : (
-          <div
-            className="w-full h-full flex items-center justify-center text-[8px] font-bold relative"
-            style={{ backgroundColor: tileInfo?.color || '#888', zIndex: 1 }}
-          >
-            <span className="text-white">{tileType.replace('_s', '')}</span>
-          </div>
         )}
 
         {/* Gimmick indicator - small icon at bottom left (like frog) */}
@@ -1174,7 +1223,7 @@ export function BotTileGrid({
     }
 
     const tileKey = `${layerIdx}_${pos}`;
-    const isHighlighted = highlightedTile === tileKey;
+    const isHighlighted = highlightedTiles.has(tileKey);
     const hasFrog = currentFrogPositions.has(tileKey);
     const isPickable = pickableTiles.has(tileKey);
 

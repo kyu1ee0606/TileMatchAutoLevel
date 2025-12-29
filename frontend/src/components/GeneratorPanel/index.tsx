@@ -1,11 +1,11 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { DifficultySlider } from './DifficultySlider';
 import { useLevelStore } from '../../stores/levelStore';
 import { useUIStore } from '../../stores/uiStore';
 import { generateLevel, generateMultipleLevels } from '../../api/generate';
 import { saveLocalLevel } from '../../services/localLevelsApi';
 import { TILE_TYPES } from '../../types';
-import type { GenerationParams, GoalConfig, ObstacleCountConfig } from '../../types';
+import type { GenerationParams, GoalConfig, ObstacleCountConfig, LayerTileConfig, LayerObstacleConfig } from '../../types';
 import { Button, Tooltip } from '../ui';
 import clsx from 'clsx';
 
@@ -14,6 +14,12 @@ const OBSTACLE_TYPES = [
   { id: 'chain', label: '⛓️ Chain', name: 'chain' },
   { id: 'frog', label: '🐸 Frog', name: 'frog' },
   { id: 'link', label: '🔗 Link', name: 'link' },
+  { id: 'grass', label: '🌿 Grass', name: 'grass' },
+  { id: 'ice', label: '❄️ Ice', name: 'ice' },
+  { id: 'bomb', label: '💣 Bomb', name: 'bomb' },
+  { id: 'curtain', label: '🎭 Curtain', name: 'curtain' },
+  { id: 'teleport', label: '🌀 Teleport', name: 'teleport' },
+  { id: 'crate', label: '📦 Crate', name: 'crate' },
 ] as const;
 
 interface GeneratorPanelProps {
@@ -27,7 +33,7 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
   // Generation parameters
   const [targetDifficulty, setTargetDifficulty] = useState(0.5);
   const [gridSize, setGridSize] = useState<[number, number]>([7, 7]);
-  const [maxLayers, setMaxLayers] = useState(8);
+  const [maxLayers, setMaxLayers] = useState(7);
 
   // Tile types selection
   const [selectedTileTypes, setSelectedTileTypes] = useState<string[]>([
@@ -40,12 +46,30 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
     chain: { min: 3, max: 8 },
     frog: { min: 2, max: 5 },
     link: { min: 0, max: 4 },
+    grass: { min: 0, max: 6 },
+    ice: { min: 0, max: 8 },
+    bomb: { min: 0, max: 3 },
+    curtain: { min: 0, max: 6 },
+    teleport: { min: 0, max: 4 },
+    crate: { min: 0, max: 4 },
   });
 
   // Goals configuration
   const [goals, setGoals] = useState<GoalConfig[]>([
     { type: 'craft_s', count: 3 },
   ]);
+
+  // Advanced layer settings (per-layer tile and obstacle configs only)
+  const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
+  const [layerTileConfigs, setLayerTileConfigs] = useState<LayerTileConfig[]>([]);
+  const [layerObstacleConfigs, setLayerObstacleConfigs] = useState<LayerObstacleConfig[]>([]);
+
+  // Clean up layer configs when maxLayers changes
+  useEffect(() => {
+    // Remove configs with layer index >= maxLayers
+    setLayerTileConfigs(prev => prev.filter(c => c.layer < maxLayers));
+    setLayerObstacleConfigs(prev => prev.filter(c => c.layer < maxLayers));
+  }, [maxLayers]);
 
   const toggleTileType = (type: string) => {
     setSelectedTileTypes((prev) =>
@@ -89,6 +113,83 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
     );
   };
 
+  // Layer tile config management
+  const addLayerTileConfig = () => {
+    const usedLayers = new Set(layerTileConfigs.map(c => c.layer));
+    // Find next available layer (from top)
+    for (let i = maxLayers - 1; i >= 0; i--) {
+      if (!usedLayers.has(i)) {
+        setLayerTileConfigs(prev => [...prev, { layer: i, count: 20 }]);
+        return;
+      }
+    }
+  };
+
+  const removeLayerTileConfig = (index: number) => {
+    setLayerTileConfigs(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const updateLayerTileConfig = (index: number, field: 'layer' | 'count', value: number) => {
+    setLayerTileConfigs(prev =>
+      prev.map((config, i) =>
+        i === index ? { ...config, [field]: value } : config
+      )
+    );
+  };
+
+  // Layer obstacle config management
+  const addLayerObstacleConfig = () => {
+    const usedLayers = new Set(layerObstacleConfigs.map(c => c.layer));
+    for (let i = maxLayers - 1; i >= 0; i--) {
+      if (!usedLayers.has(i)) {
+        setLayerObstacleConfigs(prev => [...prev, {
+          layer: i,
+          counts: {
+            chain: { min: 0, max: 3 },
+            frog: { min: 0, max: 2 },
+            link: { min: 0, max: 2 },
+          }
+        }]);
+        return;
+      }
+    }
+  };
+
+  const removeLayerObstacleConfig = (index: number) => {
+    setLayerObstacleConfigs(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const updateLayerObstacleConfig = (
+    index: number,
+    obstacleType: string,
+    field: 'min' | 'max',
+    value: number
+  ) => {
+    setLayerObstacleConfigs(prev =>
+      prev.map((config, i) => {
+        if (i !== index) return config;
+        return {
+          ...config,
+          counts: {
+            ...config.counts,
+            [obstacleType]: {
+              ...config.counts[obstacleType],
+              [field]: Math.max(0, value),
+            },
+          },
+        };
+      })
+    );
+  };
+
+  const updateLayerObstacleLayer = (index: number, layer: number) => {
+    setLayerObstacleConfigs(prev =>
+      prev.map((config, i) =>
+        i === index ? { ...config, layer } : config
+      )
+    );
+  };
+
   const handleGenerate = async (count: number = 1) => {
     if (selectedTileTypes.length === 0) {
       addNotification('warning', '최소 하나의 타일 타입을 선택하세요');
@@ -98,11 +199,21 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
     setIsGenerating(true);
 
     try {
+      // Check if advanced layer settings are being used
+      const hasAdvancedLayerObstacles = layerObstacleConfigs.length > 0;
+
       // Build obstacle_counts for selected obstacles only
-      const selectedObstacleCounts: Record<string, ObstacleCountConfig> = {};
-      for (const obstacle of selectedObstacles) {
-        if (obstacleCounts[obstacle]) {
-          selectedObstacleCounts[obstacle] = obstacleCounts[obstacle];
+      // Skip if advanced layer obstacle configs are set (they take priority)
+      let selectedObstacleCounts: Record<string, ObstacleCountConfig> | undefined = undefined;
+      if (!hasAdvancedLayerObstacles) {
+        const counts: Record<string, ObstacleCountConfig> = {};
+        for (const obstacle of selectedObstacles) {
+          if (obstacleCounts[obstacle]) {
+            counts[obstacle] = obstacleCounts[obstacle];
+          }
+        }
+        if (Object.keys(counts).length > 0) {
+          selectedObstacleCounts = counts;
         }
       }
 
@@ -114,8 +225,11 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
         obstacle_types: selectedObstacles,
         // Send empty array explicitly when no goals (not undefined)
         goals: goals,
-        // Include obstacle count ranges
-        obstacle_counts: Object.keys(selectedObstacleCounts).length > 0 ? selectedObstacleCounts : undefined,
+        // Include obstacle count ranges (ignored if layer_obstacle_configs is set)
+        obstacle_counts: selectedObstacleCounts,
+        // Per-layer configs take priority over basic settings
+        layer_tile_configs: layerTileConfigs.length > 0 ? layerTileConfigs : undefined,
+        layer_obstacle_configs: hasAdvancedLayerObstacles ? layerObstacleConfigs : undefined,
       };
 
       if (count === 1) {
@@ -134,6 +248,7 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
               description: `Target difficulty: ${(targetDifficulty * 100).toFixed(0)}%, Actual: ${(result.actual_difficulty * 100).toFixed(0)}%`,
               tags: ['generated', result.grade.toLowerCase(), `${gridSize[0]}x${gridSize[1]}`],
               difficulty: result.grade.toLowerCase(),
+              source: 'generated',
             }
           });
           addNotification(
@@ -167,6 +282,7 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
                   description: `Batch generation - Actual difficulty: ${(results[i].actual_difficulty * 100).toFixed(0)}%`,
                   tags: ['generated', 'batch', results[i].grade.toLowerCase(), `${gridSize[0]}x${gridSize[1]}`],
                   difficulty: results[i].grade.toLowerCase(),
+                  source: 'generated',
                 }
               });
               savedCount++;
@@ -222,7 +338,7 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
             onChange={(e) => setMaxLayers(Number(e.target.value))}
             className="w-full px-3 py-2 border border-gray-600 bg-gray-700 text-gray-100 rounded-md text-sm"
           >
-            {[4, 5, 6, 7, 8, 9, 10].map((n) => (
+            {[1, 2, 3, 4, 5, 6, 7].map((n) => (
               <option key={n} value={n}>
                 {n} 레이어
               </option>
@@ -268,7 +384,7 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
         </div>
       </div>
 
-      {/* Obstacles with count settings */}
+      {/* Obstacles with count settings - Button-based UI */}
       <div>
         <label className="text-sm font-medium text-gray-300 block mb-2">
           장애물 설정
@@ -276,7 +392,7 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
             ({selectedObstacles.length}개 선택)
           </span>
         </label>
-        <div className="space-y-2">
+        <div className="space-y-1.5">
           {OBSTACLE_TYPES.map((obstacle) => {
             const isSelected = selectedObstacles.includes(obstacle.name);
             const counts = obstacleCounts[obstacle.name] || { min: 0, max: 5 };
@@ -285,7 +401,7 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
               <div
                 key={obstacle.id}
                 className={clsx(
-                  'flex items-center gap-3 p-2 rounded-lg transition-colors',
+                  'flex items-center gap-2 p-1.5 rounded-lg transition-colors',
                   isSelected ? 'bg-orange-900/30 border border-orange-600' : 'bg-gray-700/30 border border-gray-600'
                 )}
               >
@@ -293,7 +409,7 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
                 <button
                   onClick={() => toggleObstacle(obstacle.name)}
                   className={clsx(
-                    'px-3 py-1 text-sm rounded-md transition-colors min-w-[90px]',
+                    'px-2 py-1 text-xs rounded-md transition-colors min-w-[80px] font-medium',
                     isSelected
                       ? 'bg-orange-500 text-white'
                       : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
@@ -302,29 +418,75 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
                   {obstacle.label}
                 </button>
 
-                {/* Count range inputs - only show when selected */}
+                {/* Count range controls - only show when selected */}
                 {isSelected && (
-                  <div className="flex items-center gap-2 ml-auto">
-                    <span className="text-xs text-gray-400">최소</span>
-                    <input
-                      type="number"
-                      min="0"
-                      max="30"
-                      value={counts.min}
-                      onChange={(e) => updateObstacleCount(obstacle.name, 'min', Number(e.target.value))}
-                      className="w-14 px-2 py-1 border border-gray-600 bg-gray-700 text-gray-100 rounded-md text-sm text-center"
-                    />
-                    <span className="text-xs text-gray-400">~</span>
-                    <span className="text-xs text-gray-400">최대</span>
-                    <input
-                      type="number"
-                      min="0"
-                      max="30"
-                      value={counts.max}
-                      onChange={(e) => updateObstacleCount(obstacle.name, 'max', Number(e.target.value))}
-                      className="w-14 px-2 py-1 border border-gray-600 bg-gray-700 text-gray-100 rounded-md text-sm text-center"
-                    />
-                    <span className="text-xs text-gray-500">개</span>
+                  <div className="flex items-center gap-1 ml-auto">
+                    {/* Min controls */}
+                    <div className="flex items-center">
+                      <button
+                        onClick={() => updateObstacleCount(obstacle.name, 'min', counts.min - 1)}
+                        className="w-6 h-6 flex items-center justify-center bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-l-md border border-gray-600 text-sm font-bold"
+                      >
+                        -
+                      </button>
+                      <div className="w-8 h-6 flex items-center justify-center bg-gray-800 border-y border-gray-600 text-xs text-gray-100">
+                        {counts.min}
+                      </div>
+                      <button
+                        onClick={() => updateObstacleCount(obstacle.name, 'min', counts.min + 1)}
+                        className="w-6 h-6 flex items-center justify-center bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-r-md border border-gray-600 text-sm font-bold"
+                      >
+                        +
+                      </button>
+                    </div>
+
+                    <span className="text-xs text-gray-500 px-1">~</span>
+
+                    {/* Max controls */}
+                    <div className="flex items-center">
+                      <button
+                        onClick={() => updateObstacleCount(obstacle.name, 'max', counts.max - 1)}
+                        className="w-6 h-6 flex items-center justify-center bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-l-md border border-gray-600 text-sm font-bold"
+                      >
+                        -
+                      </button>
+                      <div className="w-8 h-6 flex items-center justify-center bg-gray-800 border-y border-gray-600 text-xs text-gray-100">
+                        {counts.max}
+                      </div>
+                      <button
+                        onClick={() => updateObstacleCount(obstacle.name, 'max', counts.max + 1)}
+                        className="w-6 h-6 flex items-center justify-center bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-r-md border border-gray-600 text-sm font-bold"
+                      >
+                        +
+                      </button>
+                    </div>
+
+                    {/* Quick preset buttons */}
+                    <div className="flex items-center gap-0.5 ml-1">
+                      {[
+                        { label: '0', min: 0, max: 0 },
+                        { label: '少', min: 1, max: 3 },
+                        { label: '中', min: 3, max: 6 },
+                        { label: '多', min: 5, max: 10 },
+                      ].map((preset) => (
+                        <button
+                          key={preset.label}
+                          onClick={() => {
+                            updateObstacleCount(obstacle.name, 'min', preset.min);
+                            updateObstacleCount(obstacle.name, 'max', preset.max);
+                          }}
+                          className={clsx(
+                            'w-6 h-6 text-xs rounded transition-colors',
+                            counts.min === preset.min && counts.max === preset.max
+                              ? 'bg-orange-500 text-white'
+                              : 'bg-gray-600 hover:bg-gray-500 text-gray-300'
+                          )}
+                          title={`${preset.min}~${preset.max}개`}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
@@ -333,7 +495,7 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
         </div>
       </div>
 
-      {/* Goals */}
+      {/* Goals - Button-based UI */}
       <div>
         <div className="flex justify-between items-center mb-2">
           <label className="text-sm font-medium text-gray-300">
@@ -358,36 +520,296 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
             </div>
           ) : (
             goals.map((goal, index) => (
-              <div key={index} className="flex gap-2 items-center">
-                <select
-                  value={goal.type}
-                  onChange={(e) => updateGoal(index, 'type', e.target.value)}
-                  className="flex-1 px-2 py-1 border border-gray-600 bg-gray-700 text-gray-100 rounded-md text-sm"
-                >
-                  <option value="craft_s">Craft</option>
-                  <option value="stack_s">Stack</option>
-                </select>
-                <input
-                  type="number"
-                  min="1"
-                  max="20"
-                  value={goal.count}
-                  onChange={(e) => updateGoal(index, 'count', e.target.value)}
-                  className="w-16 px-2 py-1 border border-gray-600 bg-gray-700 text-gray-100 rounded-md text-sm"
-                />
-                <span className="text-sm text-gray-400">개</span>
+              <div key={index} className="flex gap-2 items-center bg-gray-700/30 p-2 rounded-md">
+                {/* Goal type buttons */}
+                <div className="flex">
+                  {[
+                    { type: 'craft_s', label: '🎁 Craft' },
+                    { type: 'stack_s', label: '📚 Stack' },
+                  ].map((opt) => (
+                    <button
+                      key={opt.type}
+                      onClick={() => updateGoal(index, 'type', opt.type)}
+                      className={clsx(
+                        'px-2 py-1 text-xs transition-colors first:rounded-l-md last:rounded-r-md border',
+                        goal.type === opt.type
+                          ? 'bg-blue-600 text-white border-blue-500'
+                          : 'bg-gray-700 text-gray-400 hover:bg-gray-600 border-gray-600'
+                      )}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Count controls */}
+                <div className="flex items-center ml-auto">
+                  <button
+                    onClick={() => updateGoal(index, 'count', Math.max(1, goal.count - 1))}
+                    className="w-7 h-7 flex items-center justify-center bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-l-md border border-gray-600 text-sm font-bold"
+                  >
+                    -
+                  </button>
+                  <div className="w-10 h-7 flex items-center justify-center bg-gray-800 border-y border-gray-600 text-sm text-gray-100 font-medium">
+                    {goal.count}
+                  </div>
+                  <button
+                    onClick={() => updateGoal(index, 'count', Math.min(20, goal.count + 1))}
+                    className="w-7 h-7 flex items-center justify-center bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-r-md border border-gray-600 text-sm font-bold"
+                  >
+                    +
+                  </button>
+                </div>
+
+                {/* Quick preset buttons for count */}
+                <div className="flex items-center gap-0.5">
+                  {[3, 6, 9].map((preset) => (
+                    <button
+                      key={preset}
+                      onClick={() => updateGoal(index, 'count', preset)}
+                      className={clsx(
+                        'w-7 h-7 text-xs rounded transition-colors',
+                        goal.count === preset
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-gray-600 hover:bg-gray-500 text-gray-300'
+                      )}
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Delete button */}
                 <Tooltip content="목표 삭제">
                   <button
                     onClick={() => removeGoal(index)}
                     className="p-1.5 text-red-400 hover:bg-red-900/50 rounded-md transition-colors"
                   >
-                    🗑️
+                    ✕
                   </button>
                 </Tooltip>
               </div>
             ))
           )}
         </div>
+      </div>
+
+      {/* Advanced Layer Settings */}
+      <div className="border-t border-gray-700 pt-4">
+        <button
+          onClick={() => setShowAdvancedSettings(!showAdvancedSettings)}
+          className="flex items-center gap-2 text-sm font-medium text-gray-300 hover:text-gray-100 transition-colors"
+        >
+          <span className={clsx('transition-transform', showAdvancedSettings && 'rotate-90')}>▶</span>
+          🔧 고급 레이어 설정
+          {(layerTileConfigs.length > 0 || layerObstacleConfigs.length > 0) && (
+            <span className="px-1.5 py-0.5 bg-blue-600 text-xs rounded">활성</span>
+          )}
+        </button>
+
+        {showAdvancedSettings && (
+          <div className="mt-3 space-y-4 pl-2 border-l-2 border-gray-600">
+            {/* Per-Layer Tile Configs - Button-based UI */}
+            <div>
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-sm text-gray-300">레이어별 타일 수</span>
+                <Button onClick={addLayerTileConfig} variant="success" size="sm" icon="+">
+                  추가
+                </Button>
+              </div>
+              {layerTileConfigs.length > 0 ? (
+                <div className="space-y-2">
+                  {layerTileConfigs.map((config, index) => (
+                    <div key={index} className="flex items-center gap-2 bg-gray-700/30 p-2 rounded-md">
+                      {/* Layer selector as buttons */}
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs text-gray-400 mr-1">L</span>
+                        {Array.from({ length: maxLayers }, (_, i) => maxLayers - 1 - i).map((layer) => (
+                          <button
+                            key={layer}
+                            onClick={() => updateLayerTileConfig(index, 'layer', layer)}
+                            className={clsx(
+                              'w-6 h-6 text-xs rounded transition-colors',
+                              config.layer === layer
+                                ? 'bg-blue-600 text-white'
+                                : 'bg-gray-600 hover:bg-gray-500 text-gray-300'
+                            )}
+                          >
+                            {layer}
+                          </button>
+                        ))}
+                      </div>
+
+                      {/* Tile count with +/- buttons */}
+                      <div className="flex items-center ml-auto">
+                        <button
+                          onClick={() => updateLayerTileConfig(index, 'count', Math.max(0, config.count - 3))}
+                          className="w-6 h-6 flex items-center justify-center bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-l-md border border-gray-600 text-xs"
+                        >
+                          -3
+                        </button>
+                        <button
+                          onClick={() => updateLayerTileConfig(index, 'count', Math.max(0, config.count - 1))}
+                          className="w-6 h-6 flex items-center justify-center bg-gray-700 hover:bg-gray-600 text-gray-300 border-y border-gray-600 text-sm font-bold"
+                        >
+                          -
+                        </button>
+                        <div className="w-10 h-6 flex items-center justify-center bg-gray-800 border-y border-gray-600 text-xs text-gray-100 font-medium">
+                          {config.count}
+                        </div>
+                        <button
+                          onClick={() => updateLayerTileConfig(index, 'count', config.count + 1)}
+                          className="w-6 h-6 flex items-center justify-center bg-gray-700 hover:bg-gray-600 text-gray-300 border-y border-gray-600 text-sm font-bold"
+                        >
+                          +
+                        </button>
+                        <button
+                          onClick={() => updateLayerTileConfig(index, 'count', config.count + 3)}
+                          className="w-6 h-6 flex items-center justify-center bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-r-md border border-gray-600 text-xs"
+                        >
+                          +3
+                        </button>
+                      </div>
+
+                      {/* Quick presets */}
+                      <div className="flex items-center gap-0.5">
+                        {[15, 21, 27].map((preset) => (
+                          <button
+                            key={preset}
+                            onClick={() => updateLayerTileConfig(index, 'count', preset)}
+                            className={clsx(
+                              'w-7 h-6 text-xs rounded transition-colors',
+                              config.count === preset
+                                ? 'bg-blue-600 text-white'
+                                : 'bg-gray-600 hover:bg-gray-500 text-gray-300'
+                            )}
+                          >
+                            {preset}
+                          </button>
+                        ))}
+                      </div>
+
+                      <button
+                        onClick={() => removeLayerTileConfig(index)}
+                        className="p-1 text-red-400 hover:bg-red-900/50 rounded transition-colors"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-gray-500">설정하지 않으면 자동 배분됩니다</p>
+              )}
+            </div>
+
+            {/* Per-Layer Obstacle Configs - Button-based UI */}
+            <div>
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-sm text-gray-300">레이어별 기믹 설정</span>
+                <Button onClick={addLayerObstacleConfig} variant="success" size="sm" icon="+">
+                  추가
+                </Button>
+              </div>
+              {layerObstacleConfigs.length > 0 ? (
+                <div className="space-y-3">
+                  {layerObstacleConfigs.map((config, index) => (
+                    <div key={index} className="bg-gray-700/30 p-3 rounded-md">
+                      <div className="flex items-center justify-between mb-2">
+                        {/* Layer selector as buttons */}
+                        <div className="flex items-center gap-1">
+                          <span className="text-xs text-gray-400 mr-1">레이어</span>
+                          {Array.from({ length: maxLayers }, (_, i) => maxLayers - 1 - i).map((layer) => (
+                            <button
+                              key={layer}
+                              onClick={() => updateLayerObstacleLayer(index, layer)}
+                              className={clsx(
+                                'w-6 h-6 text-xs rounded transition-colors',
+                                config.layer === layer
+                                  ? 'bg-blue-600 text-white'
+                                  : 'bg-gray-600 hover:bg-gray-500 text-gray-300'
+                              )}
+                            >
+                              {layer}
+                            </button>
+                          ))}
+                        </div>
+                        <button
+                          onClick={() => removeLayerObstacleConfig(index)}
+                          className="p-1 text-red-400 hover:bg-red-900/50 rounded transition-colors"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2">
+                        {OBSTACLE_TYPES.map((obs) => {
+                          const obsMin = config.counts[obs.name]?.min ?? 0;
+                          const obsMax = config.counts[obs.name]?.max ?? 0;
+                          return (
+                            <div key={obs.id} className="bg-gray-800/50 p-1.5 rounded">
+                              <div className="text-xs text-gray-400 mb-1 text-center">{obs.label}</div>
+                              <div className="flex items-center justify-center gap-0.5">
+                                {/* Min/Max combined control */}
+                                <button
+                                  onClick={() => {
+                                    updateLayerObstacleConfig(index, obs.name, 'min', Math.max(0, obsMin - 1));
+                                    updateLayerObstacleConfig(index, obs.name, 'max', Math.max(0, obsMax - 1));
+                                  }}
+                                  className="w-5 h-5 flex items-center justify-center bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-l text-xs"
+                                >
+                                  -
+                                </button>
+                                <div className="px-1.5 h-5 flex items-center justify-center bg-gray-700 text-xs text-gray-100 min-w-[36px]">
+                                  {obsMin}~{obsMax}
+                                </div>
+                                <button
+                                  onClick={() => {
+                                    updateLayerObstacleConfig(index, obs.name, 'min', obsMin + 1);
+                                    updateLayerObstacleConfig(index, obs.name, 'max', obsMax + 1);
+                                  }}
+                                  className="w-5 h-5 flex items-center justify-center bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-r text-xs"
+                                >
+                                  +
+                                </button>
+                              </div>
+                              {/* Quick presets for this obstacle */}
+                              <div className="flex justify-center gap-0.5 mt-1">
+                                {[
+                                  { label: '0', min: 0, max: 0 },
+                                  { label: '少', min: 1, max: 2 },
+                                  { label: '多', min: 3, max: 5 },
+                                ].map((preset) => (
+                                  <button
+                                    key={preset.label}
+                                    onClick={() => {
+                                      updateLayerObstacleConfig(index, obs.name, 'min', preset.min);
+                                      updateLayerObstacleConfig(index, obs.name, 'max', preset.max);
+                                    }}
+                                    className={clsx(
+                                      'w-5 h-4 text-[10px] rounded transition-colors',
+                                      obsMin === preset.min && obsMax === preset.max
+                                        ? 'bg-orange-500 text-white'
+                                        : 'bg-gray-600 hover:bg-gray-500 text-gray-400'
+                                    )}
+                                    title={`${preset.min}~${preset.max}개`}
+                                  >
+                                    {preset.label}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-gray-500">설정하지 않으면 전체 기믹 설정 기준으로 자동 배분됩니다</p>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Generate Buttons */}

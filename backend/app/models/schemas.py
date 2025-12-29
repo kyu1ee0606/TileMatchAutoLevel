@@ -28,17 +28,49 @@ class ObstacleCountConfig(BaseModel):
     max: int = Field(default=10, ge=0, description="Maximum count")
 
 
+class LayerTileConfig(BaseModel):
+    """Configuration for tile count on a specific layer."""
+    layer: int = Field(..., ge=0, description="Layer index (0-based)")
+    count: int = Field(..., ge=0, description="Tile count for this layer")
+
+
+class LayerObstacleConfig(BaseModel):
+    """Configuration for obstacle counts on a specific layer."""
+    layer: int = Field(..., ge=0, description="Layer index (0-based)")
+    counts: Dict[str, ObstacleCountConfig] = Field(
+        default_factory=dict,
+        description="Obstacle counts for this layer (e.g., {'chain': {'min': 1, 'max': 3}})"
+    )
+
+
 class GenerateRequest(BaseModel):
     """Request schema for level generation."""
     target_difficulty: float = Field(..., ge=0.0, le=1.0, description="Target difficulty (0.0-1.0)")
     grid_size: Tuple[int, int] = Field(default=(7, 7), description="Grid size (cols, rows)")
-    max_layers: int = Field(default=8, ge=4, le=12, description="Maximum number of layers")
+    max_layers: int = Field(default=7, ge=1, le=7, description="Maximum number of layers (1-7)")
     tile_types: Optional[List[str]] = Field(default=None, description="Tile types to use")
     obstacle_types: Optional[List[str]] = Field(default=None, description="Obstacle types to use")
     goals: Optional[List[GoalConfig]] = Field(default=None, description="Goal configurations")
     obstacle_counts: Optional[Dict[str, ObstacleCountConfig]] = Field(
         default=None,
         description="Obstacle count ranges per type (e.g., {'chain': {'min': 3, 'max': 8}})"
+    )
+    # New fields for enhanced generation control
+    total_tile_count: Optional[int] = Field(
+        default=None, ge=9, le=500,
+        description="Total tile count across all layers (must be divisible by 3)"
+    )
+    active_layer_count: Optional[int] = Field(
+        default=None, ge=1, le=7,
+        description="Number of active layers to use"
+    )
+    layer_tile_configs: Optional[List[LayerTileConfig]] = Field(
+        default=None,
+        description="Per-layer tile count settings. Unspecified layers auto-distribute remaining tiles."
+    )
+    layer_obstacle_configs: Optional[List[LayerObstacleConfig]] = Field(
+        default=None,
+        description="Per-layer obstacle count settings. Unspecified layers auto-distribute."
     )
 
 
@@ -236,6 +268,7 @@ class VisualBotMove(BaseModel):
     layer_idx: int = Field(..., description="Layer index of selected tile")
     position: str = Field(..., description="Position of selected tile (x_y)")
     tile_type: str = Field(..., description="Type of selected tile")
+    linked_positions: List[str] = Field(default=[], description="Positions of tiles selected together due to LINK gimmick (layerIdx_x_y format)")
     matched_positions: List[str] = Field(default=[], description="Positions of matched tiles")
     tiles_cleared: int = Field(default=0, description="Number of tiles cleared this move")
     goals_after: Dict[str, int] = Field(default={}, description="Goals remaining after move")

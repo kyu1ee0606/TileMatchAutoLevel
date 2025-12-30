@@ -1614,32 +1614,22 @@ class LevelGenerator:
     def _increase_difficulty(self, level: Dict[str, Any]) -> Dict[str, Any]:
         """Apply a random modification to increase difficulty.
 
-        Note: Obstacle modifications (chain, frog) are removed to respect
-        user-specified obstacle counts from obstacle_counts parameter.
-        Difficulty is adjusted primarily through tile count and goal changes.
+        Note: Obstacle and goal modifications are removed to respect
+        user-specified settings. Difficulty is adjusted primarily through
+        tile count changes only.
         """
-        modifications = [
-            self._add_tile_to_layer,
-            self._increase_goal_count,
-        ]
-
-        modifier = random.choice(modifications)
-        return modifier(level)
+        # Only use tile modifications - goal count should respect user's settings
+        return self._add_tile_to_layer(level)
 
     def _decrease_difficulty(self, level: Dict[str, Any]) -> Dict[str, Any]:
         """Apply a random modification to decrease difficulty.
 
-        Note: Obstacle modifications (chain, frog) are removed to respect
-        user-specified obstacle counts from obstacle_counts parameter.
-        Difficulty is adjusted primarily through tile count and goal changes.
+        Note: Obstacle and goal modifications are removed to respect
+        user-specified settings. Difficulty is adjusted primarily through
+        tile count changes only.
         """
-        modifications = [
-            self._remove_tile_from_layer,
-            self._decrease_goal_count,
-        ]
-
-        modifier = random.choice(modifications)
-        return modifier(level)
+        # Only use tile modifications - goal count should respect user's settings
+        return self._remove_tile_from_layer(level)
 
     def _add_chain_to_tile(self, level: Dict[str, Any]) -> Dict[str, Any]:
         """

@@ -249,6 +249,31 @@ class VisualSimulator:
             )
             will_match = dock_count_before >= 2
 
+            # Capture exposed bomb positions BEFORE applying the move
+            # This is important: bomb countdown should only decrease for bombs that were
+            # already exposed before this move, not bombs that become exposed by this move
+            exposed_bombs_before_move = set()
+            for bomb_key in state.bomb_tiles.keys():
+                # Parse layerIdx_x_y format (e.g., "0_1_2" -> layer_idx=0, pos="1_2")
+                parts = bomb_key.split('_')
+                if len(parts) >= 3:
+                    layer_idx = int(parts[0])
+                    pos = f"{parts[1]}_{parts[2]}"
+                    layer = state.tiles.get(layer_idx, {})
+                    if pos in layer and not layer[pos].picked:
+                        bomb_tile = layer[pos]
+                        if not self._core._is_blocked_by_upper(state, bomb_tile):
+                            exposed_bombs_before_move.add(bomb_key)
+
+            # Capture exposed curtain positions BEFORE applying the move
+            # Curtains that become exposed by this move should NOT toggle yet
+            exposed_curtains_before_move = set()
+            for layer_idx, layer_tiles in state.tiles.items():
+                for pos, tile in layer_tiles.items():
+                    if tile.effect_type == TileEffectType.CURTAIN and not tile.picked:
+                        if not self._core._is_blocked_by_upper(state, tile):
+                            exposed_curtains_before_move.add((layer_idx, pos))
+
             # Apply move (tile gets picked and added to dock)
             tiles_cleared = self._core._apply_move(state, selected_move)
             score_gained = tiles_cleared * 10.0
@@ -298,7 +323,7 @@ class VisualSimulator:
                         dock_tile_infos.append(linked_tile_info)
 
             # Process move effects (bomb, frog, curtain, teleport)
-            self._core._process_move_effects(state)
+            self._core._process_move_effects(state, exposed_bombs_before_move, exposed_curtains_before_move)
             state.moves_used += 1
 
             # Get current dock state from actual state (includes linked tiles)
@@ -598,14 +623,9 @@ def extract_initial_state(
                         initial_frog_positions.append(f"{i}_{pos}")
 
                     # Ice gimmick (attribute is "ice" or "ice_N")
+                    # ICE tiles always start with remaining=3
                     if attribute and (attribute == "ice" or attribute.startswith("ice_")):
-                        ice_level = 1
-                        if attribute.startswith("ice_"):
-                            try:
-                                ice_level = int(attribute.split("_")[1])
-                            except (IndexError, ValueError):
-                                ice_level = 1
-                        initial_ice_states[f"{i}_{pos}"] = ice_level
+                        initial_ice_states[f"{i}_{pos}"] = 3
 
                     # Chain gimmick (attribute is "chain")
                     if attribute == "chain":
@@ -614,23 +634,43 @@ def extract_initial_state(
                     # Grass gimmick (attribute is "grass" or "grass_N")
                     if attribute and (attribute == "grass" or attribute.startswith("grass_")):
                         grass_level = 1
-                        if attribute.startswith("grass_"):
+                        # First check extra_data for grass_layer (highest priority)
+                        if isinstance(extra_data, dict) and "grass_layer" in extra_data:
+                            grass_level = int(extra_data["grass_layer"])
+                        elif attribute.startswith("grass_"):
                             try:
                                 grass_level = int(attribute.split("_")[1])
                             except (IndexError, ValueError):
                                 grass_level = 1
                         initial_grass_states[f"{i}_{pos}"] = grass_level
 
-                    # Bomb gimmick (attribute is "bomb" or a number)
-                    if attribute == "bomb" or (attribute and attribute.isdigit()):
-                        bomb_count = 10  # Default bomb count
-                        if attribute and attribute.isdigit():
+                    # Bomb gimmick (attribute is "bomb", "bomb_N", or a number)
+                    # BOMB count is always fixed between 3-5
+                    if attribute and (attribute == "bomb" or attribute.startswith("bomb_") or attribute.isdigit()):
+                        bomb_count = 4  # Default middle value
+                        # First check extra_data for bomb_count
+                        if isinstance(extra_data, dict) and "bomb_count" in extra_data:
+                            bomb_count = int(extra_data["bomb_count"])
+                        elif attribute.startswith("bomb_"):
+                            try:
+                                bomb_count = int(attribute.split("_")[1])
+                            except (IndexError, ValueError):
+                                pass
+                        elif attribute.isdigit():
                             bomb_count = int(attribute)
+
+                        # Clamp bomb count to 3-5 range
+                        bomb_count = max(3, min(5, bomb_count))
                         initial_bomb_states[f"{i}_{pos}"] = bomb_count
 
-                    # Curtain gimmick (attribute is "curtain_open" or "curtain_close")
-                    if attribute and attribute.startswith("curtain_"):
-                        is_open = attribute == "curtain_open"
+                    # Curtain gimmick (attribute is "curtain", "curtain_open" or "curtain_close")
+                    if attribute and (attribute == "curtain" or attribute.startswith("curtain_")):
+                        is_open = False  # Default closed
+                        # First check extra_data for is_open (highest priority)
+                        if isinstance(extra_data, dict) and "is_open" in extra_data:
+                            is_open = bool(extra_data["is_open"])
+                        elif attribute == "curtain_open":
+                            is_open = True
                         initial_curtain_states[f"{i}_{pos}"] = is_open
 
                     # Link gimmick (attribute is "link_n", "link_s", "link_e", "link_w")
@@ -934,6 +974,8 @@ async def simulate_visual(request: VisualSimulationRequest):
     """Run visual simulation and return move history for playback."""
     try:
         start_time = time.time()
+
+        level_json = request.level_json
 
         # Determine which bots to simulate
         bot_types = request.bot_types or ["novice", "casual", "average", "expert", "optimal"]

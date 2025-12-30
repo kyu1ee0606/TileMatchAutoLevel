@@ -193,11 +193,6 @@ export function BotTileGrid({
             const visIdx = initialStackInfo.totalCount - 1;
             const topTileType = convertedTypes[visIdx] || convertedTypes[convertedTypes.length - 1] || 't0';
 
-            console.log(`[DEBUG] Craft/Stack init at ${layerIdx}_${pos}:`);
-            console.log(`  isCraft: ${initialStackInfo.isCraft}, totalCount: ${initialStackInfo.totalCount}`);
-            console.log(`  convertedTypes: ${convertedTypes}`);
-            console.log(`  visIdx: ${visIdx}, topTileType: ${topTileType}`);
-
             // Store original stack/craft tile with metadata (using converted types)
             // Start with full count - will be decremented during move replay
             layerTiles.set(pos, {
@@ -218,7 +213,6 @@ export function BotTileGrid({
               // Check if spawn position is occupied by another tile in the same layer
               // Get raw level data to check for tile at spawn position
               const spawnOccupied = layerData?.tiles?.[spawnPos] !== undefined;
-              console.log(`  spawnPos: ${spawnPos}, spawnOccupied: ${spawnOccupied}`);
 
               // Get the ExtendedTileData we just added to update its state
               const craftExtData = layerTiles.get(pos);
@@ -233,7 +227,6 @@ export function BotTileGrid({
                   pos: spawnPos,
                   tileType: topTileType,
                 });
-                console.log(`  Spawned tile added at ${spawnKey} with type ${topTileType}, remaining=${newRemaining}`);
 
                 // Update topTileType to the next tile
                 if (newRemaining > 0) {
@@ -244,7 +237,6 @@ export function BotTileGrid({
                   // Craft only has 1 tile - remove craft box after emitting
                   craftExtData.topTileType = undefined;
                   layerTiles.delete(pos);
-                  console.log(`  Craft exhausted on init - craft box removed`);
                 }
               }
               // If spawn position is occupied, the craft spawned tile will be added
@@ -259,11 +251,6 @@ export function BotTileGrid({
             const convertedTileData: TileData = [convertedType, td[1], td[2]];
             // Track if this was originally a t0 tile (now converted)
             const wasT0 = originalType === 't0' && convertedType !== 't0';
-
-            // DEBUG: Log first few conversions for verification
-            if (layerIdx === 0 && layerTiles.size < 3) {
-              console.log(`[TILE CONVERT] layer=${layerIdx} pos=${pos}: original=${originalType} -> converted=${convertedType}`);
-            }
 
             layerTiles.set(pos, { tileData: convertedTileData, wasT0 });
           }
@@ -318,12 +305,7 @@ export function BotTileGrid({
                 // Check if craft is now empty (remainingCount was already decremented when tile was emitted)
                 const currentRemaining = extData.stackInfo.remainingCount || 0;
 
-                console.log(`[DEBUG] Craft spawned tile picked from ${pos} -> ${move.position}:`);
-                console.log(`  Backend move.tile_type: ${move.tile_type}`);
-                console.log(`  Craft remainingCount: ${currentRemaining}`);
-
                 if (currentRemaining <= 0) {
-                  console.log(`  Craft exhausted - removing craft box`);
                   // Craft box is empty - remove it
                   layerTiles.delete(pos);
                 }
@@ -360,6 +342,26 @@ export function BotTileGrid({
         }
       }
 
+      // Also remove linked tiles (LINK gimmick - both tiles are picked together)
+      if (move.linked_positions && move.linked_positions.length > 0) {
+        move.linked_positions.forEach((linkedKey) => {
+          // linkedKey format: "layerIdx_x_y"
+          const parts = linkedKey.split('_');
+          if (parts.length >= 3) {
+            const linkedLayerIdx = parseInt(parts[0]);
+            const linkedPos = `${parts[1]}_${parts[2]}`;
+            const linkedLayerTiles = workingTilesByLayer.get(linkedLayerIdx);
+            if (linkedLayerTiles) {
+              linkedLayerTiles.delete(linkedPos);
+            }
+            // Also check spawned tiles
+            if (workingSpawnedTiles.has(linkedKey)) {
+              workingSpawnedTiles.delete(linkedKey);
+            }
+          }
+        });
+      }
+
       // Remove matched tiles (tiles that completed a 3-match in dock)
       // Note: matched_positions contains original board positions of tiles that were in dock
       // These tiles have ALREADY been picked from the board in previous moves
@@ -379,6 +381,12 @@ export function BotTileGrid({
       // Mark the selected tile as just removed if it's the current move
       if (i === currentStep - 1) {
         justRemoved.add(`${move.layer_idx}_${move.position}`);
+        // Also mark linked tiles as just removed
+        if (move.linked_positions && move.linked_positions.length > 0) {
+          move.linked_positions.forEach((linkedKey) => {
+            justRemoved.add(linkedKey);
+          });
+        }
       }
 
       // After each move, check if any blocked craft tiles can now emit
@@ -405,8 +413,6 @@ export function BotTileGrid({
                 const currentRemaining = extData.stackInfo.remainingCount || 0;
                 const newRemaining = currentRemaining - 1;
 
-                console.log(`[DEBUG] Craft emit (blocked->unblocked): pos=${pos}, spawnPos=${spawnPos}, emitting type=${extData.topTileType}, remaining=${currentRemaining} -> ${newRemaining}`);
-
                 workingSpawnedTiles.set(spawnKey, {
                   layerIdx,
                   pos: spawnPos,
@@ -421,13 +427,11 @@ export function BotTileGrid({
                   const nextVisIdx = newRemaining - 1;
                   const nextTileType = extData.stackInfo.tileTypes[nextVisIdx] || 't0';
                   extData.topTileType = nextTileType;
-                  console.log(`  Next tile ready: idx=${nextVisIdx}, type=${nextTileType}`);
                 } else {
                   // Craft is now empty - remove the craft box
                   // The last emitted tile is still in workingSpawnedTiles
                   extData.topTileType = undefined;
                   layerTiles.delete(pos);
-                  console.log(`  Craft exhausted - craft box removed`);
                 }
               }
             }
@@ -1009,7 +1013,12 @@ export function BotTileGrid({
     };
 
     // Get attribute image (same as editor)
-    const attrImage = attribute ? SPECIAL_IMAGES[attribute] : null;
+    // For grass tiles, hide the attribute image when grass is removed (grassLevel <= 0)
+    // For ice tiles, hide the attribute image when ice is removed (iceLevel <= 0)
+    const isGrassAttribute = attribute?.startsWith('grass');
+    const isIceAttribute = attribute?.startsWith('ice');
+    const shouldHideAttribute = (isGrassAttribute && grassLevel <= 0) || (isIceAttribute && iceLevel <= 0);
+    const attrImage = attribute && !shouldHideAttribute ? SPECIAL_IMAGES[attribute] : null;
 
     // t0 is random tile, t1+ shows t0 background + tile icon (same as editor)
     const isRandomTile = tileType === 't0';

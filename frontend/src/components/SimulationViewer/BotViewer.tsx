@@ -43,6 +43,7 @@ export function BotViewer({
   className
 }: BotViewerProps) {
   const profile = BOT_PROFILES[botResult.profile as BotProfile];
+
   const progress = botResult.total_moves > 0
     ? Math.min(currentStep, botResult.total_moves)
     : 0;

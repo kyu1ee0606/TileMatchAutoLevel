@@ -17,6 +17,7 @@ export function SimulationGrid({ levelJson, results, currentStep, className }: S
 
   // Get initial states from response
   const { initial_state } = results;
+
   const initialFrogPositions = initial_state.initial_frog_positions || [];
   const initialBombStates = initial_state.initial_bomb_states || {};
   const initialCurtainStates = initial_state.initial_curtain_states || {};

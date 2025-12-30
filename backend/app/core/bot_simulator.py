@@ -138,8 +138,8 @@ class GameState:
     link_pairs: Dict[str, str] = field(default_factory=dict)  # pos -> linked_pos
     # Frog tracking
     frog_positions: Set[str] = field(default_factory=set)
-    # Bomb tracking
-    bomb_tiles: Dict[str, int] = field(default_factory=dict)  # pos -> remaining
+    # Bomb tracking - key is layerIdx_x_y format to handle bombs in different layers
+    bomb_tiles: Dict[str, int] = field(default_factory=dict)  # layerIdx_x_y -> remaining
     # Stack/Craft tile tracking - key: full_key (layerIdx_x_y_stackIdx) -> TileState
     stacked_tiles: Dict[str, TileState] = field(default_factory=dict)
     # Craft boxes: position key -> list of stacked tile keys in order (bottom to top)
@@ -254,6 +254,7 @@ class BotSimulator:
         "link_n": TileEffectType.LINK_NORTH,
         "frog": TileEffectType.FROG,
         "bomb": TileEffectType.BOMB,
+        "curtain": TileEffectType.CURTAIN,  # Generic curtain (default closed)
         "curtain_close": TileEffectType.CURTAIN,
         "curtain_open": TileEffectType.CURTAIN,
         "teleport": TileEffectType.TELEPORT,
@@ -475,16 +476,52 @@ class BotSimulator:
                         effect_str = str(tile_data[1]).lower()
 
                         # Map effect string to type
-                        if effect_str in self.EFFECT_MAPPING:
-                            effect_type = self.EFFECT_MAPPING[effect_str]
+                        # Handle formats like "ice_2", "grass_1" by extracting base type
+                        base_effect_str = effect_str
+                        parsed_level = None
+                        if effect_str.startswith("ice_"):
+                            base_effect_str = "ice"
+                            try:
+                                parsed_level = int(effect_str.split("_")[1])
+                            except (IndexError, ValueError):
+                                parsed_level = 1
+                        elif effect_str.startswith("grass_"):
+                            base_effect_str = "grass"
+                            try:
+                                parsed_level = int(effect_str.split("_")[1])
+                            except (IndexError, ValueError):
+                                parsed_level = 1
+                        elif effect_str.startswith("bomb_"):
+                            base_effect_str = "bomb"
+                            try:
+                                parsed_level = int(effect_str.split("_")[1])
+                            except (IndexError, ValueError):
+                                parsed_level = None  # Must be explicitly set
+                        elif effect_str.isdigit():
+                            # Digit-only attribute is treated as bomb countdown
+                            base_effect_str = "bomb"
+                            parsed_level = int(effect_str)
+
+                        if base_effect_str in self.EFFECT_MAPPING:
+                            effect_type = self.EFFECT_MAPPING[base_effect_str]
 
                             # Initialize effect-specific data
+                            # Read custom layer values from tile_data[2] if provided
+                            extra_data = tile_data[2] if len(tile_data) > 2 and isinstance(tile_data[2], dict) else {}
+
                             if effect_type == TileEffectType.ICE:
-                                effect_data["remaining"] = 3  # 3 layers of ice
+                                # ICE tiles always start with remaining=3
+                                effect_data["remaining"] = 3
                             elif effect_type == TileEffectType.CHAIN:
                                 effect_data["unlocked"] = False
                             elif effect_type == TileEffectType.GRASS:
-                                effect_data["remaining"] = 2  # 2 grass layers
+                                # Priority: extra_data > parsed from attribute > default
+                                if "grass_layer" in extra_data:
+                                    effect_data["remaining"] = int(extra_data["grass_layer"])
+                                elif parsed_level is not None:
+                                    effect_data["remaining"] = parsed_level
+                                else:
+                                    effect_data["remaining"] = 1
                             elif effect_type in (TileEffectType.LINK_EAST, TileEffectType.LINK_WEST,
                                                   TileEffectType.LINK_SOUTH, TileEffectType.LINK_NORTH):
                                 effect_data["can_pick"] = False
@@ -504,15 +541,29 @@ class BotSimulator:
                                 effect_data["on_frog"] = True
                                 state.frog_positions.add(pos)
                             elif effect_type == TileEffectType.BOMB:
-                                # Parse bomb count from effect string (e.g., "10" -> 10 moves)
-                                try:
-                                    bomb_count = int(effect_str) if effect_str.isdigit() else 10
-                                except:
-                                    bomb_count = 10
+                                # BOMB count is always fixed between 3-5
+                                bomb_count = 4  # Default middle value
+                                if "bomb_count" in extra_data:
+                                    bomb_count = int(extra_data["bomb_count"])
+                                elif parsed_level is not None:
+                                    bomb_count = parsed_level
+                                elif effect_str.isdigit():
+                                    bomb_count = int(effect_str)
+
+                                # Clamp bomb count to 3-5 range
+                                bomb_count = max(3, min(5, bomb_count))
+
                                 effect_data["remaining"] = bomb_count
-                                state.bomb_tiles[pos] = bomb_count
+                                # Use layerIdx_x_y format for bomb tracking
+                                bomb_key = f"{layer_idx}_{pos}"
+                                state.bomb_tiles[bomb_key] = bomb_count
                             elif effect_type == TileEffectType.CURTAIN:
-                                effect_data["is_open"] = "open" in effect_str
+                                # First check extra_data for is_open (highest priority)
+                                if isinstance(extra_data, dict) and "is_open" in extra_data:
+                                    effect_data["is_open"] = bool(extra_data["is_open"])
+                                else:
+                                    # Fall back to parsing from attribute string
+                                    effect_data["is_open"] = "open" in effect_str
 
                     # Handle t0 random tile - use pre-computed assignment
                     actual_tile_type = tile_type
@@ -1067,11 +1118,36 @@ class BotSimulator:
             selected_move = self._select_move_with_profile(moves, state, profile)
 
             if selected_move:
+                # Capture exposed bomb positions BEFORE applying the move
+                # This is important: bomb countdown should only decrease for bombs that were
+                # already exposed before this move, not bombs that become exposed by this move
+                exposed_bombs_before_move = set()
+                for bomb_key in state.bomb_tiles.keys():
+                    # Parse layerIdx_x_y format (e.g., "0_1_2" -> layer_idx=0, pos="1_2")
+                    parts = bomb_key.split('_')
+                    if len(parts) >= 3:
+                        layer_idx = int(parts[0])
+                        pos = f"{parts[1]}_{parts[2]}"
+                        layer = state.tiles.get(layer_idx, {})
+                        if pos in layer and not layer[pos].picked:
+                            bomb_tile = layer[pos]
+                            if not self._is_blocked_by_upper(state, bomb_tile):
+                                exposed_bombs_before_move.add(bomb_key)
+
+                # Capture exposed curtain positions BEFORE applying the move
+                # Curtains that become exposed by this move should NOT toggle yet
+                exposed_curtains_before_move = set()
+                for layer_idx, layer_tiles in state.tiles.items():
+                    for pos, tile in layer_tiles.items():
+                        if tile.effect_type == TileEffectType.CURTAIN and not tile.picked:
+                            if not self._is_blocked_by_upper(state, tile):
+                                exposed_curtains_before_move.add((layer_idx, pos))
+
                 self._apply_move(state, selected_move)
                 state.moves_used += 1
 
-                # Process move effects (frog moves, bomb decreases, etc.)
-                self._process_move_effects(state)
+                # Process move effects (frog moves, bomb decreases, curtain toggle, etc.)
+                self._process_move_effects(state, exposed_bombs_before_move, exposed_curtains_before_move)
 
         # Determine final state
         if not state.failed:
@@ -1116,6 +1192,16 @@ class BotSimulator:
             state.failed = True
             return True
 
+        # Check impossible grass tiles (blocked + not enough adjacent tiles to remove grass)
+        if self._check_grass_impossible(state):
+            state.failed = True
+            return True
+
+        # Check impossible ice tiles (blocked + not enough remaining tiles to melt ice)
+        if self._check_ice_impossible(state):
+            state.failed = True
+            return True
+
         return False
 
     def _is_dock_full(self, state: GameState) -> bool:
@@ -1131,6 +1217,111 @@ class BotSimulator:
             remaining_count += count % 3  # Only remainder after 3-matches
 
         return remaining_count >= state.max_dock_slots
+
+    def _check_grass_impossible(self, state: GameState) -> bool:
+        """Check if any blocked grass tile cannot be cleared due to insufficient adjacent tiles.
+
+        A grass tile is impossible to clear when:
+        1. It is blocked by upper layer tiles (cannot be picked directly)
+        2. The number of remaining adjacent unpicked tiles < grass remaining layers
+
+        Returns True if game is in impossible state.
+        """
+        for layer_idx, layer_tiles in state.tiles.items():
+            for pos_key, tile in layer_tiles.items():
+                if tile.picked:
+                    continue
+
+                # Only check grass tiles
+                if tile.effect_type != TileEffectType.GRASS:
+                    continue
+
+                grass_remaining = tile.effect_data.get("remaining", 0)
+                if grass_remaining <= 0:
+                    # Grass already cleared, no issue
+                    continue
+
+                # Check if tile is blocked by upper layer
+                if not self._is_blocked_by_upper(state, tile):
+                    # Tile is not blocked, can be picked after grass clears
+                    continue
+
+                # Tile is blocked - count adjacent unpicked tiles that can reduce grass
+                # Count ALL unpicked adjacent tiles (even if currently blocked/can't pick)
+                # because they may eventually be picked and reduce grass layers
+                x, y = tile.x_idx, tile.y_idx
+                adjacent_positions = [
+                    (x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)
+                ]
+
+                adjacent_unpicked_count = 0
+                for adj_x, adj_y in adjacent_positions:
+                    adj_pos_key = f"{adj_x}_{adj_y}"
+                    adj_tile = layer_tiles.get(adj_pos_key)
+                    if adj_tile and not adj_tile.picked:
+                        adjacent_unpicked_count += 1
+
+                # If grass layers > unpicked adjacent tiles, impossible to clear grass
+                if grass_remaining > adjacent_unpicked_count:
+                    return True
+
+        return False
+
+    def _check_ice_impossible(self, state: GameState) -> bool:
+        """Check if any blocked ice tile cannot be cleared due to insufficient remaining tiles.
+
+        An ice tile is impossible to clear when:
+        1. It is blocked by upper layer tiles
+        2. The remaining pick opportunities are less than ice_remaining
+
+        Ice melts 1 level per tile pick (for unblocked ice tiles).
+        For blocked ice: first need to unblock it, then melt it.
+
+        Returns True if game is in impossible state.
+        """
+        # Count total remaining non-ice tiles (these provide "pick opportunities")
+        total_remaining_non_ice = 0
+        blocked_ice_tiles = []
+
+        for layer_idx, layer_tiles in state.tiles.items():
+            for pos_key, tile in layer_tiles.items():
+                if tile.picked:
+                    continue
+
+                if tile.effect_type == TileEffectType.ICE:
+                    ice_remaining = tile.effect_data.get("remaining", 0)
+                    if ice_remaining > 0 and self._is_blocked_by_upper(state, tile):
+                        blocked_ice_tiles.append((layer_idx, pos_key, tile, ice_remaining))
+                else:
+                    total_remaining_non_ice += 1
+
+        if not blocked_ice_tiles:
+            return False
+
+        # For each blocked ice tile, check if it can be cleared
+        for layer_idx, pos_key, ice_tile, ice_remaining in blocked_ice_tiles:
+            # Count tiles blocking this ice tile (upper layer tiles at same position)
+            blocking_count = 0
+            for upper_layer_idx in range(layer_idx + 1, max(state.tiles.keys()) + 1):
+                upper_layer = state.tiles.get(upper_layer_idx, {})
+                if pos_key in upper_layer:
+                    upper_tile = upper_layer[pos_key]
+                    if not upper_tile.picked:
+                        blocking_count += 1
+
+            # Total picks needed for this ice:
+            # 1. Pick all blocking tiles to unblock (blocking_count picks)
+            # 2. Then ice_remaining more picks to fully melt the ice
+            # Note: While picking blocking tiles, other unblocked ice may melt,
+            # but this blocked ice won't melt until unblocked
+            total_picks_needed = blocking_count + ice_remaining
+
+            # Available picks = total remaining non-ice tiles
+            # (Each pick clears 3 tiles from dock, but we only count non-ice as pick sources)
+            if total_picks_needed > total_remaining_non_ice:
+                return True
+
+        return False
 
     def _find_linked_tiles(self, state: GameState, tile_state: TileState) -> List[Tuple[int, str]]:
         """Find linked tiles for a given tile (LINK gimmick).
@@ -1312,6 +1503,18 @@ class BotSimulator:
         if tile_state is None:
             return 0
 
+        # IMPORTANT: Collect unblocked ice tiles BEFORE marking tile as picked
+        # Only these ice tiles should have their count decreased
+        # Ice tiles that become unblocked AFTER this pick should NOT be melted this turn
+        unblocked_ice_before_pick: set = set()
+        for l_idx, layer_tiles in state.tiles.items():
+            for pos_key, tile in layer_tiles.items():
+                if tile.picked:
+                    continue
+                if tile.effect_type == TileEffectType.ICE:
+                    if not self._is_blocked_by_upper(state, tile):
+                        unblocked_ice_before_pick.add((l_idx, pos_key))
+
         # Check if this is a LINK tile and find its linked tile (forward direction)
         linked_tile = None
         if tile_state.effect_type in (TileEffectType.LINK_EAST, TileEffectType.LINK_WEST,
@@ -1336,6 +1539,11 @@ class BotSimulator:
 
         # Mark tile as picked
         tile_state.picked = True
+
+        # Remove bomb from tracking when picked (bomb is defused by picking it)
+        if tile_state.effect_type == TileEffectType.BOMB:
+            bomb_key = f"{tile_state.layer_idx}_{tile_state.position_key}"
+            state.bomb_tiles.pop(bomb_key, None)
 
         # Update all_tile_type_counts when tile is picked
         tile_type = tile_state.tile_type
@@ -1374,10 +1582,10 @@ class BotSimulator:
             state.dock_tiles.append(linked_tile)
 
             # Update adjacent effects for linked tile
-            self._update_adjacent_effects(state, linked_tile)
+            self._update_adjacent_effects(state, linked_tile, unblocked_ice_before_pick)
 
         # Update adjacent tile effects (ice, chain, grass)
-        self._update_adjacent_effects(state, tile_state)
+        self._update_adjacent_effects(state, tile_state, unblocked_ice_before_pick)
 
         # Check for 3-match in dock
         cleared_by_type = self._process_dock_matches(state)
@@ -1448,30 +1656,31 @@ class BotSimulator:
 
         return cleared_by_type
 
-    def _update_adjacent_effects(self, state: GameState, picked_tile: TileState) -> None:
+    def _update_adjacent_effects(self, state: GameState, picked_tile: TileState,
+                                  unblocked_ice_before_pick: set = None) -> None:
         """Update effects on tiles when a tile is picked.
 
-        Ice: ANY unblocked ice tile melts (not just adjacent)
+        Ice: Only ice tiles that were ALREADY unblocked BEFORE the pick should melt
         Grass: Only ADJACENT tiles (4-directional)
         Chain: Only HORIZONTAL adjacent tiles
         """
         x, y = picked_tile.x_idx, picked_tile.y_idx
         layer_idx = picked_tile.layer_idx
 
-        # === Ice 처리: 상위 레이어에 막히지 않은 모든 Ice 타일이 녹음 ===
-        # sp_template의 TileEffect.cs OnClickOtherTile() 참조:
-        # Ice는 인접 여부와 관계없이, 상위 타일에 막히지 않으면 녹음
-        for l_idx, layer_tiles in state.tiles.items():
-            for pos_key, tile in layer_tiles.items():
-                if tile.picked:
-                    continue
+        # === Ice 처리: 타일 선택 전에 이미 가려지지 않았던 Ice 타일만 녹음 ===
+        # 방금 가려짐이 해제된 ice 타일은 이번 턴에 녹지 않음
+        if unblocked_ice_before_pick:
+            for l_idx, layer_tiles in state.tiles.items():
+                for pos_key, tile in layer_tiles.items():
+                    if tile.picked:
+                        continue
 
-                if tile.effect_type == TileEffectType.ICE:
-                    # 상위 레이어에 막혀있지 않으면 녹음
-                    if not self._is_blocked_by_upper(state, tile):
-                        remaining = tile.effect_data.get("remaining", 0)
-                        if remaining > 0:
-                            tile.effect_data["remaining"] = remaining - 1
+                    if tile.effect_type == TileEffectType.ICE:
+                        # Only melt if it was already unblocked before the pick
+                        if (l_idx, pos_key) in unblocked_ice_before_pick:
+                            remaining = tile.effect_data.get("remaining", 0)
+                            if remaining > 0:
+                                tile.effect_data["remaining"] = remaining - 1
 
         # === Grass 처리: 인접 타일(4방향)에만 영향 ===
         # Adjacent positions (4-directional)
@@ -1491,10 +1700,12 @@ class BotSimulator:
                 continue
 
             # Grass effect: decrease remaining when adjacent tile is picked
+            # ONLY if the grass tile is NOT blocked by upper layer tiles
             if adj_tile.effect_type == TileEffectType.GRASS:
-                remaining = adj_tile.effect_data.get("remaining", 0)
-                if remaining > 0:
-                    adj_tile.effect_data["remaining"] = remaining - 1
+                if not self._is_blocked_by_upper(state, adj_tile):
+                    remaining = adj_tile.effect_data.get("remaining", 0)
+                    if remaining > 0:
+                        adj_tile.effect_data["remaining"] = remaining - 1
 
         # === Chain 처리: 수평 인접 타일에만 영향 ===
         horizontal_positions = [(x + 1, y), (x - 1, y)]
@@ -1610,28 +1821,56 @@ class BotSimulator:
             target_tile.effect_data["on_frog"] = True
             state.frog_positions.add(target_pos)
 
-    def _process_move_effects(self, state: GameState) -> None:
-        """Process effects that trigger after each move (frog, bomb, curtain, teleport)."""
-        # Decrease bomb counters
-        for pos in list(state.bomb_tiles.keys()):
-            state.bomb_tiles[pos] -= 1
+    def _process_move_effects(self, state: GameState, exposed_bombs_before_move: set = None,
+                               exposed_curtains_before_move: set = None) -> None:
+        """Process effects that trigger after each move (frog, bomb, curtain, teleport).
 
-            # Update tile effect data
-            for layer in state.tiles.values():
-                if pos in layer:
-                    layer[pos].effect_data["remaining"] = state.bomb_tiles[pos]
+        Args:
+            state: Current game state
+            exposed_bombs_before_move: Set of bomb positions that were exposed BEFORE this move.
+                Only these bombs should have their countdown decreased.
+            exposed_curtains_before_move: Set of (layer_idx, pos) tuples for curtains that were
+                exposed BEFORE this move. Only these curtains should toggle.
+        """
+        # Decrease bomb counters ONLY for bombs that were exposed BEFORE this move
+        # Based on user specification: bomb countdown decreases when exposed and OTHER tiles are picked
+        # This means a bomb that becomes exposed by this move doesn't count down yet
+        if exposed_bombs_before_move is None:
+            exposed_bombs_before_move = set()
+
+        for bomb_key in list(state.bomb_tiles.keys()):
+            # Only decrease countdown if bomb was already exposed before this move
+            if bomb_key not in exposed_bombs_before_move:
+                continue
+
+            # Parse layerIdx_x_y format (e.g., "0_1_2" -> layer_idx=0, pos="1_2")
+            parts = bomb_key.split('_')
+            if len(parts) < 3:
+                continue
+            layer_idx = int(parts[0])
+            pos = f"{parts[1]}_{parts[2]}"
+
+            # Find the bomb tile to update its effect data
+            layer = state.tiles.get(layer_idx, {})
+            if pos in layer and not layer[pos].picked:
+                state.bomb_tiles[bomb_key] -= 1
+                layer[pos].effect_data["remaining"] = state.bomb_tiles[bomb_key]
 
         # Move frogs to random available tiles (sp_template FrogManager behavior)
         # All frogs move simultaneously when user picks a tile
         self._move_all_frogs(state)
 
         # Toggle curtains (sp_template deterministic logic)
-        # Curtains that are not blocked by upper layer tiles toggle on every move
-        for layer in state.tiles.values():
-            for tile in layer.values():
+        # Only curtains that were ALREADY exposed BEFORE this move should toggle
+        # Curtains that become exposed by this move should NOT toggle yet
+        if exposed_curtains_before_move is None:
+            exposed_curtains_before_move = set()
+
+        for layer_idx, layer_tiles in state.tiles.items():
+            for pos, tile in layer_tiles.items():
                 if tile.effect_type == TileEffectType.CURTAIN and not tile.picked:
-                    # Only toggle if not blocked by upper layer tiles
-                    if not self._is_blocked_by_upper(state, tile):
+                    # Only toggle if curtain was already exposed before this move
+                    if (layer_idx, pos) in exposed_curtains_before_move:
                         tile.effect_data["is_open"] = not tile.effect_data.get("is_open", True)
 
         # Process teleport (sp_template TileGroup.AddClickCount logic)

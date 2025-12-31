@@ -26,6 +26,9 @@ export interface VisualBotMove {
   chain_states_after: Record<string, boolean>; // Chain states after move (layerIdx_x_y -> unlocked)
   grass_states_after: Record<string, number>; // Grass states after move (layerIdx_x_y -> remaining layers 1-2)
   link_states_after: Record<string, string[]>; // Link states after move (layerIdx_x_y -> connected positions)
+  teleport_states_after: Record<string, string>; // Teleport tile positions and types after move (layerIdx_x_y -> tile_type)
+  teleport_click_count_after: number; // Teleport click counter after move (activates shuffle at 3)
+  tile_type_overrides: Record<string, string>; // Permanent tile type changes (layerIdx_x_y -> tile_type) - includes tiles from removed teleport gimmick
 }
 
 // Bot simulation result
@@ -51,6 +54,7 @@ export interface VisualGameState {
   initial_bomb_states: Record<string, number>; // Initial bomb states (layerIdx_x_y -> count)
   initial_curtain_states: Record<string, boolean>; // Initial curtain states (layerIdx_x_y -> is_open)
   initial_link_states: Record<string, string[]>; // Initial link states (layerIdx_x_y -> connected positions)
+  initial_teleport_states: Record<string, string>; // Initial teleport tile states (layerIdx_x_y -> tile_type)
 }
 
 // API response

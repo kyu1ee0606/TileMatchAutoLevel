@@ -14,6 +14,7 @@ interface BotTileGridProps {
   initialChainStates?: Record<string, boolean>; // Initial chain states (layerIdx_x_y -> locked=false)
   initialGrassStates?: Record<string, number>; // Initial grass states (layerIdx_x_y -> layers 1-2)
   initialLinkStates?: Record<string, string[]>; // Initial link states (layerIdx_x_y -> connected positions)
+  initialTeleportStates?: Record<string, string>; // Initial teleport tile states (layerIdx_x_y -> tile_type)
   convertedTiles?: Record<string, Record<string, unknown>>; // Converted tiles from API (t0 -> actual types)
   className?: string;
 }
@@ -56,12 +57,12 @@ const parseStackCraftInfo = (tileData: TileData): StackTileInfo | null => {
   const isCraft = tileType.startsWith('craft_');
   const direction = tileType.split('_')[1] || 's';
 
-  // Calculate spawn offset for craft tiles
+  // Calculate spawn offset for craft tiles (supports diagonal directions)
   let spawnOffsetX = 0, spawnOffsetY = 0;
-  if (direction === 'e') spawnOffsetX = 1;
-  else if (direction === 'w') spawnOffsetX = -1;
-  else if (direction === 's') spawnOffsetY = 1;
-  else if (direction === 'n') spawnOffsetY = -1;
+  if (direction.includes('e')) spawnOffsetX = 1;
+  else if (direction.includes('w')) spawnOffsetX = -1;
+  if (direction.includes('s')) spawnOffsetY = 1;
+  else if (direction.includes('n')) spawnOffsetY = -1;
 
   // Stack info is in tileData[2] with format [count] - single element array
   // All tiles in stack/craft are "t0" (random) by default
@@ -99,6 +100,7 @@ export function BotTileGrid({
   initialChainStates = {},
   initialGrassStates = {},
   initialLinkStates = {},
+  initialTeleportStates = {},
   convertedTiles,
   className
 }: BotTileGridProps) {
@@ -583,6 +585,49 @@ export function BotTileGrid({
     return {};
   }, [currentStep, botResult.moves, initialLinkStates]);
 
+  // Get current teleport states and click count based on step
+  // Teleport activates every 3 clicks (shuffles tile types)
+  // Now stores position -> tile_type mapping for shuffle visualization
+  const { currentTeleportStates, currentTeleportClickCount } = useMemo(() => {
+    if (currentStep === 0) {
+      return {
+        currentTeleportStates: new Map(Object.entries(initialTeleportStates || {})),
+        currentTeleportClickCount: 0,
+      };
+    }
+    if (currentStep > 0 && botResult.moves.length > 0) {
+      const moveIdx = Math.min(currentStep - 1, botResult.moves.length - 1);
+      const move = botResult.moves[moveIdx];
+      return {
+        currentTeleportStates: new Map(Object.entries(move.teleport_states_after || {})),
+        currentTeleportClickCount: move.teleport_click_count_after || 0,
+      };
+    }
+    return {
+      currentTeleportStates: new Map<string, string>(),
+      currentTeleportClickCount: 0,
+    };
+  }, [currentStep, botResult.moves, initialTeleportStates]);
+
+  // Get tile type overrides (permanent type changes from teleport shuffle when gimmick is removed)
+  // These accumulate over moves, so we need to collect all overrides up to current step
+  const currentTileTypeOverrides = useMemo(() => {
+    const overrides = new Map<string, string>();
+    if (currentStep > 0 && botResult.moves.length > 0) {
+      // Collect all overrides from all moves up to current step
+      const maxIdx = Math.min(currentStep, botResult.moves.length);
+      for (let i = 0; i < maxIdx; i++) {
+        const move = botResult.moves[i];
+        if (move.tile_type_overrides) {
+          for (const [pos, tileType] of Object.entries(move.tile_type_overrides)) {
+            overrides.set(pos, tileType);
+          }
+        }
+      }
+    }
+    return overrides;
+  }, [currentStep, botResult.moves]);
+
   // Get layer cols for blocking calculation (sp_template uses col comparison)
   const layerCols = useMemo(() => {
     const cols: Record<number, number> = {};
@@ -961,9 +1006,17 @@ export function BotTileGrid({
     brightness: number,
     _wasT0?: boolean
   ) => {
-    const [tileType, attribute] = tileData;
-    const tileInfo = TILE_TYPES[tileType];
+    const [originalTileType, attribute] = tileData;
     const tileKey = `${layerIdx}_${pos}`;
+
+    // Determine tile type with priority:
+    // 1. Teleport shuffled type (if tile is still active teleport)
+    // 2. Tile type override (permanent change from removed teleport gimmick)
+    // 3. Original tile type (fallback)
+    const teleportShuffledType = currentTeleportStates.get(tileKey);
+    const overriddenType = currentTileTypeOverrides.get(tileKey);
+    const tileType = teleportShuffledType || overriddenType || originalTileType;
+    const tileInfo = TILE_TYPES[tileType];
     const brightnessPercent = Math.round(brightness * 100);
 
     // Get gimmick states from backend tracking (more accurate than attribute parsing)
@@ -973,7 +1026,9 @@ export function BotTileGrid({
     const isCurtain = attribute?.startsWith('curtain') || tileKey in currentCurtainStates;
     const isCurtainOpen = isCurtain ? (currentCurtainStates[tileKey] ?? attribute === 'curtain_open') : false;
 
-    const isTeleport = attribute === 'teleport';
+    // Teleport: use backend state ONLY (not original attribute)
+    // When teleport tiles < 2, backend removes teleport effect and clears teleport_states
+    const isTeleport = currentTeleportStates.has(tileKey);
 
     // Ice: use backend state for level tracking (handles melting)
     const backendIceLevel = currentIceStates[tileKey];
@@ -1017,7 +1072,9 @@ export function BotTileGrid({
     // For ice tiles, hide the attribute image when ice is removed (iceLevel <= 0)
     const isGrassAttribute = attribute?.startsWith('grass');
     const isIceAttribute = attribute?.startsWith('ice');
-    const shouldHideAttribute = (isGrassAttribute && grassLevel <= 0) || (isIceAttribute && iceLevel <= 0);
+    const isTeleportAttribute = attribute === 'teleport';
+    // Hide attribute image when: grass removed, ice removed, or teleport (has dedicated badge with counter)
+    const shouldHideAttribute = (isGrassAttribute && grassLevel <= 0) || (isIceAttribute && iceLevel <= 0) || isTeleportAttribute;
     const attrImage = attribute && !shouldHideAttribute ? SPECIAL_IMAGES[attribute] : null;
 
     // t0 is random tile, t1+ shows t0 background + tile icon (same as editor)
@@ -1173,14 +1230,17 @@ export function BotTileGrid({
           </div>
         )}
 
-        {/* Teleport gimmick */}
+        {/* Teleport gimmick - shows click counter (0→1→2→shuffle→0) */}
         {isTeleport && (
           <div
-            className="absolute bottom-0 left-0 flex items-center justify-center rounded-tr bg-cyan-500/80 text-white"
-            style={{ width: 16, height: 14 }}
-            title="텔레포트"
+            className={clsx(
+              'absolute bottom-0 left-0 flex items-center justify-center rounded-tr text-white',
+              currentTeleportClickCount === 2 ? 'bg-cyan-600/90 animate-pulse' : 'bg-cyan-500/80'
+            )}
+            style={{ width: 22, height: 14 }}
+            title={`텔레포트 카운터: ${currentTeleportClickCount} (3이 되면 셔플 후 0으로 리셋)`}
           >
-            <span className="text-[9px]">🌀</span>
+            <span className="text-[8px]">🌀{currentTeleportClickCount}</span>
           </div>
         )}
 

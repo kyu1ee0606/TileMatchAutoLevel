@@ -123,10 +123,21 @@ async def batch_analyze_levels(
 
 
 def _calculate_max_moves(level_json: Dict[str, Any]) -> int:
-    """Calculate max moves based on total tiles.
+    """Calculate max moves for auto-play simulation.
 
-    Stack/craft tiles count as multiple tiles based on their totalCount.
+    Priority:
+    1. Use level's configured max_moves if present
+    2. Otherwise, calculate: total_tiles (including stack/craft internal tiles)
+
+    For a level to be clearable, you need exactly total_tiles moves
+    (one move per tile to pick).
     """
+    # First, check if level has explicit max_moves setting
+    level_max_moves = level_json.get("max_moves")
+    if level_max_moves is not None and level_max_moves > 0:
+        return int(level_max_moves)
+
+    # Calculate based on total tiles
     total_tiles = 0
     num_layers = level_json.get("layer", 8)
 
@@ -137,22 +148,31 @@ def _calculate_max_moves(level_json: Dict[str, Any]) -> int:
         for pos, tile_data in tiles.items():
             if isinstance(tile_data, list) and len(tile_data) > 0:
                 tile_type = tile_data[0]
-                # Check for stack/craft tiles (e.g., stack_t1, craft_t2)
+                # Check for stack/craft tiles (e.g., "stack_e", "craft_s")
                 if isinstance(tile_type, str) and (tile_type.startswith("stack_") or tile_type.startswith("craft_")):
-                    # Get totalCount from extra_data: [totalCount] or [totalCount, "types"]
-                    extra_data = tile_data[2] if len(tile_data) > 2 else None
-                    if extra_data and isinstance(extra_data, list) and len(extra_data) >= 1:
-                        stack_count = int(extra_data[0]) if extra_data[0] else 1
-                        total_tiles += stack_count
-                    else:
-                        total_tiles += 1
+                    # Get internal tile count from tile_data[2]
+                    # Format can be: [count], {"totalCount": count}, or just count
+                    stack_count = 1
+                    if len(tile_data) > 2:
+                        extra = tile_data[2]
+                        if isinstance(extra, list) and len(extra) > 0:
+                            # Format: [count] or [count, "types"]
+                            stack_count = int(extra[0]) if extra[0] else 1
+                        elif isinstance(extra, dict):
+                            # Format: {"totalCount": count} or similar
+                            stack_count = int(extra.get("totalCount", extra.get("count", 1)))
+                        elif isinstance(extra, (int, float)):
+                            # Format: just a number
+                            stack_count = int(extra)
+                    total_tiles += stack_count
                 else:
+                    # Normal tile
                     total_tiles += 1
             else:
                 total_tiles += 1
 
-    # Max moves = total tiles + buffer (10)
-    return total_tiles + 10
+    # Max moves = total tiles (exactly what's needed to pick all tiles)
+    return max(30, total_tiles)
 
 
 def _calculate_autoplay_difficulty(bot_stats: List[BotClearStats]) -> float:

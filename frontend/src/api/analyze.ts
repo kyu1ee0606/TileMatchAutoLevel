@@ -90,11 +90,22 @@ export async function analyzeAutoPlay(
   levelJson: LevelJSON,
   options?: { iterations?: number; botProfiles?: string[]; seed?: number }
 ): Promise<AutoPlayResponse> {
-  const response = await apiClient.post<AutoPlayResponse>('/analyze/autoplay', {
-    level_json: levelJson,
-    iterations: options?.iterations ?? 100,
-    bot_profiles: options?.botProfiles,
-    seed: options?.seed,
-  });
+  const iterations = options?.iterations ?? 100;
+  // Calculate timeout based on iterations (base 60s + 0.5s per iteration per bot)
+  // 5 bots, so iterations * 5 * 0.5s = iterations * 2.5s, plus base 60s
+  const timeoutMs = Math.max(60000, 60000 + iterations * 2500);
+
+  const response = await apiClient.post<AutoPlayResponse>(
+    '/analyze/autoplay',
+    {
+      level_json: levelJson,
+      iterations: iterations,
+      bot_profiles: options?.botProfiles,
+      seed: options?.seed,
+    },
+    {
+      timeout: timeoutMs, // Override default timeout for heavy simulation
+    }
+  );
   return response.data;
 }

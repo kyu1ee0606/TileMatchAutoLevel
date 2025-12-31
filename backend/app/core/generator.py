@@ -29,6 +29,10 @@ class LevelGenerator:
     MAX_ADJUSTMENT_ITERATIONS = 30
     DIFFICULTY_TOLERANCE = 5.0  # ±5 points
 
+    # Maximum useTileCount - user can specify up to 15 tile types
+    # Note: More tile types = harder levels (with 7-slot dock)
+    MAX_USE_TILE_COUNT = 15
+
     def generate(self, params: GenerationParams) -> GenerationResult:
         """
         Generate a level with target difficulty.
@@ -90,7 +94,9 @@ class LevelGenerator:
         # Adjust to target difficulty (only if NOT using strict tile config)
         # When user specifies exact tile counts, don't modify them for difficulty
         if not has_strict_tile_config:
-            level = self._adjust_difficulty(level, params.target_difficulty)
+            # Pass max tile count to prevent adding tiles beyond the target
+            max_tiles = params.total_tile_count if params.total_tile_count else None
+            level = self._adjust_difficulty(level, params.target_difficulty, max_tiles=max_tiles)
 
         # CRITICAL: Ensure tile count is divisible by 3 (only if NOT using strict config)
         # When user specifies exact counts, they are responsible for divisibility
@@ -109,6 +115,9 @@ class LevelGenerator:
         analyzer = get_analyzer()
         report = analyzer.analyze(level)
 
+        # Auto-calculate max_moves based on total tiles
+        level["max_moves"] = self._calculate_max_moves(level)
+
         generation_time_ms = int((time.time() - start_time) * 1000)
 
         return GenerationResult(
@@ -118,21 +127,59 @@ class LevelGenerator:
             generation_time_ms=generation_time_ms,
         )
 
+    def _calculate_max_moves(self, level: Dict[str, Any]) -> int:
+        """Calculate max_moves based on total tiles in the level.
+
+        Counts all tiles including internal tiles in stack/craft.
+        """
+        total_tiles = 0
+        num_layers = level.get("layer", 8)
+
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            layer_data = level.get(layer_key, {})
+            tiles = layer_data.get("tiles", {})
+
+            for pos, tile_data in tiles.items():
+                if isinstance(tile_data, list) and len(tile_data) > 0:
+                    tile_type = tile_data[0]
+                    # Check for stack/craft tiles
+                    if isinstance(tile_type, str) and (tile_type.startswith("stack_") or tile_type.startswith("craft_")):
+                        # Get internal tile count from tile_data[2]
+                        stack_count = 1
+                        if len(tile_data) > 2:
+                            extra = tile_data[2]
+                            if isinstance(extra, list) and len(extra) > 0:
+                                stack_count = int(extra[0]) if extra[0] else 1
+                            elif isinstance(extra, dict):
+                                stack_count = int(extra.get("totalCount", extra.get("count", 1)))
+                            elif isinstance(extra, (int, float)):
+                                stack_count = int(extra)
+                        total_tiles += stack_count
+                    else:
+                        # Normal tile
+                        total_tiles += 1
+                else:
+                    total_tiles += 1
+
+        # Return total tiles as max_moves (minimum 30)
+        return max(30, total_tiles)
+
     def _create_base_structure(self, params: GenerationParams) -> Dict[str, Any]:
         """Create the base level structure with empty layers."""
         cols, rows = params.grid_size
 
         # Calculate useTileCount from tile_types
-        # t0 is random tile, t1~t15 are actual types
-        # useTileCount determines how many types t0 can become (t1~t{useTileCount})
+        # Count ALL tile types including t0
         tile_types = params.tile_types or self.DEFAULT_TILE_TYPES
-        actual_tile_types = [t for t in tile_types if t != 't0' and t.startswith('t') and t[1:].isdigit()]
-        if actual_tile_types:
-            # Find the highest tile number used
-            max_tile_num = max(int(t[1:]) for t in actual_tile_types)
-            use_tile_count = max_tile_num
+        # Filter to only valid tile types (t0~t15)
+        valid_tile_types = [t for t in tile_types if t.startswith('t') and (t == 't0' or t[1:].isdigit())]
+        if valid_tile_types:
+            # Use exactly what user specified (count all including t0)
+            tile_count = len(valid_tile_types)
+            use_tile_count = min(self.MAX_USE_TILE_COUNT, tile_count)
         else:
-            # Only t0, use default
+            # No valid tiles, use default of 5
             use_tile_count = 5
 
         level = {
@@ -184,18 +231,12 @@ class LevelGenerator:
             # Total is sum of configured counts
             total_target = sum(layer_tile_counts.values())
         else:
-            # Legacy behavior: determine layers from active_layer_count or difficulty
+            # Determine layers from active_layer_count or use all max_layers
             if params.active_layer_count is not None:
                 active_layer_count = min(params.active_layer_count, params.max_layers)
             else:
-                # Default: use all available layers (since user sets maxLayers directly now)
-                # Minimum 1 layer, maximum is all layers
-                min_active_layers = 1
-                max_active_layers = params.max_layers
-                active_layer_count = min_active_layers + int(
-                    (max_active_layers - min_active_layers) * target
-                )
-                active_layer_count = max(1, min(active_layer_count, params.max_layers))
+                # Use ALL specified layers - user sets maxLayers directly
+                active_layer_count = params.max_layers
 
             # Start from top layer and work down
             active_layers = list(range(params.max_layers - 1, params.max_layers - 1 - active_layer_count, -1))
@@ -244,6 +285,15 @@ class LevelGenerator:
             for pos in positions:
                 all_layer_positions.append((layer_idx, pos))
 
+        # CRITICAL: Ensure total positions is divisible by 3
+        # When layers are full, clamping may break divisibility
+        total_positions = len(all_layer_positions)
+        remainder = total_positions % 3
+        if remainder > 0:
+            # Remove excess positions to make divisible by 3
+            # Remove from the end (random positions anyway)
+            all_layer_positions = all_layer_positions[:total_positions - remainder]
+
         # CRITICAL: Distribute tile types ensuring each type has count divisible by 3
         # Calculate how many tiles of each type we need
         total_positions = len(all_layer_positions)
@@ -264,28 +314,10 @@ class LevelGenerator:
             tile_type = random.choice(tile_types)
             tile_assignments.extend([tile_type] * 3)
 
-        # If we have more assignments than positions, trim excess positions
-        # and ensure remaining is still divisible by 3 per type
+        # If we have more assignments than positions, trim to match
+        # (positions are already divisible by 3 from earlier check)
         if len(tile_assignments) > len(all_layer_positions):
-            # Trim positions to match tile assignments
-            all_layer_positions = all_layer_positions[:len(tile_assignments)]
-
-        # Or trim tile_assignments to match positions (keeping multiples of 3)
-        while len(tile_assignments) > len(all_layer_positions):
-            # Remove 3 tiles of a random type
-            tile_type = random.choice(tile_types)
-            count = 0
-            new_assignments = []
-            for t in tile_assignments:
-                if t == tile_type and count < 3:
-                    count += 1
-                    continue
-                new_assignments.append(t)
-            if count == 3:
-                tile_assignments = new_assignments
-            else:
-                # Couldn't remove 3 of this type, try shuffling
-                break
+            tile_assignments = tile_assignments[:len(all_layer_positions)]
 
         # Shuffle assignments for random distribution
         random.shuffle(tile_assignments)
@@ -354,7 +386,8 @@ class LevelGenerator:
         self, level: Dict[str, Any], params: GenerationParams
     ) -> Dict[str, Any]:
         """Add obstacles and attributes to tiles following game rules."""
-        obstacle_types = params.obstacle_types or ["chain", "frog"]
+        # Use None check to allow empty list (empty list means no obstacles)
+        obstacle_types = params.obstacle_types if params.obstacle_types is not None else ["chain", "frog"]
         target = params.target_difficulty
 
         # Calculate target obstacle counts based on difficulty
@@ -1588,9 +1621,15 @@ class LevelGenerator:
         return level
 
     def _adjust_difficulty(
-        self, level: Dict[str, Any], target: float
+        self, level: Dict[str, Any], target: float, max_tiles: Optional[int] = None
     ) -> Dict[str, Any]:
-        """Adjust level to match target difficulty within tolerance."""
+        """Adjust level to match target difficulty within tolerance.
+
+        Args:
+            level: The level to adjust
+            target: Target difficulty (0.0-1.0)
+            max_tiles: If specified, don't add tiles beyond this count
+        """
         analyzer = get_analyzer()
         target_score = target * 100
 
@@ -1604,6 +1643,15 @@ class LevelGenerator:
 
             if diff > 0:
                 # Need to increase difficulty
+                # If max_tiles is set, check if we can add more tiles
+                if max_tiles is not None:
+                    current_tiles = sum(
+                        len(level.get(f"layer_{i}", {}).get("tiles", {}))
+                        for i in range(level.get("layer", 8))
+                    )
+                    if current_tiles >= max_tiles:
+                        # Can't add more tiles, stop adjusting
+                        break
                 level = self._increase_difficulty(level)
             else:
                 # Need to decrease difficulty
@@ -1758,9 +1806,19 @@ class LevelGenerator:
         num_layers = level.get("layer", 8)
         use_tile_count = level.get("useTileCount", 5)
 
-        # Build valid tile types based on useTileCount
-        # t0 is always valid (random tile), plus t1~t{useTileCount}
-        valid_tile_types = ["t0"] + [f"t{i}" for i in range(1, use_tile_count + 1)]
+        # Collect existing tile types from level to match user's selection
+        existing_tile_types = set()
+        for i in range(num_layers):
+            layer_tiles = level.get(f"layer_{i}", {}).get("tiles", {})
+            for tile_data in layer_tiles.values():
+                if isinstance(tile_data, list) and tile_data:
+                    existing_tile_types.add(tile_data[0])
+
+        # Use existing tile types if available, otherwise fall back to t1~t{useTileCount}
+        if existing_tile_types:
+            valid_tile_types = list(existing_tile_types)
+        else:
+            valid_tile_types = [f"t{i}" for i in range(1, use_tile_count + 1)]
 
         # Find layers that already have tiles (respect user's layer config)
         active_layer_indices = []
@@ -1911,14 +1969,30 @@ class LevelGenerator:
         This function adjusts tile types to ensure each has count divisible by 3.
 
         Also ensures all tiles are within useTileCount range (t0~t{useTileCount}).
+
+        CRITICAL: First ensures TOTAL matchable tiles is divisible by 3 by adjusting
+        craft_s internal tile counts if necessary.
         """
         num_layers = level.get("layer", 8)
         use_tile_count = level.get("useTileCount", 5)
 
-        # Valid tile types based on useTileCount
-        # t0 is random tile that becomes t1~t{useTileCount}
-        valid_tile_set = {"t0"} | {f"t{i}" for i in range(1, use_tile_count + 1)}
-        valid_tile_types = ["t0"] + [f"t{i}" for i in range(1, use_tile_count + 1)]
+        # Collect existing tile types from level to match user's selection
+        existing_tile_types = set()
+        for i in range(num_layers):
+            layer_tiles = level.get(f"layer_{i}", {}).get("tiles", {})
+            for tile_data in layer_tiles.values():
+                if isinstance(tile_data, list) and tile_data:
+                    tile_type = tile_data[0]
+                    if tile_type.startswith("t") and tile_type not in self.GOAL_TYPES:
+                        existing_tile_types.add(tile_type)
+
+        # Use existing tile types if available, otherwise fall back to t1~t{useTileCount}
+        if existing_tile_types:
+            valid_tile_set = existing_tile_types
+            valid_tile_types = list(existing_tile_types)
+        else:
+            valid_tile_set = {f"t{i}" for i in range(1, use_tile_count + 1)}
+            valid_tile_types = [f"t{i}" for i in range(1, use_tile_count + 1)]
 
         # Step 0: Convert out-of-range tiles to valid range
         for i in range(num_layers):
@@ -1934,6 +2008,60 @@ class LevelGenerator:
                     if tile_type.startswith("t") and tile_type not in valid_tile_set:
                         # Convert to a random valid tile type
                         tile_data[0] = random.choice(valid_tile_types)
+
+        # Step 0.5: Ensure TOTAL matchable tiles is divisible by 3
+        # This is CRITICAL - if total is not divisible by 3, we can't make all types divisible
+        # Count regular tiles on grid + internal tiles in craft/stack
+        total_matchable = 0
+        goal_tiles_with_internal: List[Tuple[int, str, list]] = []  # (layer_idx, pos, tile_data)
+
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for pos, tile_data in tiles.items():
+                if isinstance(tile_data, list) and len(tile_data) > 0:
+                    tile_type = tile_data[0]
+                    if tile_type in self.GOAL_TYPES or tile_type.startswith("stack_"):
+                        # Count internal tiles
+                        if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
+                            internal_count = int(tile_data[2][0]) if tile_data[2][0] else 0
+                            total_matchable += internal_count
+                            goal_tiles_with_internal.append((i, pos, tile_data))
+                    else:
+                        total_matchable += 1
+
+        # Adjust total to be divisible by 3 by modifying craft_s internal tile counts
+        total_remainder = total_matchable % 3
+        if total_remainder != 0:
+            # Need to add (3 - total_remainder) internal tiles to make total divisible by 3
+            tiles_to_add = 3 - total_remainder
+
+            if goal_tiles_with_internal:
+                # Find the first craft_s with internal tiles and increase its count
+                layer_idx, pos, tile_data = goal_tiles_with_internal[0]
+                layer_key = f"layer_{layer_idx}"
+                current_count = int(tile_data[2][0]) if tile_data[2] else 0
+                tile_data[2] = [current_count + tiles_to_add]
+                level[layer_key]["tiles"][pos] = tile_data
+            else:
+                # No goal tiles with internal counts - find any goal tile and add internal tiles
+                for i in range(num_layers):
+                    layer_key = f"layer_{i}"
+                    tiles = level.get(layer_key, {}).get("tiles", {})
+                    for pos, tile_data in tiles.items():
+                        if isinstance(tile_data, list) and len(tile_data) > 0:
+                            tile_type = tile_data[0]
+                            if tile_type in self.GOAL_TYPES:
+                                # Add internal tiles to this goal tile
+                                if len(tile_data) < 3:
+                                    tile_data.append([tiles_to_add])
+                                else:
+                                    tile_data[2] = [tiles_to_add]
+                                level[layer_key]["tiles"][pos] = tile_data
+                                break
+                    else:
+                        continue
+                    break
 
         # Step 1: Count each tile type across all layers
         # IMPORTANT: Also count internal tiles in craft/stack containers as t0
@@ -2018,52 +2146,122 @@ class LevelGenerator:
                 level[layer_key]["num"] = str(len(level[layer_key]["tiles"]))
 
         # Step 5: Final verification - if still have issues, reassign existing tiles
-        # Recount after additions
+        # Recount after additions (include internal t0 tiles)
         type_counts_final: Dict[str, int] = {}
+        type_positions_final: Dict[str, List[Tuple[int, str]]] = {}
+
         for i in range(num_layers):
             layer_key = f"layer_{i}"
             tiles = level.get(layer_key, {}).get("tiles", {})
             for pos, tile_data in tiles.items():
                 if isinstance(tile_data, list) and len(tile_data) > 0:
                     tile_type = tile_data[0]
-                    if tile_type not in self.GOAL_TYPES:
+                    if tile_type in self.GOAL_TYPES or tile_type.startswith("stack_"):
+                        # Count internal tiles as t0
+                        if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
+                            internal_count = int(tile_data[2][0]) if tile_data[2][0] else 0
+                            type_counts_final["t0"] = type_counts_final.get("t0", 0) + internal_count
+                    else:
                         type_counts_final[tile_type] = type_counts_final.get(tile_type, 0) + 1
+                        if tile_type not in type_positions_final:
+                            type_positions_final[tile_type] = []
+                        type_positions_final[tile_type].append((i, pos))
 
         # Check if any type still has remainder
         still_broken = [(t, c % 3) for t, c in type_counts_final.items() if c % 3 != 0]
 
-        if still_broken:
-            # Last resort: reassign tiles between types to balance
-            # Find types with excess (remainder 1 or 2) and types that could absorb
-            # Change some tiles from one type to another
-            for broken_type, remainder in still_broken:
-                # Find a type with opposite remainder that can balance
-                for other_type, other_count in type_counts_final.items():
-                    if other_type == broken_type:
-                        continue
-                    other_remainder = other_count % 3
-                    # If changing tiles can help both
-                    # e.g., broken has remainder 1, other has remainder 2
-                    # -> move 1 tile from broken to other: broken-1 (rem 0), other+1 (rem 0)
-                    if (remainder == 1 and other_remainder == 2) or \
-                       (remainder == 2 and other_remainder == 1):
-                        # Find a tile of broken_type and change it to other_type
-                        tiles_changed = 0
-                        tiles_to_change = 1 if remainder == 1 else 2
+        # Keep fixing until all types are divisible by 3 or no more fixes possible
+        max_fix_iterations = 10
+        fix_iteration = 0
 
-                        for i in range(num_layers):
-                            if tiles_changed >= tiles_to_change:
-                                break
-                            layer_key = f"layer_{i}"
-                            tiles = level.get(layer_key, {}).get("tiles", {})
-                            for pos, tile_data in tiles.items():
-                                if tiles_changed >= tiles_to_change:
-                                    break
-                                if isinstance(tile_data, list) and len(tile_data) > 0:
-                                    if tile_data[0] == broken_type:
-                                        tile_data[0] = other_type
-                                        tiles_changed += 1
-                        break
+        while still_broken and fix_iteration < max_fix_iterations:
+            fix_iteration += 1
+            fixed_any = False
+
+            # Separate types by remainder
+            rem1_types = [t for t, r in still_broken if r == 1]
+            rem2_types = [t for t, r in still_broken if r == 2]
+
+            # Strategy 1: Pair rem1 with rem2 types
+            while rem1_types and rem2_types:
+                type_a = rem1_types.pop(0)  # remainder 1
+                type_b = rem2_types.pop(0)  # remainder 2
+
+                # Move 1 tile from type_a to type_b
+                # type_a: -1 → remainder 0
+                # type_b: +1 → remainder 0
+                if type_a in type_positions_final and type_positions_final[type_a]:
+                    layer_idx, pos = type_positions_final[type_a].pop()
+                    layer_key = f"layer_{layer_idx}"
+                    level[layer_key]["tiles"][pos][0] = type_b
+                    fixed_any = True
+
+            # Strategy 2: Handle 3 types with same remainder
+            # 3 types with rem 1: redistribute 1 tile each to balance
+            while len(rem1_types) >= 3:
+                type_a = rem1_types.pop(0)
+                type_b = rem1_types.pop(0)
+                type_c = rem1_types.pop(0)
+
+                # Move 1 from type_a to type_b → a:rem0, b:rem2
+                # Move 2 from type_b to type_c → b:rem0, c:rem0
+                if type_a in type_positions_final and type_positions_final[type_a]:
+                    layer_idx, pos = type_positions_final[type_a].pop()
+                    layer_key = f"layer_{layer_idx}"
+                    level[layer_key]["tiles"][pos][0] = type_b
+                    fixed_any = True
+
+                if type_b in type_positions_final and len(type_positions_final.get(type_b, [])) >= 2:
+                    for _ in range(2):
+                        layer_idx, pos = type_positions_final[type_b].pop()
+                        layer_key = f"layer_{layer_idx}"
+                        level[layer_key]["tiles"][pos][0] = type_c
+                    fixed_any = True
+
+            # 3 types with rem 2: redistribute 2 tiles each to balance
+            while len(rem2_types) >= 3:
+                type_a = rem2_types.pop(0)
+                type_b = rem2_types.pop(0)
+                type_c = rem2_types.pop(0)
+
+                # Move 2 from type_a to type_b → a:rem0, b:rem1
+                # Move 1 from type_b to type_c → b:rem0, c:rem0
+                if type_a in type_positions_final and len(type_positions_final.get(type_a, [])) >= 2:
+                    for _ in range(2):
+                        layer_idx, pos = type_positions_final[type_a].pop()
+                        layer_key = f"layer_{layer_idx}"
+                        level[layer_key]["tiles"][pos][0] = type_b
+                    fixed_any = True
+
+                if type_b in type_positions_final and type_positions_final[type_b]:
+                    layer_idx, pos = type_positions_final[type_b].pop()
+                    layer_key = f"layer_{layer_idx}"
+                    level[layer_key]["tiles"][pos][0] = type_c
+                    fixed_any = True
+
+            if not fixed_any:
+                break
+
+            # Recount for next iteration
+            type_counts_final = {}
+            type_positions_final = {}
+            for i in range(num_layers):
+                layer_key = f"layer_{i}"
+                tiles = level.get(layer_key, {}).get("tiles", {})
+                for pos, tile_data in tiles.items():
+                    if isinstance(tile_data, list) and len(tile_data) > 0:
+                        tile_type = tile_data[0]
+                        if tile_type in self.GOAL_TYPES or tile_type.startswith("stack_"):
+                            if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
+                                internal_count = int(tile_data[2][0]) if tile_data[2][0] else 0
+                                type_counts_final["t0"] = type_counts_final.get("t0", 0) + internal_count
+                        else:
+                            type_counts_final[tile_type] = type_counts_final.get(tile_type, 0) + 1
+                            if tile_type not in type_positions_final:
+                                type_positions_final[tile_type] = []
+                            type_positions_final[tile_type].append((i, pos))
+
+            still_broken = [(t, c % 3) for t, c in type_counts_final.items() if c % 3 != 0]
 
         return level
 

@@ -183,13 +183,34 @@ export function AutoPlayPanel({ className, embedded = false }: AutoPlayPanelProp
         {/* Error State */}
         {mutation.isError && (
           <div className="text-center py-8">
-            <span className="text-3xl">⚠️</span>
-            <p className="mt-2 text-red-400">
-              {mutation.error instanceof Error ? mutation.error.message : '분석 실패'}
-            </p>
-            <Button variant="secondary" size="sm" onClick={handleAnalyze} className="mt-3">
-              다시 시도
-            </Button>
+            {/* Check if it's a timeout error */}
+            {(mutation.error instanceof Error &&
+              (mutation.error.message.includes('timeout') ||
+               mutation.error.message.includes('ECONNABORTED') ||
+               mutation.error.message.includes('Network Error'))) ? (
+              <>
+                <span className="text-3xl">⏱️</span>
+                <p className="mt-2 text-yellow-400">
+                  시뮬레이션 시간이 오래 걸리고 있습니다
+                </p>
+                <p className="mt-1 text-sm text-gray-400">
+                  반복 횟수를 줄이거나 다시 시도해 주세요
+                </p>
+                <Button variant="secondary" size="sm" onClick={handleAnalyze} className="mt-3">
+                  다시 시도
+                </Button>
+              </>
+            ) : (
+              <>
+                <span className="text-3xl">⚠️</span>
+                <p className="mt-2 text-red-400">
+                  {mutation.error instanceof Error ? mutation.error.message : '분석 실패'}
+                </p>
+                <Button variant="secondary" size="sm" onClick={handleAnalyze} className="mt-3">
+                  다시 시도
+                </Button>
+              </>
+            )}
           </div>
         )}
 

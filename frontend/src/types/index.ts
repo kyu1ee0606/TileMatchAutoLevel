@@ -127,7 +127,17 @@ export const TILE_TYPES: Record<string, { name: string; color: string; image?: s
   t14: { name: '기본 타일 14', color: '#22d3ee', image: '/tiles/skin0/s0_t14.png' },
   t15: { name: '기본 타일 15', color: '#a78bfa', image: '/tiles/skin0/s0_t15.png' },
   craft_s: { name: 'Craft Goal', color: '#10b981', image: '/tiles/special/tile_craft.png' },
-  stack_s: { name: 'Stack Goal', color: '#8b5cf6', image: '/tiles/special/stack_s.png' },
+  craft_e: { name: 'Craft East', color: '#10b981', image: '/tiles/special/tile_craft.png' },
+  craft_w: { name: 'Craft West', color: '#10b981', image: '/tiles/special/tile_craft.png' },
+  craft_n: { name: 'Craft North', color: '#10b981', image: '/tiles/special/tile_craft.png' },
+  stack_s: { name: 'Stack South', color: '#8b5cf6', image: '/tiles/special/stack_s.png' },
+  stack_e: { name: 'Stack East', color: '#8b5cf6', image: '/tiles/special/stack_e.png' },
+  stack_w: { name: 'Stack West', color: '#8b5cf6', image: '/tiles/special/stack_w.png' },
+  stack_n: { name: 'Stack North', color: '#8b5cf6', image: '/tiles/special/stack_n.png' },
+  stack_ne: { name: 'Stack NorthEast', color: '#8b5cf6', image: '/tiles/special/stack_ne.png' },
+  stack_nw: { name: 'Stack NorthWest', color: '#8b5cf6', image: '/tiles/special/stack_nw.png' },
+  stack_se: { name: 'Stack SouthEast', color: '#8b5cf6', image: '/tiles/special/stack_se.png' },
+  stack_sw: { name: 'Stack SouthWest', color: '#8b5cf6', image: '/tiles/special/stack_sw.png' },
 };
 
 // Special tile images for attributes and obstacles
@@ -160,8 +170,16 @@ export const SPECIAL_IMAGES: Record<string, string> = {
   stack_w: '/tiles/special/stack_w.png',
   stack_s: '/tiles/special/stack_s.png',
   stack_n: '/tiles/special/stack_n.png',
-  // Craft gimmick icon
+  stack_ne: '/tiles/special/stack_ne.png',
+  stack_nw: '/tiles/special/stack_nw.png',
+  stack_se: '/tiles/special/stack_se.png',
+  stack_sw: '/tiles/special/stack_sw.png',
+  // Craft gimmick icons (all directions use same image)
   craft: '/tiles/special/tile_craft.png',
+  craft_s: '/tiles/special/tile_craft.png',
+  craft_e: '/tiles/special/tile_craft.png',
+  craft_w: '/tiles/special/tile_craft.png',
+  craft_n: '/tiles/special/tile_craft.png',
 };
 
 // Gimmick effect definitions for visualization

@@ -24,6 +24,7 @@ interface BotViewerProps {
   initialChainStates?: Record<string, boolean>;
   initialGrassStates?: Record<string, number>;
   initialLinkStates?: Record<string, string[]>;
+  initialTeleportStates?: Record<string, string>;
   convertedTiles?: Record<string, Record<string, unknown>>; // Converted tiles from API (t0 -> actual types)
   className?: string;
 }
@@ -39,6 +40,7 @@ export function BotViewer({
   initialChainStates = {},
   initialGrassStates = {},
   initialLinkStates = {},
+  initialTeleportStates = {},
   convertedTiles,
   className
 }: BotViewerProps) {
@@ -176,6 +178,7 @@ export function BotViewer({
         initialChainStates={initialChainStates}
         initialGrassStates={initialGrassStates}
         initialLinkStates={initialLinkStates}
+        initialTeleportStates={initialTeleportStates}
         convertedTiles={convertedTiles}
       />
 

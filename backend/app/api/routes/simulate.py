@@ -267,11 +267,16 @@ class VisualSimulator:
 
             # Capture exposed curtain positions BEFORE applying the move
             # Curtains that become exposed by this move should NOT toggle yet
+            # OPTIMIZED: Use curtain_tiles dict instead of iterating all tiles
             exposed_curtains_before_move = set()
-            for layer_idx, layer_tiles in state.tiles.items():
-                for pos, tile in layer_tiles.items():
-                    if tile.effect_type == TileEffectType.CURTAIN and not tile.picked:
-                        if not self._core._is_blocked_by_upper(state, tile):
+            for curtain_key in state.curtain_tiles.keys():
+                parts = curtain_key.split('_')
+                if len(parts) >= 3:
+                    layer_idx = int(parts[0])
+                    pos = f"{parts[1]}_{parts[2]}"
+                    layer = state.tiles.get(layer_idx, {})
+                    if pos in layer and not layer[pos].picked:
+                        if not self._core._is_blocked_by_upper(state, layer[pos]):
                             exposed_curtains_before_move.add((layer_idx, pos))
 
             # Apply move (tile gets picked and added to dock)
@@ -338,20 +343,28 @@ class VisualSimulator:
                         frog_positions_after.append(f"{layer_idx}_{pos}")
 
             # Get bomb states after move (layerIdx_x_y -> remaining count)
+            # OPTIMIZED: Use bomb_tiles tracking dict
             bomb_states_after: Dict[str, int] = {}
-            for layer_idx, layer in state.tiles.items():
-                for pos, tile in layer.items():
-                    if tile.effect_type == TileEffectType.BOMB and not tile.picked:
-                        remaining = tile.effect_data.get("remaining", 0)
-                        bomb_states_after[f"{layer_idx}_{pos}"] = remaining
+            for bomb_key, remaining in state.bomb_tiles.items():
+                parts = bomb_key.split('_')
+                if len(parts) >= 3:
+                    layer_idx = int(parts[0])
+                    pos = f"{parts[1]}_{parts[2]}"
+                    layer = state.tiles.get(layer_idx, {})
+                    if pos in layer and not layer[pos].picked:
+                        bomb_states_after[bomb_key] = remaining
 
             # Get curtain states after move (layerIdx_x_y -> is_open)
+            # OPTIMIZED: Use curtain_tiles tracking dict
             curtain_states_after: Dict[str, bool] = {}
-            for layer_idx, layer in state.tiles.items():
-                for pos, tile in layer.items():
-                    if tile.effect_type == TileEffectType.CURTAIN and not tile.picked:
-                        is_open = tile.effect_data.get("is_open", True)
-                        curtain_states_after[f"{layer_idx}_{pos}"] = is_open
+            for curtain_key, is_open in state.curtain_tiles.items():
+                parts = curtain_key.split('_')
+                if len(parts) >= 3:
+                    layer_idx = int(parts[0])
+                    pos = f"{parts[1]}_{parts[2]}"
+                    layer = state.tiles.get(layer_idx, {})
+                    if pos in layer and not layer[pos].picked:
+                        curtain_states_after[curtain_key] = is_open
 
             # Get ice states after move (layerIdx_x_y -> remaining layers 1-3)
             # Note: bot_simulator uses "remaining" field for ice (initialized to 3)
@@ -389,10 +402,21 @@ class VisualSimulator:
                         linked_positions = tile.effect_data.get("linked_positions", [])
                         link_states_after[f"{layer_idx}_{pos}"] = linked_positions
 
+            # Get teleport states after move (position -> tile_type mapping for shuffle visualization)
+            teleport_states_after: Dict[str, str] = {}
+            for layer_idx, layer in state.tiles.items():
+                for pos, tile in layer.items():
+                    if tile.effect_type == TileEffectType.TELEPORT and not tile.picked:
+                        teleport_states_after[f"{layer_idx}_{pos}"] = tile.tile_type
+            teleport_click_count_after = state.teleport_click_count
+
             # Convert linked_tiles to linked_positions format (layerIdx_x_y)
             linked_positions_formatted = [
                 f"{layer_idx}_{pos}" for layer_idx, pos in selected_move.linked_tiles
             ]
+
+            # Get tile type overrides (permanent type changes from teleport shuffle)
+            tile_type_overrides = dict(state.tile_type_overrides)
 
             # Record move
             moves.append(VisualBotMove(
@@ -414,6 +438,9 @@ class VisualSimulator:
                 chain_states_after=chain_states_after,
                 grass_states_after=grass_states_after,
                 link_states_after=link_states_after,
+                teleport_states_after=teleport_states_after,
+                teleport_click_count_after=teleport_click_count_after,
+                tile_type_overrides=tile_type_overrides,
             ))
 
         # Check clear status - must clear all goals AND all tiles
@@ -533,6 +560,7 @@ def extract_initial_state(
     initial_bomb_states: Dict[str, int] = {}
     initial_curtain_states: Dict[str, bool] = {}
     initial_link_states: Dict[str, List[str]] = {}
+    initial_teleport_states: Dict[str, str] = {}
 
     # Use simulator to get proper t0 assignments for stacked tiles too (fallback only)
     simulator = VisualSimulator()
@@ -691,6 +719,11 @@ def extract_initial_state(
                         if linked_pos:
                             initial_link_states[f"{i}_{pos}"] = [f"{i}_{linked_pos}"]
 
+                    # Teleport gimmick (attribute is "teleport")
+                    # Store position -> tile_type mapping for shuffle visualization
+                    if attribute == "teleport":
+                        initial_teleport_states[f"{i}_{pos}"] = tile_type
+
     # Use goalCount from level JSON if available, otherwise use extracted goals
     goal_count = level_json.get("goalCount", {})
     if goal_count:
@@ -707,6 +740,7 @@ def extract_initial_state(
         initial_bomb_states=initial_bomb_states,
         initial_curtain_states=initial_curtain_states,
         initial_link_states=initial_link_states,
+        initial_teleport_states=initial_teleport_states,
     )
 
 
@@ -1119,15 +1153,43 @@ async def list_local_levels():
                     level_id = file_path.stem
                     metadata = data.get("metadata", {})
 
+                    # Format datetime for display
+                    created_at = metadata.get("created_at", "")
+                    saved_at = metadata.get("saved_at", "")
+                    created_at_display = ""
+                    saved_at_display = ""
+
+                    if created_at:
+                        try:
+                            from datetime import datetime as dt
+                            parsed = dt.fromisoformat(created_at.replace("Z", "+00:00"))
+                            created_at_display = parsed.strftime("%Y-%m-%d %H:%M:%S")
+                        except:
+                            created_at_display = created_at[:19].replace("T", " ")
+
+                    if saved_at:
+                        try:
+                            from datetime import datetime as dt
+                            parsed = dt.fromisoformat(saved_at.replace("Z", "+00:00"))
+                            saved_at_display = parsed.strftime("%Y-%m-%d %H:%M:%S")
+                        except:
+                            saved_at_display = saved_at[:19].replace("T", " ")
+
                     levels.append({
                         "id": level_id,
                         "name": metadata.get("name", level_id),
                         "description": metadata.get("description", ""),
                         "tags": metadata.get("tags", []),
                         "difficulty": metadata.get("difficulty", "custom"),
-                        "created_at": metadata.get("created_at", ""),
+                        "created_at": created_at,
+                        "created_at_display": created_at_display,
+                        "saved_at": saved_at,
+                        "saved_at_display": saved_at_display,
                         "source": metadata.get("source", "local"),
                         "validation_status": metadata.get("validation_status", "unknown"),
+                        "use_tile_count": metadata.get("use_tile_count", 0),
+                        "active_layers": metadata.get("active_layers", 0),
+                        "total_layers": metadata.get("total_layers", 0),
                     })
             except Exception as e:
                 # Skip invalid files
@@ -1178,17 +1240,61 @@ async def get_local_level(level_id: str):
 async def save_local_level(data: Dict[str, Any]):
     """Save a level to local storage."""
     try:
-        # Extract level ID and metadata
+        now = datetime.now()
+
+        # Auto-generate level_id if not provided
         level_id = data.get("level_id")
         if not level_id:
-            raise HTTPException(status_code=400, detail="level_id is required")
+            # Generate unique ID with timestamp: level_YYYYMMDD_HHMMSS_XXX
+            timestamp = now.strftime("%Y%m%d_%H%M%S")
+            # Add random suffix for uniqueness
+            import random
+            suffix = f"{random.randint(100, 999)}"
+            level_id = f"level_{timestamp}_{suffix}"
 
         # Add metadata
         if "metadata" not in data:
             data["metadata"] = {}
 
-        data["metadata"]["saved_at"] = datetime.now().isoformat()
+        # Set timestamps
+        data["metadata"]["saved_at"] = now.isoformat()
+        data["metadata"]["created_at"] = data["metadata"].get("created_at", now.isoformat())
         data["metadata"]["source"] = data.get("metadata", {}).get("source", "local")
+
+        # Auto-generate descriptive name if not provided or if it's a generic name
+        current_name = data["metadata"].get("name", "")
+        is_generic_name = (
+            not current_name or
+            current_name.startswith("Generated Level") or
+            current_name.startswith("generated_")
+        )
+
+        if is_generic_name:
+            # Extract level info for naming
+            level_data = data.get("level_data", {})
+            difficulty = data["metadata"].get("difficulty", "")
+            # Normalize difficulty to uppercase
+            if difficulty:
+                difficulty = difficulty.upper()
+            use_tile_count = level_data.get("useTileCount", 5)
+
+            # Count only layers that have actual tiles
+            total_layers = level_data.get("layer", 0)
+            active_layers = 0
+            for i in range(total_layers):
+                layer_tiles = level_data.get(f"layer_{i}", {}).get("tiles", {})
+                if layer_tiles:
+                    active_layers += 1
+
+            time_str = now.strftime("%m/%d %H:%M:%S")
+
+            # Create concise name: 타일종류 x 실제레이어수
+            data["metadata"]["name"] = f"{use_tile_count}종류 x {active_layers}L ({difficulty}) - {time_str}"
+
+            # Store level info in metadata for frontend use
+            data["metadata"]["use_tile_count"] = use_tile_count
+            data["metadata"]["active_layers"] = active_layers
+            data["metadata"]["total_layers"] = total_layers
 
         # Ensure level_data exists
         if "level_data" not in data:
@@ -1202,8 +1308,11 @@ async def save_local_level(data: Dict[str, Any]):
         return {
             "success": True,
             "level_id": level_id,
+            "name": data["metadata"].get("name", level_id),
+            "created_at": data["metadata"].get("created_at", ""),
+            "saved_at": data["metadata"].get("saved_at", ""),
             "file_path": str(file_path),
-            "message": f"Level {level_id} saved successfully"
+            "message": f"Level saved: {data['metadata'].get('name', level_id)}"
         }
 
     except HTTPException:

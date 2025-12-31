@@ -140,6 +140,10 @@ class GameState:
     frog_positions: Set[str] = field(default_factory=set)
     # Bomb tracking - key is layerIdx_x_y format to handle bombs in different layers
     bomb_tiles: Dict[str, int] = field(default_factory=dict)  # layerIdx_x_y -> remaining
+    # Curtain tracking - key is layerIdx_x_y format for faster lookup
+    curtain_tiles: Dict[str, bool] = field(default_factory=dict)  # layerIdx_x_y -> is_open
+    # Ice tile tracking - key is layerIdx_x_y format for faster lookup
+    ice_tiles: Dict[str, int] = field(default_factory=dict)  # layerIdx_x_y -> remaining_layers
     # Stack/Craft tile tracking - key: full_key (layerIdx_x_y_stackIdx) -> TileState
     stacked_tiles: Dict[str, TileState] = field(default_factory=dict)
     # Craft boxes: position key -> list of stacked tile keys in order (bottom to top)
@@ -147,9 +151,13 @@ class GameState:
     # Teleport tracking
     teleport_click_count: int = 0  # Click counter for teleport (activates every 3 clicks)
     teleport_tiles: List[Tuple[int, str]] = field(default_factory=list)  # (layer_idx, pos) of teleport tiles
+    # Tile type overrides - tracks permanent type changes (e.g., from teleport shuffle when gimmick is removed)
+    tile_type_overrides: Dict[str, str] = field(default_factory=dict)  # layerIdx_x_y -> tile_type
     # Complete tile type counts (including hidden tiles in stack/craft)
     # This allows optimal bot to know ALL tile information for perfect play
     all_tile_type_counts: Dict[str, int] = field(default_factory=dict)  # tile_type -> total count
+    # Performance optimization: cached max layer index
+    _max_layer_idx: int = -1
 
 
 @dataclass
@@ -240,8 +248,19 @@ class BotSimulator:
     RANDOM_TILE_POOL = [f"t{i}" for i in range(1, 16)]
     # Default tile count for random distribution (matches sp_template default)
     DEFAULT_USE_TILE_COUNT = 6
+    # Maximum tile count - user can specify up to 15 tile types
+    # Note: More tile types = harder levels (with 7-slot dock)
+    MAX_USE_TILE_COUNT = 15
     # Goal types
     GOAL_TYPES = {"craft_s", "stack_s"}
+
+    # Precomputed blocking offsets for _is_blocked_by_upper (tuples for performance)
+    # Same parity: only check same position
+    BLOCKING_OFFSETS_SAME_PARITY = ((0, 0),)
+    # Different parity, upper layer bigger: check 4 positions
+    BLOCKING_OFFSETS_UPPER_BIGGER = ((0, 0), (1, 0), (0, 1), (1, 1))
+    # Different parity, upper layer smaller or equal: check 4 positions
+    BLOCKING_OFFSETS_UPPER_SMALLER = ((-1, -1), (0, -1), (-1, 0), (0, 0))
 
     # Effect type mapping from level JSON
     EFFECT_MAPPING = {
@@ -275,12 +294,16 @@ class BotSimulator:
         level_json: Dict[str, Any],
         profile: BotProfile,
         iterations: int = 100,
-        max_moves: int = 30,
+        max_moves: Optional[int] = None,
         seed: Optional[int] = None,
     ) -> BotSimulationResult:
         """Run simulation with a specific bot profile."""
         if seed is not None:
             self._rng.seed(seed)
+
+        # Use level's max_moves if not specified
+        if max_moves is None:
+            max_moves = level_json.get("max_moves", 30)
 
         results: List[GameState] = []
 
@@ -377,6 +400,9 @@ class BotSimulator:
         use_tile_count = level_json.get("useTileCount", self.DEFAULT_USE_TILE_COUNT)
         if use_tile_count <= 0:
             use_tile_count = self.DEFAULT_USE_TILE_COUNT
+        # CRITICAL: Cap use_tile_count to MAX_USE_TILE_COUNT for playable levels
+        # Even if level JSON specifies more types, limit to prevent impossible levels
+        use_tile_count = min(use_tile_count, self.MAX_USE_TILE_COUNT)
 
         # First pass: collect ALL t0 tiles AND count existing t1~t15 tiles
         # This includes:
@@ -512,6 +538,9 @@ class BotSimulator:
                             if effect_type == TileEffectType.ICE:
                                 # ICE tiles always start with remaining=3
                                 effect_data["remaining"] = 3
+                                # Track ice tiles for fast lookup
+                                ice_key = f"{layer_idx}_{pos}"
+                                state.ice_tiles[ice_key] = 3
                             elif effect_type == TileEffectType.CHAIN:
                                 effect_data["unlocked"] = False
                             elif effect_type == TileEffectType.GRASS:
@@ -564,6 +593,9 @@ class BotSimulator:
                                 else:
                                     # Fall back to parsing from attribute string
                                     effect_data["is_open"] = "open" in effect_str
+                                # Track curtain tiles for faster lookup
+                                curtain_key = f"{layer_idx}_{pos}"
+                                state.curtain_tiles[curtain_key] = effect_data["is_open"]
 
                     # Handle t0 random tile - use pre-computed assignment
                     actual_tile_type = tile_type
@@ -611,6 +643,9 @@ class BotSimulator:
         # Calculate complete tile type counts (including hidden tiles in stack/craft)
         # This allows optimal bot to have perfect information about all tiles
         self._calculate_all_tile_counts(state)
+
+        # Cache max layer for performance optimization
+        state._max_layer_idx = max(state.tiles.keys()) if state.tiles else -1
 
         return state
 
@@ -675,8 +710,26 @@ class BotSimulator:
         dist_rng = random.Random(rand_seed if rand_seed > 0 else 42)
 
         # Limit tile types to available pool
+        # CRITICAL FIX: When existing tiles are present, use only those tile types
+        # to avoid adding t5 when the level only has t1-t4
         use_tile_count = min(use_tile_count, len(self.RANDOM_TILE_POOL))
-        available_types = self.RANDOM_TILE_POOL[:use_tile_count]
+
+        if existing_tile_counts:
+            # Use only tile types that already exist in the level
+            available_types = sorted(
+                [t for t in existing_tile_counts.keys() if t.startswith('t') and t[1:].isdigit()],
+                key=lambda x: int(x[1:])
+            )
+            # If no valid types found, fallback to RANDOM_TILE_POOL
+            if not available_types:
+                # For new levels or levels with only t0, use use_tile_count - 1
+                # (since t0 is counted as one of the use_tile_count types)
+                actual_types = max(1, use_tile_count - 1)
+                available_types = self.RANDOM_TILE_POOL[:actual_types]
+        else:
+            # No existing tiles - use use_tile_count - 1 types (excluding t0)
+            actual_types = max(1, use_tile_count - 1)
+            available_types = self.RANDOM_TILE_POOL[:actual_types]
 
         # Step 1: Calculate how many tiles each type NEEDS to become divisible by 3
         # existing % 3 = 0 -> need 0 or 3 or 6...
@@ -714,30 +767,271 @@ class BotSimulator:
 
             if complete_sets > 0:
                 # Distribute complete sets evenly
-                sets_per_type = complete_sets // use_tile_count
-                extra_sets = complete_sets % use_tile_count
+                # CRITICAL FIX: Use len(available_types) instead of use_tile_count
+                num_types = len(available_types)
+                sets_per_type = complete_sets // num_types
+                extra_sets = complete_sets % num_types
 
                 for i, tile_type in enumerate(available_types):
                     sets_for_this_type = sets_per_type + (1 if i < extra_sets else 0)
                     assignments.extend([tile_type] * (sets_for_this_type * 3))
 
             # Step 4: Handle final remainder (0, 1, or 2 tiles)
-            # These are problematic - they break the 3-divisibility
-            # Strategy: Add to types that are already divisible by 3, so we'll need 2 or 1 more later
-            # But since this is the last distribution, we need to be smart
+            # CRITICAL FIX: Remainder tiles break 3-divisibility
+            # Solution: "Borrow" tiles from existing assignments to form complete sets of 3
             if final_remainder > 0:
-                # Find types where adding these won't break existing balance
-                # Or add to types that need complementary amounts
-                # For now, add to first type(s) - the level generator should ensure total is correct
-                for i in range(final_remainder):
-                    assignments.append(available_types[i % use_tile_count])
+                # Count current assignments per type
+                assign_counts: Dict[str, int] = {}
+                for t in assignments:
+                    assign_counts[t] = assign_counts.get(t, 0) + 1
+
+                # Find a type that has at least 3 tiles (one complete set) to borrow from
+                borrow_from_type = None
+                borrow_to_type = None
+                tiles_to_borrow = 3 - final_remainder  # If remainder=1, borrow 2; if remainder=2, borrow 1
+
+                for tile_type in available_types:
+                    current = assign_counts.get(tile_type, 0)
+                    if current >= tiles_to_borrow:
+                        borrow_from_type = tile_type
+                        break
+
+                # Find a different type to receive the complete set
+                for tile_type in available_types:
+                    if tile_type != borrow_from_type:
+                        borrow_to_type = tile_type
+                        break
+
+                if borrow_from_type and borrow_to_type:
+                    # Remove tiles_to_borrow from borrow_from_type
+                    removed = 0
+                    new_assignments = []
+                    for t in assignments:
+                        if t == borrow_from_type and removed < tiles_to_borrow:
+                            removed += 1
+                            continue  # Skip this tile (borrow it)
+                        new_assignments.append(t)
+                    assignments = new_assignments
+
+                    # Add a complete set of 3 to borrow_to_type
+                    # (final_remainder + tiles_to_borrow = 3)
+                    assignments.extend([borrow_to_type] * 3)
+                else:
+                    # Fallback: if we can't borrow, just skip the remainder tiles
+                    # This means some t0 tiles won't be assigned, but types stay divisible by 3
+                    if os.environ.get('DEBUG_DISTRIBUTE'):
+                        print(f"[WARN] Cannot redistribute remainder={final_remainder}, skipping")
+
+        # Step 5: Final verification and fix - ensure ALL types end up divisible by 3
+        # This is a critical step that runs iteratively until all types are fixed or we can't improve
+        max_iterations = 10  # Prevent infinite loops
+        for iteration in range(max_iterations):
+            # Calculate final counts (existing + assignments)
+            assign_counts: Dict[str, int] = {}
+            for t in assignments:
+                assign_counts[t] = assign_counts.get(t, 0) + 1
+
+            final_counts: Dict[str, int] = {}
+            for tile_type in available_types:
+                existing = existing_tile_counts.get(tile_type, 0)
+                assigned = assign_counts.get(tile_type, 0)
+                final_counts[tile_type] = existing + assigned
+
+            # Check for types with non-divisible counts
+            broken_types = [(t, c % 3) for t, c in final_counts.items() if c % 3 != 0]
+
+            if not broken_types:
+                break  # All types are divisible by 3, we're done
+
+            # Strategy 1: Pair types with remainder 1 and 2 (move 1 tile between them)
+            rem1_types = [t for t, r in broken_types if r == 1]
+            rem2_types = [t for t, r in broken_types if r == 2]
+
+            made_change = False
+
+            # Move 1 tile from rem1 type to rem2 type
+            while rem1_types and rem2_types:
+                from_type = rem1_types.pop()
+                to_type = rem2_types.pop()
+
+                # Find one instance of from_type in assignments and change to to_type
+                for i, t in enumerate(assignments):
+                    if t == from_type:
+                        assignments[i] = to_type
+                        made_change = True
+                        break
+
+            if made_change:
+                continue  # Recalculate and check again
+
+            # Strategy 2: For unpaired types, use unused types to absorb remainder
+            # Find types not currently used
+            used_types = set(assign_counts.keys()) | set(existing_tile_counts.keys())
+            unused_types = [t for t in available_types if t not in used_types]
+
+            # Handle remaining rem1 types (need 2 more tiles)
+            for rem_type in rem1_types[:]:
+                if unused_types:
+                    # Use an unused type: move 1 tile from rem_type to unused_type (creates 1)
+                    # Then add 3 more of unused_type to make it divisible
+                    # This reduces rem_type by 1 (now remainder 0) and adds 4 to unused (4 % 3 = 1 still bad)
+                    # Better: redistribute 3 tiles from rem_type to unused_type
+                    # rem_type: loses 3, remainder goes 1-3 = -2 = 1 (mod 3)... still bad
+                    # Actually, we need to think about this differently
+
+                    # For rem_type with remainder 1: we need to add 2 or remove 1
+                    # If we remove 1 tile and it goes to unused_type which gets 1, that's bad (1 % 3 = 1)
+                    # If we remove 4 tiles and give 4 to unused... unused gets 4 (4 % 3 = 1) still bad
+
+                    # The key insight: any transfer between types preserves the sum of remainders (mod 3)
+                    # If we have only rem1 types (total remainder = len(rem1) mod 3),
+                    # we can't fix it by redistribution alone
+
+                    # Solution: add tiles to an unused type to absorb the total remainder
+                    # If we have 1 type with remainder 1, we need to add 2 to some unused type
+                    # and transfer 3 from the rem1 type (net: rem1-3=-2%3=1, bad!)
+
+                    # Actually, the REAL solution is to adjust the total assignments:
+                    # If sum of all remainders is X, we need X more tiles to make everything divisible
+                    pass
+
+            # Strategy 3: Last resort - drop some tiles to make remaining divisible
+            # Calculate total remainder
+            total_rem = sum(r for _, r in broken_types) % 3
+
+            if total_rem == 0:
+                # Sum of remainders is 0, should be fixable by redistribution
+                # But if we're here, pairing didn't work, which means odd number of same remainder types
+                # E.g., 3 types with remainder 1: can pair 2, but 1 left over
+                # Move 2 tiles from leftover rem1 to make it remainder 2, then pair with new rem2?
+                # Actually, move 2 tiles from rem1_type to another rem1_type:
+                # from: -2 = 1 (mod 3) -> 1-2 = -1 = 2 (mod 3)
+                # to: +2 -> 1+2 = 0 (mod 3)
+                # So moving 2 tiles from one rem1 to another rem1 fixes the receiver and makes sender rem2
+                if len(rem1_types) >= 2:
+                    from_type = rem1_types[0]
+                    to_type = rem1_types[1]
+                    moved = 0
+                    for i, t in enumerate(assignments):
+                        if t == from_type and moved < 2:
+                            assignments[i] = to_type
+                            moved += 1
+                    if moved == 2:
+                        made_change = True
+                        continue
+
+                if len(rem2_types) >= 2:
+                    # Move 1 tile from one rem2 to another
+                    from_type = rem2_types[0]
+                    to_type = rem2_types[1]
+                    for i, t in enumerate(assignments):
+                        if t == from_type:
+                            assignments[i] = to_type
+                            made_change = True
+                            break
+                    if made_change:
+                        continue
+
+                # Special case: 1 rem2 type and no rem1 types
+                # Move 1 tile from rem2 to a divisible type, creating 2 rem1 types
+                if len(rem2_types) == 1 and len(rem1_types) == 0:
+                    from_type = rem2_types[0]
+                    # Find a divisible type (rem 0) to receive
+                    for tile_type in available_types:
+                        if tile_type == from_type:
+                            continue
+                        final_count = final_counts.get(tile_type, 0)
+                        if final_count % 3 == 0 and final_count > 0:
+                            # Move 1 tile from rem2 to this rem0 type
+                            for i, t in enumerate(assignments):
+                                if t == from_type:
+                                    assignments[i] = tile_type
+                                    made_change = True
+                                    break
+                            break
+                    if made_change:
+                        continue
+            else:
+                # Total remainder is 1 or 2, meaning we have an impossible distribution
+                # CRITICAL: Don't drop tiles! Instead, redistribute to minimize damage
+                if len(rem1_types) >= 2:
+                    # Move 2 from one rem1 to another (fixes one, creates rem2 on other)
+                    from_type = rem1_types[0]
+                    to_type = rem1_types[1]
+                    moved = 0
+                    for i, t in enumerate(assignments):
+                        if t == from_type and moved < 2:
+                            assignments[i] = to_type
+                            moved += 1
+                    if moved == 2:
+                        made_change = True
+                        continue
+                elif len(rem2_types) >= 2:
+                    # Move 1 from one rem2 to another (fixes one, creates rem1 on other)
+                    from_type = rem2_types[0]
+                    to_type = rem2_types[1]
+                    for i, t in enumerate(assignments):
+                        if t == from_type:
+                            assignments[i] = to_type
+                            made_change = True
+                            break
+                    if made_change:
+                        continue
+                elif len(rem2_types) == 1 and len(rem1_types) == 0:
+                    # Special case: 1 rem2 type and no rem1 types
+                    # Move 1 tile from rem2 to a divisible type, creating 2 rem1 types
+                    from_type = rem2_types[0]
+                    for tile_type in available_types:
+                        if tile_type == from_type:
+                            continue
+                        final_count = final_counts.get(tile_type, 0)
+                        if final_count % 3 == 0 and final_count > 0:
+                            for i, t in enumerate(assignments):
+                                if t == from_type:
+                                    assignments[i] = tile_type
+                                    made_change = True
+                                    break
+                            break
+                    if made_change:
+                        continue
+                elif len(rem1_types) == 1 and len(rem2_types) == 0:
+                    # Special case: 1 rem1 type and no rem2 types
+                    # Move 2 tiles from rem1 to a divisible type, creating 2 rem2 types
+                    from_type = rem1_types[0]
+                    for tile_type in available_types:
+                        if tile_type == from_type:
+                            continue
+                        final_count = final_counts.get(tile_type, 0)
+                        if final_count % 3 == 0 and final_count > 0:
+                            moved = 0
+                            for i, t in enumerate(assignments):
+                                if t == from_type and moved < 2:
+                                    assignments[i] = tile_type
+                                    moved += 1
+                            if moved == 2:
+                                made_change = True
+                            break
+                    if made_change:
+                        continue
+
+                # If we still can't fix, just accept the imperfect distribution
+                # At least all tiles are assigned, which is better than dropping
+
+            if not made_change:
+                break  # Can't improve further
 
         # DEBUG: Show assignment counts before shuffle
         if os.environ.get('DEBUG_DISTRIBUTE'):
             assign_counts = {}
             for t in assignments:
                 assign_counts[t] = assign_counts.get(t, 0) + 1
-            print(f"[DEBUG] Assignments (count={len(assignments)}): {assign_counts}")
+            final_check = {}
+            for tile_type in available_types:
+                existing = existing_tile_counts.get(tile_type, 0)
+                assigned = assign_counts.get(tile_type, 0)
+                total = existing + assigned
+                final_check[tile_type] = f"{existing}+{assigned}={total}" + ("✓" if total % 3 == 0 else "✗")
+            print(f"[DEBUG] Final distribution: {final_check}")
 
         # Shuffle assignments for random placement across board
         dist_rng.shuffle(assignments)
@@ -1136,11 +1430,16 @@ class BotSimulator:
 
                 # Capture exposed curtain positions BEFORE applying the move
                 # Curtains that become exposed by this move should NOT toggle yet
+                # OPTIMIZED: Use curtain_tiles dict instead of iterating all tiles
                 exposed_curtains_before_move = set()
-                for layer_idx, layer_tiles in state.tiles.items():
-                    for pos, tile in layer_tiles.items():
-                        if tile.effect_type == TileEffectType.CURTAIN and not tile.picked:
-                            if not self._is_blocked_by_upper(state, tile):
+                for curtain_key in state.curtain_tiles.keys():
+                    parts = curtain_key.split('_')
+                    if len(parts) >= 3:
+                        layer_idx = int(parts[0])
+                        pos = f"{parts[1]}_{parts[2]}"
+                        layer = state.tiles.get(layer_idx, {})
+                        if pos in layer and not layer[pos].picked:
+                            if not self._is_blocked_by_upper(state, layer[pos]):
                                 exposed_curtains_before_move.add((layer_idx, pos))
 
                 self._apply_move(state, selected_move)
@@ -1460,7 +1759,16 @@ class BotSimulator:
         if not state.tiles:
             return False
 
-        max_layer = max(state.tiles.keys())
+        # Use cached max_layer for performance (avoid max() on each call)
+        max_layer = state._max_layer_idx
+        if max_layer < 0:
+            max_layer = max(state.tiles.keys())
+            state._max_layer_idx = max_layer
+
+        # Early exit if tile is on top layer
+        if tile.layer_idx >= max_layer:
+            return False
+
         tile_parity = tile.layer_idx % 2
         cur_layer_col = state.layer_cols.get(tile.layer_idx, 7)
 
@@ -1474,19 +1782,18 @@ class BotSimulator:
 
             # Determine blocking positions based on parity and layer size
             # This matches sp_template TileGroup.FindAllUpperTiles exactly
+            # Using precomputed class constants for performance
             if tile_parity == upper_parity:
                 # Same parity (odd-odd or even-even): only check same position
-                blocking_offsets = [(0, 0)]
+                blocking_offsets = BotSimulator.BLOCKING_OFFSETS_SAME_PARITY
             else:
                 # Different parity: compare layer col sizes
                 if upper_layer_col > cur_layer_col:
                     # Upper layer is bigger (has more columns)
-                    # Check: (0,0), (+1,0), (0,+1), (+1,+1)
-                    blocking_offsets = [(0, 0), (1, 0), (0, 1), (1, 1)]
+                    blocking_offsets = BotSimulator.BLOCKING_OFFSETS_UPPER_BIGGER
                 else:
                     # Upper layer is smaller or same size
-                    # Check: (-1,-1), (0,-1), (-1,0), (0,0)
-                    blocking_offsets = [(-1, -1), (0, -1), (-1, 0), (0, 0)]
+                    blocking_offsets = BotSimulator.BLOCKING_OFFSETS_UPPER_SMALLER
 
             for dx, dy in blocking_offsets:
                 bx = tile.x_idx + dx
@@ -1506,12 +1813,19 @@ class BotSimulator:
         # IMPORTANT: Collect unblocked ice tiles BEFORE marking tile as picked
         # Only these ice tiles should have their count decreased
         # Ice tiles that become unblocked AFTER this pick should NOT be melted this turn
+        # Performance optimization: use ice_tiles tracking dict instead of iterating all tiles
         unblocked_ice_before_pick: set = set()
-        for l_idx, layer_tiles in state.tiles.items():
-            for pos_key, tile in layer_tiles.items():
-                if tile.picked:
-                    continue
-                if tile.effect_type == TileEffectType.ICE:
+        for ice_key, remaining in state.ice_tiles.items():
+            if remaining <= 0:
+                continue
+            # Parse layerIdx_x_y format
+            parts = ice_key.split('_')
+            if len(parts) >= 3:
+                l_idx = int(parts[0])
+                pos_key = f"{parts[1]}_{parts[2]}"
+                layer_tiles = state.tiles.get(l_idx, {})
+                tile = layer_tiles.get(pos_key)
+                if tile and not tile.picked:
                     if not self._is_blocked_by_upper(state, tile):
                         unblocked_ice_before_pick.add((l_idx, pos_key))
 
@@ -1681,6 +1995,9 @@ class BotSimulator:
                             remaining = tile.effect_data.get("remaining", 0)
                             if remaining > 0:
                                 tile.effect_data["remaining"] = remaining - 1
+                                # Update ice_tiles tracking
+                                ice_key = f"{l_idx}_{pos_key}"
+                                state.ice_tiles[ice_key] = remaining - 1
 
         # === Grass 처리: 인접 타일(4방향)에만 영향 ===
         # Adjacent positions (4-directional)
@@ -1863,15 +2180,18 @@ class BotSimulator:
         # Toggle curtains (sp_template deterministic logic)
         # Only curtains that were ALREADY exposed BEFORE this move should toggle
         # Curtains that become exposed by this move should NOT toggle yet
-        if exposed_curtains_before_move is None:
-            exposed_curtains_before_move = set()
-
-        for layer_idx, layer_tiles in state.tiles.items():
-            for pos, tile in layer_tiles.items():
-                if tile.effect_type == TileEffectType.CURTAIN and not tile.picked:
-                    # Only toggle if curtain was already exposed before this move
-                    if (layer_idx, pos) in exposed_curtains_before_move:
-                        tile.effect_data["is_open"] = not tile.effect_data.get("is_open", True)
+        # OPTIMIZED: Only iterate exposed curtains, not all tiles
+        if exposed_curtains_before_move:
+            for layer_idx, pos in exposed_curtains_before_move:
+                layer = state.tiles.get(layer_idx, {})
+                tile = layer.get(pos)
+                if tile and tile.effect_type == TileEffectType.CURTAIN and not tile.picked:
+                    new_state = not tile.effect_data.get("is_open", True)
+                    tile.effect_data["is_open"] = new_state
+                    # Update curtain_tiles tracking
+                    curtain_key = f"{layer_idx}_{pos}"
+                    if curtain_key in state.curtain_tiles:
+                        state.curtain_tiles[curtain_key] = new_state
 
         # Process teleport (sp_template TileGroup.AddClickCount logic)
         # Teleport activates every 3 clicks and swaps tile types in a circular manner
@@ -1885,7 +2205,8 @@ class BotSimulator:
         """Process teleport effect - activates every 3 moves.
 
         Based on sp_template TileGroup.cs AddClickCount():
-        - Every 3rd click, all teleport tiles swap their tile types
+        - Counter starts at 0, increments by 1 each move (0 → 1 → 2)
+        - When counter reaches 3, reset to 0 and shuffle teleport tile types
         - Uses Sattolo shuffle for circular permutation (no tile stays in place)
         - If fewer than 2 teleport tiles remain, teleport is deactivated
         """
@@ -1901,13 +2222,28 @@ class BotSimulator:
         # Update teleport_tiles list for tracking
         state.teleport_tiles = [(t.layer_idx, t.position_key) for t in active_teleport_tiles]
 
-        # If fewer than 2 teleport tiles, no swap needed
+        # If fewer than 2 teleport tiles, remove teleport gimmick completely
+        # Teleport requires at least 2 tiles to shuffle between
         if len(active_teleport_tiles) < 2:
+            # Save tile types to overrides before removing gimmick
+            # This preserves the shuffled tile type for frontend display
+            for tile in active_teleport_tiles:
+                tile_key = f"{tile.layer_idx}_{tile.position_key}"
+                state.tile_type_overrides[tile_key] = tile.tile_type
+                # Remove teleport effect
+                tile.effect_type = TileEffectType.NONE
+                tile.attribute = None
+            # Clear teleport tracking
+            state.teleport_tiles = []
+            state.teleport_click_count = 0
             return
 
-        # Check if this is a teleport activation (every 3rd click)
-        if state.teleport_click_count % 3 != 0:
+        # Check if this is a teleport activation (every 3rd click: count reaches 3)
+        if state.teleport_click_count < 3:
             return
+
+        # Reset counter to 0 before shuffle
+        state.teleport_click_count = 0
 
         # Perform Sattolo shuffle for circular permutation
         # This ensures every tile gets a new type (no fixed points)
@@ -2276,26 +2612,42 @@ class BotSimulator:
         state: GameState,
         profile: BotProfile,
     ) -> Move:
-        """Optimal bot strategy - perfect information with maximum lookahead.
+        """Optimal bot strategy - perfect information with smart lookahead.
 
-        Uses full lookahead depth and explores ALL possible moves,
-        not just top 5. This ensures optimal bot always finds the best path
-        if one exists.
+        Uses adaptive lookahead depth based on level complexity.
+        Explores top candidates rather than all moves for performance.
         """
         if len(sorted_moves) <= 1:
             return sorted_moves[0]
 
-        # OPTIMAL BOT: Explore ALL moves with MAXIMUM lookahead depth
-        # No shortcuts - exhaustive search for guaranteed optimal play
+        # Adaptive depth based on remaining tiles (performance optimization)
+        remaining_tiles = sum(
+            1 for layer in state.tiles.values()
+            for tile in layer.values()
+            if not tile.picked
+        )
+        # Reduce depth for large levels to maintain performance
+        if remaining_tiles > 150:
+            depth = 2
+        elif remaining_tiles > 100:
+            depth = 3
+        elif remaining_tiles > 50:
+            depth = 4
+        else:
+            depth = 5
+
+        # Limit candidates to top 10 moves (already sorted by score)
+        max_candidates = min(10, len(sorted_moves))
+
         best_move = sorted_moves[0]
         best_future_score = self._estimate_future_score_with_deadlock_detection(
-            state, best_move, 10
+            state, best_move, depth
         )
 
-        # Check ALL moves, not just top 5
-        for move in sorted_moves[1:]:
+        # Check top candidates only
+        for move in sorted_moves[1:max_candidates]:
             future_score = self._estimate_future_score_with_deadlock_detection(
-                state, move, 10
+                state, move, depth
             )
             if future_score > best_future_score:
                 best_move = move
@@ -3052,6 +3404,7 @@ class BotSimulator:
         """Estimate future position quality after making a move.
 
         Uses a combination of immediate effects and future potential analysis.
+        Performance optimized: precomputes pickable counts by type.
         """
         score = move.score  # Start with the move's current score
 
@@ -3064,13 +3417,24 @@ class BotSimulator:
         current_dock_count = sum(1 for t in state.dock_tiles if t.tile_type == dock_type)
         new_dock_count = current_dock_count + 1
 
-        # Get pickable tiles
-        accessible = self._get_accessible_tiles(state)
-        pickable = [t for t in accessible if self._can_pick_tile(state, t) and t.position_key != move.position]
+        # PERFORMANCE: Precompute pickable counts by type in single pass
+        pickable_by_type: Dict[str, int] = {}
+        for layer_tiles in state.tiles.values():
+            for pos, tile in layer_tiles.items():
+                if tile.picked or pos == move.position:
+                    continue
+                if tile.tile_type not in self.MATCHABLE_TYPES:
+                    continue
+                if not tile.can_pick():
+                    continue
+                if self._is_blocked_by_upper(state, tile):
+                    continue
+                pickable_by_type[tile.tile_type] = pickable_by_type.get(tile.tile_type, 0) + 1
+
+        same_type_pickable = pickable_by_type.get(dock_type, 0)
 
         if new_dock_count == 2:
             # Will have 2 in dock - check if 3rd is available
-            same_type_pickable = sum(1 for t in pickable if t.tile_type == dock_type)
             if same_type_pickable >= 1:
                 score += 30.0  # Excellent - can complete match next turn
             else:
@@ -3087,7 +3451,6 @@ class BotSimulator:
 
         elif new_dock_count == 1 and not move.will_match:
             # Starting a new type in dock - check if we can complete it
-            same_type_pickable = sum(1 for t in pickable if t.tile_type == dock_type)
             if same_type_pickable >= 2:
                 score += 10.0  # Good - 2 more available
             elif same_type_pickable == 1:
@@ -3121,14 +3484,18 @@ class BotSimulator:
         elif projected_dock_size >= 4:
             score -= 5.0  # Caution
 
-        # Analyze future matching potential using COMPLETE tile information
-        # This gives optimal bot perfect knowledge of all tiles (including hidden)
+        # Analyze future matching potential using precomputed pickable counts
+        # PERFORMANCE: Use precomputed pickable_by_type instead of repeated list comprehensions
+        dock_type_counts: Dict[str, int] = {}
+        for t in state.dock_tiles:
+            dock_type_counts[t.tile_type] = dock_type_counts.get(t.tile_type, 0) + 1
+
         for tile_type, total_count in state.all_tile_type_counts.items():
             if tile_type not in self.MATCHABLE_TYPES:
                 continue
 
-            dock_has = sum(1 for t in state.dock_tiles if t.tile_type == tile_type)
-            pickable_count = sum(1 for t in pickable if t.tile_type == tile_type)
+            dock_has = dock_type_counts.get(tile_type, 0)
+            pickable_count = pickable_by_type.get(tile_type, 0)
 
             # Total available = on board (pickable) + in dock
             available_now = pickable_count + dock_has

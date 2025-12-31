@@ -25,6 +25,7 @@ export function SimulationGrid({ levelJson, results, currentStep, className }: S
   const initialChainStates = initial_state.initial_chain_states || {};
   const initialGrassStates = initial_state.initial_grass_states || {};
   const initialLinkStates = initial_state.initial_link_states || {};
+  const initialTeleportStates = initial_state.initial_teleport_states || {};
 
   // Get converted tiles from API response (t0 tiles are converted to actual types)
   const convertedTiles = initial_state.tiles as Record<string, Record<string, unknown>>;
@@ -45,6 +46,7 @@ export function SimulationGrid({ levelJson, results, currentStep, className }: S
           initialChainStates={initialChainStates}
           initialGrassStates={initialGrassStates}
           initialLinkStates={initialLinkStates}
+          initialTeleportStates={initialTeleportStates}
           convertedTiles={convertedTiles}
         />
       ))}

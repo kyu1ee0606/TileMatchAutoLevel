@@ -1,7 +1,50 @@
 # TileMatchAutoLevel 프로젝트 인덱스
 
-**마지막 업데이트**: 2025-12-23
+**마지막 업데이트**: 2025-12-31
 **프로젝트 버전**: MVP + 레벨 생성 자동화
+
+---
+
+## ⚠️ 작업 지침: 백엔드/프론트엔드 교차검증
+
+**중요**: 백엔드와 프론트엔드를 수정할 때 반드시 다음 사항을 확인하세요:
+
+### 스키마 수정 시 필수 체크리스트
+
+1. **백엔드 스키마 변경** (`backend/app/models/schemas.py`)
+   - Pydantic 모델 필드 추가/변경/삭제 시 프론트엔드 타입도 동시 수정
+
+2. **프론트엔드 타입 동기화** (`frontend/src/types/simulation.ts`)
+   - 백엔드 스키마와 1:1 매핑되는 TypeScript 인터페이스 수정
+   - `VisualBotMove`, `VisualGameState` 등 관련 타입 모두 확인
+
+3. **API 응답 처리 코드 수정** (`backend/app/api/routes/simulate.py`)
+   - 스키마에 맞게 데이터 수집 로직 수정
+   - 타입 어노테이션 일치 확인 (`List` → `Dict` 등)
+
+4. **컴포넌트 Props 및 상태 수정**
+   - `BotTileGrid.tsx` - Props 타입 및 기본값 수정
+   - `BotViewer.tsx` - Props 전달 및 기본값 수정
+   - `SimulationGrid.tsx` - API 응답 파싱 및 기본값 수정
+
+5. **TypeScript 컴파일 체크**
+   - 작업 완료 후 `npx tsc --noEmit` 실행하여 타입 오류 확인
+
+### 예시: 텔레포트 셔플 타입 변경
+
+```diff
+# 백엔드 schemas.py
+- teleport_states_after: List[str]
++ teleport_states_after: Dict[str, str]
+
+# 프론트엔드 simulation.ts
+- teleport_states_after: string[]
++ teleport_states_after: Record<string, string>
+
+# 컴포넌트 기본값
+- initialTeleportStates = []
++ initialTeleportStates = {}
+```
 
 ---
 

@@ -282,6 +282,9 @@ class VisualBotMove(BaseModel):
     chain_states_after: Dict[str, bool] = Field(default={}, description="Chain tile states after move (layerIdx_x_y -> unlocked)")
     grass_states_after: Dict[str, int] = Field(default={}, description="Grass tile states after move (layerIdx_x_y -> remaining layers 1-2)")
     link_states_after: Dict[str, List[str]] = Field(default={}, description="Link tile states after move (layerIdx_x_y -> list of connected positions)")
+    teleport_states_after: Dict[str, str] = Field(default={}, description="Teleport tile states after move (layerIdx_x_y -> tile_type)")
+    teleport_click_count_after: int = Field(default=0, description="Teleport click counter after move (activates shuffle at 3)")
+    tile_type_overrides: Dict[str, str] = Field(default={}, description="Permanent tile type changes (layerIdx_x_y -> tile_type) - includes tiles from removed teleport gimmick")
 
 
 class VisualBotResult(BaseModel):
@@ -307,6 +310,7 @@ class VisualGameState(BaseModel):
     initial_bomb_states: Dict[str, int] = Field(default={}, description="Initial bomb states (layerIdx_x_y -> count)")
     initial_curtain_states: Dict[str, bool] = Field(default={}, description="Initial curtain states (layerIdx_x_y -> is_open)")
     initial_link_states: Dict[str, List[str]] = Field(default={}, description="Initial link states (layerIdx_x_y -> connected positions)")
+    initial_teleport_states: Dict[str, str] = Field(default={}, description="Initial teleport tile states (layerIdx_x_y -> tile_type)")
 
 
 class VisualSimulationResponse(BaseModel):

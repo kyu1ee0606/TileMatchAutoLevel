@@ -500,7 +500,9 @@ class LevelSimulator:
                         score += 1.5
 
         # Bonus for matching tiles that progress towards goals
-        if state.goals_remaining.get("craft_s", 0) > 0:
+        # Check for any craft/stack goal (all directions)
+        has_craft_goal = any(k.startswith("craft_") and v > 0 for k, v in state.goals_remaining.items())
+        if has_craft_goal:
             score += 0.5
 
         # Bonus for higher layer moves (clears blocking tiles)

@@ -1,12 +1,13 @@
 import { useState, useEffect } from 'react';
 import { DifficultySlider } from './DifficultySlider';
+import { LevelSetGenerator } from '../LevelSetGenerator';
 import { useLevelStore } from '../../stores/levelStore';
 import { useUIStore } from '../../stores/uiStore';
 import { generateLevel, generateMultipleLevels } from '../../api/generate';
 import { saveLocalLevel } from '../../services/localLevelsApi';
 import { TILE_TYPES } from '../../types';
 import type { GenerationParams, GoalConfig, ObstacleCountConfig, LayerTileConfig, LayerObstacleConfig } from '../../types';
-import { Button, Tooltip } from '../ui';
+import { Button, Tooltip, CollapsiblePanel } from '../ui';
 import clsx from 'clsx';
 
 // Obstacle type definitions for UI
@@ -54,9 +55,9 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
     crate: { min: 0, max: 4 },
   });
 
-  // Goals configuration
+  // Goals configuration (craft/stack with direction)
   const [goals, setGoals] = useState<GoalConfig[]>([
-    { type: 'craft_s', count: 3 },
+    { type: 'craft', direction: 's', count: 3 },
   ]);
 
   // Advanced layer settings (per-layer tile and obstacle configs only)
@@ -96,14 +97,14 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
   };
 
   const addGoal = () => {
-    setGoals((prev) => [...prev, { type: 'craft_s', count: 3 }]);
+    setGoals((prev) => [...prev, { type: 'craft', direction: 's', count: 3 }]);
   };
 
   const removeGoal = (index: number) => {
     setGoals((prev) => prev.filter((_, i) => i !== index));
   };
 
-  const updateGoal = (index: number, field: 'type' | 'count', value: string | number) => {
+  const updateGoal = (index: number, field: 'type' | 'direction' | 'count', value: string | number) => {
     setGoals((prev) =>
       prev.map((goal, i) =>
         i === index
@@ -217,6 +218,12 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
         }
       }
 
+      // Convert goals to backend format (type_direction, e.g., craft_s, stack_e)
+      const backendGoals = goals.map(goal => ({
+        type: `${goal.type}_${goal.direction}` as 'craft_s' | 'stack_s',
+        count: goal.count,
+      }));
+
       const params: GenerationParams = {
         target_difficulty: targetDifficulty,
         grid_size: gridSize,
@@ -224,7 +231,7 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
         tile_types: selectedTileTypes,
         obstacle_types: selectedObstacles,
         // Send empty array explicitly when no goals (not undefined)
-        goals: goals,
+        goals: backendGoals as any,
         // Include obstacle count ranges (ignored if layer_obstacle_configs is set)
         obstacle_counts: selectedObstacleCounts,
         // Per-layer configs take priority over basic settings
@@ -302,8 +309,9 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
     }
   };
 
+  // Filter out craft and stack tiles - they are configured separately in Goals section
   const matchingTileTypes = Object.entries(TILE_TYPES).filter(
-    ([type]) => !type.endsWith('_s')
+    ([type]) => !type.startsWith('craft_') && !type.startsWith('stack_')
   );
 
   return (
@@ -520,12 +528,12 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
             </div>
           ) : (
             goals.map((goal, index) => (
-              <div key={index} className="flex gap-2 items-center bg-gray-700/30 p-2 rounded-md">
+              <div key={index} className="flex flex-wrap gap-2 items-center bg-gray-700/30 p-2 rounded-md">
                 {/* Goal type buttons */}
                 <div className="flex">
                   {[
-                    { type: 'craft_s', label: '🎁 Craft' },
-                    { type: 'stack_s', label: '📚 Stack' },
+                    { type: 'craft' as const, label: '🎁 Craft' },
+                    { type: 'stack' as const, label: '📚 Stack' },
                   ].map((opt) => (
                     <button
                       key={opt.type}
@@ -534,6 +542,29 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
                         'px-2 py-1 text-xs transition-colors first:rounded-l-md last:rounded-r-md border',
                         goal.type === opt.type
                           ? 'bg-blue-600 text-white border-blue-500'
+                          : 'bg-gray-700 text-gray-400 hover:bg-gray-600 border-gray-600'
+                      )}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Direction buttons */}
+                <div className="flex">
+                  {[
+                    { dir: 's' as const, label: '↓S' },
+                    { dir: 'n' as const, label: '↑N' },
+                    { dir: 'e' as const, label: '→E' },
+                    { dir: 'w' as const, label: '←W' },
+                  ].map((opt) => (
+                    <button
+                      key={opt.dir}
+                      onClick={() => updateGoal(index, 'direction', opt.dir)}
+                      className={clsx(
+                        'px-1.5 py-1 text-xs transition-colors first:rounded-l-md last:rounded-r-md border',
+                        goal.direction === opt.dir
+                          ? 'bg-green-600 text-white border-green-500'
                           : 'bg-gray-700 text-gray-400 hover:bg-gray-600 border-gray-600'
                       )}
                     >
@@ -836,6 +867,16 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
           10개 일괄
         </Button>
       </div>
+
+      {/* Level Set Generator */}
+      <CollapsiblePanel
+        title="레벨 세트 생성기"
+        icon="📊"
+        defaultCollapsed={true}
+        className="mt-4"
+      >
+        <LevelSetGenerator />
+      </CollapsiblePanel>
     </div>
   );
 }

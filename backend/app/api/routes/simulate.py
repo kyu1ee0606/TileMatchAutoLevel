@@ -1149,9 +1149,16 @@ async def list_local_levels():
                 with open(file_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
 
-                    # Extract metadata
+                    # Extract metadata - support both nested and flat formats
                     level_id = file_path.stem
-                    metadata = data.get("metadata", {})
+
+                    # Check if metadata is nested or flat
+                    if "metadata" in data:
+                        # Nested format (from manual save)
+                        metadata = data.get("metadata", {})
+                    else:
+                        # Flat format (from level set generation)
+                        metadata = data
 
                     # Format datetime for display
                     created_at = metadata.get("created_at", "")
@@ -1175,28 +1182,48 @@ async def list_local_levels():
                         except:
                             saved_at_display = saved_at[:19].replace("T", " ")
 
+                    # Get difficulty - handle both string and numeric formats
+                    difficulty = metadata.get("difficulty", "custom")
+                    if isinstance(difficulty, (int, float)):
+                        # Convert numeric difficulty to display format
+                        grade = metadata.get("grade", "")
+                        difficulty_str = f"{difficulty:.2f}" if difficulty else "custom"
+                        if grade:
+                            difficulty_str = f"{grade} ({difficulty:.2f})"
+                    else:
+                        difficulty_str = str(difficulty)
+
+                    # Get set info for level set generated levels
+                    set_info = ""
+                    if metadata.get("set_name"):
+                        set_info = f"[{metadata.get('set_name')}]"
+
                     levels.append({
                         "id": level_id,
                         "name": metadata.get("name", level_id),
-                        "description": metadata.get("description", ""),
+                        "description": metadata.get("description", set_info),
                         "tags": metadata.get("tags", []),
-                        "difficulty": metadata.get("difficulty", "custom"),
+                        "difficulty": difficulty_str,
                         "created_at": created_at,
                         "created_at_display": created_at_display,
                         "saved_at": saved_at,
                         "saved_at_display": saved_at_display,
-                        "source": metadata.get("source", "local"),
+                        "source": metadata.get("source", "level_set" if metadata.get("set_id") else "local"),
                         "validation_status": metadata.get("validation_status", "unknown"),
-                        "use_tile_count": metadata.get("use_tile_count", 0),
-                        "active_layers": metadata.get("active_layers", 0),
-                        "total_layers": metadata.get("total_layers", 0),
+                        "use_tile_count": metadata.get("useTileCount", metadata.get("use_tile_count", 0)),
+                        "active_layers": metadata.get("layer", metadata.get("active_layers", 0)),
+                        "total_layers": metadata.get("layer", metadata.get("total_layers", 0)),
+                        "set_id": metadata.get("set_id", ""),
+                        "set_name": metadata.get("set_name", ""),
+                        "level_index": metadata.get("level_index", 0),
+                        "grade": metadata.get("grade", ""),
                     })
             except Exception as e:
                 # Skip invalid files
                 continue
 
-        # Sort by creation date (newest first)
-        levels.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        # Sort by creation date (newest first), then by name
+        levels.sort(key=lambda x: (x.get("created_at", ""), x.get("name", "")), reverse=True)
 
         return {
             "levels": levels,
@@ -1224,7 +1251,31 @@ async def get_local_level(level_id: str):
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
-        return data
+        # Metadata fields to separate
+        metadata_fields = ['id', 'name', 'difficulty', 'grade', 'set_id', 'set_name',
+                          'level_index', 'created_at', 'updated_at']
+
+        # Extract metadata
+        metadata = {
+            "id": level_id,
+            "name": data.get("name", level_id),
+            "difficulty": data.get("difficulty", 0.5),
+            "grade": data.get("grade", "B"),
+        }
+
+        # Add optional metadata fields
+        for field in ['set_id', 'set_name', 'level_index', 'created_at', 'updated_at']:
+            if field in data:
+                metadata[field] = data[field]
+
+        # Level data is everything (frontend may need metadata too for display)
+        # Keep full data as level_data for compatibility
+        level_data = data
+
+        return {
+            "level_data": level_data,
+            "metadata": metadata
+        }
 
     except HTTPException:
         raise
@@ -1348,6 +1399,42 @@ async def delete_local_level(level_id: str):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.delete(
+    "/local/delete-all",
+    summary="Delete all local levels",
+    description="Delete all locally saved levels",
+)
+async def delete_all_local_levels():
+    """Delete all locally saved levels."""
+    try:
+        if not LOCAL_LEVELS_DIR.exists():
+            return {
+                "success": True,
+                "deleted_count": 0,
+                "message": "No local levels directory found"
+            }
+
+        deleted_count = 0
+        errors = []
+
+        for file_path in LOCAL_LEVELS_DIR.glob("*.json"):
+            try:
+                file_path.unlink()
+                deleted_count += 1
+            except Exception as e:
+                errors.append({"file": file_path.name, "error": str(e)})
+
+        return {
+            "success": True,
+            "deleted_count": deleted_count,
+            "errors": errors if errors else None,
+            "message": f"Deleted {deleted_count} levels" + (f" with {len(errors)} errors" if errors else "")
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.post(
     "/local/import-generated",
     summary="Import generated levels from generator output",
@@ -1452,6 +1539,226 @@ async def upload_to_server(level_id: str, server_config: Optional[Dict[str, Any]
                 "Add level format conversion",
                 "Complete upload protocol"
             ]
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# =============================================================================
+# Level Sets Management API
+# =============================================================================
+
+# Level sets storage path
+LEVEL_SETS_DIR = Path(__file__).parent.parent.parent / "storage" / "level_sets"
+LEVEL_SETS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+@router.post(
+    "/level-sets/save",
+    summary="Save a level set",
+    description="Save a generated level set to local storage",
+)
+async def save_level_set(data: Dict[str, Any]):
+    """Save a level set to local storage."""
+    try:
+        now = datetime.now()
+
+        # Extract data
+        name = data.get("name", "")
+        levels = data.get("levels", [])
+        difficulty_profile = data.get("difficulty_profile", [])
+        actual_difficulties = data.get("actual_difficulties", [])
+        grades = data.get("grades", [])
+        generation_config = data.get("generation_config", {})
+
+        if not levels:
+            raise HTTPException(status_code=400, detail="No levels provided")
+
+        if not name:
+            name = f"Level Set {now.strftime('%Y-%m-%d %H:%M')}"
+
+        # Generate unique ID
+        set_id = f"set_{now.strftime('%Y%m%d_%H%M%S')}_{random.randint(100, 999)}"
+
+        # Create set directory
+        set_dir = LEVEL_SETS_DIR / set_id
+        set_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save metadata
+        metadata = {
+            "id": set_id,
+            "name": name,
+            "created_at": now.isoformat(),
+            "level_count": len(levels),
+            "difficulty_profile": difficulty_profile,
+            "actual_difficulties": actual_difficulties,
+            "grades": grades,
+            "generation_config": generation_config,
+        }
+
+        with open(set_dir / "metadata.json", 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, indent=2, ensure_ascii=False)
+
+        # Save individual levels to level set directory
+        for i, level in enumerate(levels):
+            level_file = set_dir / f"level_{i+1:03d}.json"
+            with open(level_file, 'w', encoding='utf-8') as f:
+                json.dump(level, f, indent=2, ensure_ascii=False)
+
+        # Also save each level to local_levels directory for browsing
+        for i, level in enumerate(levels):
+            # Create unique level ID with set name and index
+            level_id = f"{set_id}_level_{i+1:03d}"
+            difficulty = actual_difficulties[i] if i < len(actual_difficulties) else 0.5
+            grade = grades[i] if i < len(grades) else "B"
+
+            # Add metadata to level
+            level_with_meta = {
+                **level,
+                "id": level_id,
+                "name": f"{name} - Level {i+1}",
+                "difficulty": difficulty,
+                "grade": grade,
+                "set_id": set_id,
+                "set_name": name,
+                "level_index": i + 1,
+            }
+
+            local_level_file = LOCAL_LEVELS_DIR / f"{level_id}.json"
+            with open(local_level_file, 'w', encoding='utf-8') as f:
+                json.dump(level_with_meta, f, indent=2, ensure_ascii=False)
+
+        return {
+            "success": True,
+            "id": set_id,
+            "message": f"Level set '{name}' saved successfully with {len(levels)} levels"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get(
+    "/level-sets/list",
+    summary="List all level sets",
+    description="Get a list of all saved level sets",
+)
+async def list_level_sets():
+    """List all saved level sets."""
+    try:
+        level_sets = []
+
+        for set_dir in LEVEL_SETS_DIR.iterdir():
+            if not set_dir.is_dir():
+                continue
+
+            metadata_file = set_dir / "metadata.json"
+            if not metadata_file.exists():
+                continue
+
+            try:
+                with open(metadata_file, 'r', encoding='utf-8') as f:
+                    metadata = json.load(f)
+
+                # Calculate difficulty range
+                actual_diffs = metadata.get("actual_difficulties", [])
+                if actual_diffs:
+                    min_diff = min(actual_diffs)
+                    max_diff = max(actual_diffs)
+                else:
+                    min_diff = 0
+                    max_diff = 0
+
+                level_sets.append({
+                    "id": metadata.get("id", set_dir.name),
+                    "name": metadata.get("name", set_dir.name),
+                    "created_at": metadata.get("created_at", ""),
+                    "level_count": metadata.get("level_count", 0),
+                    "difficulty_range": {
+                        "min": min_diff,
+                        "max": max_diff,
+                    },
+                })
+            except Exception:
+                continue
+
+        # Sort by creation date (newest first)
+        level_sets.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+
+        return {"level_sets": level_sets}
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get(
+    "/level-sets/{set_id}",
+    summary="Get a level set",
+    description="Retrieve a specific level set by ID",
+)
+async def get_level_set(set_id: str):
+    """Get a specific level set."""
+    try:
+        set_dir = LEVEL_SETS_DIR / set_id
+
+        if not set_dir.exists():
+            raise HTTPException(status_code=404, detail=f"Level set {set_id} not found")
+
+        # Load metadata
+        metadata_file = set_dir / "metadata.json"
+        if not metadata_file.exists():
+            raise HTTPException(status_code=404, detail="Level set metadata not found")
+
+        with open(metadata_file, 'r', encoding='utf-8') as f:
+            metadata = json.load(f)
+
+        # Load all levels
+        levels = []
+        level_files = sorted(set_dir.glob("level_*.json"))
+
+        for level_file in level_files:
+            with open(level_file, 'r', encoding='utf-8') as f:
+                levels.append(json.load(f))
+
+        return {
+            "metadata": metadata,
+            "levels": levels,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete(
+    "/level-sets/{set_id}",
+    summary="Delete a level set",
+    description="Delete a level set by ID",
+)
+async def delete_level_set(set_id: str):
+    """Delete a level set."""
+    try:
+        set_dir = LEVEL_SETS_DIR / set_id
+
+        if not set_dir.exists():
+            raise HTTPException(status_code=404, detail=f"Level set {set_id} not found")
+
+        # Delete all files in the set directory
+        for file in set_dir.iterdir():
+            file.unlink()
+
+        # Delete the directory
+        set_dir.rmdir()
+
+        return {
+            "success": True,
+            "message": f"Level set {set_id} deleted successfully"
         }
 
     except HTTPException:

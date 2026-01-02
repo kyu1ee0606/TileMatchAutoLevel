@@ -793,6 +793,51 @@ export function BotTileGrid({
     return null;
   };
 
+  // Direction arrow rotation mapping for craft tiles
+  const DIRECTION_ROTATIONS: Record<string, number> = {
+    's': 180,  // South - arrow pointing down
+    'n': 0,    // North - arrow pointing up
+    'e': 90,   // East - arrow pointing right
+    'w': 270,  // West - arrow pointing left
+  };
+
+  // Render direction arrow for craft tiles
+  const renderDirectionArrow = (direction: string) => {
+    const rotation = DIRECTION_ROTATIONS[direction] ?? 180;
+    const arrowSize = Math.round(TILE_SIZE * 0.35);
+
+    return (
+      <div
+        className="absolute flex items-center justify-center pointer-events-none"
+        style={{
+          width: arrowSize,
+          height: arrowSize,
+          top: '50%',
+          left: '50%',
+          transform: `translate(-50%, -50%) rotate(${rotation}deg)`,
+          zIndex: 15,
+        }}
+        title={`방향: ${direction.toUpperCase()}`}
+      >
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="white"
+          strokeWidth="3"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{
+            width: '100%',
+            height: '100%',
+            filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.8))',
+          }}
+        >
+          <path d="M12 5v14M5 12l7-7 7 7" />
+        </svg>
+      </div>
+    );
+  };
+
   // Render a stack/craft tile with gimmick icon and top tile indicator
   // Uses same structure as editor's renderCurrentTile
   const renderStackCraftTile = (
@@ -855,6 +900,9 @@ export function BotTileGrid({
             </div>
           )}
         </div>
+
+        {/* Direction arrow for craft tiles */}
+        {stackInfo.isCraft && renderDirectionArrow(stackInfo.direction)}
 
         {/* Top tile indicator (0.75 scale) - only for stack tiles */}
         {stackInfo.isStack && topTileInfo && (

@@ -59,7 +59,11 @@ class LevelGenerator:
         goals = params.goals if params.goals is not None else [{"type": "craft_s", "count": 3}]
         if goals:
             for goal in goals:
-                goal_count = goal.get("count", 3)
+                # Handle both dict and GoalConfig objects
+                if hasattr(goal, 'count'):
+                    goal_count = goal.count
+                else:
+                    goal_count = goal.get("count", 3)
                 goal_inner_tiles += goal_count
 
         # Validate: In strict mode, total tile count (including goal inner tiles) must be divisible by 3
@@ -96,7 +100,7 @@ class LevelGenerator:
         if not has_strict_tile_config:
             # Pass max tile count to prevent adding tiles beyond the target
             max_tiles = params.total_tile_count if params.total_tile_count else None
-            level = self._adjust_difficulty(level, params.target_difficulty, max_tiles=max_tiles)
+            level = self._adjust_difficulty(level, params.target_difficulty, max_tiles=max_tiles, params=params)
 
         # CRITICAL: Ensure tile count is divisible by 3 (only if NOT using strict config)
         # When user specifies exact counts, they are responsible for divisibility
@@ -247,8 +251,11 @@ class LevelGenerator:
                 if total_target < 9:
                     total_target = 9
             else:
-                max_tiles_per_layer = (cols + 1) * (rows + 1)
-                base_tiles = int(max_tiles_per_layer * active_layer_count * (0.3 + target * 0.4))
+                # Use a reasonable tile count range based on difficulty
+                # Easy levels: ~30-45 tiles, Hard levels: ~90-120 tiles
+                min_tiles = 30
+                max_tiles = 120
+                base_tiles = int(min_tiles + (max_tiles - min_tiles) * target)
                 total_target = (base_tiles // 3) * 3
                 if total_target < 9:
                     total_target = 9
@@ -277,9 +284,11 @@ class LevelGenerator:
             if target_count <= 0:
                 continue
 
-            # Generate positions for this layer
+            # Generate positions for this layer with symmetry and pattern options
             positions = self._generate_layer_positions_for_count(
-                layer_cols, layer_rows, target_count
+                layer_cols, layer_rows, target_count,
+                symmetry_mode=params.symmetry_mode,
+                pattern_type=params.pattern_type
             )
 
             for pos in positions:
@@ -289,10 +298,19 @@ class LevelGenerator:
         # When layers are full, clamping may break divisibility
         total_positions = len(all_layer_positions)
         remainder = total_positions % 3
-        if remainder > 0:
+
+        # For symmetric patterns, we can't just remove random positions
+        # as it would break the symmetry. Only remove if no symmetry.
+        symmetry = params.symmetry_mode or "none"
+        if remainder > 0 and symmetry == "none":
             # Remove excess positions to make divisible by 3
             # Remove from the end (random positions anyway)
             all_layer_positions = all_layer_positions[:total_positions - remainder]
+        elif remainder > 0 and symmetry != "none":
+            # For symmetric patterns, add dummy positions to reach divisible by 3
+            # We'll use already existing positions (they'll just be duplicated in assignment)
+            # This is a simple workaround - the tile assignment handles extra positions
+            pass  # Let the tile assignment code handle the non-divisibility
 
         # CRITICAL: Distribute tile types ensuring each type has count divisible by 3
         # Calculate how many tiles of each type we need
@@ -345,7 +363,8 @@ class LevelGenerator:
         return level
 
     def _generate_layer_positions(
-        self, cols: int, rows: int, density: float
+        self, cols: int, rows: int, density: float,
+        symmetry_mode: Optional[str] = None, pattern_type: Optional[str] = None
     ) -> List[str]:
         """Generate tile positions for a layer based on density."""
         all_positions = []
@@ -361,26 +380,449 @@ class LevelGenerator:
         if target_count == 0:
             target_count = 3  # Minimum 3 tiles
 
-        selected = random.sample(all_positions, min(target_count, len(all_positions)))
+        selected = self._generate_positions_with_pattern(
+            cols, rows, target_count, symmetry_mode, pattern_type
+        )
 
         return selected
 
     def _generate_layer_positions_for_count(
-        self, cols: int, rows: int, target_count: int
+        self, cols: int, rows: int, target_count: int,
+        symmetry_mode: Optional[str] = None, pattern_type: Optional[str] = None
     ) -> List[str]:
         """Generate tile positions for a layer with specific count."""
+        # Clamp to available positions
+        max_positions = cols * rows
+        actual_count = min(target_count, max_positions)
+        if actual_count <= 0:
+            return []
+
+        selected = self._generate_positions_with_pattern(
+            cols, rows, actual_count, symmetry_mode, pattern_type
+        )
+        return selected
+
+    def _generate_positions_with_pattern(
+        self, cols: int, rows: int, target_count: int,
+        symmetry_mode: Optional[str] = None, pattern_type: Optional[str] = None
+    ) -> List[str]:
+        """Generate positions with symmetry and pattern options."""
+        # Default to geometric pattern for more regular shapes
+        pattern = pattern_type or "geometric"
+        symmetry = symmetry_mode or "none"
+
+        # Generate base positions based on pattern type
+        if pattern == "geometric":
+            base_positions = self._generate_geometric_positions(cols, rows, target_count, symmetry)
+        elif pattern == "clustered":
+            base_positions = self._generate_clustered_positions(cols, rows, target_count, symmetry)
+        else:  # random
+            base_positions = self._generate_random_positions(cols, rows, target_count, symmetry)
+
+        return base_positions
+
+    def _generate_random_positions(
+        self, cols: int, rows: int, target_count: int, symmetry: str
+    ) -> List[str]:
+        """Generate random positions with optional symmetry."""
+        if symmetry == "none":
+            all_positions = [f"{x}_{y}" for x in range(cols) for y in range(rows)]
+            return random.sample(all_positions, min(target_count, len(all_positions)))
+
+        return self._apply_symmetry(cols, rows, target_count, symmetry, "random")
+
+    def _generate_geometric_positions(
+        self, cols: int, rows: int, target_count: int, symmetry: str
+    ) -> List[str]:
+        """Generate geometric pattern positions with proper symmetry support."""
+        # For symmetry modes, generate in base region first, then mirror
+        if symmetry == "horizontal":
+            # Generate in left half, mirror to right
+            base_cols = (cols + 1) // 2
+            base_count = (target_count + 1) // 2
+            # For symmetry, don't sample - use all positions from pattern
+            base_positions = self._generate_base_geometric_for_symmetry(base_cols, rows, base_count)
+            return self._mirror_horizontal(cols, rows, base_positions, target_count)
+
+        elif symmetry == "vertical":
+            # Generate in top half, mirror to bottom
+            base_rows = (rows + 1) // 2
+            base_count = (target_count + 1) // 2
+            base_positions = self._generate_base_geometric_for_symmetry(cols, base_rows, base_count)
+            return self._mirror_vertical(cols, rows, base_positions, target_count)
+
+        elif symmetry == "both":
+            # Generate in top-left quadrant, mirror to all 4 quadrants
+            base_cols = (cols + 1) // 2
+            base_rows = (rows + 1) // 2
+            base_count = (target_count + 3) // 4
+            base_positions = self._generate_base_geometric_for_symmetry(base_cols, base_rows, base_count)
+            return self._mirror_both(cols, rows, base_positions, target_count)
+
+        else:
+            # No symmetry - generate full grid patterns with sampling
+            return self._generate_base_geometric(cols, rows, target_count, 0, 0)
+
+    def _generate_base_geometric_for_symmetry(
+        self, cols: int, rows: int, target_count: int
+    ) -> List[str]:
+        """Generate geometric pattern for symmetry - returns deterministic positions."""
+        center_x, center_y = cols // 2, rows // 2
+
+        # Pattern 1: Filled rectangle from center
+        rect_positions = []
+        rect_size = int((target_count ** 0.5) * 1.2)
+        rect_half = rect_size // 2
+        for x in range(max(0, center_x - rect_half), min(cols, center_x + rect_half + 1)):
+            for y in range(max(0, center_y - rect_half), min(rows, center_y + rect_half + 1)):
+                rect_positions.append(f"{x}_{y}")
+
+        # Pattern 2: Diamond shape
+        diamond_positions = []
+        radius = int((target_count / 2) ** 0.5) + 1
+        for x in range(cols):
+            for y in range(rows):
+                dist = abs(x - center_x) + abs(y - center_y)
+                if dist <= radius:
+                    diamond_positions.append(f"{x}_{y}")
+
+        # Pattern 3: Fill all (for maximum coverage)
         all_positions = []
         for x in range(cols):
             for y in range(rows):
                 all_positions.append(f"{x}_{y}")
 
-        # Clamp to available positions
-        actual_count = min(target_count, len(all_positions))
-        if actual_count <= 0:
-            return []
+        # Choose the best fitting pattern - return ALL positions from chosen pattern
+        # No sampling to preserve symmetry!
+        all_patterns = [rect_positions, diamond_positions, all_positions]
 
-        selected = random.sample(all_positions, actual_count)
+        # Find pattern closest to target count
+        chosen = min(all_patterns, key=lambda p: abs(len(p) - target_count))
+
+        # If chosen pattern is too big and we need fewer positions,
+        # use a deterministic subset (from center outward)
+        if len(chosen) > target_count * 1.5:
+            # Sort by distance from center and take closest positions
+            def dist_from_center(pos: str) -> float:
+                x, y = map(int, pos.split("_"))
+                return abs(x - center_x) + abs(y - center_y)
+            chosen = sorted(chosen, key=dist_from_center)[:target_count]
+
+        return chosen
+
+    def _generate_base_geometric(
+        self, cols: int, rows: int, target_count: int, offset_x: int, offset_y: int
+    ) -> List[str]:
+        """Generate geometric pattern in a base region (with random sampling for non-symmetric)."""
+        center_x, center_y = cols // 2, rows // 2
+
+        # Pattern 1: Filled rectangle from center
+        rect_positions = []
+        rect_size = int((target_count ** 0.5) * 1.2)
+        rect_half = rect_size // 2
+        for x in range(max(0, center_x - rect_half), min(cols, center_x + rect_half + 1)):
+            for y in range(max(0, center_y - rect_half), min(rows, center_y + rect_half + 1)):
+                rect_positions.append(f"{x + offset_x}_{y + offset_y}")
+
+        # Pattern 2: Diamond shape
+        diamond_positions = []
+        radius = int((target_count / 2) ** 0.5) + 1
+        for x in range(cols):
+            for y in range(rows):
+                dist = abs(x - center_x) + abs(y - center_y)
+                if dist <= radius:
+                    diamond_positions.append(f"{x + offset_x}_{y + offset_y}")
+
+        # Pattern 3: Fill from corner (good for symmetry)
+        corner_positions = []
+        for x in range(cols):
+            for y in range(rows):
+                corner_positions.append(f"{x + offset_x}_{y + offset_y}")
+
+        # Choose the best fitting pattern
+        all_patterns = [rect_positions, diamond_positions, corner_positions]
+
+        # Filter patterns that have at least target_count positions
+        valid_patterns = [p for p in all_patterns if len(p) >= target_count]
+
+        if valid_patterns:
+            # Choose pattern closest to target count
+            chosen = min(valid_patterns, key=lambda p: abs(len(p) - target_count))
+            selected = random.sample(chosen, min(target_count, len(chosen)))
+        else:
+            # Fallback: use all positions and sample
+            all_positions = [f"{x + offset_x}_{y + offset_y}" for x in range(cols) for y in range(rows)]
+            selected = random.sample(all_positions, min(target_count, len(all_positions)))
+
         return selected
+
+    def _mirror_horizontal(
+        self, cols: int, rows: int, base_positions: List[str], target_count: int
+    ) -> List[str]:
+        """Mirror positions horizontally (left to right).
+
+        Note: Returns all mirrored positions to preserve symmetry.
+        The target_count is used only to limit base position generation.
+        """
+        result = set()
+        for pos in base_positions:
+            x, y = map(int, pos.split("_"))
+            result.add(f"{x}_{y}")
+            mirror_x = cols - 1 - x
+            if 0 <= mirror_x < cols:
+                result.add(f"{mirror_x}_{y}")
+        # Return all positions to preserve symmetry - don't slice!
+        return list(result)
+
+    def _mirror_vertical(
+        self, cols: int, rows: int, base_positions: List[str], target_count: int
+    ) -> List[str]:
+        """Mirror positions vertically (top to bottom).
+
+        Note: Returns all mirrored positions to preserve symmetry.
+        """
+        result = set()
+        for pos in base_positions:
+            x, y = map(int, pos.split("_"))
+            result.add(f"{x}_{y}")
+            mirror_y = rows - 1 - y
+            if 0 <= mirror_y < rows:
+                result.add(f"{x}_{mirror_y}")
+        return list(result)
+
+    def _mirror_both(
+        self, cols: int, rows: int, base_positions: List[str], target_count: int
+    ) -> List[str]:
+        """Mirror positions in all 4 directions.
+
+        Note: Returns all mirrored positions to preserve symmetry.
+        """
+        result = set()
+        for pos in base_positions:
+            x, y = map(int, pos.split("_"))
+            mirror_x = cols - 1 - x
+            mirror_y = rows - 1 - y
+            # Add all 4 quadrants
+            result.add(f"{x}_{y}")
+            if 0 <= mirror_x < cols:
+                result.add(f"{mirror_x}_{y}")
+            if 0 <= mirror_y < rows:
+                result.add(f"{x}_{mirror_y}")
+            if 0 <= mirror_x < cols and 0 <= mirror_y < rows:
+                result.add(f"{mirror_x}_{mirror_y}")
+        return list(result)
+
+    def _generate_clustered_positions(
+        self, cols: int, rows: int, target_count: int, symmetry: str
+    ) -> List[str]:
+        """Generate clustered positions with proper symmetry support."""
+        # For symmetry modes, generate in base region first, then mirror
+        if symmetry == "horizontal":
+            base_cols = (cols + 1) // 2
+            base_count = (target_count + 1) // 2
+            base_positions = self._generate_base_clustered_for_symmetry(base_cols, rows, base_count)
+            return self._mirror_horizontal(cols, rows, base_positions, target_count)
+
+        elif symmetry == "vertical":
+            base_rows = (rows + 1) // 2
+            base_count = (target_count + 1) // 2
+            base_positions = self._generate_base_clustered_for_symmetry(cols, base_rows, base_count)
+            return self._mirror_vertical(cols, rows, base_positions, target_count)
+
+        elif symmetry == "both":
+            base_cols = (cols + 1) // 2
+            base_rows = (rows + 1) // 2
+            base_count = (target_count + 3) // 4
+            base_positions = self._generate_base_clustered_for_symmetry(base_cols, base_rows, base_count)
+            return self._mirror_both(cols, rows, base_positions, target_count)
+
+        else:
+            return self._generate_base_clustered(cols, rows, target_count)
+
+    def _generate_base_clustered_for_symmetry(
+        self, cols: int, rows: int, target_count: int
+    ) -> List[str]:
+        """Generate clustered positions for symmetry - deterministic, no random sampling."""
+        # Use center of base region as cluster center
+        center_x, center_y = cols // 2, rows // 2
+
+        # Generate all positions within cluster radius
+        cluster_radius = int((target_count / 3.14) ** 0.5) + 1
+        positions = []
+
+        for x in range(cols):
+            for y in range(rows):
+                dist = ((x - center_x) ** 2 + (y - center_y) ** 2) ** 0.5
+                if dist <= cluster_radius:
+                    positions.append((dist, f"{x}_{y}"))
+
+        # Sort by distance and take closest positions (deterministic)
+        positions.sort(key=lambda p: p[0])
+        result = [pos for _, pos in positions]
+
+        # If we have too many, take the closest to center
+        if len(result) > target_count * 1.5:
+            result = result[:target_count]
+
+        return result
+
+    def _generate_base_clustered(
+        self, cols: int, rows: int, target_count: int
+    ) -> List[str]:
+        """Generate clustered positions in a base region (with randomness for non-symmetric)."""
+        positions = set()
+
+        # Create 1-3 cluster centers
+        num_clusters = random.randint(1, min(3, max(1, target_count // 6)))
+        tiles_per_cluster = target_count // max(1, num_clusters)
+
+        # Generate cluster centers (avoid edges)
+        margin = max(1, min(cols, rows) // 4)
+        cluster_centers = []
+
+        for _ in range(num_clusters):
+            cx = random.randint(margin, max(margin, cols - margin - 1)) if cols > 2 * margin else cols // 2
+            cy = random.randint(margin, max(margin, rows - margin - 1)) if rows > 2 * margin else rows // 2
+            cluster_centers.append((cx, cy))
+
+        # Generate positions around each cluster center
+        for cx, cy in cluster_centers:
+            cluster_radius = int((tiles_per_cluster / 3.14) ** 0.5) + 1
+            cluster_positions = []
+
+            for x in range(max(0, cx - cluster_radius), min(cols, cx + cluster_radius + 1)):
+                for y in range(max(0, cy - cluster_radius), min(rows, cy + cluster_radius + 1)):
+                    dist = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
+                    if dist <= cluster_radius:
+                        cluster_positions.append(f"{x}_{y}")
+
+            sample_count = min(tiles_per_cluster, len(cluster_positions))
+            if sample_count > 0:
+                sampled = random.sample(cluster_positions, sample_count)
+                positions.update(sampled)
+
+        # Fill remaining if needed
+        all_positions = [f"{x}_{y}" for x in range(cols) for y in range(rows)]
+        remaining = [p for p in all_positions if p not in positions]
+
+        while len(positions) < target_count and remaining:
+            pos = random.choice(remaining)
+            remaining.remove(pos)
+            positions.add(pos)
+
+        return list(positions)[:target_count]
+
+    def _apply_symmetry(
+        self, cols: int, rows: int, target_count: int, symmetry: str, pattern: str
+    ) -> List[str]:
+        """Apply symmetry by generating half and mirroring."""
+        if symmetry == "horizontal":
+            # Left-right symmetry: generate left half, mirror to right
+            half_cols = (cols + 1) // 2
+            half_count = (target_count + 1) // 2
+
+            # Generate positions in left half
+            left_positions = [f"{x}_{y}" for x in range(half_cols) for y in range(rows)]
+            selected_left = random.sample(left_positions, min(half_count, len(left_positions)))
+
+            # Mirror to right
+            result = set()
+            for pos in selected_left:
+                x, y = map(int, pos.split("_"))
+                result.add(pos)
+                mirror_x = cols - 1 - x
+                if mirror_x >= 0 and mirror_x < cols:
+                    result.add(f"{mirror_x}_{y}")
+
+            return list(result)[:target_count]
+
+        elif symmetry == "vertical":
+            # Top-bottom symmetry: generate top half, mirror to bottom
+            half_rows = (rows + 1) // 2
+            half_count = (target_count + 1) // 2
+
+            top_positions = [f"{x}_{y}" for x in range(cols) for y in range(half_rows)]
+            selected_top = random.sample(top_positions, min(half_count, len(top_positions)))
+
+            result = set()
+            for pos in selected_top:
+                x, y = map(int, pos.split("_"))
+                result.add(pos)
+                mirror_y = rows - 1 - y
+                if mirror_y >= 0 and mirror_y < rows:
+                    result.add(f"{x}_{mirror_y}")
+
+            return list(result)[:target_count]
+
+        elif symmetry == "both":
+            # 4-way symmetry: generate top-left quadrant, mirror to all
+            half_cols = (cols + 1) // 2
+            half_rows = (rows + 1) // 2
+            quarter_count = (target_count + 3) // 4
+
+            quadrant_positions = [f"{x}_{y}" for x in range(half_cols) for y in range(half_rows)]
+            selected_quadrant = random.sample(quadrant_positions, min(quarter_count, len(quadrant_positions)))
+
+            result = set()
+            for pos in selected_quadrant:
+                x, y = map(int, pos.split("_"))
+                # Add all 4 symmetric positions
+                result.add(f"{x}_{y}")
+                mirror_x = cols - 1 - x
+                mirror_y = rows - 1 - y
+                if mirror_x >= 0 and mirror_x < cols:
+                    result.add(f"{mirror_x}_{y}")
+                if mirror_y >= 0 and mirror_y < rows:
+                    result.add(f"{x}_{mirror_y}")
+                if mirror_x >= 0 and mirror_x < cols and mirror_y >= 0 and mirror_y < rows:
+                    result.add(f"{mirror_x}_{mirror_y}")
+
+            return list(result)[:target_count]
+
+        # Default: no symmetry
+        all_positions = [f"{x}_{y}" for x in range(cols) for y in range(rows)]
+        return random.sample(all_positions, min(target_count, len(all_positions)))
+
+    def _apply_symmetry_to_positions(
+        self, cols: int, rows: int, positions: List[str], symmetry: str, target_count: int
+    ) -> List[str]:
+        """Apply symmetry transformation to existing positions."""
+        if symmetry == "horizontal":
+            result = set()
+            for pos in positions:
+                x, y = map(int, pos.split("_"))
+                result.add(pos)
+                mirror_x = cols - 1 - x
+                if 0 <= mirror_x < cols:
+                    result.add(f"{mirror_x}_{y}")
+            return list(result)[:target_count]
+
+        elif symmetry == "vertical":
+            result = set()
+            for pos in positions:
+                x, y = map(int, pos.split("_"))
+                result.add(pos)
+                mirror_y = rows - 1 - y
+                if 0 <= mirror_y < rows:
+                    result.add(f"{x}_{mirror_y}")
+            return list(result)[:target_count]
+
+        elif symmetry == "both":
+            result = set()
+            for pos in positions:
+                x, y = map(int, pos.split("_"))
+                result.add(f"{x}_{y}")
+                mirror_x = cols - 1 - x
+                mirror_y = rows - 1 - y
+                if 0 <= mirror_x < cols:
+                    result.add(f"{mirror_x}_{y}")
+                if 0 <= mirror_y < rows:
+                    result.add(f"{x}_{mirror_y}")
+                if 0 <= mirror_x < cols and 0 <= mirror_y < rows:
+                    result.add(f"{mirror_x}_{mirror_y}")
+            return list(result)[:target_count]
+
+        return positions[:target_count]
 
     def _add_obstacles(
         self, level: Dict[str, Any], params: GenerationParams
@@ -1557,71 +1999,206 @@ class LevelGenerator:
 
         # Find available positions for goals (positions not already occupied)
         center_col = cols // 2
-        placed_positions = set()  # Track positions used by goals (including output positions)
+        center_row = rows // 2
+        symmetry_mode = params.symmetry_mode or "none"
+        placed_positions = set()  # Track positions used by goals
+        output_positions = set()  # Track output positions of goals
+        goal_positions_info = []  # Track (pos, goal_type) for adjacency check
+
+        def is_self_symmetric_position(col: int, row: int) -> bool:
+            """Check if position is its own mirror (for placing single goals in symmetric mode)."""
+            if symmetry_mode == "horizontal":
+                # For horizontal symmetry, only the exact center column(s) work
+                # But for even cols, there's no perfect center. Allow near-center.
+                mirror_col = cols - 1 - col
+                return col == mirror_col  # Only true if col == (cols-1)/2, i.e., odd cols
+            elif symmetry_mode == "vertical":
+                mirror_row = rows - 1 - row
+                return row == mirror_row
+            elif symmetry_mode == "both":
+                mirror_col = cols - 1 - col
+                mirror_row = rows - 1 - row
+                return col == mirror_col and row == mirror_row
+            return True  # No symmetry, any position works
+
+        def get_preferred_columns_for_symmetry() -> List[int]:
+            """Get column order that respects symmetry."""
+            if symmetry_mode in ("horizontal", "both"):
+                # For horizontal symmetry, prefer center column
+                # If cols=8, center is between 3 and 4. For even cols, prefer 3 or 4.
+                if cols % 2 == 1:
+                    # Odd cols: exact center exists
+                    return [cols // 2]
+                else:
+                    # Even cols: no exact center, use the two middle columns
+                    # They are at (cols//2 - 1) and (cols//2)
+                    # e.g., for cols=8: 3 and 4
+                    return [cols // 2 - 1, cols // 2]
+            else:
+                # No horizontal symmetry constraint
+                return list(range(cols))
+
+        def get_adjacent_positions(col: int, row: int) -> set:
+            """Get all adjacent positions (including diagonals)."""
+            adjacent = set()
+            for dc in [-1, 0, 1]:
+                for dr in [-1, 0, 1]:
+                    if dc == 0 and dr == 0:
+                        continue
+                    adjacent.add(f"{col + dc}_{row + dr}")
+            return adjacent
+
+        def would_face_each_other(pos1: str, type1: str, pos2: str, type2: str) -> bool:
+            """Check if two craft tiles would face each other (output into each other)."""
+            col1, row1 = map(int, pos1.split("_"))
+            col2, row2 = map(int, pos2.split("_"))
+
+            dir1 = type1[-1] if type1.endswith(('_s', '_n', '_e', '_w')) else 's'
+            dir2 = type2[-1] if type2.endswith(('_s', '_n', '_e', '_w')) else 's'
+
+            # Get output positions
+            offsets = {'s': (0, 1), 'n': (0, -1), 'e': (1, 0), 'w': (-1, 0)}
+            out1 = (col1 + offsets[dir1][0], row1 + offsets[dir1][1])
+            out2 = (col2 + offsets[dir2][0], row2 + offsets[dir2][1])
+
+            # Check if they face each other (output to each other's position)
+            if out1 == (col2, row2) or out2 == (col1, row1):
+                return True
+
+            # Check if outputs collide
+            if out1 == out2:
+                return True
+
+            return False
 
         for i, goal in enumerate(goals):
-            goal_type = goal.get("type", "craft_s")
+            # Handle both old format (type="craft_s") and new format (type="craft", direction="s")
+            base_type = goal.get("type", "craft")
+            goal_direction = goal.get("direction") or "s"  # Handle None value
+
+            # If type already includes direction suffix, use as-is
+            if base_type.endswith(('_s', '_n', '_e', '_w')):
+                goal_type = base_type
+            else:
+                # Combine type and direction
+                goal_type = f"{base_type}_{goal_direction}"
+
             goal_count = goal.get("count", 3)
 
-            # Calculate preferred column near center
-            target_col = center_col - len(goals) // 2 + i
+            # Calculate preferred column with more spacing between goals
+            # For symmetric modes, prefer center columns
+            if symmetry_mode in ("horizontal", "both"):
+                preferred_cols = get_preferred_columns_for_symmetry()
+                target_col = preferred_cols[i % len(preferred_cols)]
+            else:
+                spacing = 2  # Minimum 2 columns apart
+                target_col = center_col - (len(goals) * spacing) // 2 + i * spacing
             target_col = max(0, min(cols - 1, target_col))
 
             # Find valid position considering direction rules
             pos = None
             row_order = get_row_search_order(goal_type)
 
-            # Try target column first, then expand search
-            for try_row in row_order:
-                # Search columns in spiral order from target
+            # Build column search order - for symmetry, prefer center columns first
+            if symmetry_mode in ("horizontal", "both"):
+                # Start with preferred symmetric columns, then expand outward
+                preferred = get_preferred_columns_for_symmetry()
+                col_search_order = preferred[:]
+                for offset in range(1, cols):
+                    for c in preferred:
+                        if c - offset >= 0 and (c - offset) not in col_search_order:
+                            col_search_order.append(c - offset)
+                        if c + offset < cols and (c + offset) not in col_search_order:
+                            col_search_order.append(c + offset)
+            else:
+                # Original spiral search from target
+                col_search_order = []
                 for col_offset in range(cols):
-                    for direction in ([0] if col_offset == 0 else [-1, 1]):
-                        try_col = target_col + col_offset * direction
-                        if try_col < 0 or try_col >= cols:
-                            continue
+                    for search_dir in ([0] if col_offset == 0 else [-1, 1]):
+                        c = target_col + col_offset * search_dir
+                        if 0 <= c < cols and c not in col_search_order:
+                            col_search_order.append(c)
 
-                        try_pos = f"{try_col}_{try_row}"
+            # Try positions in priority order
+            for try_row in row_order:
+                for try_col in col_search_order:
+                    try_pos = f"{try_col}_{try_row}"
 
-                        # Check if position is not occupied and not already used
-                        if try_pos in tiles or try_pos in placed_positions:
-                            continue
+                    # Check if position is not occupied and not already used
+                    if try_pos in tiles or try_pos in placed_positions:
+                        continue
 
-                        # Check if this position is valid for the goal direction
-                        if not is_valid_goal_position(try_col, try_row, goal_type):
-                            continue
+                    # Check if this position is valid for the goal direction
+                    if not is_valid_goal_position(try_col, try_row, goal_type):
+                        continue
 
-                        # For stack, also check output position is not in placed_positions
-                        if goal_type.startswith("stack"):
-                            col_off, row_off = get_output_direction(goal_type)
-                            output_pos = f"{try_col + col_off}_{try_row + row_off}"
-                            if output_pos in placed_positions:
-                                continue
+                    # Get output position for this goal
+                    col_off, row_off = get_output_direction(goal_type)
+                    output_pos = f"{try_col + col_off}_{try_row + row_off}"
 
-                        pos = try_pos
-                        break
-                    if pos:
-                        break
+                    # Check output position is not occupied
+                    if output_pos in tiles or output_pos in placed_positions or output_pos in output_positions:
+                        continue
+
+                    # Check no adjacent to existing goals (minimum 1 cell gap)
+                    adjacent = get_adjacent_positions(try_col, try_row)
+                    if adjacent & placed_positions:
+                        continue
+
+                    # Check output position adjacency
+                    output_adjacent = get_adjacent_positions(try_col + col_off, try_row + row_off)
+                    if output_adjacent & output_positions:
+                        continue
+
+                    # Check not facing any existing goal
+                    facing_conflict = False
+                    for existing_pos, existing_type in goal_positions_info:
+                        if would_face_each_other(try_pos, goal_type, existing_pos, existing_type):
+                            facing_conflict = True
+                            break
+                    if facing_conflict:
+                        continue
+
+                    pos = try_pos
+                    break
                 if pos:
                     break
 
             if pos:
+                p_col, p_row = map(int, pos.split("_"))
+                col_off, row_off = get_output_direction(goal_type)
+                output_pos = f"{p_col + col_off}_{p_row + row_off}"
+
                 placed_positions.add(pos)
-                # For stack, also reserve output position
-                if goal_type.startswith("stack"):
-                    col_off, row_off = get_output_direction(goal_type)
-                    p_col, p_row = map(int, pos.split("_"))
-                    output_pos = f"{p_col + col_off}_{p_row + row_off}"
-                    placed_positions.add(output_pos)
+                output_positions.add(output_pos)
+                goal_positions_info.append((pos, goal_type))
 
                 tiles[pos] = [goal_type, "", [goal_count]]
 
         # Update tile count
         level[layer_key]["num"] = str(len(tiles))
 
+        # Set goalCount for the level
+        goalCount = {}
+        for goal in goals:
+            # Handle both old format (type="craft_s") and new format (type="craft", direction="s")
+            base_type = goal.get("type", "craft")
+            direction = goal.get("direction") or "s"  # Handle None value
+
+            if base_type.endswith(('_s', '_n', '_e', '_w')):
+                full_goal_type = base_type
+            else:
+                full_goal_type = f"{base_type}_{direction}"
+
+            goal_count = goal.get("count", 3)
+            goalCount[full_goal_type] = goalCount.get(full_goal_type, 0) + goal_count
+
+        level["goalCount"] = goalCount
+
         return level
 
     def _adjust_difficulty(
-        self, level: Dict[str, Any], target: float, max_tiles: Optional[int] = None
+        self, level: Dict[str, Any], target: float, max_tiles: Optional[int] = None, params: Optional["GenerationParams"] = None
     ) -> Dict[str, Any]:
         """Adjust level to match target difficulty within tolerance.
 
@@ -1629,9 +2206,11 @@ class LevelGenerator:
             level: The level to adjust
             target: Target difficulty (0.0-1.0)
             max_tiles: If specified, don't add tiles beyond this count
+            params: Generation parameters (for symmetry awareness)
         """
         analyzer = get_analyzer()
         target_score = target * 100
+        symmetry_mode = params.symmetry_mode if params else "none"
 
         for iteration in range(self.MAX_ADJUSTMENT_ITERATIONS):
             report = analyzer.analyze(level)
@@ -1652,30 +2231,38 @@ class LevelGenerator:
                     if current_tiles >= max_tiles:
                         # Can't add more tiles, stop adjusting
                         break
-                level = self._increase_difficulty(level)
+                level = self._increase_difficulty(level, params)
             else:
                 # Need to decrease difficulty
-                level = self._decrease_difficulty(level)
+                level = self._decrease_difficulty(level, params)
 
         return level
 
-    def _increase_difficulty(self, level: Dict[str, Any]) -> Dict[str, Any]:
+    def _increase_difficulty(self, level: Dict[str, Any], params: Optional["GenerationParams"] = None) -> Dict[str, Any]:
         """Apply a random modification to increase difficulty.
 
         Note: Obstacle and goal modifications are removed to respect
         user-specified settings. Difficulty is adjusted primarily through
         tile count changes only.
         """
+        symmetry_mode = params.symmetry_mode if params else "none"
+        # For symmetric patterns, skip random tile addition to preserve symmetry
+        if symmetry_mode != "none":
+            return level
         # Only use tile modifications - goal count should respect user's settings
         return self._add_tile_to_layer(level)
 
-    def _decrease_difficulty(self, level: Dict[str, Any]) -> Dict[str, Any]:
+    def _decrease_difficulty(self, level: Dict[str, Any], params: Optional["GenerationParams"] = None) -> Dict[str, Any]:
         """Apply a random modification to decrease difficulty.
 
         Note: Obstacle and goal modifications are removed to respect
         user-specified settings. Difficulty is adjusted primarily through
         tile count changes only.
         """
+        symmetry_mode = params.symmetry_mode if params else "none"
+        # For symmetric patterns, skip random tile removal to preserve symmetry
+        if symmetry_mode != "none":
+            return level
         # Only use tile modifications - goal count should respect user's settings
         return self._remove_tile_from_layer(level)
 
@@ -1807,12 +2394,16 @@ class LevelGenerator:
         use_tile_count = level.get("useTileCount", 5)
 
         # Collect existing tile types from level to match user's selection
+        # IMPORTANT: Exclude goal types (craft_s, stack_s, etc.) - they should only be added via _add_goals
         existing_tile_types = set()
         for i in range(num_layers):
             layer_tiles = level.get(f"layer_{i}", {}).get("tiles", {})
             for tile_data in layer_tiles.values():
                 if isinstance(tile_data, list) and tile_data:
-                    existing_tile_types.add(tile_data[0])
+                    tile_type = tile_data[0]
+                    # Exclude goal types and craft/stack tiles
+                    if not (tile_type.startswith("craft_") or tile_type.startswith("stack_")):
+                        existing_tile_types.add(tile_type)
 
         # Use existing tile types if available, otherwise fall back to t1~t{useTileCount}
         if existing_tile_types:
@@ -2001,8 +2592,8 @@ class LevelGenerator:
             for pos, tile_data in tiles.items():
                 if isinstance(tile_data, list) and len(tile_data) > 0:
                     tile_type = tile_data[0]
-                    # Skip goal tiles
-                    if tile_type in self.GOAL_TYPES:
+                    # Skip goal tiles (craft_s, craft_n, craft_e, craft_w, stack_s, etc.)
+                    if tile_type in self.GOAL_TYPES or tile_type.startswith("craft_") or tile_type.startswith("stack_"):
                         continue
                     # Check if tile type is out of valid range
                     if tile_type.startswith("t") and tile_type not in valid_tile_set:
@@ -2021,8 +2612,8 @@ class LevelGenerator:
             for pos, tile_data in tiles.items():
                 if isinstance(tile_data, list) and len(tile_data) > 0:
                     tile_type = tile_data[0]
-                    if tile_type in self.GOAL_TYPES or tile_type.startswith("stack_"):
-                        # Count internal tiles
+                    if tile_type in self.GOAL_TYPES or tile_type.startswith("craft_") or tile_type.startswith("stack_"):
+                        # Count internal tiles for goal tiles (craft/stack)
                         if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
                             internal_count = int(tile_data[2][0]) if tile_data[2][0] else 0
                             total_matchable += internal_count
@@ -2030,38 +2621,89 @@ class LevelGenerator:
                     else:
                         total_matchable += 1
 
-        # Adjust total to be divisible by 3 by modifying craft_s internal tile counts
+        # Adjust total to be divisible by 3 (NOT modifying goal counts)
+        # User-specified goal internal counts should be preserved
+        # Strategy: Try to add tiles first, if not possible then remove tiles
+        # CRITICAL: For symmetric patterns, we must add/remove tiles symmetrically!
         total_remainder = total_matchable % 3
-        if total_remainder != 0:
-            # Need to add (3 - total_remainder) internal tiles to make total divisible by 3
-            tiles_to_add = 3 - total_remainder
+        tiles_were_removed = False  # Track if we removed tiles for total adjustment
+        symmetry_mode = params.symmetry_mode or "none"
 
-            if goal_tiles_with_internal:
-                # Find the first craft_s with internal tiles and increase its count
-                layer_idx, pos, tile_data = goal_tiles_with_internal[0]
-                layer_key = f"layer_{layer_idx}"
-                current_count = int(tile_data[2][0]) if tile_data[2] else 0
-                tile_data[2] = [current_count + tiles_to_add]
-                level[layer_key]["tiles"][pos] = tile_data
+        if total_remainder != 0:
+            cols, rows = params.grid_size
+
+            # First, try to add tiles (3 - remainder tiles needed)
+            tiles_to_add = 3 - total_remainder
+            added_count = 0
+
+            # For symmetric patterns, add tiles symmetrically
+            if symmetry_mode in ("horizontal", "vertical", "both"):
+                # For symmetry, we need to add tiles in pairs/quads
+                # Just skip adding for now - the tile type redistribution will handle it
+                pass
             else:
-                # No goal tiles with internal counts - find any goal tile and add internal tiles
+                for i in range(num_layers):
+                    if added_count >= tiles_to_add:
+                        break
+                    layer_key = f"layer_{i}"
+                    layer_data = level.get(layer_key, {})
+                    tiles = layer_data.get("tiles", {})
+                    if not tiles:
+                        continue
+
+                    is_odd_layer = i % 2 == 1
+                    layer_cols = cols if is_odd_layer else cols + 1
+                    layer_rows = rows if is_odd_layer else rows + 1
+
+                    all_positions = [f"{x}_{y}" for x in range(layer_cols) for y in range(layer_rows)]
+                    used_positions = set(tiles.keys())
+
+                    for pos in all_positions:
+                        if added_count >= tiles_to_add:
+                            break
+                        if pos not in used_positions:
+                            # Add a t0 tile to this position
+                            level[layer_key]["tiles"][pos] = ["t0", ""]
+                            level[layer_key]["num"] = str(len(level[layer_key]["tiles"]))
+                            added_count += 1
+
+            # If adding tiles failed (no available positions), remove tiles instead
+            # If remainder=1, remove 1 tile. If remainder=2, remove 2 tiles.
+            # CRITICAL: For symmetric patterns, we SKIP removal to preserve symmetry!
+            if added_count < tiles_to_add and symmetry_mode == "none":
+                tiles_to_remove = total_remainder  # 1 or 2
+                removed_count = 0
+
+                # Collect removable tiles (regular tiles without attributes, not goals)
+                removable_tiles: List[Tuple[int, str]] = []
                 for i in range(num_layers):
                     layer_key = f"layer_{i}"
                     tiles = level.get(layer_key, {}).get("tiles", {})
                     for pos, tile_data in tiles.items():
-                        if isinstance(tile_data, list) and len(tile_data) > 0:
+                        if isinstance(tile_data, list) and len(tile_data) >= 2:
                             tile_type = tile_data[0]
-                            if tile_type in self.GOAL_TYPES:
-                                # Add internal tiles to this goal tile
-                                if len(tile_data) < 3:
-                                    tile_data.append([tiles_to_add])
-                                else:
-                                    tile_data[2] = [tiles_to_add]
-                                level[layer_key]["tiles"][pos] = tile_data
-                                break
-                    else:
-                        continue
-                    break
+                            attribute = tile_data[1] if len(tile_data) > 1 else ""
+                            # Only remove regular tiles without attributes (not goal tiles)
+                            if (tile_type not in self.GOAL_TYPES and
+                                not tile_type.startswith("craft_") and
+                                not tile_type.startswith("stack_") and
+                                not attribute):
+                                removable_tiles.append((i, pos))
+
+                # Remove tiles from the end of the list (less impactful positions)
+                import random
+                random.shuffle(removable_tiles)
+                for layer_idx, pos in removable_tiles[:tiles_to_remove]:
+                    layer_key = f"layer_{layer_idx}"
+                    if pos in level[layer_key]["tiles"]:
+                        del level[layer_key]["tiles"][pos]
+                        level[layer_key]["num"] = str(len(level[layer_key]["tiles"]))
+                        removed_count += 1
+                        if removed_count >= tiles_to_remove:
+                            break
+
+                if removed_count > 0:
+                    tiles_were_removed = True
 
         # Step 1: Count each tile type across all layers
         # IMPORTANT: Also count internal tiles in craft/stack containers as t0
@@ -2075,7 +2717,7 @@ class LevelGenerator:
                 if isinstance(tile_data, list) and len(tile_data) > 0:
                     tile_type = tile_data[0]
                     # For craft/stack tiles, count internal tiles as t0
-                    if tile_type in self.GOAL_TYPES or tile_type.startswith("stack_"):
+                    if tile_type in self.GOAL_TYPES or tile_type.startswith("craft_") or tile_type.startswith("stack_"):
                         # [count] = number of internal t0 tiles
                         if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
                             internal_count = int(tile_data[2][0]) if tile_data[2][0] else 0
@@ -2136,14 +2778,18 @@ class LevelGenerator:
                     available_positions.append((layer_idx, pos))
 
         # Step 4: Add tiles to reach multiples of 3 for each type
-        for tile_type, tiles_needed in types_needing_add:
-            for _ in range(tiles_needed):
-                if not available_positions:
-                    break
-                layer_idx, pos = available_positions.pop(0)
-                layer_key = f"layer_{layer_idx}"
-                level[layer_key]["tiles"][pos] = [tile_type, ""]
-                level[layer_key]["num"] = str(len(level[layer_key]["tiles"]))
+        # IMPORTANT: Skip adding tiles if we already removed tiles for total adjustment
+        # Adding tiles would undo the total divisibility fix
+        # CRITICAL: For symmetric patterns, skip random tile addition to preserve symmetry!
+        if not tiles_were_removed and symmetry_mode == "none":
+            for tile_type, tiles_needed in types_needing_add:
+                for _ in range(tiles_needed):
+                    if not available_positions:
+                        break
+                    layer_idx, pos = available_positions.pop(0)
+                    layer_key = f"layer_{layer_idx}"
+                    level[layer_key]["tiles"][pos] = [tile_type, ""]
+                    level[layer_key]["num"] = str(len(level[layer_key]["tiles"]))
 
         # Step 5: Final verification - if still have issues, reassign existing tiles
         # Recount after additions (include internal t0 tiles)
@@ -2156,7 +2802,7 @@ class LevelGenerator:
             for pos, tile_data in tiles.items():
                 if isinstance(tile_data, list) and len(tile_data) > 0:
                     tile_type = tile_data[0]
-                    if tile_type in self.GOAL_TYPES or tile_type.startswith("stack_"):
+                    if tile_type in self.GOAL_TYPES or tile_type.startswith("craft_") or tile_type.startswith("stack_"):
                         # Count internal tiles as t0
                         if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
                             internal_count = int(tile_data[2][0]) if tile_data[2][0] else 0
@@ -2251,7 +2897,7 @@ class LevelGenerator:
                 for pos, tile_data in tiles.items():
                     if isinstance(tile_data, list) and len(tile_data) > 0:
                         tile_type = tile_data[0]
-                        if tile_type in self.GOAL_TYPES or tile_type.startswith("stack_"):
+                        if tile_type in self.GOAL_TYPES or tile_type.startswith("craft_") or tile_type.startswith("stack_"):
                             if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
                                 internal_count = int(tile_data[2][0]) if tile_data[2][0] else 0
                                 type_counts_final["t0"] = type_counts_final.get("t0", 0) + internal_count
@@ -2262,6 +2908,107 @@ class LevelGenerator:
                             type_positions_final[tile_type].append((i, pos))
 
             still_broken = [(t, c % 3) for t, c in type_counts_final.items() if c % 3 != 0]
+
+        # FINAL STEP: FORCE divisibility by 3
+        # If still_broken has any types, it means the total is not divisible by 3
+        # or the reassignment strategies failed. Force fix by removing tiles.
+        if still_broken:
+            # Recount everything one more time
+            total_matchable = 0
+            removable_tiles_final: List[Tuple[int, str, str]] = []  # (layer_idx, pos, tile_type)
+
+            for i in range(num_layers):
+                layer_key = f"layer_{i}"
+                tiles = level.get(layer_key, {}).get("tiles", {})
+                for pos, tile_data in tiles.items():
+                    if isinstance(tile_data, list) and len(tile_data) > 0:
+                        tile_type = tile_data[0]
+                        if tile_type in self.GOAL_TYPES or tile_type.startswith("craft_") or tile_type.startswith("stack_"):
+                            # Count internal tiles
+                            if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
+                                internal_count = int(tile_data[2][0]) if tile_data[2][0] else 0
+                                total_matchable += internal_count
+                        else:
+                            total_matchable += 1
+                            # Only add regular tiles without obstacles as removable
+                            attr = tile_data[1] if len(tile_data) > 1 else ""
+                            if not attr:
+                                removable_tiles_final.append((i, pos, tile_type))
+
+            total_remainder = total_matchable % 3
+            if total_remainder != 0:
+                # We MUST remove tiles to fix the total
+                tiles_to_remove = total_remainder  # 1 or 2
+
+                # Sort removable tiles by type - prefer removing from types with remainder
+                type_counts_for_sort: Dict[str, int] = {}
+                for layer_idx, pos, tile_type in removable_tiles_final:
+                    type_counts_for_sort[tile_type] = type_counts_for_sort.get(tile_type, 0) + 1
+
+                # Calculate remainder for each type
+                type_remainders = {t: c % 3 for t, c in type_counts_for_sort.items()}
+
+                # Sort: prefer types with remainder matching tiles_to_remove
+                # e.g., if we need to remove 1 tile, prefer types with remainder 1
+                def sort_key(item: Tuple[int, str, str]) -> Tuple[int, str]:
+                    _, _, tile_type = item
+                    remainder = type_remainders.get(tile_type, 0)
+                    # Priority: exact match > any remainder > no remainder
+                    if remainder == tiles_to_remove:
+                        return (0, tile_type)
+                    elif remainder > 0:
+                        return (1, tile_type)
+                    else:
+                        return (2, tile_type)
+
+                removable_tiles_final.sort(key=sort_key)
+
+                removed_count = 0
+                for layer_idx, pos, tile_type in removable_tiles_final:
+                    if removed_count >= tiles_to_remove:
+                        break
+                    layer_key = f"layer_{layer_idx}"
+                    if pos in level.get(layer_key, {}).get("tiles", {}):
+                        del level[layer_key]["tiles"][pos]
+                        level[layer_key]["num"] = str(len(level[layer_key]["tiles"]))
+                        removed_count += 1
+
+                # After removing tiles for total, we need to re-run type redistribution
+                # But now the total IS divisible by 3, so redistribution will work
+                if removed_count > 0:
+                    # Quick redistribution pass
+                    type_counts_final2: Dict[str, int] = {}
+                    type_positions_final2: Dict[str, List[Tuple[int, str]]] = {}
+
+                    for i in range(num_layers):
+                        layer_key = f"layer_{i}"
+                        tiles = level.get(layer_key, {}).get("tiles", {})
+                        for pos, tile_data in tiles.items():
+                            if isinstance(tile_data, list) and len(tile_data) > 0:
+                                tile_type = tile_data[0]
+                                if tile_type in self.GOAL_TYPES or tile_type.startswith("craft_") or tile_type.startswith("stack_"):
+                                    if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
+                                        internal_count = int(tile_data[2][0]) if tile_data[2][0] else 0
+                                        type_counts_final2["t0"] = type_counts_final2.get("t0", 0) + internal_count
+                                else:
+                                    type_counts_final2[tile_type] = type_counts_final2.get(tile_type, 0) + 1
+                                    if tile_type not in type_positions_final2:
+                                        type_positions_final2[tile_type] = []
+                                    type_positions_final2[tile_type].append((i, pos))
+
+                    # Simple redistribution: pair rem1 with rem2
+                    still_broken2 = [(t, c % 3) for t, c in type_counts_final2.items() if c % 3 != 0]
+                    rem1_types2 = [t for t, r in still_broken2 if r == 1]
+                    rem2_types2 = [t for t, r in still_broken2 if r == 2]
+
+                    while rem1_types2 and rem2_types2:
+                        type_a = rem1_types2.pop(0)
+                        type_b = rem2_types2.pop(0)
+                        if type_a in type_positions_final2 and type_positions_final2[type_a]:
+                            layer_idx, pos = type_positions_final2[type_a].pop()
+                            layer_key = f"layer_{layer_idx}"
+                            if pos in level.get(layer_key, {}).get("tiles", {}):
+                                level[layer_key]["tiles"][pos][0] = type_b
 
         return level
 
@@ -2341,8 +3088,11 @@ class LevelGenerator:
                     if target_pos in tiles:
                         target_data = tiles[target_pos]
                         if isinstance(target_data, list) and len(target_data) >= 2:
-                            # Target must not be a goal tile
-                            if target_data[0] not in self.GOAL_TYPES:
+                            # Target must not be a goal tile (craft/stack)
+                            target_type = target_data[0]
+                            if (target_type not in self.GOAL_TYPES and
+                                not target_type.startswith("craft_") and
+                                not target_type.startswith("stack_")):
                                 valid_link = True
 
                     if not valid_link:

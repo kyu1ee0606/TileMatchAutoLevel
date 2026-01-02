@@ -12,14 +12,16 @@ class LevelAnalyzer:
     """Analyzes level difficulty based on various metrics."""
 
     # Weight configuration for difficulty calculation
+    # Score is normalized to 0-100 by dividing by 3.0
+    # Target ranges: Easy 0-30, Medium 30-60, Hard 60-100
     WEIGHTS = {
-        "total_tiles": 0.3,
-        "active_layers": 5.0,
-        "chain_count": 3.0,
-        "frog_count": 4.0,
-        "link_count": 2.0,
-        "goal_amount": 2.0,
-        "layer_blocking": 1.5,
+        "total_tiles": 0.5,       # 30-120 tiles → 15-60 points
+        "active_layers": 4.0,     # 3-8 layers → 12-32 points
+        "chain_count": 3.0,       # 0-15 chains → 0-45 points
+        "frog_count": 4.0,        # 0-10 frogs → 0-40 points
+        "link_count": 2.0,        # 0-10 links → 0-20 points
+        "goal_amount": 1.5,       # 3-10 goals → 4.5-15 points
+        "layer_blocking": 0.15,   # Reduced: blocking can be 0-300 → 0-45 points
     }
 
     # Recommendation thresholds
@@ -101,8 +103,8 @@ class LevelAnalyzer:
                     elif attribute.startswith("link_"):
                         link_count += 1
 
-                    # Extract goals
-                    if tile_type in ("craft_s", "stack_s"):
+                    # Extract goals (support all direction variants: s, n, e, w)
+                    if tile_type.startswith(("craft_", "stack_")):
                         count = extra[0] if extra and len(extra) > 0 else 1
                         goals.append({"type": tile_type, "count": count})
                         goal_amount += count

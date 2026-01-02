@@ -85,8 +85,9 @@ export function BotViewer({
   }, [currentStep, botResult.moves, initialFrogPositions]);
 
   // Calculate remaining tiles and layers info
+  // NOTE: Count actual matchable tiles, including stack/craft internal tiles
   const { totalTiles, remainingTiles, layerStats } = useMemo(() => {
-    // Count initial tiles per layer
+    // Count initial tiles per layer (including stack/craft internal tiles)
     const layerCounts: Record<number, number> = {};
     let total = 0;
 
@@ -94,9 +95,31 @@ export function BotViewer({
       const layerKey = `layer_${layerIdx}` as `layer_${number}`;
       const layerData = levelJson[layerKey];
       if (layerData?.tiles) {
-        const count = Object.keys(layerData.tiles).length;
-        layerCounts[layerIdx] = count;
-        total += count;
+        let layerTotal = 0;
+        Object.values(layerData.tiles).forEach((tileData: unknown) => {
+          const td = tileData as [string, string?, unknown[]?];
+          if (!td || !td[0]) return;
+
+          const tileType = td[0];
+          // Check if this is a stack/craft tile with internal tiles
+          if (tileType.startsWith('stack_') || tileType.startsWith('craft_')) {
+            // Stack/craft info is in td[2] with format [count] or [count, types_string]
+            const stackInfo = td[2];
+            if (stackInfo && Array.isArray(stackInfo) && stackInfo.length >= 1) {
+              const internalCount = typeof stackInfo[0] === 'number'
+                ? stackInfo[0]
+                : parseInt(String(stackInfo[0]), 10) || 1;
+              layerTotal += internalCount;
+            } else {
+              layerTotal += 1; // Default: 1 internal tile
+            }
+          } else {
+            // Regular tile
+            layerTotal += 1;
+          }
+        });
+        layerCounts[layerIdx] = layerTotal;
+        total += layerTotal;
       }
     }
 

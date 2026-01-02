@@ -18,7 +18,8 @@ class AnalyzeResponse(BaseModel):
 
 class GoalConfig(BaseModel):
     """Goal configuration for level generation."""
-    type: str = Field(..., description="Goal type (craft_s, stack_s)")
+    type: str = Field(..., description="Goal type (craft, stack) or full type (craft_s, stack_s)")
+    direction: Optional[str] = Field(default=None, description="Direction suffix (s/n/e/w) for craft/stack goals")
     count: int = Field(..., ge=1, description="Required count to collect")
 
 
@@ -71,6 +72,15 @@ class GenerateRequest(BaseModel):
     layer_obstacle_configs: Optional[List[LayerObstacleConfig]] = Field(
         default=None,
         description="Per-layer obstacle count settings. Unspecified layers auto-distribute."
+    )
+    # Symmetry and pattern options
+    symmetry_mode: Optional[str] = Field(
+        default=None,
+        description="Symmetry mode: 'none', 'horizontal' (left-right), 'vertical' (top-bottom), 'both' (4-way)"
+    )
+    pattern_type: Optional[str] = Field(
+        default=None,
+        description="Pattern type: 'random', 'geometric' (regular shapes), 'clustered' (grouped tiles)"
     )
 
 
@@ -371,3 +381,43 @@ class AutoPlayResponse(BaseModel):
     # Metadata
     total_simulations: int = Field(..., description="Total number of simulations run")
     execution_time_ms: int = Field(..., description="Execution time in milliseconds")
+
+
+# ============================================================
+# Validated Generation Schemas (Simulation-verified generation)
+# ============================================================
+
+class ValidatedGenerateRequest(BaseModel):
+    """Request schema for simulation-validated level generation."""
+    target_difficulty: float = Field(..., ge=0.0, le=1.0, description="Target difficulty (0.0-1.0)")
+    grid_size: Tuple[int, int] = Field(default=(7, 7), description="Grid size (cols, rows)")
+    max_layers: int = Field(default=7, ge=1, le=7, description="Maximum number of layers")
+    tile_types: Optional[List[str]] = Field(default=None, description="Tile types to use")
+    obstacle_types: Optional[List[str]] = Field(default=None, description="Obstacle types to use")
+    goals: Optional[List[GoalConfig]] = Field(default=None, description="Goal configurations")
+    symmetry_mode: Optional[str] = Field(default=None, description="Symmetry mode")
+    pattern_type: Optional[str] = Field(default=None, description="Pattern type")
+
+    # Validation parameters
+    max_retries: int = Field(default=5, ge=1, le=20, description="Maximum generation retries")
+    tolerance: float = Field(default=15.0, ge=5.0, le=30.0, description="Acceptable gap percentage from target")
+    simulation_iterations: int = Field(default=30, ge=10, le=100, description="Iterations for validation simulation")
+
+
+class ValidatedGenerateResponse(BaseModel):
+    """Response schema for validated level generation."""
+    level_json: Dict[str, Any] = Field(..., description="Generated level JSON")
+    actual_difficulty: float = Field(..., description="Analyzer difficulty score (0-1)")
+    grade: str = Field(..., description="Difficulty grade")
+    generation_time_ms: int = Field(default=0, description="Total generation time in ms")
+
+    # Simulation validation results
+    validation_passed: bool = Field(..., description="Whether simulation validation passed")
+    attempts: int = Field(..., description="Number of generation attempts")
+
+    # Bot clear rates from simulation
+    bot_clear_rates: Dict[str, float] = Field(default={}, description="Clear rates per bot type (0-1)")
+    target_clear_rates: Dict[str, float] = Field(default={}, description="Target clear rates per bot type")
+    avg_gap: float = Field(default=0, description="Average gap from target (%)")
+    max_gap: float = Field(default=0, description="Maximum gap from target (%)")
+    match_score: float = Field(default=0, description="Match score (0-100%, higher is better)")

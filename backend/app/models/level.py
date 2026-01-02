@@ -110,6 +110,9 @@ class GenerationParams:
     active_layer_count: Optional[int] = None  # Number of active layers
     layer_tile_configs: Optional[List[LayerTileConfig]] = None  # Per-layer tile counts
     layer_obstacle_configs: Optional[List[LayerObstacleConfig]] = None  # Per-layer obstacle counts
+    # Symmetry and pattern options
+    symmetry_mode: Optional[str] = None  # 'none', 'horizontal', 'vertical', 'both'
+    pattern_type: Optional[str] = None  # 'random', 'geometric', 'clustered'
 
     def __post_init__(self):
         """Set default values after initialization."""

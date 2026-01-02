@@ -160,6 +160,11 @@ export function LocalLevelBrowser({ className }: LocalLevelBrowserProps) {
   const [selectedLevelId, setSelectedLevelId] = useState<string | null>(null);
   const [thumbnailCache, setThumbnailCache] = useState<Record<string, LevelJSON>>({});
 
+  // Bulk selection state
+  const [isSelectMode, setIsSelectMode] = useState(false);
+  const [checkedLevelIds, setCheckedLevelIds] = useState<Set<string>>(new Set());
+  const [isDeleting, setIsDeleting] = useState(false);
+
   // Load levels on mount
   const loadLevels = async () => {
     setIsLoadingList(true);
@@ -212,6 +217,72 @@ export function LocalLevelBrowser({ className }: LocalLevelBrowserProps) {
     } catch (err) {
       console.error('Failed to delete level:', err);
       addNotification('error', '레벨 삭제에 실패했습니다');
+    }
+  };
+
+  // Toggle select mode
+  const toggleSelectMode = () => {
+    setIsSelectMode(!isSelectMode);
+    setCheckedLevelIds(new Set());
+  };
+
+  // Toggle individual level check
+  const toggleLevelCheck = (levelId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setCheckedLevelIds(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(levelId)) {
+        newSet.delete(levelId);
+      } else {
+        newSet.add(levelId);
+      }
+      return newSet;
+    });
+  };
+
+  // Select all visible levels
+  const selectAll = () => {
+    const allIds = filteredAndSortedLevels.map(l => l.id);
+    setCheckedLevelIds(new Set(allIds));
+  };
+
+  // Deselect all
+  const deselectAll = () => {
+    setCheckedLevelIds(new Set());
+  };
+
+  // Bulk delete
+  const handleBulkDelete = async () => {
+    if (checkedLevelIds.size === 0) return;
+
+    if (!confirm(`선택한 ${checkedLevelIds.size}개의 레벨을 삭제하시겠습니까?`)) return;
+
+    setIsDeleting(true);
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const levelId of checkedLevelIds) {
+      try {
+        await deleteLocalLevel(levelId);
+        successCount++;
+      } catch (err) {
+        console.error(`Failed to delete level ${levelId}:`, err);
+        failCount++;
+      }
+    }
+
+    // Update state
+    setLevels(prev => prev.filter(l => !checkedLevelIds.has(l.id)));
+    if (selectedLevelId && checkedLevelIds.has(selectedLevelId)) {
+      setSelectedLevelId(null);
+    }
+    setCheckedLevelIds(new Set());
+    setIsDeleting(false);
+
+    if (failCount === 0) {
+      addNotification('success', `${successCount}개의 레벨이 삭제되었습니다`);
+    } else {
+      addNotification('warning', `${successCount}개 삭제, ${failCount}개 실패`);
     }
   };
 
@@ -287,7 +358,19 @@ export function LocalLevelBrowser({ className }: LocalLevelBrowserProps) {
           <span>💾 로컬 레벨</span>
           <span className="text-xs text-gray-400">({levels.length})</span>
         </button>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1">
+          <button
+            onClick={toggleSelectMode}
+            className={clsx(
+              'px-2 py-1 text-xs rounded-md transition-colors',
+              isSelectMode
+                ? 'bg-primary-600 text-white'
+                : 'hover:bg-gray-700 text-gray-400'
+            )}
+            title={isSelectMode ? '선택 모드 종료' : '일괄 선택'}
+          >
+            ☑️
+          </button>
           <button
             onClick={loadLevels}
             className="p-1.5 hover:bg-gray-700 rounded-md transition-colors"
@@ -297,6 +380,40 @@ export function LocalLevelBrowser({ className }: LocalLevelBrowserProps) {
           </button>
         </div>
       </div>
+
+      {/* Bulk action bar */}
+      {isSelectMode && isExpanded && (
+        <div className="flex items-center gap-2 px-3 py-2 bg-gray-700/50 border-b border-gray-700">
+          <button
+            onClick={selectAll}
+            className="px-2 py-1 text-xs bg-gray-600 hover:bg-gray-500 rounded transition-colors"
+          >
+            전체 선택
+          </button>
+          <button
+            onClick={deselectAll}
+            className="px-2 py-1 text-xs bg-gray-600 hover:bg-gray-500 rounded transition-colors"
+          >
+            선택 해제
+          </button>
+          <div className="flex-1" />
+          <span className="text-xs text-gray-400">
+            {checkedLevelIds.size}개 선택
+          </span>
+          <button
+            onClick={handleBulkDelete}
+            disabled={checkedLevelIds.size === 0 || isDeleting}
+            className={clsx(
+              'px-3 py-1 text-xs rounded transition-colors',
+              checkedLevelIds.size === 0 || isDeleting
+                ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
+                : 'bg-red-600 hover:bg-red-500 text-white'
+            )}
+          >
+            {isDeleting ? '삭제 중...' : '🗑️ 일괄 삭제'}
+          </button>
+        </div>
+      )}
 
       {isExpanded && (
         <>
@@ -337,14 +454,27 @@ export function LocalLevelBrowser({ className }: LocalLevelBrowserProps) {
                 {filteredAndSortedLevels.map((level) => (
                   <div
                     key={level.id}
-                    onClick={() => handleLevelClick(level.id)}
+                    onClick={() => isSelectMode ? toggleLevelCheck(level.id, { stopPropagation: () => {} } as React.MouseEvent) : handleLevelClick(level.id)}
                     className={clsx(
                       'flex items-center gap-3 px-3 py-2 border-b border-gray-800 cursor-pointer transition-colors',
-                      selectedLevelId === level.id
+                      checkedLevelIds.has(level.id)
+                        ? 'bg-blue-900/30 border-blue-700'
+                        : selectedLevelId === level.id
                         ? 'bg-primary-900/30 border-primary-700'
                         : 'hover:bg-gray-700/50'
                     )}
                   >
+                    {/* Checkbox in select mode */}
+                    {isSelectMode && (
+                      <input
+                        type="checkbox"
+                        checked={checkedLevelIds.has(level.id)}
+                        onChange={(e) => toggleLevelCheck(level.id, e as unknown as React.MouseEvent)}
+                        onClick={(e) => e.stopPropagation()}
+                        className="w-4 h-4 rounded border-gray-500 text-primary-600 focus:ring-primary-500 bg-gray-700"
+                      />
+                    )}
+
                     {/* Thumbnail */}
                     <LevelThumbnail
                       levelData={thumbnailCache[level.id]}

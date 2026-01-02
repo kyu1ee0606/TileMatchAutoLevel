@@ -9,6 +9,53 @@ interface TileGridProps {
   className?: string;
 }
 
+// Direction arrow component for craft tiles
+// Parse direction from tile type suffix: _s=south, _n=north, _e=east, _w=west
+const DIRECTION_SUFFIX_MAP: Record<string, { rotation: number; label: string; direction: string }> = {
+  '_s': { rotation: 180, label: '↓', direction: 'South' },   // South (down)
+  '_n': { rotation: 0, label: '↑', direction: 'North' },     // North (up)
+  '_e': { rotation: 90, label: '→', direction: 'East' },     // East (right)
+  '_w': { rotation: 270, label: '←', direction: 'West' },    // West (left)
+};
+
+function getDirectionFromTileType(tileType: string): { rotation: number; label: string; direction: string } | null {
+  // Check last 2 characters for direction suffix
+  const suffix = tileType.slice(-2);
+  return DIRECTION_SUFFIX_MAP[suffix] || null;
+}
+
+function DirectionArrow({ tileType, tileSize }: { tileType: string; tileSize: number }) {
+  const dirInfo = getDirectionFromTileType(tileType);
+  if (!dirInfo) return null;
+
+  const arrowSize = Math.max(16, tileSize * 0.5);
+
+  return (
+    <div
+      className="absolute inset-0 flex items-center justify-center pointer-events-none z-30"
+      title={`배출 방향: ${dirInfo.direction} ${dirInfo.label}`}
+    >
+      <svg
+        width={arrowSize}
+        height={arrowSize}
+        viewBox="0 0 24 24"
+        style={{
+          transform: `rotate(${dirInfo.rotation}deg)`,
+          filter: 'drop-shadow(0 0 2px rgba(0,0,0,0.8))',
+        }}
+      >
+        {/* Arrow pointing up (will be rotated) */}
+        <path
+          d="M12 4L4 14h5v6h6v-6h5L12 4z"
+          fill="#FFD700"
+          stroke="#000"
+          strokeWidth="1"
+        />
+      </svg>
+    </div>
+  );
+}
+
 const BASE_TILE_SIZE = 40; // px
 const GAP_SIZE = 2; // px (gap-0.5)
 
@@ -374,10 +421,9 @@ export function TileGrid({ className }: TileGridProps) {
             {attrInfo?.icon || attribute[0]}
           </span>
         )}
-        {tileData[2] && (
-          <span className="absolute top-0 left-0 text-[10px] bg-black/50 text-white px-0.5 rounded z-20">
-            {tileData[2][0]}
-          </span>
+        {/* Direction arrow overlay for craft tiles */}
+        {tileType.startsWith('craft_') && (
+          <DirectionArrow tileType={tileType} tileSize={TILE_SIZE} />
         )}
       </div>
     );

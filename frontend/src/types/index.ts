@@ -41,9 +41,13 @@ export interface DifficultyReport {
   recommendations: string[];
 }
 
-// Goal configuration
+// Goal configuration with direction support
+export type GoalType = 'craft' | 'stack';
+export type GoalDirection = 's' | 'n' | 'e' | 'w';
+
 export interface GoalConfig {
-  type: 'craft_s' | 'stack_s';
+  type: GoalType;
+  direction: GoalDirection;
   count: number;
 }
 
@@ -65,6 +69,12 @@ export interface LayerObstacleConfig {
   counts: Record<string, ObstacleCountConfig>;
 }
 
+// Symmetry mode options
+export type SymmetryMode = 'none' | 'horizontal' | 'vertical' | 'both';
+
+// Pattern type options
+export type PatternType = 'random' | 'geometric' | 'clustered';
+
 // Level generation parameters
 export interface GenerationParams {
   target_difficulty: number;
@@ -79,6 +89,9 @@ export interface GenerationParams {
   active_layer_count?: number;
   layer_tile_configs?: LayerTileConfig[];
   layer_obstacle_configs?: LayerObstacleConfig[];
+  // Symmetry and pattern options
+  symmetry_mode?: SymmetryMode;
+  pattern_type?: PatternType;
 }
 
 // Level generation result

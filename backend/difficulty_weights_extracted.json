@@ -1,0 +1,161 @@
+{
+  "obstacles": {
+    "chain": {
+      "weight": 1.14,
+      "avg_count": 4.4,
+      "avg_difficulty": 0.417,
+      "difficulty_impact_per_obs": 0.0114,
+      "per_bot_clears": {
+        "novice": 0.655,
+        "casual": 0.9,
+        "average": 0.973,
+        "expert": 1.0
+      },
+      "avg_moves": 104.1
+    },
+    "frog": {
+      "weight": 2.09,
+      "avg_count": 2.7,
+      "avg_difficulty": 0.424,
+      "difficulty_impact_per_obs": 0.0209,
+      "per_bot_clears": {
+        "novice": 0.627,
+        "casual": 0.891,
+        "average": 0.973,
+        "expert": 1.0
+      },
+      "avg_moves": 104.2
+    },
+    "link": {
+      "weight": 5.57,
+      "avg_count": 1,
+      "avg_difficulty": 0.423,
+      "difficulty_impact_per_obs": 0.0557,
+      "per_bot_clears": {
+        "novice": 0.7,
+        "casual": 0.814,
+        "average": 0.957,
+        "expert": 1.0
+      },
+      "avg_moves": 101.6
+    },
+    "ice": {
+      "weight": 0.94,
+      "avg_count": 3.7,
+      "avg_difficulty": 0.402,
+      "difficulty_impact_per_obs": 0.0094,
+      "per_bot_clears": {
+        "novice": 0.722,
+        "casual": 0.889,
+        "average": 0.967,
+        "expert": 1.0
+      },
+      "avg_moves": 104.3
+    },
+    "grass": {
+      "weight": 0.83,
+      "avg_count": 2,
+      "avg_difficulty": 0.384,
+      "difficulty_impact_per_obs": 0.0083,
+      "per_bot_clears": {
+        "novice": 0.833,
+        "casual": 0.833,
+        "average": 1.0,
+        "expert": 1.0
+      },
+      "avg_moves": 100.7
+    },
+    "bomb": {
+      "weight": 10,
+      "avg_count": 1,
+      "avg_difficulty": 0.61,
+      "difficulty_impact_per_obs": 0.2431,
+      "per_bot_clears": {
+        "novice": 0.367,
+        "casual": 0.5,
+        "average": 0.8,
+        "expert": 0.867
+      },
+      "avg_moves": 95.5
+    },
+    "curtain": {
+      "weight": 1.49,
+      "avg_count": 2,
+      "avg_difficulty": 0.397,
+      "difficulty_impact_per_obs": 0.0149,
+      "per_bot_clears": {
+        "novice": 0.733,
+        "casual": 0.9,
+        "average": 1.0,
+        "expert": 1.0
+      },
+      "avg_moves": 100.2
+    }
+  },
+  "layer_coefficient": 2.057,
+  "layers": {
+    "2": {
+      "avg_clear_rate": 0.967,
+      "avg_moves": 99.2,
+      "avg_blocking_score": 20.0,
+      "avg_difficulty": 0.332
+    },
+    "3": {
+      "avg_clear_rate": 0.975,
+      "avg_moves": 95.9,
+      "avg_blocking_score": 39.4,
+      "avg_difficulty": 0.326
+    },
+    "4": {
+      "avg_clear_rate": 0.9,
+      "avg_moves": 101.0,
+      "avg_blocking_score": 61.3,
+      "avg_difficulty": 0.402
+    },
+    "5": {
+      "avg_clear_rate": 0.933,
+      "avg_moves": 94.8,
+      "avg_blocking_score": 70.9,
+      "avg_difficulty": 0.366
+    },
+    "6": {
+      "avg_clear_rate": 0.933,
+      "avg_moves": 98.2,
+      "avg_blocking_score": 101.7,
+      "avg_difficulty": 0.367
+    },
+    "7": {
+      "avg_clear_rate": 0.887,
+      "avg_moves": 75.5,
+      "avg_blocking_score": 140.4,
+      "avg_difficulty": 0.405
+    },
+    "8": {
+      "avg_clear_rate": 0.717,
+      "avg_moves": 58.2,
+      "avg_blocking_score": 212.2,
+      "avg_difficulty": 0.483
+    }
+  },
+  "blocking_weight": 0.1784,
+  "tile_ranges": {
+    "30-60": {
+      "count": 3,
+      "avg_clear_rate": 0.883,
+      "avg_moves": 53.8,
+      "avg_difficulty": 0.401
+    },
+    "60-90": {
+      "count": 3,
+      "avg_clear_rate": 0.717,
+      "avg_moves": 58.2,
+      "avg_difficulty": 0.483
+    },
+    "90-120": {
+      "count": 55,
+      "avg_clear_rate": 0.904,
+      "avg_moves": 99.4,
+      "avg_difficulty": 0.392
+    }
+  }
+}

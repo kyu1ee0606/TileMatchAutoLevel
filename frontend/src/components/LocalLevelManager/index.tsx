@@ -3,6 +3,7 @@ import {
   listLocalLevels,
   getLocalLevel,
   deleteLocalLevel,
+  deleteAllLocalLevels,
   importGeneratedLevels,
   simulateLocalLevel,
   type LocalLevelMetadata,
@@ -48,6 +49,19 @@ export function LocalLevelManager({ onPlayLevel }: LocalLevelManagerProps) {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete level');
       console.error('Failed to delete level:', err);
+    }
+  }
+
+  async function handleDeleteAll() {
+    if (!confirm(`정말로 모든 로컬 레벨(${levels.length}개)을 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다.`)) return;
+
+    try {
+      const result = await deleteAllLocalLevels();
+      alert(`${result.deleted_count}개의 레벨이 삭제되었습니다.`);
+      await loadLevels();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete all levels');
+      console.error('Failed to delete all levels:', err);
     }
   }
 
@@ -169,6 +183,11 @@ export function LocalLevelManager({ onPlayLevel }: LocalLevelManagerProps) {
           <button onClick={() => setImportDialogOpen(true)}>
             📥 Import Levels
           </button>
+          {levels.length > 0 && (
+            <button onClick={handleDeleteAll} className="delete-all-button">
+              🗑️ Delete All
+            </button>
+          )}
         </div>
       </div>
 

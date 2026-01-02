@@ -111,6 +111,20 @@ export async function deleteLocalLevel(levelId: string): Promise<{ success: bool
 }
 
 /**
+ * Delete all local levels
+ */
+export async function deleteAllLocalLevels(): Promise<{ success: boolean; deleted_count: number; message: string }> {
+  const response = await fetch(`${API_BASE}/local/delete-all`, {
+    method: 'DELETE',
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to delete all levels: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+/**
  * Import generated levels from generator output file
  */
 export async function importGeneratedLevels(fileContent: any): Promise<ImportResponse> {

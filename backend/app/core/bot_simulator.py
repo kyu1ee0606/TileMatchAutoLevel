@@ -63,6 +63,7 @@ class TileState:
     under_stacked_tile_key: Optional[str] = None  # Key to under stacked tile
     root_stacked_tile_key: Optional[str] = None  # Key to root (bottom) tile of stack
     craft_direction: str = ""  # e/w/s/n for craft tiles
+    origin_goal_type: str = ""  # Full goal type (e.g., "craft_s", "craft_n", "stack_e") for goal tracking
     original_full_key: Optional[str] = None  # Original full_key before position changes (for craft box lookup)
 
     @property
@@ -1160,6 +1161,7 @@ class BotSimulator:
                     stack_index=stack_idx,
                     stack_max_index=total_count - 1,
                     craft_direction=direction,
+                    origin_goal_type=tile_type_str,  # e.g., "craft_s", "craft_n", "stack_e"
                 )
 
                 # For craft tiles: only the topmost tile is "crafted" (visible/pickable)
@@ -1910,16 +1912,11 @@ class BotSimulator:
             state.combo_count += 1
 
         # Progress goals based on cleared tile types
+        # NOTE: craft/stack goal decrements are now handled in _process_dock_matches
+        # to properly count ALL cleared tiles (not just the picked one)
         for tile_type, count in cleared_by_type.items():
             if tile_type in state.goals_remaining:
                 state.goals_remaining[tile_type] = max(0, state.goals_remaining[tile_type] - count)
-
-        # Progress craft_s/stack_s goals when craft/stack tiles are cleared
-        # The goal is to clear tiles FROM craft/stack boxes, not the tile types
-        if tile_state.is_craft_tile and "craft_s" in state.goals_remaining:
-            state.goals_remaining["craft_s"] = max(0, state.goals_remaining["craft_s"] - 1)
-        if tile_state.is_stack_tile and not tile_state.is_craft_tile and "stack_s" in state.goals_remaining:
-            state.goals_remaining["stack_s"] = max(0, state.goals_remaining["stack_s"] - 1)
 
         return total_tiles_cleared
 
@@ -1947,7 +1944,10 @@ class BotSimulator:
                     layer_tiles[pos_key] = under_tile
 
     def _process_dock_matches(self, state: GameState) -> Dict[str, int]:
-        """Process 3-matches in dock. Returns dict of cleared tiles by type."""
+        """Process 3-matches in dock. Returns dict of cleared tiles by type.
+
+        Also decrements craft/stack goals for cleared tiles that originated from craft/stack boxes.
+        """
         cleared_by_type: Dict[str, int] = {}
 
         # Count tiles by type
@@ -1967,6 +1967,17 @@ class BotSimulator:
                     cleared_by_type[tile_type] = cleared_by_type.get(tile_type, 0) + 1
                     # Note: all_tile_type_counts is already decremented in _apply_move
                     # when tile is picked, so no need to decrement again here
+
+                    # CRITICAL: Decrement craft/stack goals for cleared tiles
+                    # Each cleared tile that came from a craft/stack box decrements that goal
+                    if removed.is_craft_tile and removed.origin_goal_type:
+                        goal_key = removed.origin_goal_type
+                        if goal_key in state.goals_remaining:
+                            state.goals_remaining[goal_key] = max(0, state.goals_remaining[goal_key] - 1)
+                    elif removed.is_stack_tile and not removed.is_craft_tile and removed.origin_goal_type:
+                        goal_key = removed.origin_goal_type
+                        if goal_key in state.goals_remaining:
+                            state.goals_remaining[goal_key] = max(0, state.goals_remaining[goal_key] - 1)
 
         return cleared_by_type
 
@@ -2931,7 +2942,9 @@ class BotSimulator:
                     spawn_blocking_moves.append(move)
 
         # Collect stack tiles (ONLY if safe)
-        if "stack_s" in state.goals_remaining and state.goals_remaining["stack_s"] > 0:
+        # Check for any stack goal (stack_s, stack_n, stack_e, stack_w, etc.)
+        has_stack_goal = any(k.startswith("stack_") and v > 0 for k, v in state.goals_remaining.items())
+        if has_stack_goal:
             for move in sorted_moves:
                 if move.tile_state and move.tile_state.is_stack_tile:
                     if is_safe_move(move):

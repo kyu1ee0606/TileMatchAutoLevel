@@ -11,11 +11,14 @@ import {
   calculateGradeDistribution,
   createGenerationPlan,
   getGradeFromDifficulty,
+  shiftDifficultyPoints,
+  createDefaultMultiSetConfig,
   type DifficultyPoint,
   type LevelSetGenerationConfig,
   type GenerationProgressState,
   type GenerationResultItem,
   type LevelSet,
+  type MultiSetProgressState,
 } from '../../types/levelSet';
 import type { LevelJSON, DifficultyGrade, GenerationParams } from '../../types';
 import { Button } from '../ui';
@@ -58,6 +61,18 @@ export function LevelSetGenerator({ onLevelSetCreated }: LevelSetGeneratorProps)
   });
   const [generatedLevelSet, setGeneratedLevelSet] = useState<LevelSet | null>(null);
 
+  // Multi-set generation state
+  const [multiSetProgress, setMultiSetProgress] = useState<MultiSetProgressState>({
+    status: 'idle',
+    totalSets: 0,
+    currentSetIndex: 0,
+    totalLevels: 0,
+    currentLevelIndex: 0,
+    completedSets: 0,
+    setResults: [],
+  });
+  const [generatedLevelSets, setGeneratedLevelSets] = useState<LevelSet[]>([]);
+
   const abortControllerRef = useRef<AbortController | null>(null);
 
   // Update difficulty points when level count changes
@@ -69,6 +84,284 @@ export function LevelSetGenerator({ onLevelSetCreated }: LevelSetGeneratorProps)
     }
     setConfig(newConfig);
   }, [config.levelCount]);
+
+  // Generate a single level set (used by both single and multi-set modes)
+  const generateSingleSet = useCallback(async (
+    setName: string,
+    setIndex: number,
+    baseDifficultyPoints: DifficultyPoint[],
+    signal: AbortSignal,
+    onProgress?: (levelIndex: number, total: number) => void
+  ): Promise<LevelSet | null> => {
+    const difficulties = interpolateDifficulties(baseDifficultyPoints, config.levelCount);
+    const gradeDistribution = calculateGradeDistribution(difficulties);
+    const generationPlan = createGenerationPlan(gradeDistribution);
+
+    console.log(`📊 Set ${setIndex + 1} "${setName}" - Grade distribution:`, gradeDistribution);
+
+    const generatedLevels: LevelJSON[] = [];
+    const actualDifficulties: number[] = [];
+    const grades: DifficultyGrade[] = [];
+
+    let levelIndex = 0;
+
+    for (const plan of generationPlan) {
+      for (let j = 0; j < plan.count; j++) {
+        if (signal.aborted) {
+          throw new Error('cancelled');
+        }
+
+        onProgress?.(levelIndex + 1, config.levelCount);
+
+        const baseParams: GenerationParams = {
+          ...config.baseParams,
+          target_difficulty: plan.targetDifficulty,
+        };
+
+        let useAutoGimmicks = false;
+        let autoGimmickPool: string[] | undefined;
+
+        if (config.gimmickMode === 'auto') {
+          useAutoGimmicks = true;
+          autoGimmickPool = config.availableGimmicks;
+          baseParams.obstacle_types = [];
+        } else if (config.gimmickMode === 'hybrid') {
+          const override = config.levelGimmickOverrides?.find(o => o.levelIndex === levelIndex + 1);
+          if (override) {
+            baseParams.obstacle_types = override.gimmicks;
+          } else {
+            useAutoGimmicks = true;
+            autoGimmickPool = config.availableGimmicks;
+            baseParams.obstacle_types = [];
+          }
+        }
+
+        try {
+          const gimmickOpts = useAutoGimmicks ? {
+            auto_select_gimmicks: true,
+            available_gimmicks: autoGimmickPool,
+          } : undefined;
+
+          const MAX_RETRIES = 30;
+          let result = await generateLevel(baseParams, gimmickOpts);
+          let retryCount = 0;
+          let difficultyAdjustment = 0;
+
+          while (result.grade !== plan.grade && retryCount < MAX_RETRIES) {
+            retryCount++;
+            const gradeOrder = ['S', 'A', 'B', 'C', 'D'];
+            const targetGradeIdx = gradeOrder.indexOf(plan.grade);
+            const actualGradeIdx = gradeOrder.indexOf(result.grade);
+
+            if (actualGradeIdx < targetGradeIdx) {
+              difficultyAdjustment += 0.05;
+            } else {
+              difficultyAdjustment -= 0.05;
+            }
+
+            difficultyAdjustment = Math.max(-0.15, Math.min(0.15, difficultyAdjustment));
+
+            const adjustedParams = {
+              ...baseParams,
+              target_difficulty: Math.max(0.05, Math.min(0.95, plan.targetDifficulty + difficultyAdjustment)),
+            };
+
+            result = await generateLevel(adjustedParams, gimmickOpts);
+          }
+
+          generatedLevels.push(result.level_json);
+          actualDifficulties.push(result.actual_difficulty);
+          grades.push(result.grade);
+        } catch (err) {
+          console.error(`Set ${setIndex + 1} Level ${levelIndex + 1}: Generation failed:`, err);
+          generatedLevels.push(null as unknown as LevelJSON);
+          actualDifficulties.push(0);
+          grades.push('D');
+        }
+
+        levelIndex++;
+      }
+    }
+
+    const successfulLevels = generatedLevels.filter((l) => l !== null);
+    const successfulDifficulties = actualDifficulties.filter((_, i) => generatedLevels[i] !== null);
+    const successfulGrades = grades.filter((_, i) => generatedLevels[i] !== null);
+
+    if (successfulLevels.length === 0) {
+      return null;
+    }
+
+    const reorderResult = reorderLevelsByDifficulty(
+      successfulLevels,
+      successfulDifficulties,
+      successfulGrades,
+      difficulties.slice(0, successfulLevels.length)
+    );
+
+    const setId = `set_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const finalLevels = reorderResult.reorderedLevels.map((level, newIndex) => ({
+      ...level,
+      level_index: newIndex + 1,
+      name: `${setName} - Level ${newIndex + 1}`,
+      id: `${setId}_level_${String(newIndex + 1).padStart(3, '0')}`,
+    }));
+
+    return {
+      metadata: {
+        id: setId,
+        name: setName,
+        created_at: new Date().toISOString(),
+        level_count: finalLevels.length,
+        difficulty_profile: difficulties.slice(0, finalLevels.length),
+        actual_difficulties: reorderResult.reorderedDifficulties,
+        grades: reorderResult.reorderedGrades,
+        generation_config: config.baseParams,
+      },
+      levels: finalLevels,
+    };
+  }, [config]);
+
+  // Start multi-set generation
+  const handleStartMultiSetGeneration = useCallback(async () => {
+    const multiSetConfig = config.multiSetConfig || createDefaultMultiSetConfig();
+
+    if (!config.setName.trim()) {
+      addNotification('error', '세트 이름을 입력해주세요');
+      return;
+    }
+
+    const totalSets = multiSetConfig.setCount;
+    const totalLevels = config.levelCount * totalSets;
+
+    // Initialize multi-set progress
+    const initialSetResults = Array.from({ length: totalSets }, (_, i) => ({
+      setIndex: i,
+      setName: `${config.setName} ${i + 1}`,
+      levelCount: config.levelCount,
+      status: 'pending' as const,
+    }));
+
+    setMultiSetProgress({
+      status: 'generating',
+      totalSets,
+      currentSetIndex: 0,
+      totalLevels,
+      currentLevelIndex: 0,
+      completedSets: 0,
+      setResults: initialSetResults,
+      startTime: Date.now(),
+    });
+
+    setGeneratedLevelSets([]);
+
+    abortControllerRef.current = new AbortController();
+    const signal = abortControllerRef.current.signal;
+
+    const completedSets: LevelSet[] = [];
+
+    try {
+      for (let setIdx = 0; setIdx < totalSets; setIdx++) {
+        if (signal.aborted) {
+          throw new Error('cancelled');
+        }
+
+        const setName = `${config.setName} ${setIdx + 1}`;
+        const difficultyShift = setIdx * multiSetConfig.difficultyShiftPerSet;
+        const shiftedPoints = shiftDifficultyPoints(
+          difficultyPoints,
+          difficultyShift,
+          multiSetConfig.maxDifficultyClamp
+        );
+
+        console.log(`🚀 Starting Set ${setIdx + 1}/${totalSets}: "${setName}" (shift: +${(difficultyShift * 100).toFixed(0)}%)`);
+
+        // Update progress: mark current set as generating
+        setMultiSetProgress(prev => ({
+          ...prev,
+          currentSetIndex: setIdx,
+          setResults: prev.setResults.map((r, i) =>
+            i === setIdx ? { ...r, status: 'generating' } : r
+          ),
+        }));
+
+        const levelSet = await generateSingleSet(
+          setName,
+          setIdx,
+          shiftedPoints,
+          signal,
+          (levelIndex, _total) => {
+            setMultiSetProgress(prev => ({
+              ...prev,
+              currentLevelIndex: setIdx * config.levelCount + levelIndex,
+            }));
+          }
+        );
+
+        if (levelSet) {
+          completedSets.push(levelSet);
+
+          // Save the set immediately
+          try {
+            await saveLevelSet({
+              name: levelSet.metadata.name,
+              levels: levelSet.levels,
+              difficulty_profile: levelSet.metadata.difficulty_profile,
+              actual_difficulties: levelSet.metadata.actual_difficulties,
+              grades: levelSet.metadata.grades,
+              generation_config: levelSet.metadata.generation_config as Record<string, unknown>,
+            });
+            console.log(`✅ Set ${setIdx + 1} saved: "${setName}"`);
+          } catch (err) {
+            console.error(`Failed to save set ${setIdx + 1}:`, err);
+          }
+
+          // Update progress: mark current set as completed
+          setMultiSetProgress(prev => ({
+            ...prev,
+            completedSets: setIdx + 1,
+            setResults: prev.setResults.map((r, i) =>
+              i === setIdx ? { ...r, status: 'completed' } : r
+            ),
+          }));
+
+          setGeneratedLevelSets([...completedSets]);
+        } else {
+          // Mark as failed
+          setMultiSetProgress(prev => ({
+            ...prev,
+            setResults: prev.setResults.map((r, i) =>
+              i === setIdx ? { ...r, status: 'failed', error: '레벨 생성 실패' } : r
+            ),
+          }));
+        }
+      }
+
+      setMultiSetProgress(prev => ({
+        ...prev,
+        status: 'completed',
+      }));
+
+      addNotification(
+        'success',
+        `🎉 ${completedSets.length}개 세트 생성 완료! (총 ${completedSets.reduce((sum, s) => sum + s.levels.length, 0)}개 레벨)`
+      );
+    } catch (err) {
+      if ((err as Error).message === 'cancelled') {
+        setMultiSetProgress(prev => ({
+          ...prev,
+          status: 'cancelled',
+        }));
+        addNotification('info', `생성이 취소되었습니다. ${completedSets.length}개 세트가 저장되었습니다.`);
+      } else {
+        setMultiSetProgress(prev => ({
+          ...prev,
+          status: 'error',
+          error: err instanceof Error ? err.message : '알 수 없는 오류',
+        }));
+        addNotification('error', `생성 오류: ${err instanceof Error ? err.message : '알 수 없는 오류'}`);
+      }
+    }
+  }, [config, difficultyPoints, addNotification, generateSingleSet]);
 
   // Start generation - Grade-based fast generation
   const handleStartGeneration = useCallback(async () => {
@@ -437,11 +730,31 @@ export function LevelSetGenerator({ onLevelSetCreated }: LevelSetGeneratorProps)
       current: 0,
       results: [],
     });
+    setMultiSetProgress({
+      status: 'idle',
+      totalSets: 0,
+      currentSetIndex: 0,
+      totalLevels: 0,
+      currentLevelIndex: 0,
+      completedSets: 0,
+      setResults: [],
+    });
     setGeneratedLevelSet(null);
+    setGeneratedLevelSets([]);
   }, []);
 
-  const isGenerating = progress.status === 'generating';
-  const isCompleted = progress.status === 'completed';
+  const multiSetConfig = config.multiSetConfig || createDefaultMultiSetConfig();
+  const isMultiSetMode = multiSetConfig.enabled;
+
+  const isGenerating = isMultiSetMode
+    ? multiSetProgress.status === 'generating'
+    : progress.status === 'generating';
+  const isCompleted = isMultiSetMode
+    ? multiSetProgress.status === 'completed'
+    : progress.status === 'completed';
+  const hasError = isMultiSetMode
+    ? multiSetProgress.status === 'error' || multiSetProgress.status === 'cancelled'
+    : progress.status === 'error' || progress.status === 'cancelled';
 
   // Check if difficulty ceiling warning is needed
   const maxDifficulty = Math.max(...difficultyPoints.map(p => p.difficulty));
@@ -449,6 +762,85 @@ export function LevelSetGenerator({ onLevelSetCreated }: LevelSetGeneratorProps)
     (config.gimmickMode === 'manual' && (!config.baseParams.obstacle_types || config.baseParams.obstacle_types.length === 0)) ||
     ((config.gimmickMode === 'auto' || config.gimmickMode === 'hybrid') && (!config.availableGimmicks || config.availableGimmicks.length === 0))
   );
+
+  // Multi-set progress display component
+  const MultiSetProgressDisplay = () => {
+    if (multiSetProgress.status === 'idle') return null;
+
+    const elapsed = multiSetProgress.startTime
+      ? Math.floor((Date.now() - multiSetProgress.startTime) / 1000)
+      : 0;
+    const progressPercent = multiSetProgress.totalLevels > 0
+      ? (multiSetProgress.currentLevelIndex / multiSetProgress.totalLevels) * 100
+      : 0;
+
+    return (
+      <div className="bg-gray-800 rounded-lg p-4 space-y-4">
+        <div className="flex justify-between items-center">
+          <h3 className="text-sm font-medium text-white">
+            🔄 다중 세트 생성 중
+          </h3>
+          <span className="text-xs text-gray-400">
+            {Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, '0')}
+          </span>
+        </div>
+
+        {/* Overall progress */}
+        <div className="space-y-2">
+          <div className="flex justify-between text-xs">
+            <span className="text-gray-400">
+              세트 {multiSetProgress.status === 'completed'
+                ? multiSetProgress.completedSets
+                : multiSetProgress.currentSetIndex + 1}/{multiSetProgress.totalSets}
+            </span>
+            <span className="text-gray-400">
+              레벨 {multiSetProgress.currentLevelIndex}/{multiSetProgress.totalLevels}
+            </span>
+          </div>
+          <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-gradient-to-r from-indigo-600 to-purple-600 transition-all duration-300"
+              style={{ width: `${progressPercent}%` }}
+            />
+          </div>
+        </div>
+
+        {/* Set list */}
+        <div className="max-h-48 overflow-y-auto space-y-1">
+          {multiSetProgress.setResults.map((set, idx) => (
+            <div
+              key={idx}
+              className={`flex items-center justify-between px-2 py-1 rounded text-xs ${
+                set.status === 'generating' ? 'bg-indigo-900/50' :
+                set.status === 'completed' ? 'bg-green-900/30' :
+                set.status === 'failed' ? 'bg-red-900/30' :
+                'bg-gray-700/30'
+              }`}
+            >
+              <span className="text-gray-300">{set.setName}</span>
+              <span className={`${
+                set.status === 'generating' ? 'text-indigo-400' :
+                set.status === 'completed' ? 'text-green-400' :
+                set.status === 'failed' ? 'text-red-400' :
+                'text-gray-500'
+              }`}>
+                {set.status === 'generating' ? '생성 중...' :
+                 set.status === 'completed' ? '✓ 완료' :
+                 set.status === 'failed' ? '✗ 실패' :
+                 '대기'}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        {multiSetProgress.status === 'generating' && (
+          <Button onClick={handleCancel} variant="danger" className="w-full">
+            🛑 생성 중지
+          </Button>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="space-y-4">
@@ -480,20 +872,51 @@ export function LevelSetGenerator({ onLevelSetCreated }: LevelSetGeneratorProps)
         />
       )}
 
-      {/* Progress */}
-      {(isGenerating || isCompleted || progress.status === 'cancelled' || progress.status === 'error') && (
+      {/* Progress - Single Set Mode */}
+      {!isMultiSetMode && (isGenerating || isCompleted || progress.status === 'cancelled' || progress.status === 'error') && (
         <GenerationProgress state={progress} onCancel={handleCancel} />
+      )}
+
+      {/* Progress - Multi-Set Mode */}
+      {isMultiSetMode && multiSetProgress.status !== 'idle' && (
+        <MultiSetProgressDisplay />
+      )}
+
+      {/* Multi-Set Completion Summary */}
+      {isMultiSetMode && isCompleted && generatedLevelSets.length > 0 && (
+        <div className="bg-green-900/30 border border-green-600 rounded-lg p-4 space-y-2">
+          <div className="flex items-center gap-2 text-green-400 font-medium">
+            <span>🎉</span>
+            <span>다중 세트 생성 완료!</span>
+          </div>
+          <div className="text-sm text-gray-300">
+            <span className="text-green-400 font-bold">{generatedLevelSets.length}</span>개 세트,
+            총 <span className="text-green-400 font-bold">
+              {generatedLevelSets.reduce((sum, s) => sum + s.levels.length, 0)}
+            </span>개 레벨이 자동으로 저장되었습니다.
+          </div>
+          <div className="text-xs text-gray-400">
+            로컬 레벨 브라우저에서 생성된 레벨들을 확인할 수 있습니다.
+          </div>
+        </div>
       )}
 
       {/* Actions */}
       <div className="flex gap-2">
-        {!isGenerating && !isCompleted && (
-          <Button onClick={handleStartGeneration} className="flex-1">
-            🚀 레벨 세트 생성 시작
+        {!isGenerating && !isCompleted && !hasError && (
+          <Button
+            onClick={isMultiSetMode ? handleStartMultiSetGeneration : handleStartGeneration}
+            className="flex-1"
+          >
+            {isMultiSetMode ? (
+              <>🚀 {multiSetConfig.setCount}개 세트 생성 시작 ({config.levelCount * multiSetConfig.setCount}개 레벨)</>
+            ) : (
+              <>🚀 레벨 세트 생성 시작</>
+            )}
           </Button>
         )}
 
-        {isCompleted && generatedLevelSet && (
+        {!isMultiSetMode && isCompleted && generatedLevelSet && (
           <>
             <Button onClick={handleSave} className="flex-1">
               💾 저장
@@ -507,7 +930,13 @@ export function LevelSetGenerator({ onLevelSetCreated }: LevelSetGeneratorProps)
           </>
         )}
 
-        {(progress.status === 'cancelled' || progress.status === 'error') && (
+        {isMultiSetMode && isCompleted && (
+          <Button onClick={handleReset} className="flex-1">
+            🔄 새 세트 만들기
+          </Button>
+        )}
+
+        {hasError && (
           <Button onClick={handleReset} className="flex-1">
             🔄 다시 시도
           </Button>

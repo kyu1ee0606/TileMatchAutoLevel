@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import type { LevelSetGenerationConfig, GimmickMode, LevelGimmickOverride, DifficultyPoint } from '../../types/levelSet';
+import type { LevelSetGenerationConfig, GimmickMode, LevelGimmickOverride, DifficultyPoint, MultiSetConfig } from '../../types/levelSet';
+import { createDefaultMultiSetConfig, calculateTotalLevels, STEP_10_PRESET } from '../../types/levelSet';
 import type { GoalConfig, SymmetryMode, PatternType } from '../../types';
 import { Button } from '../ui';
 import { LevelGimmickTable } from './LevelGimmickTable';
@@ -83,6 +84,38 @@ export function LevelSetConfig({
     onConfigChange({ ...config, levelGimmickOverrides: overrides });
   };
 
+  const updateMultiSetConfig = (updates: Partial<MultiSetConfig>) => {
+    const currentMultiSet = config.multiSetConfig || createDefaultMultiSetConfig();
+    onConfigChange({
+      ...config,
+      multiSetConfig: { ...currentMultiSet, ...updates },
+    });
+  };
+
+  const toggleMultiSetMode = () => {
+    const currentMultiSet = config.multiSetConfig || createDefaultMultiSetConfig();
+    const newEnabled = !currentMultiSet.enabled;
+
+    // When enabling multi-set mode with 10 levels, apply the step preset
+    if (newEnabled && config.levelCount === 10) {
+      onConfigChange({
+        ...config,
+        multiSetConfig: { ...currentMultiSet, enabled: newEnabled },
+        difficultyPoints: STEP_10_PRESET,
+      });
+    } else {
+      onConfigChange({
+        ...config,
+        multiSetConfig: { ...currentMultiSet, enabled: newEnabled },
+      });
+    }
+  };
+
+  const multiSetConfig = config.multiSetConfig || createDefaultMultiSetConfig();
+  const totalLevels = multiSetConfig.enabled
+    ? calculateTotalLevels(config.levelCount, multiSetConfig.setCount)
+    : config.levelCount;
+
   const updateGoal = (index: number, updates: Partial<GoalConfig>) => {
     const newGoals = [...(config.baseParams.goals || [])];
     newGoals[index] = { ...newGoals[index], ...updates };
@@ -108,10 +141,111 @@ export function LevelSetConfig({
           type="text"
           value={config.setName}
           onChange={(e) => updateConfig({ setName: e.target.value })}
-          placeholder="예: 초보자용 레벨 세트"
+          placeholder={multiSetConfig.enabled ? "예: 캐주얼 매치" : "예: 초보자용 레벨 세트"}
           className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
           disabled={disabled}
         />
+        {multiSetConfig.enabled && (
+          <p className="text-xs text-gray-500 mt-1">
+            각 세트는 "{config.setName || '세트'} 1", "{config.setName || '세트'} 2" ... 형식으로 저장됩니다.
+          </p>
+        )}
+      </div>
+
+      {/* Multi-Set Mode Toggle */}
+      <div className="bg-gradient-to-r from-indigo-900/50 to-purple-900/50 rounded-lg p-4 border border-indigo-500/30">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <span className="text-lg">🔄</span>
+            <label className="text-sm font-medium text-white">다중 세트 생성</label>
+          </div>
+          <button
+            onClick={toggleMultiSetMode}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              multiSetConfig.enabled ? 'bg-indigo-600' : 'bg-gray-600'
+            }`}
+            disabled={disabled}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                multiSetConfig.enabled ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+          </button>
+        </div>
+
+        {multiSetConfig.enabled && (
+          <div className="space-y-3">
+            <p className="text-xs text-indigo-300 mb-3">
+              기본 패턴을 여러 세트로 반복하며, 각 세트마다 난이도가 조금씩 상승합니다.
+            </p>
+
+            {/* Set Count */}
+            <div>
+              <label className="block text-xs font-medium text-gray-400 mb-1">
+                세트 수: <span className="text-indigo-400 font-bold">{multiSetConfig.setCount}</span>개
+                <span className="text-gray-500 ml-2">
+                  (총 <span className="text-indigo-400">{totalLevels}</span>개 레벨)
+                </span>
+              </label>
+              <input
+                type="range"
+                min={2}
+                max={20}
+                value={multiSetConfig.setCount}
+                onChange={(e) => updateMultiSetConfig({ setCount: parseInt(e.target.value) })}
+                className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer"
+                disabled={disabled}
+              />
+              <div className="flex justify-between text-xs text-gray-500 mt-1">
+                <span>2</span>
+                <span>5</span>
+                <span>10</span>
+                <span>15</span>
+                <span>20</span>
+              </div>
+            </div>
+
+            {/* Difficulty Shift Per Set */}
+            <div>
+              <label className="block text-xs font-medium text-gray-400 mb-1">
+                세트당 난이도 증가: <span className="text-indigo-400 font-bold">{(multiSetConfig.difficultyShiftPerSet * 100).toFixed(0)}%</span>
+              </label>
+              <input
+                type="range"
+                min={1}
+                max={10}
+                value={multiSetConfig.difficultyShiftPerSet * 100}
+                onChange={(e) => updateMultiSetConfig({ difficultyShiftPerSet: parseInt(e.target.value) / 100 })}
+                className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer"
+                disabled={disabled}
+              />
+              <div className="flex justify-between text-xs text-gray-500 mt-1">
+                <span>1%</span>
+                <span>3%</span>
+                <span>5%</span>
+                <span>7%</span>
+                <span>10%</span>
+              </div>
+            </div>
+
+            {/* Preview */}
+            <div className="bg-gray-800/50 rounded p-2 text-xs">
+              <div className="text-gray-400 mb-1">📊 예상 난이도 범위:</div>
+              <div className="grid grid-cols-3 gap-1 text-gray-300">
+                <div>세트 1: 원본</div>
+                <div>세트 {Math.ceil(multiSetConfig.setCount / 2)}: +{((Math.ceil(multiSetConfig.setCount / 2) - 1) * multiSetConfig.difficultyShiftPerSet * 100).toFixed(0)}%</div>
+                <div>세트 {multiSetConfig.setCount}: +{((multiSetConfig.setCount - 1) * multiSetConfig.difficultyShiftPerSet * 100).toFixed(0)}%</div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {!multiSetConfig.enabled && (
+          <p className="text-xs text-gray-400">
+            활성화하면 동일한 패턴의 세트를 여러 개 생성하면서 난이도를 점진적으로 상승시킬 수 있습니다.
+          </p>
+        )}
       </div>
 
       {/* Level Count */}

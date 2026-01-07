@@ -62,6 +62,37 @@ export interface LevelGimmickOverride {
 }
 
 /**
+ * 다중 세트 생성 설정
+ */
+export interface MultiSetConfig {
+  enabled: boolean;              // 다중 세트 모드 활성화
+  setCount: number;              // 생성할 세트 수 (예: 10)
+  difficultyShiftPerSet: number; // 세트당 난이도 시프트 (예: 0.05 = 5%)
+  maxDifficultyClamp: number;    // 최대 난이도 제한 (예: 0.95)
+}
+
+/**
+ * 다중 세트 생성 진행 상태
+ */
+export interface MultiSetProgressState {
+  status: 'idle' | 'generating' | 'completed' | 'cancelled' | 'error';
+  totalSets: number;
+  currentSetIndex: number;
+  totalLevels: number;
+  currentLevelIndex: number;
+  completedSets: number;
+  setResults: {
+    setIndex: number;
+    setName: string;
+    levelCount: number;
+    status: 'pending' | 'generating' | 'completed' | 'failed';
+    error?: string;
+  }[];
+  error?: string;
+  startTime?: number;
+}
+
+/**
  * 레벨 세트 생성 설정
  */
 export interface LevelSetGenerationConfig {
@@ -73,6 +104,8 @@ export interface LevelSetGenerationConfig {
   gimmickMode: GimmickMode;  // 자동/수동/하이브리드
   availableGimmicks: string[];  // 자동 선택 시 사용 가능한 기믹 풀
   levelGimmickOverrides?: LevelGimmickOverride[];  // 하이브리드 모드: 레벨별 기믹 오버라이드
+  // 다중 세트 생성 관련
+  multiSetConfig?: MultiSetConfig;
 }
 
 /**
@@ -449,6 +482,59 @@ export function createGenerationPlan(distribution: GradeDistribution): GradeGene
 
   return plan;
 }
+
+/**
+ * 기본 다중 세트 설정 생성
+ */
+export function createDefaultMultiSetConfig(): MultiSetConfig {
+  return {
+    enabled: false,
+    setCount: 10,
+    difficultyShiftPerSet: 0.05,  // 5% per set
+    maxDifficultyClamp: 0.95,
+  };
+}
+
+/**
+ * 난이도 포인트를 특정 값만큼 시프트
+ * @param points 원본 난이도 포인트
+ * @param shift 시프트할 값 (0.05 = 5%)
+ * @param maxClamp 최대 난이도 제한
+ */
+export function shiftDifficultyPoints(
+  points: DifficultyPoint[],
+  shift: number,
+  maxClamp: number = 0.95
+): DifficultyPoint[] {
+  return points.map(p => ({
+    ...p,
+    difficulty: Math.min(maxClamp, Math.max(0.05, p.difficulty + shift)),
+  }));
+}
+
+/**
+ * 다중 세트의 총 레벨 수 계산
+ */
+export function calculateTotalLevels(levelCount: number, setCount: number): number {
+  return levelCount * setCount;
+}
+
+/**
+ * 10개 레벨 계단형 프리셋 (다중 세트 기본 패턴)
+ * S(2) → A(3) → B(3) → C(2) 형태
+ */
+export const STEP_10_PRESET: DifficultyPoint[] = [
+  { levelIndex: 1, difficulty: 0.1 },   // S
+  { levelIndex: 2, difficulty: 0.15 },  // S
+  { levelIndex: 3, difficulty: 0.25 },  // A
+  { levelIndex: 4, difficulty: 0.30 },  // A
+  { levelIndex: 5, difficulty: 0.35 },  // A
+  { levelIndex: 6, difficulty: 0.45 },  // B
+  { levelIndex: 7, difficulty: 0.50 },  // B
+  { levelIndex: 8, difficulty: 0.55 },  // B
+  { levelIndex: 9, difficulty: 0.65 },  // C
+  { levelIndex: 10, difficulty: 0.70 }, // C
+];
 
 /**
  * 내장 프리셋 목록

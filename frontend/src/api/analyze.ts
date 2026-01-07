@@ -54,6 +54,7 @@ export interface AutoPlayRequest {
   iterations?: number; // Default: 100
   bot_profiles?: string[]; // Default: all 5
   seed?: number;
+  target_difficulty?: number; // 0.0-1.0, for dynamic bot target rates
 }
 
 export interface BotClearStats {
@@ -88,7 +89,12 @@ export interface AutoPlayResponse {
  */
 export async function analyzeAutoPlay(
   levelJson: LevelJSON,
-  options?: { iterations?: number; botProfiles?: string[]; seed?: number }
+  options?: {
+    iterations?: number;
+    botProfiles?: string[];
+    seed?: number;
+    targetDifficulty?: number;  // 0.0-1.0, for dynamic bot target rates
+  }
 ): Promise<AutoPlayResponse> {
   const iterations = options?.iterations ?? 100;
   // Calculate timeout based on iterations (base 60s + 0.5s per iteration per bot)
@@ -102,6 +108,7 @@ export async function analyzeAutoPlay(
       iterations: iterations,
       bot_profiles: options?.botProfiles,
       seed: options?.seed,
+      target_difficulty: options?.targetDifficulty,
     },
     {
       timeout: timeoutMs, // Override default timeout for heavy simulation

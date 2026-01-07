@@ -35,6 +35,7 @@ class LevelMetrics:
     chain_count: int = 0
     frog_count: int = 0
     link_count: int = 0
+    ice_count: int = 0
     goal_amount: int = 0
     layer_blocking: float = 0.0
     tile_types: Dict[str, int] = field(default_factory=dict)
@@ -48,6 +49,7 @@ class LevelMetrics:
             "chain_count": self.chain_count,
             "frog_count": self.frog_count,
             "link_count": self.link_count,
+            "ice_count": self.ice_count,
             "goal_amount": self.goal_amount,
             "layer_blocking": self.layer_blocking,
             "tile_types": self.tile_types,

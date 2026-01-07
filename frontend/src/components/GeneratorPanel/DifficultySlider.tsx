@@ -39,23 +39,40 @@ export function DifficultySlider({ value, onChange, className }: DifficultySlide
       </div>
 
       <div className="relative">
+        {/* Grade boundary marks */}
+        <div className="absolute inset-0 flex items-center pointer-events-none h-3">
+          {[20, 40, 60, 80].map((boundary) => (
+            <div
+              key={boundary}
+              className="absolute w-0.5 h-4 bg-gray-500/50 -top-0.5"
+              style={{ left: `${boundary}%`, transform: 'translateX(-50%)' }}
+            />
+          ))}
+        </div>
         <input
           type="range"
           min="0"
           max="100"
           value={percentage}
           onChange={(e) => onChange(parseInt(e.target.value) / 100)}
-          className="w-full h-3 bg-gray-700 rounded-lg appearance-none cursor-pointer slider-thumb"
+          className="w-full h-3 bg-gray-700 rounded-lg appearance-none cursor-pointer slider-thumb relative z-10"
           style={{
             background: `linear-gradient(to right, ${gradeColor} ${percentage}%, #374151 ${percentage}%)`,
           }}
         />
-        <div className="flex justify-between text-xs text-gray-500 mt-1">
-          <span>S</span>
-          <span>A</span>
-          <span>B</span>
-          <span>C</span>
-          <span>D</span>
+        <div className="flex justify-between text-xs mt-1">
+          {(['S', 'A', 'B', 'C', 'D'] as const).map((g) => (
+            <span
+              key={g}
+              className={clsx(
+                'w-5 text-center font-medium transition-colors',
+                grade === g ? 'text-white' : 'text-gray-500'
+              )}
+              style={grade === g ? { color: getGradeColor(g) } : {}}
+            >
+              {g}
+            </span>
+          ))}
         </div>
       </div>
 

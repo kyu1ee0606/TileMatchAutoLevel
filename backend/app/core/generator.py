@@ -1,8 +1,11 @@
 """Level generator engine with difficulty targeting."""
+import logging
 import random
 import time
 from typing import Dict, List, Any, Optional, Tuple, Set
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 from ..models.level import (
     GenerationParams,
@@ -23,7 +26,11 @@ class LevelGenerator:
     DEFAULT_TILE_TYPES = ["t0", "t2", "t4", "t5"]  # Removed t6 to match useTileCount=5
     OBSTACLE_TILE_TYPES = ["t8", "t9"]
     SPECIAL_TILE_TYPES = ["t10", "t11", "t12", "t14", "t15"]
-    GOAL_TYPES = ["craft_s", "stack_s"]
+    # All goal types - craft and stack with all 4 directions (s=south, n=north, e=east, w=west)
+    GOAL_TYPES = [
+        "craft_s", "craft_n", "craft_e", "craft_w",
+        "stack_s", "stack_n", "stack_e", "stack_w"
+    ]
 
     # Generation parameters
     MAX_ADJUSTMENT_ITERATIONS = 30
@@ -130,6 +137,226 @@ class LevelGenerator:
             grade=report.grade,
             generation_time_ms=generation_time_ms,
         )
+
+    def reshuffle_positions(self, level: Dict[str, Any], params: Optional[GenerationParams] = None) -> Dict[str, Any]:
+        """
+        Reshuffle tile positions while keeping tile types, gimmicks, and layer structure.
+
+        This method:
+        1. Extracts all tile data (type, gimmick, extra) from each layer
+        2. Generates new positions using smart placement for gimmick tiles
+        3. Places tiles with neighbor-dependent gimmicks (chain, link, grass) first
+        4. Ensures these tiles have valid neighbors
+
+        Args:
+            level: Existing level JSON to reshuffle
+            params: Optional generation params for validation
+
+        Returns:
+            New level JSON with reshuffled positions
+        """
+        import copy
+        new_level = copy.deepcopy(level)
+
+        num_layers = new_level.get("layer", 8)
+
+        # Gimmicks that require at least one clearable neighbor
+        NEIGHBOR_DEPENDENT_GIMMICKS = {'chain', 'link', 'link_s', 'link_n', 'link_e', 'link_w', 'grass'}
+
+        for layer_idx in range(num_layers):
+            layer_key = f"layer_{layer_idx}"
+            if layer_key not in new_level:
+                continue
+
+            layer_data = new_level[layer_key]
+            tiles = layer_data.get("tiles", {})
+            if not tiles:
+                continue
+
+            # Extract tile data into categories
+            goal_tiles = []           # [(tile_type, gimmick, extra), ...]
+            gimmick_tiles = []        # Tiles with neighbor-dependent gimmicks
+            other_gimmick_tiles = []  # Tiles with other gimmicks (ice, frog, bomb, etc.)
+            plain_tiles = []          # Tiles without gimmicks
+
+            for pos, tile_data in tiles.items():
+                if not isinstance(tile_data, list):
+                    continue
+                tile_type = tile_data[0] if len(tile_data) > 0 else "t0"
+                gimmick = tile_data[1] if len(tile_data) > 1 else ""
+                extra = tile_data[2] if len(tile_data) > 2 else None
+
+                if tile_type.startswith("craft_") or tile_type.startswith("stack_"):
+                    goal_tiles.append((tile_type, gimmick, extra))
+                elif gimmick and any(gimmick.startswith(g) for g in NEIGHBOR_DEPENDENT_GIMMICKS):
+                    gimmick_tiles.append((tile_type, gimmick, extra))
+                elif gimmick:
+                    other_gimmick_tiles.append((tile_type, gimmick, extra))
+                else:
+                    plain_tiles.append((tile_type, gimmick, extra))
+
+            # Get grid dimensions from layer
+            cols = int(layer_data.get("col", 8))
+            rows = int(layer_data.get("row", 8))
+
+            # Helper to get required adjacent positions based on gimmick type
+            def get_required_adjacent(pos_str, gimmick_type=""):
+                col, row = map(int, pos_str.split("_"))
+                adj = []
+
+                # Chain only checks LEFT and RIGHT (horizontal neighbors)
+                if gimmick_type == "chain":
+                    directions = [(-1, 0), (1, 0)]  # Left, Right only
+                # Link checks specific direction
+                elif gimmick_type.startswith("link_"):
+                    if gimmick_type == "link_n":
+                        directions = [(0, -1)]  # North
+                    elif gimmick_type == "link_s":
+                        directions = [(0, 1)]   # South
+                    elif gimmick_type == "link_e":
+                        directions = [(1, 0)]   # East
+                    elif gimmick_type == "link_w":
+                        directions = [(-1, 0)]  # West
+                    else:
+                        directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+                else:
+                    # Default: all 4 directions
+                    directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+
+                for dc, dr in directions:
+                    nc, nr = col + dc, row + dr
+                    if 0 <= nc < cols and 0 <= nr < rows:
+                        adj.append(f"{nc}_{nr}")
+                return adj
+
+            # Generate all positions and shuffle
+            all_positions = [f"{c}_{r}" for c in range(cols) for r in range(rows)]
+            random.shuffle(all_positions)
+
+            new_tiles = {}
+            used_positions = set()
+
+            # STEP 1: Place plain tiles first (they will be neighbors for gimmick tiles)
+            # Place them in a cluster pattern to ensure connectivity
+            random.shuffle(plain_tiles)
+            for tile_type, gimmick, extra in plain_tiles:
+                for pos in all_positions:
+                    if pos not in used_positions:
+                        used_positions.add(pos)
+                        if extra is not None:
+                            new_tiles[pos] = [tile_type, gimmick, extra]
+                        else:
+                            new_tiles[pos] = [tile_type, gimmick]
+                        break
+
+            # STEP 2: Place neighbor-dependent gimmick tiles using gimmick-specific neighbor rules
+            random.shuffle(gimmick_tiles)
+            for tile_type, gimmick, extra in gimmick_tiles:
+                placed = False
+                # Find a position with valid neighbor for this specific gimmick type
+                candidates = []
+                for pos in all_positions:
+                    if pos in used_positions:
+                        continue
+                    # Check required adjacent positions for this gimmick type
+                    required_adj = get_required_adjacent(pos, gimmick)
+                    for adj_pos in required_adj:
+                        if adj_pos in new_tiles:
+                            adj_tile = new_tiles[adj_pos]
+                            # Plain tile = no gimmick attribute, or frog (clearable)
+                            if len(adj_tile) >= 2 and (not adj_tile[1] or adj_tile[1] == "frog"):
+                                candidates.append(pos)
+                                break
+
+                if candidates:
+                    random.shuffle(candidates)
+                    pos = candidates[0]
+                    used_positions.add(pos)
+                    if extra is not None:
+                        new_tiles[pos] = [tile_type, gimmick, extra]
+                    else:
+                        new_tiles[pos] = [tile_type, gimmick]
+                    placed = True
+
+                # Fallback: place anywhere if no good position found
+                if not placed:
+                    for pos in all_positions:
+                        if pos not in used_positions:
+                            used_positions.add(pos)
+                            if extra is not None:
+                                new_tiles[pos] = [tile_type, gimmick, extra]
+                            else:
+                                new_tiles[pos] = [tile_type, gimmick]
+                            break
+
+            # STEP 3: Place other gimmick tiles (ice, frog, bomb, etc.)
+            random.shuffle(other_gimmick_tiles)
+            for tile_type, gimmick, extra in other_gimmick_tiles:
+                for pos in all_positions:
+                    if pos not in used_positions:
+                        used_positions.add(pos)
+                        if extra is not None:
+                            new_tiles[pos] = [tile_type, gimmick, extra]
+                        else:
+                            new_tiles[pos] = [tile_type, gimmick]
+                        break
+
+            # STEP 4: Place goal tiles (respecting direction constraints)
+            for tile_type, gimmick, extra in goal_tiles:
+                direction = tile_type[-1] if tile_type else 's'
+                valid_positions = []
+
+                for pos in all_positions:
+                    if pos in used_positions:
+                        continue
+                    col, row = map(int, pos.split("_"))
+
+                    # Check direction constraints
+                    if direction == 's' and row >= rows - 1:
+                        continue
+                    if direction == 'n' and row <= 0:
+                        continue
+                    if direction == 'e' and col >= cols - 1:
+                        continue
+                    if direction == 'w' and col <= 0:
+                        continue
+
+                    valid_positions.append(pos)
+
+                if valid_positions:
+                    random.shuffle(valid_positions)
+                    pos = valid_positions[0]
+                    used_positions.add(pos)
+                    if extra is not None:
+                        new_tiles[pos] = [tile_type, gimmick, extra]
+                    else:
+                        new_tiles[pos] = [tile_type, gimmick]
+                else:
+                    # FALLBACK: If no valid position found, place in any available position
+                    # This ensures goals are never lost during reshuffle
+                    for pos in all_positions:
+                        if pos not in used_positions:
+                            used_positions.add(pos)
+                            if extra is not None:
+                                new_tiles[pos] = [tile_type, gimmick, extra]
+                            else:
+                                new_tiles[pos] = [tile_type, gimmick]
+                            break
+
+            # Update layer with new tiles
+            layer_data["tiles"] = new_tiles
+            layer_data["num"] = str(len(new_tiles))
+
+        # Re-validate obstacles (should preserve most gimmicks now)
+        new_level = self._validate_and_fix_obstacles(new_level)
+
+        # Recalculate max_moves
+        new_level["max_moves"] = self._calculate_max_moves(new_level)
+
+        # Generate new random seed
+        new_level["randSeed"] = random.randint(100000, 999999)
+
+        return new_level
 
     def _calculate_max_moves(self, level: Dict[str, Any]) -> int:
         """Calculate max_moves based on total tiles in the level.
@@ -239,8 +466,16 @@ class LevelGenerator:
             if params.active_layer_count is not None:
                 active_layer_count = min(params.active_layer_count, params.max_layers)
             else:
-                # Use ALL specified layers - user sets maxLayers directly
-                active_layer_count = params.max_layers
+                # Adjust layer count based on target difficulty
+                # S grade (< 0.2): use 2-3 layers for minimal complexity
+                # A grade (< 0.4): use 3-5 layers
+                # B+ grades: use all layers
+                if target < 0.2:
+                    active_layer_count = min(3, params.max_layers)
+                elif target < 0.4:
+                    active_layer_count = min(5, params.max_layers)
+                else:
+                    active_layer_count = params.max_layers
 
             # Start from top layer and work down
             active_layers = list(range(params.max_layers - 1, params.max_layers - 1 - active_layer_count, -1))
@@ -251,11 +486,24 @@ class LevelGenerator:
                 if total_target < 9:
                     total_target = 9
             else:
-                # Use a reasonable tile count range based on difficulty
-                # Easy levels: ~30-45 tiles, Hard levels: ~90-120 tiles
-                min_tiles = 30
-                max_tiles = 120
-                base_tiles = int(min_tiles + (max_tiles - min_tiles) * target)
+                # Use a tile count range based on difficulty
+                # For low difficulty (S grade < 0.2), use fewer tiles to achieve target
+                # S grade: ~9-24 tiles, A grade: ~24-45 tiles, B+ grades: ~45-120 tiles
+                if target < 0.2:
+                    # S grade: very few tiles
+                    min_tiles = 9
+                    max_tiles = 24
+                elif target < 0.4:
+                    # A grade: moderate tiles
+                    min_tiles = 24
+                    max_tiles = 45
+                else:
+                    # B, C, D grades: more tiles + obstacles
+                    min_tiles = 45
+                    max_tiles = 120
+
+                base_tiles = int(min_tiles + (max_tiles - min_tiles) * ((target - (0.2 if target < 0.4 else 0.4)) / 0.2 if target < 0.4 else (target - 0.4) / 0.6))
+                base_tiles = max(min_tiles, min(max_tiles, base_tiles))
                 total_target = (base_tiles // 3) * 3
                 if total_target < 9:
                     total_target = 9
@@ -513,16 +761,30 @@ class LevelGenerator:
     def _generate_base_geometric(
         self, cols: int, rows: int, target_count: int, offset_x: int, offset_y: int
     ) -> List[str]:
-        """Generate geometric pattern in a base region (with random sampling for non-symmetric)."""
-        center_x, center_y = cols // 2, rows // 2
+        """Generate geometric pattern in a base region with diverse shapes."""
+        # Random offset to avoid always-centered shapes
+        offset_range_x = max(1, cols // 4)
+        offset_range_y = max(1, rows // 4)
+        rand_offset_x = random.randint(-offset_range_x, offset_range_x)
+        rand_offset_y = random.randint(-offset_range_y, offset_range_y)
+        center_x = cols // 2 + rand_offset_x
+        center_y = rows // 2 + rand_offset_y
 
-        # Pattern 1: Filled rectangle from center
+        # Clamp center to valid range
+        center_x = max(1, min(cols - 2, center_x))
+        center_y = max(1, min(rows - 2, center_y))
+
+        all_patterns = []
+
+        # Pattern 1: Filled rectangle (traditional)
         rect_positions = []
         rect_size = int((target_count ** 0.5) * 1.2)
         rect_half = rect_size // 2
         for x in range(max(0, center_x - rect_half), min(cols, center_x + rect_half + 1)):
             for y in range(max(0, center_y - rect_half), min(rows, center_y + rect_half + 1)):
                 rect_positions.append(f"{x + offset_x}_{y + offset_y}")
+        if rect_positions:
+            all_patterns.append(rect_positions)
 
         # Pattern 2: Diamond shape
         diamond_positions = []
@@ -532,29 +794,302 @@ class LevelGenerator:
                 dist = abs(x - center_x) + abs(y - center_y)
                 if dist <= radius:
                     diamond_positions.append(f"{x + offset_x}_{y + offset_y}")
+        if diamond_positions:
+            all_patterns.append(diamond_positions)
 
-        # Pattern 3: Fill from corner (good for symmetry)
-        corner_positions = []
-        for x in range(cols):
-            for y in range(rows):
-                corner_positions.append(f"{x + offset_x}_{y + offset_y}")
+        # Pattern 3: L-shape (multiple rotations)
+        l_rotation = random.randint(0, 3)
+        l_positions = self._generate_l_shape(cols, rows, target_count, l_rotation, offset_x, offset_y)
+        if l_positions:
+            all_patterns.append(l_positions)
 
-        # Choose the best fitting pattern
-        all_patterns = [rect_positions, diamond_positions, corner_positions]
+        # Pattern 4: T-shape (multiple rotations)
+        t_rotation = random.randint(0, 3)
+        t_positions = self._generate_t_shape(cols, rows, target_count, t_rotation, offset_x, offset_y)
+        if t_positions:
+            all_patterns.append(t_positions)
 
-        # Filter patterns that have at least target_count positions
-        valid_patterns = [p for p in all_patterns if len(p) >= target_count]
+        # Pattern 5: Cross/Plus shape
+        cross_positions = self._generate_cross_shape(cols, rows, target_count, center_x, center_y, offset_x, offset_y)
+        if cross_positions:
+            all_patterns.append(cross_positions)
+
+        # Pattern 6: Donut/Ring shape
+        donut_positions = self._generate_donut_shape(cols, rows, target_count, center_x, center_y, offset_x, offset_y)
+        if donut_positions:
+            all_patterns.append(donut_positions)
+
+        # Pattern 7: Zigzag pattern
+        zigzag_positions = self._generate_zigzag_shape(cols, rows, target_count, offset_x, offset_y)
+        if zigzag_positions:
+            all_patterns.append(zigzag_positions)
+
+        # Pattern 8: Diagonal stripe
+        diagonal_positions = self._generate_diagonal_shape(cols, rows, target_count, offset_x, offset_y)
+        if diagonal_positions:
+            all_patterns.append(diagonal_positions)
+
+        # Pattern 9: Corner cluster (L positioned at corner)
+        corner_cluster = self._generate_corner_cluster(cols, rows, target_count, offset_x, offset_y)
+        if corner_cluster:
+            all_patterns.append(corner_cluster)
+
+        # Pattern 10: Scattered clusters
+        scattered_positions = self._generate_scattered_clusters(cols, rows, target_count, offset_x, offset_y)
+        if scattered_positions:
+            all_patterns.append(scattered_positions)
+
+        # Pattern 11: Horizontal bar
+        h_bar_positions = self._generate_horizontal_bar(cols, rows, target_count, center_y, offset_x, offset_y)
+        if h_bar_positions:
+            all_patterns.append(h_bar_positions)
+
+        # Pattern 12: Vertical bar
+        v_bar_positions = self._generate_vertical_bar(cols, rows, target_count, center_x, offset_x, offset_y)
+        if v_bar_positions:
+            all_patterns.append(v_bar_positions)
+
+        # Randomly select from all valid patterns (not just closest to target)
+        valid_patterns = [p for p in all_patterns if len(p) >= target_count * 0.7]
 
         if valid_patterns:
-            # Choose pattern closest to target count
-            chosen = min(valid_patterns, key=lambda p: abs(len(p) - target_count))
+            # Randomly choose a pattern for variety
+            chosen = random.choice(valid_patterns)
             selected = random.sample(chosen, min(target_count, len(chosen)))
         else:
             # Fallback: use all positions and sample
             all_positions = [f"{x + offset_x}_{y + offset_y}" for x in range(cols) for y in range(rows)]
             selected = random.sample(all_positions, min(target_count, len(all_positions)))
 
-        return selected
+        # Apply random position perturbation for additional diversity
+        # This shifts the entire pattern by a random offset
+        shift_x = random.randint(-2, 2)
+        shift_y = random.randint(-2, 2)
+        shifted = []
+        for pos in selected:
+            x, y = map(int, pos.split("_"))
+            new_x = max(0, min(cols - 1, x + shift_x))
+            new_y = max(0, min(rows - 1, y + shift_y))
+            shifted.append(f"{new_x}_{new_y}")
+
+        # Remove duplicates that may have been created by shifting
+        shifted = list(set(shifted))
+
+        # If we lost too many tiles due to deduplication, add random positions
+        if len(shifted) < target_count:
+            all_positions = [f"{x}_{y}" for x in range(cols) for y in range(rows)]
+            available = [p for p in all_positions if p not in shifted]
+            if available:
+                extra = random.sample(available, min(target_count - len(shifted), len(available)))
+                shifted.extend(extra)
+
+        return shifted[:target_count]
+
+    def _generate_l_shape(
+        self, cols: int, rows: int, target_count: int, rotation: int, offset_x: int, offset_y: int
+    ) -> List[str]:
+        """Generate L-shaped pattern with rotation."""
+        positions = []
+        size = int((target_count / 2) ** 0.5) + 2
+        thickness = max(2, size // 2)
+
+        # Base L shape (rotation 0: vertical bar on left, horizontal bar on bottom)
+        for x in range(cols):
+            for y in range(rows):
+                in_vertical = (x < thickness and y < size)
+                in_horizontal = (y >= size - thickness and x < size)
+
+                # Apply rotation
+                if rotation == 0:
+                    if in_vertical or in_horizontal:
+                        positions.append(f"{x + offset_x}_{y + offset_y}")
+                elif rotation == 1:  # 90 degrees
+                    if (y < thickness and x < size) or (x >= size - thickness and y < size):
+                        positions.append(f"{x + offset_x}_{y + offset_y}")
+                elif rotation == 2:  # 180 degrees
+                    if (x >= cols - thickness and y >= rows - size) or (y < thickness and x >= cols - size):
+                        positions.append(f"{x + offset_x}_{y + offset_y}")
+                elif rotation == 3:  # 270 degrees
+                    if (y >= rows - thickness and x >= cols - size) or (x < thickness and y >= rows - size):
+                        positions.append(f"{x + offset_x}_{y + offset_y}")
+
+        return positions
+
+    def _generate_t_shape(
+        self, cols: int, rows: int, target_count: int, rotation: int, offset_x: int, offset_y: int
+    ) -> List[str]:
+        """Generate T-shaped pattern with rotation."""
+        positions = []
+        center_x, center_y = cols // 2, rows // 2
+        arm_length = int((target_count / 3) ** 0.5) + 1
+        thickness = max(2, arm_length // 2)
+
+        for x in range(cols):
+            for y in range(rows):
+                # T shape based on rotation
+                if rotation == 0:  # T pointing down
+                    in_horizontal = (abs(y - center_y) < thickness and x < cols)
+                    in_vertical = (abs(x - center_x) < thickness and y >= center_y)
+                elif rotation == 1:  # T pointing left
+                    in_vertical = (abs(x - center_x) < thickness and y < rows)
+                    in_horizontal = (abs(y - center_y) < thickness and x <= center_x)
+                elif rotation == 2:  # T pointing up
+                    in_horizontal = (abs(y - center_y) < thickness and x < cols)
+                    in_vertical = (abs(x - center_x) < thickness and y <= center_y)
+                else:  # T pointing right
+                    in_vertical = (abs(x - center_x) < thickness and y < rows)
+                    in_horizontal = (abs(y - center_y) < thickness and x >= center_x)
+
+                if in_horizontal or in_vertical:
+                    positions.append(f"{x + offset_x}_{y + offset_y}")
+
+        return positions
+
+    def _generate_cross_shape(
+        self, cols: int, rows: int, target_count: int, center_x: int, center_y: int, offset_x: int, offset_y: int
+    ) -> List[str]:
+        """Generate cross/plus shaped pattern."""
+        positions = []
+        arm_length = int((target_count / 4) ** 0.5) + 1
+        thickness = max(1, arm_length // 2)
+
+        for x in range(cols):
+            for y in range(rows):
+                # Horizontal arm
+                in_horizontal = (abs(y - center_y) < thickness and abs(x - center_x) <= arm_length)
+                # Vertical arm
+                in_vertical = (abs(x - center_x) < thickness and abs(y - center_y) <= arm_length)
+
+                if in_horizontal or in_vertical:
+                    positions.append(f"{x + offset_x}_{y + offset_y}")
+
+        return positions
+
+    def _generate_donut_shape(
+        self, cols: int, rows: int, target_count: int, center_x: int, center_y: int, offset_x: int, offset_y: int
+    ) -> List[str]:
+        """Generate donut/ring shaped pattern with hollow center."""
+        positions = []
+        outer_radius = int((target_count / 2.5) ** 0.5) + 2
+        inner_radius = max(1, outer_radius // 2)
+
+        for x in range(cols):
+            for y in range(rows):
+                dist = ((x - center_x) ** 2 + (y - center_y) ** 2) ** 0.5
+                if inner_radius <= dist <= outer_radius:
+                    positions.append(f"{x + offset_x}_{y + offset_y}")
+
+        return positions
+
+    def _generate_zigzag_shape(
+        self, cols: int, rows: int, target_count: int, offset_x: int, offset_y: int
+    ) -> List[str]:
+        """Generate zigzag pattern."""
+        positions = []
+        amplitude = max(1, rows // 4)
+        thickness = max(2, int((target_count / rows) ** 0.5))
+
+        for x in range(cols):
+            # Zigzag center line
+            zigzag_y = rows // 2 + int(amplitude * (1 if (x // 2) % 2 == 0 else -1))
+            for y in range(rows):
+                if abs(y - zigzag_y) < thickness:
+                    positions.append(f"{x + offset_x}_{y + offset_y}")
+
+        return positions
+
+    def _generate_diagonal_shape(
+        self, cols: int, rows: int, target_count: int, offset_x: int, offset_y: int
+    ) -> List[str]:
+        """Generate diagonal stripe pattern."""
+        positions = []
+        thickness = max(2, int((target_count / max(cols, rows)) ** 0.5) + 1)
+        direction = random.choice([1, -1])  # 1 = top-left to bottom-right, -1 = top-right to bottom-left
+
+        for x in range(cols):
+            for y in range(rows):
+                # Diagonal line: y = x (or y = -x) with some offset
+                if direction == 1:
+                    diag_dist = abs(y - x)
+                else:
+                    diag_dist = abs(y - (cols - 1 - x))
+
+                if diag_dist < thickness:
+                    positions.append(f"{x + offset_x}_{y + offset_y}")
+
+        return positions
+
+    def _generate_corner_cluster(
+        self, cols: int, rows: int, target_count: int, offset_x: int, offset_y: int
+    ) -> List[str]:
+        """Generate cluster positioned at a random corner."""
+        positions = []
+        corner = random.randint(0, 3)
+        cluster_size = int((target_count ** 0.5)) + 1
+
+        # Determine corner position
+        if corner == 0:  # Top-left
+            start_x, start_y = 0, 0
+        elif corner == 1:  # Top-right
+            start_x, start_y = max(0, cols - cluster_size), 0
+        elif corner == 2:  # Bottom-left
+            start_x, start_y = 0, max(0, rows - cluster_size)
+        else:  # Bottom-right
+            start_x, start_y = max(0, cols - cluster_size), max(0, rows - cluster_size)
+
+        for x in range(start_x, min(cols, start_x + cluster_size)):
+            for y in range(start_y, min(rows, start_y + cluster_size)):
+                positions.append(f"{x + offset_x}_{y + offset_y}")
+
+        return positions
+
+    def _generate_scattered_clusters(
+        self, cols: int, rows: int, target_count: int, offset_x: int, offset_y: int
+    ) -> List[str]:
+        """Generate multiple small scattered clusters."""
+        positions = set()
+        num_clusters = random.randint(3, 5)
+        tiles_per_cluster = target_count // num_clusters
+        cluster_radius = max(1, int((tiles_per_cluster / 3.14) ** 0.5))
+
+        for _ in range(num_clusters):
+            # Random cluster center
+            cx = random.randint(cluster_radius, cols - cluster_radius - 1)
+            cy = random.randint(cluster_radius, rows - cluster_radius - 1)
+
+            for x in range(cols):
+                for y in range(rows):
+                    dist = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
+                    if dist <= cluster_radius:
+                        positions.add(f"{x + offset_x}_{y + offset_y}")
+
+        return list(positions)
+
+    def _generate_horizontal_bar(
+        self, cols: int, rows: int, target_count: int, center_y: int, offset_x: int, offset_y: int
+    ) -> List[str]:
+        """Generate horizontal bar pattern."""
+        positions = []
+        bar_height = max(2, target_count // cols + 1)
+
+        for x in range(cols):
+            for y in range(max(0, center_y - bar_height // 2), min(rows, center_y + bar_height // 2 + 1)):
+                positions.append(f"{x + offset_x}_{y + offset_y}")
+
+        return positions
+
+    def _generate_vertical_bar(
+        self, cols: int, rows: int, target_count: int, center_x: int, offset_x: int, offset_y: int
+    ) -> List[str]:
+        """Generate vertical bar pattern."""
+        positions = []
+        bar_width = max(2, target_count // rows + 1)
+
+        for x in range(max(0, center_x - bar_width // 2), min(cols, center_x + bar_width // 2 + 1)):
+            for y in range(rows):
+                positions.append(f"{x + offset_x}_{y + offset_y}")
+
+        return positions
 
     def _mirror_horizontal(
         self, cols: int, rows: int, base_positions: List[str], target_count: int
@@ -824,6 +1359,67 @@ class LevelGenerator:
 
         return positions[:target_count]
 
+    def _is_position_covered_by_upper(
+        self, level: Dict[str, Any], layer_idx: int, col: int, row: int
+    ) -> bool:
+        """Check if a position is covered by tiles in upper layers.
+
+        Based on sp_template TileGroup.FindAllUpperTiles logic:
+        - Same parity (layer 0→2, 1→3): Check same position only
+        - Different parity: Compare layer col sizes to determine offset direction
+          - Upper layer col > current layer col: Check (0,0), (+1,0), (0,+1), (+1,+1)
+          - Upper layer col <= current layer col: Check (-1,-1), (0,-1), (-1,0), (0,0)
+
+        Parity is determined by layer_idx % 2.
+        """
+        num_layers = level.get("layer", 8)
+
+        # Early exit if on top layer
+        if layer_idx >= num_layers - 1:
+            return False
+
+        tile_parity = layer_idx % 2
+        cur_layer_data = level.get(f"layer_{layer_idx}", {})
+        cur_layer_col = int(cur_layer_data.get("col", 7))
+
+        # Blocking offsets based on parity
+        BLOCKING_OFFSETS_SAME_PARITY = ((0, 0),)
+        BLOCKING_OFFSETS_UPPER_BIGGER = ((0, 0), (1, 0), (0, 1), (1, 1))
+        BLOCKING_OFFSETS_UPPER_SMALLER = ((-1, -1), (0, -1), (-1, 0), (0, 0))
+
+        for upper_layer_idx in range(layer_idx + 1, num_layers):
+            upper_layer_key = f"layer_{upper_layer_idx}"
+            upper_layer_data = level.get(upper_layer_key, {})
+            upper_tiles = upper_layer_data.get("tiles", {})
+
+            if not upper_tiles:
+                continue
+
+            upper_parity = upper_layer_idx % 2
+            upper_layer_col = int(upper_layer_data.get("col", 7))
+
+            # Determine blocking positions based on parity and layer size
+            if tile_parity == upper_parity:
+                # Same parity (odd-odd or even-even): only check same position
+                blocking_offsets = BLOCKING_OFFSETS_SAME_PARITY
+            else:
+                # Different parity: compare layer col sizes
+                if upper_layer_col > cur_layer_col:
+                    # Upper layer is bigger (has more columns)
+                    blocking_offsets = BLOCKING_OFFSETS_UPPER_BIGGER
+                else:
+                    # Upper layer is smaller or same size
+                    blocking_offsets = BLOCKING_OFFSETS_UPPER_SMALLER
+
+            for dx, dy in blocking_offsets:
+                bx = col + dx
+                by = row + dy
+                pos_key = f"{bx}_{by}"
+                if pos_key in upper_tiles:
+                    return True
+
+        return False
+
     def _add_obstacles(
         self, level: Dict[str, Any], params: GenerationParams
     ) -> Dict[str, Any]:
@@ -1001,7 +1597,11 @@ class LevelGenerator:
     def _add_frog_obstacles_to_layer(
         self, level: Dict[str, Any], layer_idx: int, target: int, counter: Dict[str, int]
     ) -> Dict[str, Any]:
-        """Add frog obstacles to a specific layer (no special placement rules)."""
+        """Add frog obstacles to a specific layer.
+
+        RULE: Frogs must only be placed on tiles that are NOT covered by upper layers.
+        This is because frogs need to be immediately selectable when the level spawns.
+        """
         layer_key = f"layer_{layer_idx}"
         tiles = level.get(layer_key, {}).get("tiles", {})
         added = 0
@@ -1019,6 +1619,14 @@ class LevelGenerator:
 
             # Skip goal tiles and tiles with attributes
             if tile_data[0] in self.GOAL_TYPES or tile_data[1]:
+                continue
+
+            # RULE: Skip positions covered by upper layers (frogs must be selectable at spawn)
+            try:
+                col, row = map(int, pos.split('_'))
+                if self._is_position_covered_by_upper(level, layer_idx, col, row):
+                    continue
+            except:
                 continue
 
             tile_data[1] = "frog"
@@ -1517,7 +2125,11 @@ class LevelGenerator:
     def _add_frog_obstacles(
         self, level: Dict[str, Any], target: int, counter: Dict[str, int]
     ) -> Dict[str, Any]:
-        """Add frog obstacles (no special placement rules)."""
+        """Add frog obstacles.
+
+        RULE: Frogs must only be placed on tiles that are NOT covered by upper layers.
+        This is because frogs need to be immediately selectable when the level spawns.
+        """
         num_layers = level.get("layer", 8)
 
         for i in range(num_layers - 1, -1, -1):
@@ -1536,6 +2148,14 @@ class LevelGenerator:
 
                 # Skip goal tiles and tiles with attributes
                 if tile_data[0] in self.GOAL_TYPES or tile_data[1]:
+                    continue
+
+                # RULE: Skip positions covered by upper layers (frogs must be selectable at spawn)
+                try:
+                    col, row = map(int, pos.split('_'))
+                    if self._is_position_covered_by_upper(level, i, col, row):
+                        continue
+                except:
                     continue
 
                 if random.random() < 0.15:
@@ -2099,7 +2719,7 @@ class LevelGenerator:
             pos = None
             row_order = get_row_search_order(goal_type)
 
-            # Build column search order - for symmetry, prefer center columns first
+            # Build column search order - RANDOMIZED for variety
             if symmetry_mode in ("horizontal", "both"):
                 # Start with preferred symmetric columns, then expand outward
                 preferred = get_preferred_columns_for_symmetry()
@@ -2111,16 +2731,17 @@ class LevelGenerator:
                         if c + offset < cols and (c + offset) not in col_search_order:
                             col_search_order.append(c + offset)
             else:
-                # Original spiral search from target
-                col_search_order = []
-                for col_offset in range(cols):
-                    for search_dir in ([0] if col_offset == 0 else [-1, 1]):
-                        c = target_col + col_offset * search_dir
-                        if 0 <= c < cols and c not in col_search_order:
-                            col_search_order.append(c)
+                # Randomized column search for variety in goal placement
+                col_search_order = list(range(cols))
+                random.shuffle(col_search_order)
 
-            # Try positions in priority order
-            for try_row in row_order:
+            # Randomize row order while respecting direction constraints
+            # (e.g., craft_s can't be at bottom row, craft_n can't be at top row)
+            row_order_list = list(row_order)
+            random.shuffle(row_order_list)
+
+            # Try positions in randomized order
+            for try_row in row_order_list:
                 for try_col in col_search_order:
                     try_pos = f"{try_col}_{try_row}"
 
@@ -2178,20 +2799,39 @@ class LevelGenerator:
         # Update tile count
         level[layer_key]["num"] = str(len(tiles))
 
-        # Set goalCount for the level
+        # Set goalCount for the level - ONLY include goals that were actually placed
+        # Build goalCount from successfully placed tiles, not from requested goals
         goalCount = {}
-        for goal in goals:
-            # Handle both old format (type="craft_s") and new format (type="craft", direction="s")
-            base_type = goal.get("type", "craft")
-            direction = goal.get("direction") or "s"  # Handle None value
+        for pos, tile_data in tiles.items():
+            if isinstance(tile_data, list) and len(tile_data) > 0:
+                tile_type = tile_data[0]
+                # Check if it's a craft/stack goal tile
+                if isinstance(tile_type, str) and (tile_type.startswith("craft_") or tile_type.startswith("stack_")):
+                    # Extract count from tile_data[2]
+                    tile_count = 1
+                    if len(tile_data) > 2:
+                        extra = tile_data[2]
+                        if isinstance(extra, list) and len(extra) > 0:
+                            tile_count = int(extra[0]) if extra[0] else 1
+                        elif isinstance(extra, (int, float)):
+                            tile_count = int(extra)
+                    goalCount[tile_type] = goalCount.get(tile_type, 0) + tile_count
 
+        # Warn if not all requested goals were placed
+        requested_goals = set()
+        for goal in goals:
+            base_type = goal.get("type", "craft")
+            direction = goal.get("direction") or "s"
             if base_type.endswith(('_s', '_n', '_e', '_w')):
                 full_goal_type = base_type
             else:
                 full_goal_type = f"{base_type}_{direction}"
+            requested_goals.add(full_goal_type)
 
-            goal_count = goal.get("count", 3)
-            goalCount[full_goal_type] = goalCount.get(full_goal_type, 0) + goal_count
+        placed_goals = set(goalCount.keys())
+        missing_goals = requested_goals - placed_goals
+        if missing_goals:
+            logger.warning(f"Could not place some goals: {missing_goals}. Placed: {placed_goals}")
 
         level["goalCount"] = goalCount
 
@@ -2212,6 +2852,12 @@ class LevelGenerator:
         target_score = target * 100
         symmetry_mode = params.symmetry_mode if params else "none"
 
+        # Track if we've hit tile limit - need to use obstacles
+        tiles_maxed_out = False
+        # Track consecutive no-change iterations
+        no_change_count = 0
+        last_score = None
+
         for iteration in range(self.MAX_ADJUSTMENT_ITERATIONS):
             report = analyzer.analyze(level)
             current_score = report.score
@@ -2219,6 +2865,16 @@ class LevelGenerator:
 
             if abs(diff) <= self.DIFFICULTY_TOLERANCE:
                 break
+
+            # Check if score isn't changing (stuck)
+            if last_score is not None and abs(current_score - last_score) < 0.1:
+                no_change_count += 1
+                if no_change_count >= 3:
+                    # Score is stuck, need to use obstacles to increase further
+                    tiles_maxed_out = True
+            else:
+                no_change_count = 0
+            last_score = current_score
 
             if diff > 0:
                 # Need to increase difficulty
@@ -2229,42 +2885,138 @@ class LevelGenerator:
                         for i in range(level.get("layer", 8))
                     )
                     if current_tiles >= max_tiles:
-                        # Can't add more tiles, stop adjusting
-                        break
-                level = self._increase_difficulty(level, params)
+                        tiles_maxed_out = True
+
+                # Pass target difficulty to enable aggressive obstacle addition for high targets
+                level = self._increase_difficulty(level, params, tiles_maxed_out=tiles_maxed_out, target_difficulty=target)
             else:
-                # Need to decrease difficulty
-                level = self._decrease_difficulty(level, params)
+                # Need to decrease difficulty - pass target for aggressive reduction at low targets
+                level = self._decrease_difficulty(level, params, target_difficulty=target)
 
         return level
 
-    def _increase_difficulty(self, level: Dict[str, Any], params: Optional["GenerationParams"] = None) -> Dict[str, Any]:
+    def _increase_difficulty(self, level: Dict[str, Any], params: Optional["GenerationParams"] = None, tiles_maxed_out: bool = False, target_difficulty: float = 0.5) -> Dict[str, Any]:
         """Apply a random modification to increase difficulty.
 
-        Note: Obstacle and goal modifications are removed to respect
-        user-specified settings. Difficulty is adjusted primarily through
-        tile count changes only.
+        When tiles are maxed out or target difficulty is high, adds obstacles
+        (chain, frog, ice) to increase difficulty. This allows generating B, C, D grade levels.
+
+        Strategy based on target_difficulty:
+        - target < 0.4 (S/A grade): Primarily add tiles
+        - target >= 0.4 (B grade): Mix of tiles and obstacles (50% chance each)
+        - target >= 0.6 (C grade): Primarily obstacles, multiple per iteration
+        - target >= 0.8 (D grade): Aggressive obstacle addition, activate more layers
         """
         symmetry_mode = params.symmetry_mode if params else "none"
+
+        # Obstacle addition actions
+        obstacle_actions = [
+            self._add_chain_to_tile,
+            self._add_frog_to_tile,
+            self._add_ice_to_tile,
+        ]
+
+        # D grade (target >= 0.8): Very aggressive - always add multiple obstacles
+        if target_difficulty >= 0.8:
+            # Add 2-4 obstacles per iteration
+            num_obstacles = random.randint(2, 4)
+            for _ in range(num_obstacles):
+                action = random.choice(obstacle_actions)
+                level = action(level)
+            # Also try to add tiles to increase complexity
+            if symmetry_mode == "none":
+                level = self._add_tile_to_layer(level)
+            return level
+
+        # C grade (target >= 0.6): Aggressive - primarily obstacles
+        if target_difficulty >= 0.6:
+            # Add 1-3 obstacles per iteration
+            num_obstacles = random.randint(1, 3)
+            for _ in range(num_obstacles):
+                action = random.choice(obstacle_actions)
+                level = action(level)
+            return level
+
+        # B grade (target >= 0.4): Mixed strategy - 60% obstacles, 40% tiles
+        if target_difficulty >= 0.4:
+            if random.random() < 0.6 or tiles_maxed_out:
+                # Add 1-2 obstacles
+                num_obstacles = random.randint(1, 2)
+                for _ in range(num_obstacles):
+                    action = random.choice(obstacle_actions)
+                    level = action(level)
+                return level
+            # Fall through to add tiles
+
+        # If tiles are maxed out, add obstacles to increase difficulty
+        if tiles_maxed_out:
+            action = random.choice(obstacle_actions)
+            return action(level)
+
         # For symmetric patterns, skip random tile addition to preserve symmetry
         if symmetry_mode != "none":
             return level
-        # Only use tile modifications - goal count should respect user's settings
+
+        # Default: add tiles (for S/A grade targets)
         return self._add_tile_to_layer(level)
 
-    def _decrease_difficulty(self, level: Dict[str, Any], params: Optional["GenerationParams"] = None) -> Dict[str, Any]:
+    def _decrease_difficulty(self, level: Dict[str, Any], params: Optional["GenerationParams"] = None, target_difficulty: float = 0.5) -> Dict[str, Any]:
         """Apply a random modification to decrease difficulty.
 
-        Note: Obstacle and goal modifications are removed to respect
-        user-specified settings. Difficulty is adjusted primarily through
-        tile count changes only.
+        Strategy based on target_difficulty:
+        - target >= 0.4: Remove 1 tile (gentle reduction)
+        - target >= 0.2 (A grade): Remove 1-2 tiles, possibly remove obstacle
+        - target < 0.2 (S grade): Aggressively remove 2-3 tiles and obstacles
         """
         symmetry_mode = params.symmetry_mode if params else "none"
         # For symmetric patterns, skip random tile removal to preserve symmetry
         if symmetry_mode != "none":
             return level
-        # Only use tile modifications - goal count should respect user's settings
+
+        # S grade (target < 0.2): Very aggressive - remove multiple tiles and obstacles
+        if target_difficulty < 0.2:
+            # Remove 2-3 tiles per iteration
+            num_removals = random.randint(2, 3)
+            for _ in range(num_removals):
+                level = self._remove_tile_from_layer(level)
+            # Also try to remove obstacles if any exist
+            if random.random() < 0.7:
+                level = self._remove_random_obstacle(level)
+            return level
+
+        # A grade (target < 0.4): Moderate reduction
+        if target_difficulty < 0.4:
+            # Remove 1-2 tiles
+            num_removals = random.randint(1, 2)
+            for _ in range(num_removals):
+                level = self._remove_tile_from_layer(level)
+            # Sometimes remove obstacles
+            if random.random() < 0.3:
+                level = self._remove_random_obstacle(level)
+            return level
+
+        # Default: gentle reduction - remove 1 tile
         return self._remove_tile_from_layer(level)
+
+    def _remove_random_obstacle(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """Remove a random obstacle (chain, frog, ice) from the level."""
+        num_layers = level.get("layer", 8)
+
+        # Find all tiles with obstacles
+        candidates = []
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for pos, tile_data in tiles.items():
+                if (isinstance(tile_data, list) and len(tile_data) >= 2
+                    and tile_data[1] in ["chain", "frog", "ice"]):
+                    candidates.append((layer_key, pos))
+
+        if candidates:
+            layer_key, pos = random.choice(candidates)
+            level[layer_key]["tiles"][pos][1] = ""
+
+        return level
 
     def _add_chain_to_tile(self, level: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -2322,8 +3074,46 @@ class LevelGenerator:
         return level
 
     def _add_frog_to_tile(self, level: Dict[str, Any]) -> Dict[str, Any]:
-        """Add frog attribute to a random tile."""
-        return self._add_attribute_to_tile(level, "frog")
+        """Add frog attribute to a random tile.
+
+        RULE: Frogs must only be placed on tiles that are NOT covered by upper layers.
+        This is because frogs need to be immediately selectable when the level spawns.
+        """
+        num_layers = level.get("layer", 8)
+
+        # Collect all tiles without attributes that are NOT covered by upper layers
+        candidates = []
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for pos, tile_data in tiles.items():
+                if (
+                    isinstance(tile_data, list)
+                    and len(tile_data) >= 2
+                    and not tile_data[1]
+                    and tile_data[0] not in self.GOAL_TYPES
+                ):
+                    # Check if position is covered by upper layers
+                    try:
+                        col, row = map(int, pos.split('_'))
+                        if not self._is_position_covered_by_upper(level, i, col, row):
+                            candidates.append((layer_key, pos))
+                    except:
+                        continue
+
+        if candidates:
+            layer_key, pos = random.choice(candidates)
+            level[layer_key]["tiles"][pos][1] = "frog"
+
+        return level
+
+    def _add_ice_to_tile(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """Add ice attribute to a random tile.
+
+        Ice tiles require 2 taps to clear: first tap removes ice, second tap clears tile.
+        Ice is a good difficulty modifier as it doesn't require neighbor rules like chain.
+        """
+        return self._add_attribute_to_tile(level, "ice")
 
     def _add_attribute_to_tile(
         self, level: Dict[str, Any], attribute: str

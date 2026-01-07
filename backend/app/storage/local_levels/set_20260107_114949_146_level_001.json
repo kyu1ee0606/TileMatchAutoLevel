@@ -1,0 +1,119 @@
+{
+  "layer": 5,
+  "useTileCount": 5,
+  "randSeed": 914048,
+  "layer_0": {
+    "col": "8",
+    "row": "8",
+    "tiles": {},
+    "num": "0"
+  },
+  "layer_1": {
+    "col": "7",
+    "row": "7",
+    "tiles": {},
+    "num": "0"
+  },
+  "layer_2": {
+    "col": "8",
+    "row": "8",
+    "tiles": {
+      "6_6": [
+        "t4",
+        ""
+      ],
+      "7_6": [
+        "t0",
+        ""
+      ],
+      "7_7": [
+        "t4",
+        ""
+      ]
+    },
+    "num": "3"
+  },
+  "layer_3": {
+    "col": "7",
+    "row": "7",
+    "tiles": {
+      "3_6": [
+        "t2",
+        ""
+      ],
+      "4_6": [
+        "t0",
+        ""
+      ],
+      "0_6": [
+        "t0",
+        ""
+      ]
+    },
+    "num": "3"
+  },
+  "layer_4": {
+    "col": "8",
+    "row": "8",
+    "tiles": {
+      "0_3": [
+        "t2",
+        ""
+      ],
+      "3_5": [
+        "t2",
+        ""
+      ],
+      "1_6": [
+        "t4",
+        ""
+      ],
+      "2_5": [
+        "craft_s",
+        "",
+        [
+          3
+        ]
+      ],
+      "5_1": [
+        "craft_n",
+        "",
+        [
+          3
+        ]
+      ],
+      "0_1": [
+        "craft_e",
+        "",
+        [
+          3
+        ]
+      ],
+      "7_2": [
+        "craft_w",
+        "",
+        [
+          3
+        ]
+      ]
+    },
+    "num": "7"
+  },
+  "goalCount": {
+    "craft_s": 3,
+    "craft_n": 3,
+    "craft_e": 3,
+    "craft_w": 3
+  },
+  "max_moves": 30,
+  "target_difficulty": 0.1,
+  "symmetry_mode": "none",
+  "pattern_type": "geometric",
+  "level_index": 1,
+  "name": "111 - Level 1",
+  "id": "set_20260107_114949_146_level_001",
+  "difficulty": 0.12166666666666666,
+  "grade": "S",
+  "set_id": "set_20260107_114949_146",
+  "set_name": "111"
+}

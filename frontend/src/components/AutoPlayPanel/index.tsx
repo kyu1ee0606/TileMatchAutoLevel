@@ -9,6 +9,9 @@ interface AutoPlayPanelProps {
   className?: string;
   embedded?: boolean;
   targetDifficulty?: number; // Optional: target difficulty from generation
+  onRegenerate?: (attempts: number) => void; // Optional: callback to regenerate level with number of attempts
+  isRegenerating?: boolean; // Optional: indicates if regeneration is in progress
+  regenerationProgress?: { current: number; total: number; bestScore: number }; // Optional: regeneration progress info
 }
 
 // Bot profile colors and Korean display names
@@ -54,7 +57,16 @@ function getMatchStatus(score: number): { label: string; color: string; bgColor:
 }
 
 // Difficulty Match Summary Component
-function DifficultyMatchSummary({ result, targetDifficulty }: { result: AutoPlayResponse; targetDifficulty?: number }) {
+interface DifficultyMatchSummaryProps {
+  result: AutoPlayResponse;
+  targetDifficulty?: number;
+  onRegenerate?: (attempts: number) => void;
+  isRegenerating?: boolean;
+  regenerationProgress?: { current: number; total: number; bestScore: number };
+}
+
+function DifficultyMatchSummary({ result, targetDifficulty, onRegenerate, isRegenerating, regenerationProgress }: DifficultyMatchSummaryProps) {
+  const [regenerationAttempts, setRegenerationAttempts] = useState(3);
   const { score, avgGap, maxGap } = useMemo(() => calculateMatchScore(result.bot_stats), [result.bot_stats]);
   const status = getMatchStatus(score);
 
@@ -131,6 +143,67 @@ function DifficultyMatchSummary({ result, targetDifficulty }: { result: AutoPlay
           </div>
         )}
       </div>
+
+      {/* Regenerate Button - Always show when callback is provided */}
+      {onRegenerate && (
+        <div className="mt-3 pt-3 border-t border-gray-700">
+          <div className="flex items-center gap-2">
+            <select
+              value={regenerationAttempts}
+              onChange={(e) => setRegenerationAttempts(Number(e.target.value))}
+              className="bg-gray-700 text-gray-200 text-sm rounded px-2 py-1.5 border border-gray-600 flex-shrink-0"
+              disabled={isRegenerating}
+            >
+              <option value={1}>1회</option>
+              <option value={3}>3회</option>
+              <option value={5}>5회</option>
+              <option value={10}>10회</option>
+            </select>
+            <Button
+              variant={score < 70 ? "danger" : "secondary"}
+              size="sm"
+              onClick={() => onRegenerate(regenerationAttempts)}
+              disabled={isRegenerating}
+              className="flex-1"
+            >
+              {isRegenerating ? (
+                <>
+                  <span className="animate-spin mr-2">⟳</span>
+                  {regenerationProgress ? (
+                    `재생성 중... (${regenerationProgress.current}/${regenerationProgress.total})`
+                  ) : (
+                    '재생성 중...'
+                  )}
+                </>
+              ) : (
+                <>
+                  <span className="mr-2">🔄</span>
+                  {regenerationAttempts}회 재생성 후 최적 선택
+                </>
+              )}
+            </Button>
+          </div>
+          {/* Progress indicator during regeneration */}
+          {isRegenerating && regenerationProgress && (
+            <div className="mt-2">
+              <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-blue-500 transition-all duration-300"
+                  style={{ width: `${(regenerationProgress.current / regenerationProgress.total) * 100}%` }}
+                />
+              </div>
+              <p className="text-xs text-gray-400 mt-1 text-center">
+                현재 최고 일치도: {regenerationProgress.bestScore.toFixed(0)}%
+              </p>
+            </div>
+          )}
+          {!isRegenerating && (
+            <p className="text-xs text-gray-500 mt-2 text-center">
+              {regenerationAttempts}회 생성 후 목표 난이도에 가장 적합한 레벨로 교체합니다
+            </p>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -298,13 +371,19 @@ function GapSummaryTable({ botStats }: { botStats: BotClearStats[] }) {
   );
 }
 
-export function AutoPlayPanel({ className, embedded = false, targetDifficulty }: AutoPlayPanelProps) {
+export function AutoPlayPanel({ className, embedded = false, targetDifficulty, onRegenerate, isRegenerating, regenerationProgress }: AutoPlayPanelProps) {
   const { level } = useLevelStore();
   const [iterations, setIterations] = useState(100);
   const [showDetails, setShowDetails] = useState(false);
 
+  // Get target difficulty from prop, level data, or use default (0.5)
+  const effectiveTargetDifficulty = targetDifficulty ?? (level as any).target_difficulty ?? (level as any).targetDifficulty;
+
   const mutation = useMutation({
-    mutationFn: () => analyzeAutoPlay(level, { iterations }),
+    mutationFn: () => analyzeAutoPlay(level, {
+      iterations,
+      targetDifficulty: effectiveTargetDifficulty,
+    }),
   });
 
   const handleAnalyze = () => {
@@ -392,7 +471,13 @@ export function AutoPlayPanel({ className, embedded = false, targetDifficulty }:
         {result && !mutation.isPending && (
           <div className="space-y-4">
             {/* Difficulty Match Summary - NEW! */}
-            <DifficultyMatchSummary result={result} targetDifficulty={targetDifficulty} />
+            <DifficultyMatchSummary
+              result={result}
+              targetDifficulty={effectiveTargetDifficulty}
+              onRegenerate={onRegenerate}
+              isRegenerating={isRegenerating}
+              regenerationProgress={regenerationProgress}
+            />
 
             {/* Score Comparison */}
             <ScoreComparison result={result} />

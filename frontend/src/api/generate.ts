@@ -15,6 +15,9 @@ export interface GenerateRequest {
   // Symmetry and pattern options
   symmetry_mode?: SymmetryMode;
   pattern_type?: PatternType;
+  // Auto gimmick selection parameters
+  auto_select_gimmicks?: boolean;
+  available_gimmicks?: string[];
 }
 
 export interface SimulateRequest {
@@ -26,7 +29,13 @@ export interface SimulateRequest {
 /**
  * Generate a new level with target difficulty.
  */
-export async function generateLevel(params: GenerationParams): Promise<GenerationResult> {
+export async function generateLevel(
+  params: GenerationParams,
+  gimmickOptions?: {
+    auto_select_gimmicks?: boolean;
+    available_gimmicks?: string[];
+  }
+): Promise<GenerationResult> {
   const request: GenerateRequest = {
     target_difficulty: params.target_difficulty,
     grid_size: params.grid_size,
@@ -39,9 +48,17 @@ export async function generateLevel(params: GenerationParams): Promise<Generatio
     layer_obstacle_configs: params.layer_obstacle_configs,
     symmetry_mode: params.symmetry_mode,
     pattern_type: params.pattern_type,
+    // Auto gimmick selection
+    auto_select_gimmicks: gimmickOptions?.auto_select_gimmicks,
+    available_gimmicks: gimmickOptions?.available_gimmicks,
   };
 
-  const response = await apiClient.post<GenerationResult>('/generate', request);
+  // Increase timeout when using auto gimmick selection (requires additional processing)
+  const timeoutMs = gimmickOptions?.auto_select_gimmicks ? 60000 : 30000;
+
+  const response = await apiClient.post<GenerationResult>('/generate', request, {
+    timeout: timeoutMs,
+  });
   return response.data;
 }
 
@@ -89,6 +106,10 @@ export interface ValidatedGenerateRequest {
   max_retries?: number;          // Default: 5
   tolerance?: number;            // Default: 15.0 (percentage)
   simulation_iterations?: number; // Default: 30
+  use_best_match?: boolean;      // Default: true - always return best result after max_retries
+  // Auto gimmick selection parameters
+  auto_select_gimmicks?: boolean;   // Enable auto gimmick selection based on difficulty
+  available_gimmicks?: string[];    // Pool of available gimmicks for auto-selection
 }
 
 export interface ValidatedGenerateResult {
@@ -117,6 +138,11 @@ export async function generateValidatedLevel(
     max_retries?: number;
     tolerance?: number;
     simulation_iterations?: number;
+    use_best_match?: boolean;
+  },
+  gimmickOptions?: {
+    auto_select_gimmicks?: boolean;
+    available_gimmicks?: string[];
   }
 ): Promise<ValidatedGenerateResult> {
   const request: ValidatedGenerateRequest = {
@@ -131,8 +157,19 @@ export async function generateValidatedLevel(
     max_retries: validationOptions?.max_retries ?? 5,
     tolerance: validationOptions?.tolerance ?? 15.0,
     simulation_iterations: validationOptions?.simulation_iterations ?? 30,
+    use_best_match: validationOptions?.use_best_match ?? true,  // Default: use best match strategy
+    // Auto gimmick selection
+    auto_select_gimmicks: gimmickOptions?.auto_select_gimmicks,
+    available_gimmicks: gimmickOptions?.available_gimmicks,
   };
 
-  const response = await apiClient.post<ValidatedGenerateResult>('/generate/validated', request);
+  // Calculate timeout: base 60s + extra time for retries and simulations
+  // Each retry with 30 iterations takes ~5-10 seconds
+  const maxRetries = request.max_retries ?? 5;
+  const timeoutMs = 60000 + (maxRetries * 15000); // 60s base + 15s per retry
+
+  const response = await apiClient.post<ValidatedGenerateResult>('/generate/validated', request, {
+    timeout: timeoutMs,
+  });
   return response.data;
 }

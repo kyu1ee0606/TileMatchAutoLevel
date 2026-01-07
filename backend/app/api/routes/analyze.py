@@ -21,8 +21,8 @@ from ..deps import get_level_analyzer
 
 router = APIRouter(prefix="/api", tags=["analyze"])
 
-# Bot target clear rates (expected performance)
-BOT_TARGET_CLEAR_RATES = {
+# Base bot target clear rates (for target_difficulty=0.5)
+BASE_TARGET_CLEAR_RATES = {
     "novice": 0.40,
     "casual": 0.60,
     "average": 0.75,
@@ -47,6 +47,46 @@ BOT_WEIGHTS = {
     "expert": 1.5,
     "optimal": 1.0,
 }
+
+
+def calculate_target_clear_rates(target_difficulty: float) -> Dict[str, float]:
+    """
+    Calculate target clear rates based on target difficulty.
+
+    target_difficulty=0.0: Very easy, all bots ~95-99%
+    target_difficulty=0.5: Balanced (base rates)
+    target_difficulty=1.0: Very hard, lower rates based on game mechanics
+
+    NOTE: Hard targets are calibrated based on game simulation testing.
+    The tile matching game has limited variance between bot skill levels
+    when levels are mathematically solvable. Key difficulty drivers are:
+    - Tile type count (more types = harder to match before dock fills)
+    - Move constraint (tighter moves = less room for suboptimal play)
+    """
+    rates = {}
+    for bot_type, base_rate in BASE_TARGET_CLEAR_RATES.items():
+        if target_difficulty <= 0.5:
+            # Easier: interpolate from 0.99 to base_rate
+            t = target_difficulty / 0.5
+            rate = 0.99 - t * (0.99 - base_rate)
+        else:
+            # Harder: interpolate from base_rate to realistic hard targets
+            t = (target_difficulty - 0.5) / 0.5
+            # Adjusted hard targets based on game mechanics testing:
+            # - Novice/Casual are most affected by tile type count
+            # - Expert/Optimal almost always clear solvable levels (game mechanics limitation)
+            # - Target rates reflect achievable variance, not ideal distribution
+            hard_targets = {
+                "novice": 0.20,    # Strongly affected by tile type count
+                "casual": 0.40,    # Moderately affected
+                "average": 0.70,   # Good strategy limits variance
+                "expert": 0.90,    # Very good at solving, minor failures only
+                "optimal": 0.95,   # Near-perfect, only fails on edge cases
+            }
+            hard_rate = hard_targets.get(bot_type, 0.40)
+            rate = base_rate - t * (base_rate - hard_rate)
+        rates[bot_type] = max(0.01, min(0.99, rate))
+    return rates
 
 
 @router.post("/analyze", response_model=AnalyzeResponse)
@@ -125,19 +165,10 @@ async def batch_analyze_levels(
 def _calculate_max_moves(level_json: Dict[str, Any]) -> int:
     """Calculate max moves for auto-play simulation.
 
-    Priority:
-    1. Use level's configured max_moves if present
-    2. Otherwise, calculate: total_tiles (including stack/craft internal tiles)
-
-    For a level to be clearable, you need exactly total_tiles moves
-    (one move per tile to pick).
+    Ensures max_moves is at least total_tiles to make level clearable.
+    This fixes issues with saved levels that have incorrectly low max_moves.
     """
-    # First, check if level has explicit max_moves setting
-    level_max_moves = level_json.get("max_moves")
-    if level_max_moves is not None and level_max_moves > 0:
-        return int(level_max_moves)
-
-    # Calculate based on total tiles
+    # Calculate based on total tiles (including stack/craft internal tiles)
     total_tiles = 0
     num_layers = level_json.get("layer", 8)
 
@@ -171,7 +202,13 @@ def _calculate_max_moves(level_json: Dict[str, Any]) -> int:
             else:
                 total_tiles += 1
 
-    # Max moves = total tiles (exactly what's needed to pick all tiles)
+    # Use level's max_moves if set and >= total_tiles, otherwise use total_tiles
+    # This ensures levels are always clearable for simulation
+    level_max_moves = level_json.get("max_moves")
+    if level_max_moves is not None and level_max_moves >= total_tiles:
+        return int(level_max_moves)
+
+    # Max moves = total tiles (minimum needed to pick all tiles)
     return max(30, total_tiles)
 
 
@@ -278,6 +315,7 @@ def _run_bot_simulation(
     iterations: int,
     max_moves: int,
     seed: int | None,
+    target_clear_rate: float,
 ) -> BotClearStats:
     """Run simulation for a single bot profile."""
     simulator = BotSimulator()
@@ -295,7 +333,7 @@ def _run_bot_simulation(
         profile=profile_name,
         profile_display=BOT_DISPLAY_NAMES.get(profile_name, profile_name),
         clear_rate=result.clear_rate,
-        target_clear_rate=BOT_TARGET_CLEAR_RATES.get(profile_name, 0.5),
+        target_clear_rate=target_clear_rate,
         avg_moves=result.avg_moves,
         min_moves=result.min_moves,
         max_moves=result.max_moves,
@@ -330,11 +368,23 @@ async def analyze_autoplay(
         iterations = request.iterations
         seed = request.seed
 
+        # Run static analysis FIRST to get actual difficulty score
+        static_report = analyzer.analyze(level_json)
+        static_score = static_report.score
+        static_grade = static_report.grade.value
+
+        # Calculate target clear rates based on STATIC ANALYSIS difficulty score
+        # Convert static_score (0-100) to difficulty (0.0-1.0)
+        # score 0 = easiest (S grade) → difficulty 0.0
+        # score 100 = hardest (D grade) → difficulty 1.0
+        difficulty_from_score = static_score / 100.0
+        target_rates = calculate_target_clear_rates(difficulty_from_score)
+
         # Determine which bot profiles to use
         if request.bot_profiles:
-            profiles = [p.lower() for p in request.bot_profiles if p.lower() in BOT_TARGET_CLEAR_RATES]
+            profiles = [p.lower() for p in request.bot_profiles if p.lower() in BASE_TARGET_CLEAR_RATES]
         else:
-            profiles = list(BOT_TARGET_CLEAR_RATES.keys())
+            profiles = list(BASE_TARGET_CLEAR_RATES.keys())
 
         if not profiles:
             raise HTTPException(
@@ -356,6 +406,7 @@ async def analyze_autoplay(
                     iterations,
                     max_moves,
                     seed,
+                    target_rates.get(profile, 0.5),
                 ): profile
                 for profile in profiles
             }
@@ -371,7 +422,7 @@ async def analyze_autoplay(
                         profile=profile,
                         profile_display=BOT_DISPLAY_NAMES.get(profile, profile),
                         clear_rate=0.0,
-                        target_clear_rate=BOT_TARGET_CLEAR_RATES.get(profile, 0.5),
+                        target_clear_rate=target_rates.get(profile, 0.5),
                         avg_moves=0.0,
                         min_moves=0,
                         max_moves=0,
@@ -381,17 +432,14 @@ async def analyze_autoplay(
                     ))
 
         # Sort by profile order
-        profile_order = list(BOT_TARGET_CLEAR_RATES.keys())
+        profile_order = list(BASE_TARGET_CLEAR_RATES.keys())
         bot_stats.sort(key=lambda x: profile_order.index(x.profile) if x.profile in profile_order else 999)
 
         # Calculate autoplay difficulty score
         autoplay_score = _calculate_autoplay_difficulty(bot_stats)
         autoplay_grade = _get_grade_from_score(autoplay_score)
 
-        # Get static analysis for comparison
-        static_report = analyzer.analyze(level_json)
-        static_score = static_report.score
-        static_grade = static_report.grade.value
+        # static_score and static_grade already calculated above
 
         # Assess balance
         balance_status, recommendations = _assess_balance(bot_stats)

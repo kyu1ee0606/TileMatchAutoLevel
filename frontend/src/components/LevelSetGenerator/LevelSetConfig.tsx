@@ -1,19 +1,13 @@
 import { useState } from 'react';
-import type { LevelSetGenerationConfig } from '../../types/levelSet';
+import type { LevelSetGenerationConfig, GimmickMode, LevelGimmickOverride, DifficultyPoint } from '../../types/levelSet';
 import type { GoalConfig, SymmetryMode, PatternType } from '../../types';
 import { Button } from '../ui';
-
-export interface ValidationOptions {
-  enabled: boolean;
-  max_retries: number;
-  tolerance: number;
-}
+import { LevelGimmickTable } from './LevelGimmickTable';
 
 interface LevelSetConfigProps {
   config: LevelSetGenerationConfig;
   onConfigChange: (config: LevelSetGenerationConfig) => void;
-  validationOptions: ValidationOptions;
-  onValidationOptionsChange: (options: ValidationOptions) => void;
+  difficultyPoints: DifficultyPoint[];
   disabled?: boolean;
 }
 
@@ -40,11 +34,16 @@ const PATTERN_OPTIONS: { id: PatternType; label: string; icon: string }[] = [
   { id: 'clustered', label: '군집형', icon: '⚬' },
 ];
 
+const GIMMICK_MODE_OPTIONS: { id: GimmickMode; label: string; icon: string; description: string }[] = [
+  { id: 'auto', label: '자동', icon: '🤖', description: '난이도에 따라 자동 배분' },
+  { id: 'manual', label: '수동', icon: '✋', description: '모든 레벨에 동일 적용' },
+  { id: 'hybrid', label: '하이브리드', icon: '🔀', description: '자동 + 레벨별 오버라이드' },
+];
+
 export function LevelSetConfig({
   config,
   onConfigChange,
-  validationOptions,
-  onValidationOptionsChange,
+  difficultyPoints,
   disabled
 }: LevelSetConfigProps) {
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -66,6 +65,22 @@ export function LevelSetConfig({
       ? current.filter((o) => o !== obstacle)
       : [...current, obstacle];
     updateBaseParams({ obstacle_types: updated });
+  };
+
+  const toggleAvailableGimmick = (gimmick: string) => {
+    const current = config.availableGimmicks || [];
+    const updated = current.includes(gimmick)
+      ? current.filter((g) => g !== gimmick)
+      : [...current, gimmick];
+    onConfigChange({ ...config, availableGimmicks: updated });
+  };
+
+  const setGimmickMode = (mode: GimmickMode) => {
+    onConfigChange({ ...config, gimmickMode: mode });
+  };
+
+  const updateLevelGimmickOverrides = (overrides: LevelGimmickOverride[]) => {
+    onConfigChange({ ...config, levelGimmickOverrides: overrides });
   };
 
   const updateGoal = (index: number, updates: Partial<GoalConfig>) => {
@@ -230,64 +245,76 @@ export function LevelSetConfig({
         </div>
       </div>
 
-      {/* Validation Options */}
-      <div className="bg-gray-700/50 p-3 rounded-lg border border-gray-600">
-        <div className="flex items-center justify-between mb-2">
-          <label className="text-sm font-medium text-gray-300 flex items-center gap-2">
-            <span>🎯 시뮬레이션 검증</span>
-            {validationOptions.enabled && (
-              <span className="text-xs text-green-400 bg-green-900/40 px-2 py-0.5 rounded">활성</span>
-            )}
-          </label>
-          <button
-            onClick={() => onValidationOptionsChange({ ...validationOptions, enabled: !validationOptions.enabled })}
-            className={`relative w-12 h-6 rounded-full transition-colors ${
-              validationOptions.enabled ? 'bg-green-600' : 'bg-gray-600'
-            }`}
-            disabled={disabled}
-          >
-            <span
-              className={`absolute top-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
-                validationOptions.enabled ? 'translate-x-6' : 'translate-x-0.5'
-              }`}
-            />
-          </button>
+      {/* Gimmick Mode Selection */}
+      <div className="bg-gray-750 rounded-lg p-3 border border-gray-600">
+        <label className="block text-sm font-medium text-gray-300 mb-2">🎮 기믹 배분 모드</label>
+        <div className="flex flex-wrap gap-2 mb-3">
+          {GIMMICK_MODE_OPTIONS.map((opt) => {
+            const isSelected = config.gimmickMode === opt.id;
+            return (
+              <button
+                key={opt.id}
+                onClick={() => setGimmickMode(opt.id)}
+                className={`px-3 py-1.5 text-sm rounded transition-colors flex items-center gap-1.5 ${
+                  isSelected
+                    ? 'bg-indigo-600 text-white'
+                    : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                }`}
+                disabled={disabled}
+                title={opt.description}
+              >
+                <span>{opt.icon}</span>
+                <span>{opt.label}</span>
+              </button>
+            );
+          })}
         </div>
-        <p className="text-xs text-gray-500 mb-2">
-          각 레벨 생성 후 봇 시뮬레이션으로 난이도 검증. 목표 클리어율과 맞지 않으면 재생성.
+        <p className="text-xs text-gray-500 mb-3">
+          {config.gimmickMode === 'auto' && '🤖 난이도에 따라 자동으로 기믹이 배분됩니다. (S등급: 기믹 없음 → D등급: 다양한 기믹)'}
+          {config.gimmickMode === 'manual' && '✋ 선택한 기믹이 모든 레벨에 동일하게 적용됩니다.'}
+          {config.gimmickMode === 'hybrid' && '🔀 자동 배분 기반 + 특정 레벨에 원하는 기믹을 지정할 수 있습니다.'}
         </p>
-        {validationOptions.enabled && (
-          <div className="grid grid-cols-2 gap-3 mt-3 pt-3 border-t border-gray-600">
-            <div>
-              <label className="block text-xs text-gray-400 mb-1">최대 재시도</label>
-              <input
-                type="number"
-                value={validationOptions.max_retries}
-                onChange={(e) => onValidationOptionsChange({
-                  ...validationOptions,
-                  max_retries: Math.max(1, Math.min(10, parseInt(e.target.value) || 5))
-                })}
-                min={1}
-                max={10}
-                className="w-full px-2 py-1 bg-gray-600 border border-gray-500 rounded text-white text-sm"
-                disabled={disabled}
-              />
+
+        {/* Available Gimmicks for Auto/Hybrid Mode */}
+        {(config.gimmickMode === 'auto' || config.gimmickMode === 'hybrid') && (
+          <div>
+            <label className="block text-xs font-medium text-gray-400 mb-2">사용 가능한 기믹 풀 (자동 선택에 사용)</label>
+            <div className="flex flex-wrap gap-2">
+              {OBSTACLE_TYPES.map((obs) => {
+                const isSelected = (config.availableGimmicks || []).includes(obs.id);
+                return (
+                  <button
+                    key={obs.id}
+                    onClick={() => toggleAvailableGimmick(obs.id)}
+                    className={`px-2 py-1 text-xs rounded transition-colors ${
+                      isSelected
+                        ? 'bg-indigo-600 text-white'
+                        : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                    }`}
+                    disabled={disabled}
+                  >
+                    {obs.label}
+                  </button>
+                );
+              })}
             </div>
-            <div>
-              <label className="block text-xs text-gray-400 mb-1">허용 오차 (%)</label>
-              <input
-                type="number"
-                value={validationOptions.tolerance}
-                onChange={(e) => onValidationOptionsChange({
-                  ...validationOptions,
-                  tolerance: Math.max(5, Math.min(30, parseInt(e.target.value) || 15))
-                })}
-                min={5}
-                max={30}
-                className="w-full px-2 py-1 bg-gray-600 border border-gray-500 rounded text-white text-sm"
-                disabled={disabled}
-              />
-            </div>
+            {(config.availableGimmicks || []).length === 0 && (
+              <p className="text-xs text-yellow-500 mt-2">⚠️ 기믹 풀이 비어있으면 모든 레벨이 기믹 없이 생성됩니다.</p>
+            )}
+          </div>
+        )}
+
+        {/* Hybrid Mode: Level Override Table */}
+        {config.gimmickMode === 'hybrid' && (config.availableGimmicks || []).length > 0 && (
+          <div className="mt-3">
+            <LevelGimmickTable
+              levelCount={config.levelCount}
+              difficultyPoints={difficultyPoints}
+              availableGimmicks={config.availableGimmicks || []}
+              overrides={config.levelGimmickOverrides || []}
+              onOverridesChange={updateLevelGimmickOverrides}
+              disabled={disabled}
+            />
           </div>
         )}
       </div>
@@ -356,29 +383,32 @@ export function LevelSetConfig({
             </div>
           </div>
 
-          {/* Obstacles */}
-          <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">장애물</label>
-            <div className="flex flex-wrap gap-2">
-              {OBSTACLE_TYPES.map((obs) => {
-                const isSelected = (config.baseParams.obstacle_types || []).includes(obs.id);
-                return (
-                  <button
-                    key={obs.id}
-                    onClick={() => toggleObstacle(obs.id)}
-                    className={`px-2 py-1 text-xs rounded transition-colors ${
-                      isSelected
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
-                    }`}
-                    disabled={disabled}
-                  >
-                    {obs.label}
-                  </button>
-                );
-              })}
+          {/* Obstacles - Only shown in manual mode */}
+          {config.gimmickMode === 'manual' && (
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-2">장애물 (모든 레벨에 적용)</label>
+              <div className="flex flex-wrap gap-2">
+                {OBSTACLE_TYPES.map((obs) => {
+                  const isSelected = (config.baseParams.obstacle_types || []).includes(obs.id);
+                  return (
+                    <button
+                      key={obs.id}
+                      onClick={() => toggleObstacle(obs.id)}
+                      className={`px-2 py-1 text-xs rounded transition-colors ${
+                        isSelected
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                      }`}
+                      disabled={disabled}
+                    >
+                      {obs.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-xs text-gray-500 mt-1">선택한 장애물이 모든 레벨에 동일하게 적용됩니다.</p>
             </div>
-          </div>
+          )}
         </div>
       )}
     </div>

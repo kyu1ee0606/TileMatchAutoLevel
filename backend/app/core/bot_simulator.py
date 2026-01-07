@@ -252,8 +252,11 @@ class BotSimulator:
     # Maximum tile count - user can specify up to 15 tile types
     # Note: More tile types = harder levels (with 7-slot dock)
     MAX_USE_TILE_COUNT = 15
-    # Goal types
-    GOAL_TYPES = {"craft_s", "stack_s"}
+    # Goal types - all craft/stack directions create goals
+    GOAL_TYPES = {
+        "craft_s", "craft_n", "craft_e", "craft_w",
+        "stack_s", "stack_n", "stack_e", "stack_w",
+    }
 
     # Precomputed blocking offsets for _is_blocked_by_upper (tuples for performance)
     # Same parity: only check same position

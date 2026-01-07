@@ -82,6 +82,15 @@ class GenerateRequest(BaseModel):
         default=None,
         description="Pattern type: 'random', 'geometric' (regular shapes), 'clustered' (grouped tiles)"
     )
+    # Auto gimmick selection parameters
+    auto_select_gimmicks: bool = Field(
+        default=False,
+        description="Enable auto gimmick selection based on target difficulty"
+    )
+    available_gimmicks: Optional[List[str]] = Field(
+        default=None,
+        description="Pool of available gimmicks for auto-selection"
+    )
 
 
 class GenerateResponse(BaseModel):
@@ -344,6 +353,12 @@ class AutoPlayRequest(BaseModel):
         description="Bot profiles to use (default: all 5 - novice, casual, average, expert, optimal)"
     )
     seed: Optional[int] = Field(default=None, description="Random seed for reproducibility")
+    target_difficulty: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Target difficulty (0.0-1.0) for dynamic bot target rates. If not provided, uses base rates."
+    )
 
 
 class BotClearStats(BaseModel):
@@ -398,10 +413,15 @@ class ValidatedGenerateRequest(BaseModel):
     symmetry_mode: Optional[str] = Field(default=None, description="Symmetry mode")
     pattern_type: Optional[str] = Field(default=None, description="Pattern type")
 
+    # Auto gimmick selection parameters
+    auto_select_gimmicks: bool = Field(default=False, description="Auto-select gimmicks based on difficulty")
+    available_gimmicks: Optional[List[str]] = Field(default=None, description="Pool of available gimmicks for auto-selection")
+
     # Validation parameters
     max_retries: int = Field(default=5, ge=1, le=20, description="Maximum generation retries")
-    tolerance: float = Field(default=15.0, ge=5.0, le=30.0, description="Acceptable gap percentage from target")
+    tolerance: float = Field(default=15.0, ge=1.0, le=50.0, description="Acceptable gap percentage from target")
     simulation_iterations: int = Field(default=30, ge=10, le=100, description="Iterations for validation simulation")
+    use_best_match: bool = Field(default=True, description="Use best match strategy - always return best result after max_retries")
 
 
 class ValidatedGenerateResponse(BaseModel):

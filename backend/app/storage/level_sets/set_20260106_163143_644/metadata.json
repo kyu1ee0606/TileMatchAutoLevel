@@ -1,0 +1,81 @@
+{
+  "id": "set_20260106_163143_644",
+  "name": "11",
+  "created_at": "2026-01-06T16:31:43.941211",
+  "level_count": 10,
+  "difficulty_profile": [
+    0.1,
+    0.2,
+    0.15,
+    0.3,
+    0.25,
+    0.35,
+    0.45,
+    0.4,
+    0.5,
+    0.6
+  ],
+  "actual_difficulties": [
+    0.12166666666666666,
+    0.12166666666666666,
+    0.12191666666666669,
+    0.26208333333333333,
+    0.2575833333333334,
+    0.26158333333333333,
+    0.44825,
+    0.25908333333333333,
+    0.48991666666666667,
+    0.4839166666666667
+  ],
+  "grades": [
+    "S",
+    "S",
+    "S",
+    "A",
+    "A",
+    "A",
+    "B",
+    "A",
+    "B",
+    "B"
+  ],
+  "generation_config": {
+    "grid_size": [
+      7,
+      7
+    ],
+    "max_layers": 7,
+    "tile_types": [
+      "t0",
+      "t2",
+      "t4",
+      "t5",
+      "t6"
+    ],
+    "obstacle_types": [],
+    "goals": [
+      {
+        "type": "craft",
+        "direction": "s",
+        "count": 3
+      },
+      {
+        "type": "craft",
+        "direction": "n",
+        "count": 3
+      },
+      {
+        "type": "craft",
+        "direction": "e",
+        "count": 3
+      },
+      {
+        "type": "craft",
+        "direction": "w",
+        "count": 3
+      }
+    ],
+    "symmetry_mode": "none",
+    "pattern_type": "geometric"
+  }
+}

@@ -17,9 +17,10 @@ class LevelAnalyzer:
     WEIGHTS = {
         "total_tiles": 0.5,       # 30-120 tiles → 15-60 points
         "active_layers": 4.0,     # 3-8 layers → 12-32 points
-        "chain_count": 3.0,       # 0-15 chains → 0-45 points
-        "frog_count": 4.0,        # 0-10 frogs → 0-40 points
-        "link_count": 2.0,        # 0-10 links → 0-20 points
+        "chain_count": 5.0,       # 0-15 chains → 0-75 points (increased from 3.0)
+        "frog_count": 6.0,        # 0-10 frogs → 0-60 points (increased from 4.0)
+        "link_count": 3.0,        # 0-10 links → 0-30 points (increased from 2.0)
+        "ice_count": 4.0,         # 0-15 ice → 0-60 points (increased from 2.5)
         "goal_amount": 1.5,       # 3-10 goals → 4.5-15 points
         "layer_blocking": 0.15,   # Reduced: blocking can be 0-300 → 0-45 points
     }
@@ -66,6 +67,7 @@ class LevelAnalyzer:
         chain_count = 0
         frog_count = 0
         link_count = 0
+        ice_count = 0
         goal_amount = 0
         tile_types: Dict[str, int] = {}
         goals: List[Dict[str, Any]] = []
@@ -100,6 +102,8 @@ class LevelAnalyzer:
                         chain_count += 1
                     elif attribute == "frog":
                         frog_count += 1
+                    elif attribute == "ice":
+                        ice_count += 1
                     elif attribute.startswith("link_"):
                         link_count += 1
 
@@ -118,6 +122,7 @@ class LevelAnalyzer:
             chain_count=chain_count,
             frog_count=frog_count,
             link_count=link_count,
+            ice_count=ice_count,
             goal_amount=goal_amount,
             layer_blocking=layer_blocking,
             tile_types=tile_types,
@@ -158,6 +163,7 @@ class LevelAnalyzer:
         score += metrics.chain_count * self.WEIGHTS["chain_count"]
         score += metrics.frog_count * self.WEIGHTS["frog_count"]
         score += metrics.link_count * self.WEIGHTS["link_count"]
+        score += metrics.ice_count * self.WEIGHTS["ice_count"]
         score += metrics.goal_amount * self.WEIGHTS["goal_amount"]
         score += metrics.layer_blocking * self.WEIGHTS["layer_blocking"]
 

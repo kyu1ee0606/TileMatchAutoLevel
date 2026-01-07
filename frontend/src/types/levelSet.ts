@@ -49,6 +49,19 @@ export interface LevelSetListItem {
 }
 
 /**
+ * 기믹 모드
+ */
+export type GimmickMode = 'auto' | 'manual' | 'hybrid';
+
+/**
+ * 레벨별 기믹 오버라이드 설정
+ */
+export interface LevelGimmickOverride {
+  levelIndex: number;  // 1-based index
+  gimmicks: string[];  // 해당 레벨에 적용할 기믹 리스트
+}
+
+/**
  * 레벨 세트 생성 설정
  */
 export interface LevelSetGenerationConfig {
@@ -56,6 +69,10 @@ export interface LevelSetGenerationConfig {
   levelCount: number;
   difficultyPoints: DifficultyPoint[];
   baseParams: Omit<GenerationParams, 'target_difficulty'>;
+  // 기믹 자동 선택 관련
+  gimmickMode: GimmickMode;  // 자동/수동/하이브리드
+  availableGimmicks: string[];  // 자동 선택 시 사용 가능한 기믹 풀
+  levelGimmickOverrides?: LevelGimmickOverride[];  // 하이브리드 모드: 레벨별 기믹 오버라이드
 }
 
 /**
@@ -67,6 +84,11 @@ export interface GenerationProgressState {
   current: number;
   results: GenerationResultItem[];
   error?: string;
+  // Detailed progress for long-running generations
+  currentLevelStartTime?: number;   // Timestamp when current level started
+  totalStartTime?: number;          // Timestamp when generation started
+  averageTimePerLevel?: number;     // Average ms per level (calculated from completed)
+  completedTimes?: number[];        // Time taken for each completed level (ms)
 }
 
 /**
@@ -83,6 +105,9 @@ export interface GenerationResultItem {
   // Validation results (only present when using validated generation)
   matchScore?: number;         // 0-100, how well actual matches target
   validationPassed?: boolean;  // Whether validation criteria were met
+  // Retry information for grade matching
+  retryCount?: number;         // Number of retries to achieve target grade
+  targetGrade?: DifficultyGrade; // The grade we're trying to achieve
 }
 
 /**
@@ -191,6 +216,238 @@ export function scalePresetToLevelCount(
     levelIndex: Math.max(1, Math.min(levelCount, Math.round((p.levelIndex / maxIndex) * levelCount))),
     difficulty: p.difficulty,
   }));
+}
+
+/**
+ * 레벨 재배치 결과
+ */
+export interface ReorderResult {
+  reorderedLevels: LevelJSON[];
+  reorderedDifficulties: number[];
+  reorderedGrades: DifficultyGrade[];
+  originalIndices: number[];  // 원래 순서에서의 인덱스
+  improvements: {
+    beforeError: number;  // 재배치 전 평균 오차
+    afterError: number;   // 재배치 후 평균 오차
+    swapCount: number;    // 교환된 레벨 수
+  };
+}
+
+/**
+ * 레벨들을 목표 난이도 그래프에 맞게 재배치
+ * 등급 우선 알고리즘: 먼저 등급을 맞추고, 같은 등급 내에서 난이도 최적화
+ */
+export function reorderLevelsByDifficulty(
+  levels: LevelJSON[],
+  actualDifficulties: number[],
+  grades: DifficultyGrade[],
+  targetDifficulties: number[]
+): ReorderResult {
+  const n = levels.length;
+
+  if (n === 0 || n !== actualDifficulties.length || n !== targetDifficulties.length) {
+    return {
+      reorderedLevels: levels,
+      reorderedDifficulties: actualDifficulties,
+      reorderedGrades: grades,
+      originalIndices: Array.from({ length: n }, (_, i) => i),
+      improvements: { beforeError: 0, afterError: 0, swapCount: 0 },
+    };
+  }
+
+  // 재배치 전 오차 계산
+  const beforeError = calculateAverageError(actualDifficulties, targetDifficulties);
+
+  // 각 레벨에 대한 정보와 원래 인덱스 저장
+  const levelInfos = levels.map((level, i) => ({
+    level,
+    actualDifficulty: actualDifficulties[i],
+    grade: grades[i],
+    originalIndex: i,
+    assigned: false,
+  }));
+
+  // 결과 배열
+  const result: (typeof levelInfos[0] | null)[] = new Array(n).fill(null);
+
+  // 각 위치에 필요한 등급 계산
+  const targetGrades = targetDifficulties.map(getGradeFromDifficulty);
+
+  // 위치를 목표 난이도순으로 정렬 (쉬운 것부터)
+  const sortedPositions = targetDifficulties
+    .map((target, position) => ({ target, position, grade: targetGrades[position] }))
+    .sort((a, b) => a.target - b.target);
+
+  // 1단계: 등급이 일치하는 레벨을 우선 할당
+  for (const { target, position, grade: requiredGrade } of sortedPositions) {
+    let bestIdx = -1;
+    let bestDiff = Infinity;
+
+    // 같은 등급의 레벨 중 가장 가까운 난이도 찾기
+    for (let i = 0; i < levelInfos.length; i++) {
+      if (levelInfos[i].assigned) continue;
+      if (levelInfos[i].grade !== requiredGrade) continue;
+
+      const diff = Math.abs(levelInfos[i].actualDifficulty - target);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        bestIdx = i;
+      }
+    }
+
+    if (bestIdx !== -1) {
+      levelInfos[bestIdx].assigned = true;
+      result[position] = levelInfos[bestIdx];
+    }
+  }
+
+  // 2단계: 할당되지 않은 위치에 남은 레벨 할당 (등급 무관, 난이도 우선)
+  for (const { target, position } of sortedPositions) {
+    if (result[position] !== null) continue;
+
+    let bestIdx = -1;
+    let bestDiff = Infinity;
+
+    for (let i = 0; i < levelInfos.length; i++) {
+      if (levelInfos[i].assigned) continue;
+
+      const diff = Math.abs(levelInfos[i].actualDifficulty - target);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        bestIdx = i;
+      }
+    }
+
+    if (bestIdx !== -1) {
+      levelInfos[bestIdx].assigned = true;
+      result[position] = levelInfos[bestIdx];
+    }
+  }
+
+  // 결과 추출 (null 체크)
+  const validResults = result.map((r, i) => r || levelInfos[i]);
+  const reorderedLevels = validResults.map(r => r.level);
+  const reorderedDifficulties = validResults.map(r => r.actualDifficulty);
+  const reorderedGrades = validResults.map(r => r.grade);
+  const originalIndices = validResults.map(r => r.originalIndex);
+
+  // 재배치 후 오차 계산
+  const afterError = calculateAverageError(reorderedDifficulties, targetDifficulties);
+
+  // 교환된 레벨 수 계산
+  let swapCount = 0;
+  for (let i = 0; i < n; i++) {
+    if (originalIndices[i] !== i) swapCount++;
+  }
+
+  // 등급 일치 통계
+  let gradeMatchCount = 0;
+  for (let i = 0; i < n; i++) {
+    if (reorderedGrades[i] === targetGrades[i]) gradeMatchCount++;
+  }
+  console.log(`📊 Grade matching: ${gradeMatchCount}/${n} positions match target grade`);
+
+  return {
+    reorderedLevels,
+    reorderedDifficulties,
+    reorderedGrades,
+    originalIndices,
+    improvements: {
+      beforeError,
+      afterError,
+      swapCount,
+    },
+  };
+}
+
+/**
+ * 평균 오차 계산 (0~1 범위)
+ */
+function calculateAverageError(actual: number[], target: number[]): number {
+  if (actual.length === 0) return 0;
+  const sum = actual.reduce((acc, val, i) => acc + Math.abs(val - target[i]), 0);
+  return sum / actual.length;
+}
+
+/**
+ * 등급 범위 정의
+ * S: 0-20%, A: 20-40%, B: 40-60%, C: 60-80%, D: 80-100%
+ */
+export const GRADE_RANGES: Record<DifficultyGrade, { min: number; max: number; target: number }> = {
+  S: { min: 0.0, max: 0.2, target: 0.1 },
+  A: { min: 0.2, max: 0.4, target: 0.3 },
+  B: { min: 0.4, max: 0.6, target: 0.5 },
+  C: { min: 0.6, max: 0.8, target: 0.7 },
+  D: { min: 0.8, max: 1.0, target: 0.9 },
+};
+
+/**
+ * 난이도 값에서 등급 결정
+ */
+export function getGradeFromDifficulty(difficulty: number): DifficultyGrade {
+  // Use <= to include boundary values in the lower grade
+  // S: 0-20%, A: 21-40%, B: 41-60%, C: 61-80%, D: 81-100%
+  if (difficulty <= 0.2) return 'S';
+  if (difficulty <= 0.4) return 'A';
+  if (difficulty <= 0.6) return 'B';
+  if (difficulty <= 0.8) return 'C';
+  return 'D';
+}
+
+/**
+ * 등급별 분포 계산 결과
+ */
+export interface GradeDistribution {
+  S: number;
+  A: number;
+  B: number;
+  C: number;
+  D: number;
+  total: number;
+}
+
+/**
+ * 난이도 프로필에서 등급별 필요 개수 계산
+ */
+export function calculateGradeDistribution(difficulties: number[]): GradeDistribution {
+  const distribution: GradeDistribution = { S: 0, A: 0, B: 0, C: 0, D: 0, total: difficulties.length };
+
+  for (const diff of difficulties) {
+    const grade = getGradeFromDifficulty(diff);
+    distribution[grade]++;
+  }
+
+  return distribution;
+}
+
+/**
+ * 등급별 생성 계획
+ * 각 등급별로 몇 개의 레벨을 생성할지와 목표 난이도
+ */
+export interface GradeGenerationPlan {
+  grade: DifficultyGrade;
+  count: number;
+  targetDifficulty: number;  // 해당 등급의 중앙값
+}
+
+/**
+ * 등급 분포에서 생성 계획 생성
+ */
+export function createGenerationPlan(distribution: GradeDistribution): GradeGenerationPlan[] {
+  const grades: DifficultyGrade[] = ['S', 'A', 'B', 'C', 'D'];
+  const plan: GradeGenerationPlan[] = [];
+
+  for (const grade of grades) {
+    if (distribution[grade] > 0) {
+      plan.push({
+        grade,
+        count: distribution[grade],
+        targetDifficulty: GRADE_RANGES[grade].target,
+      });
+    }
+  }
+
+  return plan;
 }
 
 /**

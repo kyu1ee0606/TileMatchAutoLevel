@@ -53,17 +53,30 @@ function LevelThumbnail({ levelData, size = 48, className }: LevelThumbnailProps
   if (!levelData) {
     return (
       <div
-        className={clsx('bg-gray-700 rounded flex items-center justify-center', className)}
+        className={clsx('bg-gradient-to-br from-gray-700 to-gray-800 rounded-lg flex items-center justify-center border border-gray-600', className)}
         style={{ width: size, height: size }}
       >
-        <span className="text-gray-500 text-xs">?</span>
+        <span className="text-gray-400 text-lg">📄</span>
       </div>
     );
   }
 
-  // Get layer 0 data for thumbnail
-  const layer0 = levelData.layer_0 as LevelLayer | undefined;
-  if (!layer0 || !layer0.tiles) {
+  // Find the first non-empty layer for thumbnail (check layers 0-7)
+  let displayLayer: LevelLayer | undefined;
+  let cols = 8;
+  let rows = 8;
+
+  for (let i = 0; i < 8; i++) {
+    const layer = (levelData as any)[`layer_${i}`] as LevelLayer | undefined;
+    if (layer && layer.tiles && Object.keys(layer.tiles).length > 0) {
+      displayLayer = layer;
+      cols = parseInt(layer.col) || 8;
+      rows = parseInt(layer.row) || 8;
+      break;
+    }
+  }
+
+  if (!displayLayer || !displayLayer.tiles) {
     return (
       <div
         className={clsx('bg-gray-700 rounded flex items-center justify-center', className)}
@@ -74,10 +87,8 @@ function LevelThumbnail({ levelData, size = 48, className }: LevelThumbnailProps
     );
   }
 
-  const cols = parseInt(layer0.col) || 8;
-  const rows = parseInt(layer0.row) || 8;
   const tileSize = Math.max(3, Math.floor(size / Math.max(cols, rows)));
-  const tiles = layer0.tiles;
+  const tiles = displayLayer.tiles;
 
   return (
     <div
@@ -165,12 +176,44 @@ export function LocalLevelBrowser({ className }: LocalLevelBrowserProps) {
   const [checkedLevelIds, setCheckedLevelIds] = useState<Set<string>>(new Set());
   const [isDeleting, setIsDeleting] = useState(false);
 
+  // Load thumbnail data for levels
+  const loadThumbnails = async (levelIds: string[]) => {
+    const newCache: Record<string, LevelJSON> = {};
+
+    // Load in parallel with a limit of 5 concurrent requests
+    const batchSize = 5;
+    for (let i = 0; i < levelIds.length; i += batchSize) {
+      const batch = levelIds.slice(i, i + batchSize);
+      const results = await Promise.allSettled(
+        batch.map(async (id) => {
+          if (thumbnailCache[id]) return { id, data: thumbnailCache[id] };
+          const level = await getLocalLevel(id);
+          return { id, data: level.level_data };
+        })
+      );
+
+      results.forEach((result) => {
+        if (result.status === 'fulfilled') {
+          newCache[result.value.id] = result.value.data;
+        }
+      });
+    }
+
+    setThumbnailCache(prev => ({ ...prev, ...newCache }));
+  };
+
   // Load levels on mount
   const loadLevels = async () => {
     setIsLoadingList(true);
     try {
       const response = await listLocalLevels();
       setLevels(response.levels);
+
+      // Load thumbnails for all levels
+      if (response.levels.length > 0) {
+        const levelIds = response.levels.map(l => l.id);
+        loadThumbnails(levelIds);
+      }
     } catch (err) {
       console.error('Failed to load local levels:', err);
       addNotification('error', '로컬 레벨 목록을 불러올 수 없습니다');
@@ -326,14 +369,21 @@ export function LocalLevelBrowser({ className }: LocalLevelBrowserProps) {
 
   const getDifficultyColor = (difficulty: string): string => {
     const colors: Record<string, string> = {
-      easy: '#4CAF50',
-      medium: '#FF9800',
-      hard: '#F44336',
-      expert: '#9C27B0',
-      impossible: '#000000',
-      custom: '#2196F3',
+      // Grade system colors
+      s: '#10B981', // emerald
+      a: '#3B82F6', // blue
+      b: '#F59E0B', // amber
+      c: '#F97316', // orange
+      d: '#EF4444', // red
+      // Legacy colors
+      easy: '#10B981',
+      medium: '#F59E0B',
+      hard: '#F97316',
+      expert: '#EF4444',
+      impossible: '#7C3AED',
+      custom: '#6366F1',
     };
-    return colors[difficulty.toLowerCase()] || '#757575';
+    return colors[difficulty.toLowerCase()] || '#6B7280';
   };
 
   const getStatusIcon = (status: string): string => {
@@ -341,9 +391,20 @@ export function LocalLevelBrowser({ className }: LocalLevelBrowserProps) {
       pass: '✅',
       warn: '⚠️',
       fail: '❌',
-      unknown: '❓',
+      unknown: '',
     };
-    return icons[status] || '❓';
+    return icons[status] || '';
+  };
+
+  const formatDate = (dateStr: string): string => {
+    if (!dateStr) return '';
+    const date = new Date(dateStr);
+    if (isNaN(date.getTime())) return '';
+    return date.toLocaleDateString('ko-KR', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    });
   };
 
   return (
@@ -499,8 +560,10 @@ export function LocalLevelBrowser({ className }: LocalLevelBrowserProps) {
                         </span>
                       </div>
                       <div className="flex items-center gap-2 text-xs text-gray-400">
-                        <span>{getStatusIcon(level.validation_status)}</span>
-                        <span>{new Date(level.created_at).toLocaleDateString()}</span>
+                        {getStatusIcon(level.validation_status) && (
+                          <span>{getStatusIcon(level.validation_status)}</span>
+                        )}
+                        <span>{formatDate(level.created_at) || '방금 생성'}</span>
                       </div>
                     </div>
 

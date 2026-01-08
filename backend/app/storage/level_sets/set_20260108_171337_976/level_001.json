@@ -1,0 +1,103 @@
+{
+  "layer": 7,
+  "useTileCount": 5,
+  "randSeed": 265960,
+  "layer_0": {
+    "col": "8",
+    "row": "8",
+    "tiles": {},
+    "num": "0"
+  },
+  "layer_1": {
+    "col": "7",
+    "row": "7",
+    "tiles": {},
+    "num": "0"
+  },
+  "layer_2": {
+    "col": "8",
+    "row": "8",
+    "tiles": {},
+    "num": "0"
+  },
+  "layer_3": {
+    "col": "7",
+    "row": "7",
+    "tiles": {},
+    "num": "0"
+  },
+  "layer_4": {
+    "col": "8",
+    "row": "8",
+    "tiles": {
+      "3_3": [
+        "t2",
+        ""
+      ],
+      "4_3": [
+        "t4",
+        ""
+      ],
+      "3_4": [
+        "t4",
+        ""
+      ]
+    },
+    "num": "3"
+  },
+  "layer_5": {
+    "col": "7",
+    "row": "7",
+    "tiles": {
+      "3_3": [
+        "t0",
+        ""
+      ],
+      "2_3": [
+        "t2",
+        ""
+      ],
+      "3_2": [
+        "t0",
+        ""
+      ]
+    },
+    "num": "3"
+  },
+  "layer_6": {
+    "col": "8",
+    "row": "8",
+    "tiles": {
+      "3_3": [
+        "t2",
+        ""
+      ],
+      "3_4": [
+        "t0",
+        ""
+      ],
+      "4_3": [
+        "t4",
+        ""
+      ],
+      "2_3": [
+        "craft_s",
+        "",
+        [
+          3
+        ]
+      ]
+    },
+    "num": "4"
+  },
+  "goalCount": {
+    "craft_s": 3
+  },
+  "max_moves": 30,
+  "target_difficulty": 0.1,
+  "symmetry_mode": "both",
+  "pattern_type": "aesthetic",
+  "level_index": 1,
+  "name": "PatternTest500 1 - Level 1",
+  "id": "set_1767860017818_se46vj0vu_level_001"
+}

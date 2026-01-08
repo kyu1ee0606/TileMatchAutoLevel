@@ -1,0 +1,119 @@
+{
+  "layer": 3,
+  "useTileCount": 5,
+  "randSeed": 315753,
+  "layer_0": {
+    "col": "8",
+    "row": "8",
+    "tiles": {
+      "3_3": [
+        "t2",
+        ""
+      ],
+      "3_4": [
+        "t4",
+        ""
+      ],
+      "4_4": [
+        "t5",
+        ""
+      ],
+      "4_3": [
+        "t0",
+        ""
+      ]
+    },
+    "num": "4"
+  },
+  "layer_1": {
+    "col": "7",
+    "row": "7",
+    "tiles": {
+      "3_3": [
+        "t5",
+        ""
+      ],
+      "2_3": [
+        "t2",
+        ""
+      ],
+      "3_2": [
+        "t0",
+        ""
+      ],
+      "3_4": [
+        "t0",
+        ""
+      ]
+    },
+    "num": "4"
+  },
+  "layer_2": {
+    "col": "8",
+    "row": "8",
+    "tiles": {
+      "3_3": [
+        "t5",
+        ""
+      ],
+      "3_4": [
+        "t2",
+        ""
+      ],
+      "4_4": [
+        "t4",
+        ""
+      ],
+      "4_3": [
+        "t4",
+        ""
+      ],
+      "1_3": [
+        "craft_s",
+        "",
+        [
+          3
+        ]
+      ]
+    },
+    "num": "5"
+  },
+  "layer_3": {
+    "col": "7",
+    "row": "7",
+    "tiles": {},
+    "num": "0"
+  },
+  "layer_4": {
+    "col": "8",
+    "row": "8",
+    "tiles": {},
+    "num": "0"
+  },
+  "layer_5": {
+    "col": "7",
+    "row": "7",
+    "tiles": {},
+    "num": "0"
+  },
+  "layer_6": {
+    "col": "8",
+    "row": "8",
+    "tiles": {},
+    "num": "0"
+  },
+  "goalCount": {
+    "craft_s": 3
+  },
+  "max_moves": 30,
+  "target_difficulty": 0.1,
+  "symmetry_mode": "vertical",
+  "pattern_type": "aesthetic",
+  "level_index": 50,
+  "name": "Symmetry Test 1 - Level 50",
+  "id": "set_20260108_183418_440_level_050",
+  "difficulty": 0.07916666666666666,
+  "grade": "S",
+  "set_id": "set_20260108_183418_440",
+  "set_name": "Symmetry Test 1"
+}

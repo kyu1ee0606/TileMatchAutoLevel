@@ -28,18 +28,56 @@ interface LevelSetGeneratorProps {
   onLevelSetCreated?: (levelSet: LevelSet) => void;
 }
 
+/**
+ * Calculate gimmick intensity based on global level position
+ *
+ * @param globalLevelIndex - 0-based index of this level across ALL generated levels
+ * @param totalLevels - Total number of levels being generated
+ * @returns intensity value from 0.0 to 1.0
+ *
+ * Progression curve:
+ * - First 20% of levels: intensity = 0 (no gimmicks for early levels)
+ * - 20% ~ 100%: linear increase from 0 to 1.0
+ *
+ * Examples for 30 total levels:
+ * - Level 1-6 (0-20%): intensity = 0.0
+ * - Level 7 (23%): intensity ≈ 0.04
+ * - Level 15 (50%): intensity ≈ 0.38
+ * - Level 24 (80%): intensity ≈ 0.75
+ * - Level 30 (100%): intensity = 1.0
+ */
+function calculateGimmickIntensity(globalLevelIndex: number, totalLevels: number): number {
+  if (totalLevels <= 1) return 0;
+
+  // First 20% of levels have no gimmicks
+  const noGimmickThreshold = 0.2;
+  const position = globalLevelIndex / (totalLevels - 1);
+
+  if (position <= noGimmickThreshold) {
+    return 0;
+  }
+
+  // Linear increase from threshold to end
+  // Map (noGimmickThreshold, 1.0) → (0, 1.0)
+  const intensity = (position - noGimmickThreshold) / (1 - noGimmickThreshold);
+
+  // Round to 2 decimal places for cleaner values
+  return Math.round(intensity * 100) / 100;
+}
+
 const DEFAULT_CONFIG: LevelSetGenerationConfig = {
   setName: '',
   levelCount: 10,
   difficultyPoints: createDefaultDifficultyPoints(10),
   baseParams: {
     grid_size: [7, 7],
-    max_layers: 7,
+    min_layers: 3,  // 최소 레이어 (쉬운 난이도용)
+    max_layers: 7,  // 최대 레이어 (어려운 난이도용)
     tile_types: ['t0', 't2', 't4', 't5', 't6'],
     obstacle_types: [],  // 수동 모드일 때 사용
     goals: [{ type: 'craft', direction: 's', count: 3 }],
-    symmetry_mode: 'none',
-    pattern_type: 'geometric',  // 기본값: 기하학적 패턴
+    symmetry_mode: 'both',  // 기본값: 양방향 대칭
+    pattern_type: 'aesthetic',  // 기본값: 미관 최적화 패턴 (Tile Explorer/Tile Buster 스타일)
   },
   // 기믹 자동 선택 관련 - 기본값: 자동 모드
   gimmickMode: 'auto',
@@ -86,12 +124,16 @@ export function LevelSetGenerator({ onLevelSetCreated }: LevelSetGeneratorProps)
   }, [config.levelCount]);
 
   // Generate a single level set (used by both single and multi-set modes)
+  // globalLevelStart: Starting global level index (for multi-set generation)
+  // totalGlobalLevels: Total levels being generated across all sets (for intensity calculation)
   const generateSingleSet = useCallback(async (
     setName: string,
     setIndex: number,
     baseDifficultyPoints: DifficultyPoint[],
     signal: AbortSignal,
-    onProgress?: (levelIndex: number, total: number) => void
+    onProgress?: (levelIndex: number, total: number) => void,
+    globalLevelStart: number = 0,
+    totalGlobalLevels?: number
   ): Promise<LevelSet | null> => {
     const difficulties = interpolateDifficulties(baseDifficultyPoints, config.levelCount);
     const gradeDistribution = calculateGradeDistribution(difficulties);
@@ -113,9 +155,18 @@ export function LevelSetGenerator({ onLevelSetCreated }: LevelSetGeneratorProps)
 
         onProgress?.(levelIndex + 1, config.levelCount);
 
+        // Calculate gimmick intensity based on GLOBAL level position
+        // Uses smooth linear progression: first 20% = 0, then linear increase to 1.0
+        const globalLevelIndex = globalLevelStart + levelIndex;
+        const totalLevels = totalGlobalLevels ?? config.levelCount;
+        const gimmickIntensity = calculateGimmickIntensity(globalLevelIndex, totalLevels);
+
         const baseParams: GenerationParams = {
           ...config.baseParams,
           target_difficulty: plan.targetDifficulty,
+          // Use different pattern for each set when using aesthetic pattern
+          // setIndex % 50 cycles through all 50 patterns (0-49)
+          pattern_index: config.baseParams.pattern_type === 'aesthetic' ? (setIndex % 50) : undefined,
         };
 
         let useAutoGimmicks = false;
@@ -137,10 +188,16 @@ export function LevelSetGenerator({ onLevelSetCreated }: LevelSetGeneratorProps)
         }
 
         try {
-          const gimmickOpts = useAutoGimmicks ? {
-            auto_select_gimmicks: true,
-            available_gimmicks: autoGimmickPool,
-          } : undefined;
+          // Always include gimmick_intensity, add auto gimmick options if needed
+          const gimmickOpts = {
+            gimmick_intensity: gimmickIntensity,  // Level progression: early levels have no gimmicks
+            ...(useAutoGimmicks && {
+              auto_select_gimmicks: true,
+              available_gimmicks: autoGimmickPool,
+            }),
+          };
+
+          console.log(`🎮 Global Level ${globalLevelIndex + 1}/${totalLevels}: intensity=${gimmickIntensity.toFixed(2)}`);
 
           const MAX_RETRIES = 30;
           let result = await generateLevel(baseParams, gimmickOpts);
@@ -284,6 +341,9 @@ export function LevelSetGenerator({ onLevelSetCreated }: LevelSetGeneratorProps)
           ),
         }));
 
+        // Calculate global level start index for gimmick intensity progression
+        const globalLevelStart = setIdx * config.levelCount;
+
         const levelSet = await generateSingleSet(
           setName,
           setIdx,
@@ -294,7 +354,9 @@ export function LevelSetGenerator({ onLevelSetCreated }: LevelSetGeneratorProps)
               ...prev,
               currentLevelIndex: setIdx * config.levelCount + levelIndex,
             }));
-          }
+          },
+          globalLevelStart,  // Global level start for this set
+          totalLevels        // Total levels across all sets
         );
 
         if (levelSet) {
@@ -483,16 +545,23 @@ export function LevelSetGenerator({ onLevelSetCreated }: LevelSetGeneratorProps)
           }
           // manual mode: use baseParams.obstacle_types as-is
 
+          // Calculate gimmick intensity based on global level position
+          // Uses smooth linear progression: first 20% = 0, then linear increase to 1.0
+          const gimmickIntensity = calculateGimmickIntensity(levelIndex, config.levelCount);
+
           // Debug: log generation parameters
           const gimmickInfo = useAutoGimmicks ? `auto(pool: ${autoGimmickPool?.join(',')})` : `manual(${baseParams.obstacle_types?.join(',') || 'none'})`;
-          console.log(`Level ${levelIndex + 1}: grade=${plan.grade}, diff=${plan.targetDifficulty}, gimmicks=${gimmickInfo}`);
+          console.log(`🎮 Level ${levelIndex + 1}/${config.levelCount}: grade=${plan.grade}, intensity=${gimmickIntensity.toFixed(2)}, gimmicks=${gimmickInfo}`);
 
           try {
-            // Prepare gimmick options for auto selection
-            const gimmickOpts = useAutoGimmicks ? {
-              auto_select_gimmicks: true,
-              available_gimmicks: autoGimmickPool,
-            } : undefined;
+            // Prepare gimmick options - always include gimmick_intensity for level progression
+            const gimmickOpts = {
+              gimmick_intensity: gimmickIntensity,  // Level progression: early levels have no gimmicks
+              ...(useAutoGimmicks && {
+                auto_select_gimmicks: true,
+                available_gimmicks: autoGimmickPool,
+              }),
+            };
 
             // Generate with strict grade matching - retry with adjusted difficulty until grade matches
             const MAX_RETRIES = 30;

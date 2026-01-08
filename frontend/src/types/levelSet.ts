@@ -488,7 +488,7 @@ export function createGenerationPlan(distribution: GradeDistribution): GradeGene
  */
 export function createDefaultMultiSetConfig(): MultiSetConfig {
   return {
-    enabled: false,
+    enabled: true,  // 기본값 ON - 레벨 디자이너 워크플로우 최적화
     setCount: 10,
     difficultyShiftPerSet: 0.05,  // 5% per set
     maxDifficultyClamp: 0.95,

@@ -1,0 +1,91 @@
+{
+  "layer": 3,
+  "useTileCount": 5,
+  "randSeed": 678238,
+  "layer_0": {
+    "col": "8",
+    "row": "8",
+    "tiles": {
+      "3_3": [
+        "t2",
+        ""
+      ],
+      "4_3": [
+        "t4",
+        ""
+      ]
+    },
+    "num": "2"
+  },
+  "layer_1": {
+    "col": "7",
+    "row": "7",
+    "tiles": {
+      "1_3": [
+        "t2",
+        ""
+      ],
+      "3_5": [
+        "t2",
+        ""
+      ]
+    },
+    "num": "2"
+  },
+  "layer_2": {
+    "col": "8",
+    "row": "8",
+    "tiles": {
+      "3_3": [
+        "t4",
+        ""
+      ],
+      "3_4": [
+        "t4",
+        ""
+      ],
+      "2_2": [
+        "craft_s",
+        "",
+        [
+          3
+        ]
+      ]
+    },
+    "num": "3"
+  },
+  "layer_3": {
+    "col": "7",
+    "row": "7",
+    "tiles": {},
+    "num": "0"
+  },
+  "layer_4": {
+    "col": "8",
+    "row": "8",
+    "tiles": {},
+    "num": "0"
+  },
+  "layer_5": {
+    "col": "7",
+    "row": "7",
+    "tiles": {},
+    "num": "0"
+  },
+  "layer_6": {
+    "col": "8",
+    "row": "8",
+    "tiles": {},
+    "num": "0"
+  },
+  "goalCount": {
+    "craft_s": 3
+  },
+  "max_moves": 30,
+  "target_difficulty": 0.1,
+  "symmetry_mode": "both",
+  "pattern_type": "aesthetic",
+  "level_index": 50,
+  "name": "DifficultyTest 1 - Level 50",
+  "id": "set_1767862345172_qh0itkf3f_level_050"
+}

@@ -15,9 +15,12 @@ export interface GenerateRequest {
   // Symmetry and pattern options
   symmetry_mode?: SymmetryMode;
   pattern_type?: PatternType;
+  pattern_index?: number;  // 0-49 for specific aesthetic pattern
   // Auto gimmick selection parameters
   auto_select_gimmicks?: boolean;
   available_gimmicks?: string[];
+  // Gimmick intensity control (0.0=no gimmicks, 1.0=normal, 2.0=double)
+  gimmick_intensity?: number;
 }
 
 export interface SimulateRequest {
@@ -34,6 +37,7 @@ export async function generateLevel(
   gimmickOptions?: {
     auto_select_gimmicks?: boolean;
     available_gimmicks?: string[];
+    gimmick_intensity?: number;  // 0.0=no gimmicks, 1.0=normal, 2.0=double
   }
 ): Promise<GenerationResult> {
   const request: GenerateRequest = {
@@ -48,9 +52,12 @@ export async function generateLevel(
     layer_obstacle_configs: params.layer_obstacle_configs,
     symmetry_mode: params.symmetry_mode,
     pattern_type: params.pattern_type,
+    pattern_index: params.pattern_index,
     // Auto gimmick selection
     auto_select_gimmicks: gimmickOptions?.auto_select_gimmicks,
     available_gimmicks: gimmickOptions?.available_gimmicks,
+    // Gimmick intensity control
+    gimmick_intensity: gimmickOptions?.gimmick_intensity,
   };
 
   // Increase timeout when using auto gimmick selection (requires additional processing)
@@ -110,6 +117,8 @@ export interface ValidatedGenerateRequest {
   // Auto gimmick selection parameters
   auto_select_gimmicks?: boolean;   // Enable auto gimmick selection based on difficulty
   available_gimmicks?: string[];    // Pool of available gimmicks for auto-selection
+  // Gimmick intensity control (0.0=no gimmicks, 1.0=normal, 2.0=double)
+  gimmick_intensity?: number;
 }
 
 export interface ValidatedGenerateResult {
@@ -133,7 +142,9 @@ export interface ValidatedGenerateResult {
  * using bot simulation. Returns the best level found within max_retries attempts.
  */
 export async function generateValidatedLevel(
-  params: Omit<GenerationParams, 'obstacle_counts' | 'layer_tile_configs' | 'layer_obstacle_configs'>,
+  params: Omit<GenerationParams, 'obstacle_counts' | 'layer_tile_configs' | 'layer_obstacle_configs'> & {
+    gimmick_intensity?: number;
+  },
   validationOptions?: {
     max_retries?: number;
     tolerance?: number;
@@ -161,6 +172,8 @@ export async function generateValidatedLevel(
     // Auto gimmick selection
     auto_select_gimmicks: gimmickOptions?.auto_select_gimmicks,
     available_gimmicks: gimmickOptions?.available_gimmicks,
+    // Gimmick intensity (for level progression)
+    gimmick_intensity: params.gimmick_intensity,
   };
 
   // Calculate timeout: base 60s + extra time for retries and simulations

@@ -73,13 +73,14 @@ export interface LayerObstacleConfig {
 export type SymmetryMode = 'none' | 'horizontal' | 'vertical' | 'both';
 
 // Pattern type options
-export type PatternType = 'random' | 'geometric' | 'clustered';
+export type PatternType = 'random' | 'geometric' | 'clustered' | 'aesthetic';
 
 // Level generation parameters
 export interface GenerationParams {
   target_difficulty: number;
   grid_size?: [number, number];
-  max_layers?: number;
+  min_layers?: number;  // Minimum layers for easy difficulty
+  max_layers?: number;  // Maximum layers for hard difficulty
   tile_types?: string[];
   obstacle_types?: string[];
   goals?: GoalConfig[];
@@ -92,6 +93,7 @@ export interface GenerationParams {
   // Symmetry and pattern options
   symmetry_mode?: SymmetryMode;
   pattern_type?: PatternType;
+  pattern_index?: number;  // 0-49 for specific aesthetic pattern (undefined = auto-select)
 }
 
 // Level generation result

@@ -30,9 +30,10 @@ const SYMMETRY_OPTIONS: { id: SymmetryMode; label: string; icon: string }[] = [
 ];
 
 const PATTERN_OPTIONS: { id: PatternType; label: string; icon: string }[] = [
-  { id: 'random', label: '랜덤', icon: '🎲' },
+  { id: 'aesthetic', label: '미관최적화', icon: '✨' },
   { id: 'geometric', label: '기하학적', icon: '◆' },
   { id: 'clustered', label: '군집형', icon: '⚬' },
+  { id: 'random', label: '랜덤', icon: '🎲' },
 ];
 
 const GIMMICK_MODE_OPTIONS: { id: GimmickMode; label: string; icon: string; description: string }[] = [
@@ -306,20 +307,53 @@ export function LevelSetConfig({
         </div>
       </div>
 
-      {/* Max Layers */}
-      <div>
-        <label className="block text-sm font-medium text-gray-300 mb-1">
-          최대 레이어: <span className="text-blue-400">{config.baseParams.max_layers || 7}</span>
-        </label>
-        <input
-          type="range"
-          min={1}
-          max={10}
-          value={config.baseParams.max_layers || 7}
-          onChange={(e) => updateBaseParams({ max_layers: parseInt(e.target.value) })}
-          className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer"
-          disabled={disabled}
-        />
+      {/* Layer Range */}
+      <div className="space-y-3">
+        <div>
+          <label className="block text-sm font-medium text-gray-300 mb-1">
+            최소 레이어 (쉬운 난이도): <span className="text-blue-400">{config.baseParams.min_layers || 3}</span>
+          </label>
+          <input
+            type="range"
+            min={1}
+            max={10}
+            value={config.baseParams.min_layers || 3}
+            onChange={(e) => {
+              const minVal = parseInt(e.target.value);
+              const maxVal = config.baseParams.max_layers || 7;
+              updateBaseParams({
+                min_layers: minVal,
+                max_layers: Math.max(minVal, maxVal)
+              });
+            }}
+            className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer"
+            disabled={disabled}
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-300 mb-1">
+            최대 레이어 (어려운 난이도): <span className="text-blue-400">{config.baseParams.max_layers || 7}</span>
+          </label>
+          <input
+            type="range"
+            min={1}
+            max={10}
+            value={config.baseParams.max_layers || 7}
+            onChange={(e) => {
+              const maxVal = parseInt(e.target.value);
+              const minVal = config.baseParams.min_layers || 3;
+              updateBaseParams({
+                max_layers: maxVal,
+                min_layers: Math.min(minVal, maxVal)
+              });
+            }}
+            className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer"
+            disabled={disabled}
+          />
+        </div>
+        <p className="text-xs text-gray-500">
+          난이도에 따라 레이어 수가 {config.baseParams.min_layers || 3}~{config.baseParams.max_layers || 7} 범위 내에서 자동 결정됩니다
+        </p>
       </div>
 
       {/* Goals */}

@@ -80,7 +80,13 @@ class GenerateRequest(BaseModel):
     )
     pattern_type: Optional[str] = Field(
         default=None,
-        description="Pattern type: 'random', 'geometric' (regular shapes), 'clustered' (grouped tiles)"
+        description="Pattern type: 'random', 'geometric' (regular shapes), 'clustered' (grouped tiles), 'aesthetic' (visual patterns)"
+    )
+    pattern_index: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=49,
+        description="Specific pattern index (0-49) for aesthetic mode. None = auto-select best pattern"
     )
     # Auto gimmick selection parameters
     auto_select_gimmicks: bool = Field(
@@ -90,6 +96,13 @@ class GenerateRequest(BaseModel):
     available_gimmicks: Optional[List[str]] = Field(
         default=None,
         description="Pool of available gimmicks for auto-selection"
+    )
+    # Gimmick intensity control (for level progression within a set)
+    gimmick_intensity: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=2.0,
+        description="Gimmick intensity multiplier (0.0=no gimmicks, 1.0=normal, 2.0=double). Use for level progression."
     )
 
 
@@ -412,10 +425,14 @@ class ValidatedGenerateRequest(BaseModel):
     goals: Optional[List[GoalConfig]] = Field(default=None, description="Goal configurations")
     symmetry_mode: Optional[str] = Field(default=None, description="Symmetry mode")
     pattern_type: Optional[str] = Field(default=None, description="Pattern type")
+    pattern_index: Optional[int] = Field(default=None, ge=0, le=49, description="Specific pattern index (0-49) for aesthetic mode")
 
     # Auto gimmick selection parameters
     auto_select_gimmicks: bool = Field(default=False, description="Auto-select gimmicks based on difficulty")
     available_gimmicks: Optional[List[str]] = Field(default=None, description="Pool of available gimmicks for auto-selection")
+
+    # Gimmick intensity control
+    gimmick_intensity: float = Field(default=1.0, ge=0.0, le=2.0, description="Gimmick intensity multiplier (0.0=no gimmicks, 1.0=normal)")
 
     # Validation parameters
     max_retries: int = Field(default=5, ge=1, le=20, description="Maximum generation retries")

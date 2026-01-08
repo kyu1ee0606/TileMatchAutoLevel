@@ -24,6 +24,17 @@ from ...models.gimmick_profile import (
     get_all_profiles_info,
 )
 from ..deps import get_level_generator, get_level_simulator
+import random
+
+
+def resolve_symmetry_mode(symmetry_mode: str | None) -> str:
+    """
+    Resolve symmetry mode to ensure single-axis symmetry.
+    Converts None, "none", or "both" to random "horizontal" or "vertical".
+    """
+    if symmetry_mode is None or symmetry_mode in ("none", "both"):
+        return random.choice(["horizontal", "vertical"])
+    return symmetry_mode
 
 
 # Base bot target clear rates (for target_difficulty=0.5)
@@ -304,6 +315,9 @@ async def generate_level(
             )
             obstacle_types = auto_selected if auto_selected else None
 
+        # Resolve symmetry mode: convert "both"/"none"/None to random "horizontal" or "vertical"
+        actual_symmetry = resolve_symmetry_mode(request.symmetry_mode)
+
         params = GenerationParams(
             target_difficulty=request.target_difficulty,
             grid_size=tuple(request.grid_size),
@@ -316,16 +330,18 @@ async def generate_level(
             active_layer_count=request.active_layer_count,
             layer_tile_configs=layer_tile_configs,
             layer_obstacle_configs=layer_obstacle_configs,
-            symmetry_mode=request.symmetry_mode,
+            symmetry_mode=actual_symmetry,
             pattern_type=request.pattern_type,
+            pattern_index=request.pattern_index,
+            gimmick_intensity=request.gimmick_intensity,
         )
 
         result = generator.generate(params)
 
         # Store target_difficulty and generation config in level_json for verification
         result.level_json["target_difficulty"] = request.target_difficulty
-        if request.symmetry_mode:
-            result.level_json["symmetry_mode"] = request.symmetry_mode
+        # Store actual symmetry mode used (not request value)
+        result.level_json["symmetry_mode"] = actual_symmetry
         if request.pattern_type:
             result.level_json["pattern_type"] = request.pattern_type
 
@@ -549,6 +565,9 @@ async def generate_validated_level(
             # Adjust internal target difficulty based on previous results
             adjusted_difficulty = min(1.0, max(0.0, request.target_difficulty + difficulty_offset))
 
+            # Resolve symmetry mode: convert "both"/"none"/None to random "horizontal" or "vertical"
+            actual_symmetry = resolve_symmetry_mode(request.symmetry_mode)
+
             params = GenerationParams(
                 target_difficulty=adjusted_difficulty,
                 grid_size=tuple(current_grid_size),
@@ -556,8 +575,10 @@ async def generate_validated_level(
                 tile_types=current_tile_types,
                 obstacle_types=current_obstacle_types if current_obstacle_types else None,
                 goals=goals,
-                symmetry_mode=request.symmetry_mode,
+                symmetry_mode=actual_symmetry,
                 pattern_type=request.pattern_type,
+                pattern_index=request.pattern_index,
+                gimmick_intensity=request.gimmick_intensity,
             )
 
             result = generator.generate(params)
@@ -575,9 +596,8 @@ async def generate_validated_level(
             modified_max_moves = max(total_tiles, min(original_max_moves, ratio_based_moves))
             level_json["max_moves"] = modified_max_moves
             level_json["target_difficulty"] = request.target_difficulty  # Store for verification
-            # Store generation config for level regeneration
-            if request.symmetry_mode:
-                level_json["symmetry_mode"] = request.symmetry_mode
+            # Store actual symmetry mode used (not request value)
+            level_json["symmetry_mode"] = actual_symmetry
             if request.pattern_type:
                 level_json["pattern_type"] = request.pattern_type
 
@@ -615,9 +635,8 @@ async def generate_validated_level(
                 best_result = result
                 best_result.level_json["max_moves"] = modified_max_moves  # Store modified max_moves
                 best_result.level_json["target_difficulty"] = request.target_difficulty  # Store for verification
-                # Store generation config for level regeneration
-                if request.symmetry_mode:
-                    best_result.level_json["symmetry_mode"] = request.symmetry_mode
+                # Store actual symmetry mode used (not request value)
+                best_result.level_json["symmetry_mode"] = actual_symmetry
                 if request.pattern_type:
                     best_result.level_json["pattern_type"] = request.pattern_type
                 best_actual_rates = actual_rates.copy()
@@ -770,9 +789,8 @@ async def generate_validated_level(
                     )
                     reshuffled_level["max_moves"] = best_max_moves
                     reshuffled_level["target_difficulty"] = request.target_difficulty
-                    # Preserve generation config for level regeneration
-                    if request.symmetry_mode:
-                        reshuffled_level["symmetry_mode"] = request.symmetry_mode
+                    # Preserve generation config (use actual symmetry from best_result)
+                    reshuffled_level["symmetry_mode"] = best_result.level_json.get("symmetry_mode", actual_symmetry)
                     if request.pattern_type:
                         reshuffled_level["pattern_type"] = request.pattern_type
 

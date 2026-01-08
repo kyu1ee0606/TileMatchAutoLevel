@@ -101,7 +101,8 @@ class GenerationParams:
     """Parameters for level generation."""
     target_difficulty: float  # 0.0 ~ 1.0
     grid_size: Tuple[int, int] = (7, 7)
-    max_layers: int = 8
+    min_layers: int = 3  # Minimum layer count (for easier levels)
+    max_layers: int = 8  # Maximum layer count (for harder levels)
     tile_types: Optional[List[str]] = None
     obstacle_types: Optional[List[str]] = None
     goals: Optional[List[Dict[str, Any]]] = None
@@ -114,7 +115,10 @@ class GenerationParams:
     layer_obstacle_configs: Optional[List[LayerObstacleConfig]] = None  # Per-layer obstacle counts
     # Symmetry and pattern options
     symmetry_mode: Optional[str] = None  # 'none', 'horizontal', 'vertical', 'both'
-    pattern_type: Optional[str] = None  # 'random', 'geometric', 'clustered'
+    pattern_type: Optional[str] = None  # 'random', 'geometric', 'clustered', 'aesthetic'
+    pattern_index: Optional[int] = None  # 0-49 for specific aesthetic pattern (None = auto-select)
+    # Gimmick intensity control
+    gimmick_intensity: float = 1.0  # 0.0=no gimmicks, 1.0=normal, 2.0=double
 
     def __post_init__(self):
         """Set default values after initialization."""

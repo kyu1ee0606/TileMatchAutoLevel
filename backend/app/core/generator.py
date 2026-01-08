@@ -433,6 +433,98 @@ class LevelGenerator:
 
         return level
 
+    def _select_layer_pattern_indices(
+        self, active_layers: List[int], base_pattern_index: Optional[int] = None
+    ) -> Dict[int, int]:
+        """Select varied pattern indices for each layer to create geometric diversity.
+
+        Pattern Categories (50 patterns total):
+        - 0-9: Basic shapes (rectangle, diamond, oval, cross, donut, etc.)
+        - 10-14: Arrow/Direction patterns
+        - 15-19: Star/Celestial patterns
+        - 20-29: Letter shapes (H, I, L, U, X, Y, Z, S, O, C)
+        - 30-39: Advanced geometric (triangles, hourglass, stairs, pyramid, zigzag)
+        - 40-44: Frame/Border patterns
+        - 45-49: Artistic patterns (butterfly, flower, islands, stripes, honeycomb)
+
+        Strategy: Select patterns from different categories for adjacent layers
+        to create visually interesting, non-repetitive geometric compositions.
+
+        Args:
+            active_layers: List of layer indices that will be populated
+            base_pattern_index: If specified, use as base; otherwise auto-select
+
+        Returns:
+            Dict mapping layer_idx -> pattern_index
+        """
+        # Define pattern categories with complementary aesthetics
+        # Each category has patterns that look distinct from each other
+        pattern_categories = [
+            [0, 1, 2],      # Basic shapes: rectangle, diamond, oval
+            [3, 4, 5],      # Structural: cross, donut, chevron
+            [10, 11, 12],   # Directional: arrows
+            [15, 16, 17],   # Celestial: stars
+            [30, 31, 32],   # Geometric: triangles, hourglass
+            [40, 41, 42],   # Frames: borders
+            [6, 7, 8, 9],   # Misc basic shapes
+            [33, 34, 35],   # More advanced geometric
+        ]
+
+        # Flatten for random selection if needed
+        all_patterns = [p for cat in pattern_categories for p in cat]
+
+        layer_patterns: Dict[int, int] = {}
+        used_categories: Set[int] = set()
+
+        # Sort layers to ensure consistent ordering (top to bottom)
+        sorted_layers = sorted(active_layers, reverse=True)
+
+        for i, layer_idx in enumerate(sorted_layers):
+            if base_pattern_index is not None and i == 0:
+                # Use base pattern for first layer
+                layer_patterns[layer_idx] = base_pattern_index
+                # Find which category this belongs to
+                for cat_idx, cat in enumerate(pattern_categories):
+                    if base_pattern_index in cat:
+                        used_categories.add(cat_idx)
+                        break
+            else:
+                # Select from a different category than recent layers
+                available_categories = [
+                    cat_idx for cat_idx in range(len(pattern_categories))
+                    if cat_idx not in used_categories
+                ]
+
+                # If all categories used, reset but avoid immediate repeat
+                if not available_categories:
+                    used_categories.clear()
+                    # Keep the most recent category excluded
+                    if i > 0:
+                        prev_layer = sorted_layers[i - 1]
+                        prev_pattern = layer_patterns.get(prev_layer, 0)
+                        for cat_idx, cat in enumerate(pattern_categories):
+                            if prev_pattern in cat:
+                                used_categories.add(cat_idx)
+                                break
+                    available_categories = [
+                        cat_idx for cat_idx in range(len(pattern_categories))
+                        if cat_idx not in used_categories
+                    ]
+
+                if available_categories:
+                    selected_cat_idx = random.choice(available_categories)
+                    selected_pattern = random.choice(pattern_categories[selected_cat_idx])
+                    used_categories.add(selected_cat_idx)
+                else:
+                    # Fallback: random pattern avoiding immediate repeat
+                    prev_pattern = layer_patterns.get(sorted_layers[i - 1], -1) if i > 0 else -1
+                    candidates = [p for p in all_patterns if p != prev_pattern]
+                    selected_pattern = random.choice(candidates) if candidates else random.choice(all_patterns)
+
+                layer_patterns[layer_idx] = selected_pattern
+
+        return layer_patterns
+
     def _populate_layers(
         self, level: Dict[str, Any], params: GenerationParams
     ) -> Dict[str, Any]:
@@ -462,23 +554,32 @@ class LevelGenerator:
             # Total is sum of configured counts
             total_target = sum(layer_tile_counts.values())
         else:
-            # Determine layers from active_layer_count or use all max_layers
+            # Determine layers from active_layer_count or calculate based on difficulty
             if params.active_layer_count is not None:
                 active_layer_count = min(params.active_layer_count, params.max_layers)
             else:
-                # Adjust layer count based on target difficulty
-                # S grade (< 0.2): use 2-3 layers for minimal complexity
-                # A grade (< 0.4): use 3-5 layers
-                # B+ grades: use all layers
-                if target < 0.2:
-                    active_layer_count = min(3, params.max_layers)
-                elif target < 0.4:
-                    active_layer_count = min(5, params.max_layers)
-                else:
-                    active_layer_count = params.max_layers
+                # Calculate layer count based on difficulty within min/max range
+                # Lower difficulty = fewer layers, higher difficulty = more layers
+                min_layers = max(1, params.min_layers)
+                max_layers = params.max_layers
 
-            # Start from top layer and work down
-            active_layers = list(range(params.max_layers - 1, params.max_layers - 1 - active_layer_count, -1))
+                # Ensure min <= max
+                if min_layers > max_layers:
+                    min_layers = max_layers
+
+                # Linear interpolation based on difficulty
+                # difficulty 0.0 → min_layers, difficulty 1.0 → max_layers
+                layer_range = max_layers - min_layers
+                active_layer_count = min_layers + int(layer_range * target)
+
+                # Clamp to valid range
+                active_layer_count = max(min_layers, min(max_layers, active_layer_count))
+
+            # Update level["layer"] to reflect actual active layer count
+            level["layer"] = active_layer_count
+
+            # Use layers 0 to active_layer_count-1 (bottom to top)
+            active_layers = list(range(active_layer_count))
 
             # Calculate total tile count target
             if params.total_tile_count is not None:
@@ -519,6 +620,12 @@ class LevelGenerator:
         # Collect all positions across all layers
         all_layer_positions: List[Tuple[int, str]] = []  # (layer_idx, pos)
 
+        # Generate varied pattern indices for each layer (for aesthetic mode)
+        # This creates geometric diversity by using different patterns per layer
+        layer_pattern_indices = self._select_layer_pattern_indices(
+            active_layers, base_pattern_index=params.pattern_index
+        )
+
         for layer_idx in active_layers:
             layer_key = f"layer_{layer_idx}"
             is_odd_layer = layer_idx % 2 == 1
@@ -532,11 +639,15 @@ class LevelGenerator:
             if target_count <= 0:
                 continue
 
+            # Use layer-specific pattern index for geometric diversity
+            layer_pattern_index = layer_pattern_indices.get(layer_idx, params.pattern_index)
+
             # Generate positions for this layer with symmetry and pattern options
             positions = self._generate_layer_positions_for_count(
                 layer_cols, layer_rows, target_count,
                 symmetry_mode=params.symmetry_mode,
-                pattern_type=params.pattern_type
+                pattern_type=params.pattern_type,
+                pattern_index=layer_pattern_index  # Use varied pattern per layer
             )
 
             for pos in positions:
@@ -636,7 +747,8 @@ class LevelGenerator:
 
     def _generate_layer_positions_for_count(
         self, cols: int, rows: int, target_count: int,
-        symmetry_mode: Optional[str] = None, pattern_type: Optional[str] = None
+        symmetry_mode: Optional[str] = None, pattern_type: Optional[str] = None,
+        pattern_index: Optional[int] = None
     ) -> List[str]:
         """Generate tile positions for a layer with specific count."""
         # Clamp to available positions
@@ -646,21 +758,33 @@ class LevelGenerator:
             return []
 
         selected = self._generate_positions_with_pattern(
-            cols, rows, actual_count, symmetry_mode, pattern_type
+            cols, rows, actual_count, symmetry_mode, pattern_type, pattern_index
         )
         return selected
 
     def _generate_positions_with_pattern(
         self, cols: int, rows: int, target_count: int,
-        symmetry_mode: Optional[str] = None, pattern_type: Optional[str] = None
+        symmetry_mode: Optional[str] = None, pattern_type: Optional[str] = None,
+        pattern_index: Optional[int] = None
     ) -> List[str]:
         """Generate positions with symmetry and pattern options."""
         # Default to geometric pattern for more regular shapes
         pattern = pattern_type or "geometric"
-        symmetry = symmetry_mode or "none"
+
+        # Always enforce single-axis symmetry: horizontal or vertical
+        # Convert "both", "none", or None to random single-axis choice
+        if symmetry_mode is None or symmetry_mode in ("none", "both"):
+            symmetry = random.choice(["horizontal", "vertical"])
+        else:
+            symmetry = symmetry_mode
 
         # Generate base positions based on pattern type
-        if pattern == "geometric":
+        if pattern == "aesthetic":
+            # Aesthetic mode: generate pattern then apply symmetry mirroring
+            raw_positions = self._generate_aesthetic_positions(cols, rows, target_count, pattern_index)
+            # Apply symmetry to aesthetic patterns too
+            base_positions = self._apply_symmetry_to_positions(cols, rows, raw_positions, symmetry, target_count)
+        elif pattern == "geometric":
             base_positions = self._generate_geometric_positions(cols, rows, target_count, symmetry)
         elif pattern == "clustered":
             base_positions = self._generate_clustered_positions(cols, rows, target_count, symmetry)
@@ -668,6 +792,962 @@ class LevelGenerator:
             base_positions = self._generate_random_positions(cols, rows, target_count, symmetry)
 
         return base_positions
+
+    def _generate_aesthetic_positions(
+        self, cols: int, rows: int, target_count: int,
+        pattern_index: Optional[int] = None
+    ) -> List[str]:
+        """Generate visually appealing positions using 50 diverse patterns.
+
+        Patterns are inspired by high-level stages from Tile Buster, Triple Match 3D,
+        Tile Explorer, and other popular tile-matching puzzle games.
+
+        Categories:
+        - 0-9: Basic shapes (rectangle, diamond, oval, cross, donut, etc.)
+        - 10-14: Arrow/Direction patterns
+        - 15-19: Star/Celestial patterns
+        - 20-29: Letter shapes (H, I, L, U, X, Y, Z, S, O, C)
+        - 30-39: Advanced geometric (triangles, hourglass, stairs, pyramid, zigzag)
+        - 40-44: Frame/Border patterns
+        - 45-49: Artistic patterns (butterfly, flower, islands, stripes, honeycomb)
+
+        Args:
+            cols: Grid columns
+            rows: Grid rows
+            target_count: Target number of tiles
+            pattern_index: If specified (0-49), forces use of that specific pattern.
+                          None = auto-select best pattern based on target_count.
+        """
+        import math
+        center_x, center_y = cols / 2.0, rows / 2.0
+
+        # ============ Category 1: Basic Shapes (0-9) ============
+
+        # Pattern 0: Filled Rectangle
+        def filled_rectangle():
+            aspect_ratio = cols / rows
+            rect_height = int((target_count / aspect_ratio) ** 0.5)
+            rect_width = int(rect_height * aspect_ratio)
+            if rect_width * rect_height < target_count:
+                rect_width += 1
+            if rect_width * rect_height < target_count:
+                rect_height += 1
+            start_x = int((cols - rect_width) / 2)
+            start_y = int((rows - rect_height) / 2)
+            positions = []
+            for x in range(start_x, min(cols, start_x + rect_width)):
+                for y in range(start_y, min(rows, start_y + rect_height)):
+                    if x >= 0 and y >= 0:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 1: Diamond/Rhombus shape
+        def diamond_shape():
+            radius = int((target_count * 2) ** 0.5)
+            positions = []
+            for x in range(cols):
+                for y in range(rows):
+                    dist = abs(x - center_x + 0.5) + abs(y - center_y + 0.5)
+                    if dist <= radius:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 2: Oval/Ellipse shape
+        def oval_shape():
+            radius_x = int((target_count * cols / (rows * 3.14)) ** 0.5) + 1
+            radius_y = int((target_count * rows / (cols * 3.14)) ** 0.5) + 1
+            positions = []
+            for x in range(cols):
+                for y in range(rows):
+                    dx = (x - center_x + 0.5) / max(1, radius_x)
+                    dy = (y - center_y + 0.5) / max(1, radius_y)
+                    if dx * dx + dy * dy <= 1.0:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 3: Plus/Cross shape
+        def cross_shape():
+            positions = []
+            arm_width = max(2, int(cols * 0.4))
+            arm_height = max(2, int(rows * 0.4))
+            start_x = int((cols - arm_width) / 2)
+            start_y = int((rows - arm_height) / 2)
+            for x in range(cols):
+                for y in range(start_y, min(rows, start_y + arm_height)):
+                    positions.append(f"{x}_{y}")
+            for x in range(start_x, min(cols, start_x + arm_width)):
+                for y in range(rows):
+                    if f"{x}_{y}" not in positions:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 4: Donut shape (hollow center)
+        def donut_shape():
+            outer_radius = int((target_count / 2.5) ** 0.5) + 2
+            inner_radius = max(1, outer_radius // 3)
+            positions = []
+            for x in range(cols):
+                for y in range(rows):
+                    dist = ((x - center_x + 0.5) ** 2 + (y - center_y + 0.5) ** 2) ** 0.5
+                    if inner_radius <= dist <= outer_radius:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 5: Concentric diamond
+        def concentric_diamond():
+            positions = []
+            outer_radius = int((target_count * 2) ** 0.5)
+            for x in range(cols):
+                for y in range(rows):
+                    dist = abs(x - center_x + 0.5) + abs(y - center_y + 0.5)
+                    if dist <= outer_radius:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 6: Corner-anchored pattern
+        def corner_anchored():
+            positions = []
+            corner_size = max(1, min(cols, rows) // 4)
+            for x in range(cols):
+                for y in range(rows):
+                    is_corner = (
+                        (x < corner_size and y < corner_size) or
+                        (x < corner_size and y >= rows - corner_size) or
+                        (x >= cols - corner_size and y < corner_size) or
+                        (x >= cols - corner_size and y >= rows - corner_size)
+                    )
+                    if not is_corner:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 7: Hexagonal-ish pattern
+        def hexagonal():
+            positions = []
+            radius = int((target_count / 2.6) ** 0.5) + 1
+            for x in range(cols):
+                for y in range(rows):
+                    dx = abs(x - center_x + 0.5)
+                    dy = abs(y - center_y + 0.5) * 1.15
+                    dist = max(dx, dy, (dx + dy) * 0.55)
+                    if dist <= radius:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 8: Heart shape
+        def heart_shape():
+            positions = []
+            scale = max(cols, rows) / 8
+            for x in range(cols):
+                for y in range(rows):
+                    nx = (x - center_x + 0.5) / scale
+                    ny = -(y - center_y + 0.5) / scale + 0.5
+                    value = (nx**2 + ny**2 - 1)**3 - (nx**2) * (ny**3)
+                    if value <= 0.5:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 9: T-shape
+        def t_shape():
+            positions = []
+            bar_height = max(2, rows // 4)
+            stem_width = max(2, cols // 3)
+            stem_start_x = int((cols - stem_width) / 2)
+            for x in range(cols):
+                for y in range(bar_height):
+                    positions.append(f"{x}_{y}")
+            for x in range(stem_start_x, min(cols, stem_start_x + stem_width)):
+                for y in range(bar_height, rows):
+                    positions.append(f"{x}_{y}")
+            return positions
+
+        # ============ Category 2: Arrow/Direction Patterns (10-14) ============
+
+        # Pattern 10: Arrow Up
+        def arrow_up():
+            positions = []
+            tip_y = 0
+            base_y = rows - 1
+            arrow_width = max(2, cols // 3)
+            start_x = int((cols - arrow_width) / 2)
+            # Arrow head (triangle)
+            for y in range(rows // 2):
+                width = max(1, (y + 1) * 2)
+                sx = int(center_x - width / 2)
+                for x in range(sx, min(cols, sx + width)):
+                    if 0 <= x < cols:
+                        positions.append(f"{x}_{y}")
+            # Arrow stem
+            for x in range(start_x, min(cols, start_x + arrow_width)):
+                for y in range(rows // 2, rows):
+                    positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 11: Arrow Down
+        def arrow_down():
+            positions = []
+            arrow_width = max(2, cols // 3)
+            start_x = int((cols - arrow_width) / 2)
+            # Arrow stem (top)
+            for x in range(start_x, min(cols, start_x + arrow_width)):
+                for y in range(rows // 2):
+                    positions.append(f"{x}_{y}")
+            # Arrow head (triangle pointing down)
+            for y in range(rows // 2, rows):
+                rel_y = y - rows // 2
+                width = max(1, cols - rel_y * 2)
+                sx = int(center_x - width / 2)
+                for x in range(sx, min(cols, sx + width)):
+                    if 0 <= x < cols and width > 0:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 12: Arrow Left
+        def arrow_left():
+            positions = []
+            arrow_height = max(2, rows // 3)
+            start_y = int((rows - arrow_height) / 2)
+            # Arrow head (triangle pointing left)
+            for x in range(cols // 2):
+                height = max(1, (x + 1) * 2)
+                sy = int(center_y - height / 2)
+                for y in range(sy, min(rows, sy + height)):
+                    if 0 <= y < rows:
+                        positions.append(f"{x}_{y}")
+            # Arrow stem
+            for y in range(start_y, min(rows, start_y + arrow_height)):
+                for x in range(cols // 2, cols):
+                    positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 13: Arrow Right
+        def arrow_right():
+            positions = []
+            arrow_height = max(2, rows // 3)
+            start_y = int((rows - arrow_height) / 2)
+            # Arrow stem (left side)
+            for y in range(start_y, min(rows, start_y + arrow_height)):
+                for x in range(cols // 2):
+                    positions.append(f"{x}_{y}")
+            # Arrow head (triangle pointing right)
+            for x in range(cols // 2, cols):
+                rel_x = x - cols // 2
+                height = max(1, rows - rel_x * 2)
+                sy = int(center_y - height / 2)
+                for y in range(sy, min(rows, sy + height)):
+                    if 0 <= y < rows and height > 0:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 14: Chevron (double arrow)
+        def chevron_pattern():
+            positions = []
+            thickness = max(2, min(cols, rows) // 4)
+            for x in range(cols):
+                for y in range(rows):
+                    # V shape
+                    v_dist = abs(y - (rows - 1 - abs(x - center_x + 0.5) * rows / cols * 0.8))
+                    if v_dist <= thickness:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # ============ Category 3: Star/Celestial Patterns (15-19) ============
+
+        # Pattern 15: Five-pointed Star
+        def star_five_point():
+            positions = []
+            radius = min(cols, rows) / 2.5
+            inner_radius = radius * 0.4
+            for x in range(cols):
+                for y in range(rows):
+                    dx = x - center_x + 0.5
+                    dy = y - center_y + 0.5
+                    angle = math.atan2(dy, dx)
+                    dist = (dx**2 + dy**2) ** 0.5
+                    # Star shape formula
+                    star_angle = (angle + math.pi) % (2 * math.pi / 5)
+                    star_radius = inner_radius + (radius - inner_radius) * abs(math.cos(star_angle * 2.5))
+                    if dist <= star_radius:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 16: Six-pointed Star (Star of David)
+        def star_six_point():
+            positions = []
+            radius = min(cols, rows) / 2.5
+            for x in range(cols):
+                for y in range(rows):
+                    dx = x - center_x + 0.5
+                    dy = y - center_y + 0.5
+                    # Two overlapping triangles
+                    tri1 = (dy <= radius * 0.5 - abs(dx) * 0.866) or (dy >= -radius * 0.5 + abs(dx) * 0.866 and dy <= 0)
+                    tri2 = (dy >= -radius * 0.5 + abs(dx) * 0.866) or (dy <= radius * 0.5 - abs(dx) * 0.866 and dy >= 0)
+                    dist = abs(dx) + abs(dy) * 0.7
+                    if dist <= radius:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 17: Crescent Moon
+        def crescent_moon():
+            positions = []
+            outer_radius = min(cols, rows) / 2.2
+            inner_radius = outer_radius * 0.7
+            offset_x = outer_radius * 0.5
+            for x in range(cols):
+                for y in range(rows):
+                    dx = x - center_x + 0.5
+                    dy = y - center_y + 0.5
+                    outer_dist = (dx**2 + dy**2) ** 0.5
+                    inner_dist = ((dx + offset_x)**2 + dy**2) ** 0.5
+                    if outer_dist <= outer_radius and inner_dist > inner_radius:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 18: Sun Burst
+        def sun_burst():
+            positions = []
+            core_radius = min(cols, rows) / 4
+            ray_length = min(cols, rows) / 2.5
+            num_rays = 8
+            for x in range(cols):
+                for y in range(rows):
+                    dx = x - center_x + 0.5
+                    dy = y - center_y + 0.5
+                    dist = (dx**2 + dy**2) ** 0.5
+                    angle = math.atan2(dy, dx)
+                    # Core circle
+                    if dist <= core_radius:
+                        positions.append(f"{x}_{y}")
+                    # Rays
+                    elif dist <= ray_length:
+                        ray_angle = (angle + math.pi) % (2 * math.pi / num_rays)
+                        if ray_angle < math.pi / num_rays * 0.5 or ray_angle > 2 * math.pi / num_rays - math.pi / num_rays * 0.5:
+                            positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 19: Spiral
+        def spiral():
+            positions = []
+            max_radius = min(cols, rows) / 2.2
+            turns = 2.5
+            thickness = max(1.5, min(cols, rows) / 8)
+            for x in range(cols):
+                for y in range(rows):
+                    dx = x - center_x + 0.5
+                    dy = y - center_y + 0.5
+                    dist = (dx**2 + dy**2) ** 0.5
+                    if dist < 0.5:
+                        positions.append(f"{x}_{y}")
+                        continue
+                    angle = math.atan2(dy, dx)
+                    expected_dist = (angle + math.pi) / (2 * math.pi) * max_radius / turns
+                    for i in range(int(turns) + 1):
+                        check_dist = expected_dist + i * max_radius / turns
+                        if abs(dist - check_dist) <= thickness:
+                            positions.append(f"{x}_{y}")
+                            break
+            return positions
+
+        # ============ Category 4: Letter Shapes (20-29) ============
+
+        # Pattern 20: Letter H
+        def letter_H():
+            positions = []
+            bar_width = max(2, cols // 4)
+            for x in range(bar_width):
+                for y in range(rows):
+                    positions.append(f"{x}_{y}")
+            for x in range(cols - bar_width, cols):
+                for y in range(rows):
+                    positions.append(f"{x}_{y}")
+            mid_y = rows // 2
+            bar_height = max(2, rows // 4)
+            for x in range(bar_width, cols - bar_width):
+                for y in range(mid_y - bar_height // 2, mid_y + bar_height // 2 + 1):
+                    positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 21: Letter I
+        def letter_I():
+            positions = []
+            bar_height = max(2, rows // 4)
+            stem_width = max(2, cols // 3)
+            stem_start = int((cols - stem_width) / 2)
+            # Top bar
+            for x in range(cols):
+                for y in range(bar_height):
+                    positions.append(f"{x}_{y}")
+            # Bottom bar
+            for x in range(cols):
+                for y in range(rows - bar_height, rows):
+                    positions.append(f"{x}_{y}")
+            # Stem
+            for x in range(stem_start, stem_start + stem_width):
+                for y in range(bar_height, rows - bar_height):
+                    positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 22: Letter L
+        def letter_L():
+            positions = []
+            bar_width = max(2, cols // 3)
+            bar_height = max(2, rows // 4)
+            # Vertical bar
+            for x in range(bar_width):
+                for y in range(rows):
+                    positions.append(f"{x}_{y}")
+            # Horizontal bar at bottom
+            for x in range(bar_width, cols):
+                for y in range(rows - bar_height, rows):
+                    positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 23: Letter U
+        def letter_U():
+            positions = []
+            bar_width = max(2, cols // 4)
+            bar_height = max(2, rows // 4)
+            # Left vertical
+            for x in range(bar_width):
+                for y in range(rows):
+                    positions.append(f"{x}_{y}")
+            # Right vertical
+            for x in range(cols - bar_width, cols):
+                for y in range(rows):
+                    positions.append(f"{x}_{y}")
+            # Bottom connector
+            for x in range(bar_width, cols - bar_width):
+                for y in range(rows - bar_height, rows):
+                    positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 24: Letter X
+        def letter_X():
+            positions = []
+            thickness = max(1.5, min(cols, rows) / 5)
+            for x in range(cols):
+                for y in range(rows):
+                    # Diagonal 1 (top-left to bottom-right)
+                    d1 = abs((x - center_x) - (y - center_y) * cols / rows)
+                    # Diagonal 2 (top-right to bottom-left)
+                    d2 = abs((x - center_x) + (y - center_y) * cols / rows)
+                    if d1 <= thickness or d2 <= thickness:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 25: Letter Y
+        def letter_Y():
+            positions = []
+            stem_width = max(2, cols // 3)
+            stem_start = int((cols - stem_width) / 2)
+            mid_y = rows // 2
+            thickness = max(1.5, cols / 5)
+            # Top diagonals
+            for x in range(cols):
+                for y in range(mid_y):
+                    d1 = abs((x - center_x) - (y - mid_y) * cols / rows)
+                    d2 = abs((x - center_x) + (y - mid_y) * cols / rows)
+                    if d1 <= thickness or d2 <= thickness:
+                        positions.append(f"{x}_{y}")
+            # Bottom stem
+            for x in range(stem_start, stem_start + stem_width):
+                for y in range(mid_y, rows):
+                    positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 26: Letter Z
+        def letter_Z():
+            positions = []
+            bar_height = max(2, rows // 4)
+            thickness = max(1.5, min(cols, rows) / 5)
+            # Top bar
+            for x in range(cols):
+                for y in range(bar_height):
+                    positions.append(f"{x}_{y}")
+            # Bottom bar
+            for x in range(cols):
+                for y in range(rows - bar_height, rows):
+                    positions.append(f"{x}_{y}")
+            # Diagonal
+            for x in range(cols):
+                for y in range(bar_height, rows - bar_height):
+                    expected_x = cols - 1 - (y - bar_height) * cols / (rows - 2 * bar_height)
+                    if abs(x - expected_x) <= thickness:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 27: Letter S
+        def letter_S():
+            positions = []
+            bar_height = max(2, rows // 5)
+            bar_width = max(2, cols // 4)
+            # Top bar
+            for x in range(cols):
+                for y in range(bar_height):
+                    positions.append(f"{x}_{y}")
+            # Upper left vertical
+            for x in range(bar_width):
+                for y in range(bar_height, rows // 2):
+                    positions.append(f"{x}_{y}")
+            # Middle bar
+            for x in range(cols):
+                for y in range(rows // 2 - bar_height // 2, rows // 2 + bar_height // 2 + 1):
+                    positions.append(f"{x}_{y}")
+            # Lower right vertical
+            for x in range(cols - bar_width, cols):
+                for y in range(rows // 2 + 1, rows - bar_height):
+                    positions.append(f"{x}_{y}")
+            # Bottom bar
+            for x in range(cols):
+                for y in range(rows - bar_height, rows):
+                    positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 28: Letter O (ring)
+        def letter_O():
+            positions = []
+            outer_rx = cols / 2.2
+            outer_ry = rows / 2.2
+            inner_rx = outer_rx * 0.5
+            inner_ry = outer_ry * 0.5
+            for x in range(cols):
+                for y in range(rows):
+                    dx = (x - center_x + 0.5) / outer_rx
+                    dy = (y - center_y + 0.5) / outer_ry
+                    outer_dist = dx * dx + dy * dy
+                    dx2 = (x - center_x + 0.5) / inner_rx
+                    dy2 = (y - center_y + 0.5) / inner_ry
+                    inner_dist = dx2 * dx2 + dy2 * dy2
+                    if outer_dist <= 1.0 and inner_dist >= 1.0:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 29: Letter C
+        def letter_C():
+            positions = []
+            outer_rx = cols / 2.2
+            outer_ry = rows / 2.2
+            inner_rx = outer_rx * 0.5
+            inner_ry = outer_ry * 0.5
+            gap_width = cols / 3
+            for x in range(cols):
+                for y in range(rows):
+                    dx = (x - center_x + 0.5) / outer_rx
+                    dy = (y - center_y + 0.5) / outer_ry
+                    outer_dist = dx * dx + dy * dy
+                    dx2 = (x - center_x + 0.5) / inner_rx
+                    dy2 = (y - center_y + 0.5) / inner_ry
+                    inner_dist = dx2 * dx2 + dy2 * dy2
+                    # C shape - open on the right
+                    if outer_dist <= 1.0 and inner_dist >= 1.0 and x < cols - gap_width:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # ============ Category 5: Advanced Geometric (30-39) ============
+
+        # Pattern 30: Triangle Up
+        def triangle_up():
+            positions = []
+            for y in range(rows):
+                width = int((rows - y) * cols / rows)
+                start_x = int((cols - width) / 2)
+                for x in range(start_x, min(cols, start_x + width)):
+                    if 0 <= x < cols:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 31: Triangle Down
+        def triangle_down():
+            positions = []
+            for y in range(rows):
+                width = int((y + 1) * cols / rows)
+                start_x = int((cols - width) / 2)
+                for x in range(start_x, min(cols, start_x + width)):
+                    if 0 <= x < cols:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 32: Hourglass
+        def hourglass():
+            positions = []
+            for y in range(rows):
+                # Distance from center row
+                dist_from_center = abs(y - center_y)
+                width = int(cols * (dist_from_center / center_y + 0.3))
+                width = max(2, min(cols, width))
+                start_x = int((cols - width) / 2)
+                for x in range(start_x, min(cols, start_x + width)):
+                    if 0 <= x < cols:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 33: Bowtie
+        def bowtie():
+            positions = []
+            for y in range(rows):
+                dist_from_center = abs(y - center_y)
+                width = int(cols * (1 - dist_from_center / center_y * 0.7))
+                width = max(2, min(cols, width))
+                start_x = int((cols - width) / 2)
+                for x in range(start_x, min(cols, start_x + width)):
+                    if 0 <= x < cols:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 34: Stairs Ascending (left to right)
+        def stairs_ascending():
+            positions = []
+            num_steps = min(cols, rows) // 2
+            step_width = cols // num_steps
+            step_height = rows // num_steps
+            for step in range(num_steps):
+                x_start = step * step_width
+                y_start = rows - (step + 1) * step_height
+                for x in range(x_start, min(cols, x_start + step_width + 1)):
+                    for y in range(max(0, y_start), rows):
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 35: Stairs Descending
+        def stairs_descending():
+            positions = []
+            num_steps = min(cols, rows) // 2
+            step_width = cols // num_steps
+            step_height = rows // num_steps
+            for step in range(num_steps):
+                x_start = step * step_width
+                y_end = (step + 1) * step_height
+                for x in range(x_start, min(cols, x_start + step_width + 1)):
+                    for y in range(min(rows, y_end)):
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 36: Pyramid
+        def pyramid():
+            positions = []
+            levels = min(rows, cols // 2)
+            for level in range(levels):
+                y = rows - 1 - level
+                width = (level + 1) * 2 - 1
+                start_x = int((cols - width) / 2)
+                for x in range(start_x, min(cols, start_x + width)):
+                    if 0 <= x < cols and 0 <= y < rows:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 37: Inverted Pyramid
+        def inverted_pyramid():
+            positions = []
+            levels = min(rows, cols // 2)
+            for level in range(levels):
+                y = level
+                width = (levels - level) * 2 - 1
+                start_x = int((cols - width) / 2)
+                for x in range(start_x, min(cols, start_x + width)):
+                    if 0 <= x < cols:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 38: Zigzag Horizontal
+        def zigzag_horizontal():
+            positions = []
+            amplitude = rows // 3
+            period = cols // 3
+            thickness = max(2, rows // 4)
+            for x in range(cols):
+                base_y = int(center_y + amplitude * math.sin(x * 2 * math.pi / period))
+                for y in range(max(0, base_y - thickness), min(rows, base_y + thickness + 1)):
+                    positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 39: Wave Pattern
+        def wave_pattern():
+            positions = []
+            num_waves = 3
+            wave_height = rows // (num_waves * 2)
+            for x in range(cols):
+                for y in range(rows):
+                    wave_offset = int(wave_height * math.sin(x * 2 * math.pi / (cols / 2)))
+                    if (y + wave_offset) % (rows // num_waves) < rows // num_waves // 2:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # ============ Category 6: Frame/Border Patterns (40-44) ============
+
+        # Pattern 40: Frame Border
+        def frame_border():
+            positions = []
+            border_width = max(2, min(cols, rows) // 4)
+            for x in range(cols):
+                for y in range(rows):
+                    if x < border_width or x >= cols - border_width or y < border_width or y >= rows - border_width:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 41: Double Frame
+        def double_frame():
+            positions = []
+            outer_width = max(1, min(cols, rows) // 6)
+            gap = max(1, min(cols, rows) // 6)
+            inner_width = max(1, min(cols, rows) // 6)
+            for x in range(cols):
+                for y in range(rows):
+                    # Outer frame
+                    if x < outer_width or x >= cols - outer_width or y < outer_width or y >= rows - outer_width:
+                        positions.append(f"{x}_{y}")
+                    # Inner frame
+                    inner_start = outer_width + gap
+                    inner_end_x = cols - outer_width - gap
+                    inner_end_y = rows - outer_width - gap
+                    if inner_start <= x < inner_end_x and inner_start <= y < inner_end_y:
+                        if x < inner_start + inner_width or x >= inner_end_x - inner_width or y < inner_start + inner_width or y >= inner_end_y - inner_width:
+                            positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 42: Corner Triangles
+        def corner_triangles():
+            positions = []
+            tri_size = min(cols, rows) // 3
+            for x in range(cols):
+                for y in range(rows):
+                    # Top-left
+                    if x + y < tri_size:
+                        positions.append(f"{x}_{y}")
+                    # Top-right
+                    elif (cols - 1 - x) + y < tri_size:
+                        positions.append(f"{x}_{y}")
+                    # Bottom-left
+                    elif x + (rows - 1 - y) < tri_size:
+                        positions.append(f"{x}_{y}")
+                    # Bottom-right
+                    elif (cols - 1 - x) + (rows - 1 - y) < tri_size:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 43: Center Hollow (filled corners, hollow center)
+        def center_hollow():
+            positions = []
+            hollow_size = min(cols, rows) // 3
+            hollow_x_start = int((cols - hollow_size) / 2)
+            hollow_y_start = int((rows - hollow_size) / 2)
+            for x in range(cols):
+                for y in range(rows):
+                    # Not in center hollow
+                    if not (hollow_x_start <= x < hollow_x_start + hollow_size and hollow_y_start <= y < hollow_y_start + hollow_size):
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 44: Window Panes (4 quadrants)
+        def window_panes():
+            positions = []
+            gap = max(1, min(cols, rows) // 6)
+            mid_x = cols // 2
+            mid_y = rows // 2
+            for x in range(cols):
+                for y in range(rows):
+                    # Not in center cross
+                    if not (mid_x - gap <= x < mid_x + gap or mid_y - gap <= y < mid_y + gap):
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # ============ Category 7: Artistic Patterns (45-49) ============
+
+        # Pattern 45: Butterfly
+        def butterfly():
+            positions = []
+            wing_radius = min(cols, rows) / 2.5
+            body_width = max(1, cols // 6)
+            for x in range(cols):
+                for y in range(rows):
+                    dx = abs(x - center_x + 0.5)
+                    dy = y - center_y + 0.5
+                    # Wings (two circles offset from center)
+                    wing_dist = ((dx - wing_radius * 0.5) ** 2 + dy ** 2) ** 0.5
+                    # Body (center column)
+                    if wing_dist <= wing_radius * 0.7 or dx <= body_width / 2:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 46: Flower Pattern (petals around center)
+        def flower_pattern():
+            positions = []
+            petal_radius = min(cols, rows) / 3
+            center_radius = min(cols, rows) / 6
+            num_petals = 6
+            for x in range(cols):
+                for y in range(rows):
+                    dx = x - center_x + 0.5
+                    dy = y - center_y + 0.5
+                    dist = (dx ** 2 + dy ** 2) ** 0.5
+                    # Center
+                    if dist <= center_radius:
+                        positions.append(f"{x}_{y}")
+                    else:
+                        # Petals
+                        angle = math.atan2(dy, dx)
+                        for i in range(num_petals):
+                            petal_angle = i * 2 * math.pi / num_petals
+                            petal_cx = center_x + math.cos(petal_angle) * petal_radius * 0.7
+                            petal_cy = center_y + math.sin(petal_angle) * petal_radius * 0.7
+                            petal_dist = ((x - petal_cx) ** 2 + (y - petal_cy) ** 2) ** 0.5
+                            if petal_dist <= petal_radius * 0.5:
+                                positions.append(f"{x}_{y}")
+                                break
+            return positions
+
+        # Pattern 47: Scattered Islands
+        def scattered_islands():
+            positions = []
+            # Create 4-6 island clusters
+            random.seed(42)  # Deterministic for consistency
+            num_islands = min(6, max(4, (cols * rows) // 30))
+            islands = []
+            for _ in range(num_islands):
+                ix = random.randint(1, cols - 2)
+                iy = random.randint(1, rows - 2)
+                ir = random.uniform(1.5, min(cols, rows) / 4)
+                islands.append((ix, iy, ir))
+            for x in range(cols):
+                for y in range(rows):
+                    for ix, iy, ir in islands:
+                        if ((x - ix) ** 2 + (y - iy) ** 2) ** 0.5 <= ir:
+                            positions.append(f"{x}_{y}")
+                            break
+            return positions
+
+        # Pattern 48: Diagonal Stripes
+        def diagonal_stripes():
+            positions = []
+            stripe_width = max(2, min(cols, rows) // 4)
+            for x in range(cols):
+                for y in range(rows):
+                    if ((x + y) // stripe_width) % 2 == 0:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 49: Honeycomb
+        def honeycomb():
+            positions = []
+            cell_size = max(2, min(cols, rows) // 4)
+            for x in range(cols):
+                for y in range(rows):
+                    # Offset every other row
+                    offset = (cell_size // 2) if (y // cell_size) % 2 == 1 else 0
+                    cell_x = (x + offset) // cell_size
+                    cell_y = y // cell_size
+                    # Create hexagonal-ish cells
+                    local_x = (x + offset) % cell_size
+                    local_y = y % cell_size
+                    # Fill cells but leave small gaps
+                    if local_x > 0 and local_x < cell_size - 1 and local_y > 0 and local_y < cell_size - 1:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # ============ Build Pattern List ============
+
+        all_patterns = [
+            # Category 1: Basic Shapes (0-9)
+            ("filled_rectangle", filled_rectangle),       # 0
+            ("diamond_shape", diamond_shape),             # 1
+            ("oval_shape", oval_shape),                   # 2
+            ("cross_shape", cross_shape),                 # 3
+            ("donut_shape", donut_shape),                 # 4
+            ("concentric_diamond", concentric_diamond),   # 5
+            ("corner_anchored", corner_anchored),         # 6
+            ("hexagonal", hexagonal),                     # 7
+            ("heart_shape", heart_shape),                 # 8
+            ("t_shape", t_shape),                         # 9
+            # Category 2: Arrow/Direction (10-14)
+            ("arrow_up", arrow_up),                       # 10
+            ("arrow_down", arrow_down),                   # 11
+            ("arrow_left", arrow_left),                   # 12
+            ("arrow_right", arrow_right),                 # 13
+            ("chevron_pattern", chevron_pattern),         # 14
+            # Category 3: Star/Celestial (15-19)
+            ("star_five_point", star_five_point),         # 15
+            ("star_six_point", star_six_point),           # 16
+            ("crescent_moon", crescent_moon),             # 17
+            ("sun_burst", sun_burst),                     # 18
+            ("spiral", spiral),                           # 19
+            # Category 4: Letter Shapes (20-29)
+            ("letter_H", letter_H),                       # 20
+            ("letter_I", letter_I),                       # 21
+            ("letter_L", letter_L),                       # 22
+            ("letter_U", letter_U),                       # 23
+            ("letter_X", letter_X),                       # 24
+            ("letter_Y", letter_Y),                       # 25
+            ("letter_Z", letter_Z),                       # 26
+            ("letter_S", letter_S),                       # 27
+            ("letter_O", letter_O),                       # 28
+            ("letter_C", letter_C),                       # 29
+            # Category 5: Advanced Geometric (30-39)
+            ("triangle_up", triangle_up),                 # 30
+            ("triangle_down", triangle_down),             # 31
+            ("hourglass", hourglass),                     # 32
+            ("bowtie", bowtie),                           # 33
+            ("stairs_ascending", stairs_ascending),       # 34
+            ("stairs_descending", stairs_descending),     # 35
+            ("pyramid", pyramid),                         # 36
+            ("inverted_pyramid", inverted_pyramid),       # 37
+            ("zigzag_horizontal", zigzag_horizontal),     # 38
+            ("wave_pattern", wave_pattern),               # 39
+            # Category 6: Frame/Border (40-44)
+            ("frame_border", frame_border),               # 40
+            ("double_frame", double_frame),               # 41
+            ("corner_triangles", corner_triangles),       # 42
+            ("center_hollow", center_hollow),             # 43
+            ("window_panes", window_panes),               # 44
+            # Category 7: Artistic (45-49)
+            ("butterfly", butterfly),                     # 45
+            ("flower_pattern", flower_pattern),           # 46
+            ("scattered_islands", scattered_islands),     # 47
+            ("diagonal_stripes", diagonal_stripes),       # 48
+            ("honeycomb", honeycomb),                     # 49
+        ]
+
+        TOTAL_PATTERNS = 50
+
+        # If pattern_index is specified, use that specific pattern
+        if pattern_index is not None and 0 <= pattern_index < TOTAL_PATTERNS:
+            pattern_name, pattern_fn = all_patterns[pattern_index]
+            best_positions = pattern_fn()
+            if not best_positions:
+                # Fallback to filled rectangle if chosen pattern returns nothing
+                best_positions = filled_rectangle()
+        else:
+            # Auto-select: Score all patterns and pick best match for target_count
+            pattern_results = []
+            for pattern_name, pattern_fn in all_patterns:
+                try:
+                    positions = pattern_fn()
+                    if positions:
+                        # Score based on how close to target count
+                        score = -abs(len(positions) - target_count)
+                        # Penalize if too few positions
+                        if len(positions) < target_count * 0.7:
+                            score -= 1000
+                        # Bonus for visually interesting patterns
+                        if pattern_name in ["star_five_point", "heart_shape", "butterfly", "flower_pattern"]:
+                            score += 5
+                        pattern_results.append((score, positions, pattern_name))
+                except Exception:
+                    continue
+
+            if not pattern_results:
+                return filled_rectangle()[:target_count]
+
+            # Sort by score and pick best pattern
+            pattern_results.sort(key=lambda x: x[0], reverse=True)
+            _, best_positions, _ = pattern_results[0]
+
+        # If we have too many positions, trim from edges (maintain symmetry)
+        if len(best_positions) > target_count:
+            def dist_from_center(pos: str) -> float:
+                x, y = map(int, pos.split("_"))
+                return ((x - center_x + 0.5) ** 2 + (y - center_y + 0.5) ** 2) ** 0.5
+            best_positions.sort(key=dist_from_center)
+            best_positions = best_positions[:target_count]
+
+        return best_positions
 
     def _generate_random_positions(
         self, cols: int, rows: int, target_count: int, symmetry: str
@@ -1147,6 +2227,51 @@ class LevelGenerator:
                 result.add(f"{mirror_x}_{mirror_y}")
         return list(result)
 
+    def _apply_symmetry_to_positions(
+        self, cols: int, rows: int, positions: List[str], symmetry: str, target_count: int
+    ) -> List[str]:
+        """Apply symmetry transformation to a set of positions.
+
+        Takes existing positions and enforces the specified symmetry by:
+        1. Keeping positions in one half of the grid
+        2. Mirroring them to create perfect symmetry
+        """
+        if symmetry == "horizontal":
+            # Keep only left half, then mirror to right
+            center_x = cols / 2.0
+            base_positions = []
+            for pos in positions:
+                x, y = map(int, pos.split("_"))
+                if x < center_x or (cols % 2 == 1 and x == cols // 2):
+                    base_positions.append(pos)
+            return self._mirror_horizontal(cols, rows, base_positions, target_count)
+
+        elif symmetry == "vertical":
+            # Keep only top half, then mirror to bottom
+            center_y = rows / 2.0
+            base_positions = []
+            for pos in positions:
+                x, y = map(int, pos.split("_"))
+                if y < center_y or (rows % 2 == 1 and y == rows // 2):
+                    base_positions.append(pos)
+            return self._mirror_vertical(cols, rows, base_positions, target_count)
+
+        elif symmetry == "both":
+            # Keep only top-left quadrant, then mirror to all 4
+            center_x = cols / 2.0
+            center_y = rows / 2.0
+            base_positions = []
+            for pos in positions:
+                x, y = map(int, pos.split("_"))
+                in_x = x < center_x or (cols % 2 == 1 and x == cols // 2)
+                in_y = y < center_y or (rows % 2 == 1 and y == rows // 2)
+                if in_x and in_y:
+                    base_positions.append(pos)
+            return self._mirror_both(cols, rows, base_positions, target_count)
+
+        # No symmetry - return as-is
+        return positions
+
     def _generate_clustered_positions(
         self, cols: int, rows: int, target_count: int, symmetry: str
     ) -> List[str]:
@@ -1318,47 +2443,6 @@ class LevelGenerator:
         all_positions = [f"{x}_{y}" for x in range(cols) for y in range(rows)]
         return random.sample(all_positions, min(target_count, len(all_positions)))
 
-    def _apply_symmetry_to_positions(
-        self, cols: int, rows: int, positions: List[str], symmetry: str, target_count: int
-    ) -> List[str]:
-        """Apply symmetry transformation to existing positions."""
-        if symmetry == "horizontal":
-            result = set()
-            for pos in positions:
-                x, y = map(int, pos.split("_"))
-                result.add(pos)
-                mirror_x = cols - 1 - x
-                if 0 <= mirror_x < cols:
-                    result.add(f"{mirror_x}_{y}")
-            return list(result)[:target_count]
-
-        elif symmetry == "vertical":
-            result = set()
-            for pos in positions:
-                x, y = map(int, pos.split("_"))
-                result.add(pos)
-                mirror_y = rows - 1 - y
-                if 0 <= mirror_y < rows:
-                    result.add(f"{x}_{mirror_y}")
-            return list(result)[:target_count]
-
-        elif symmetry == "both":
-            result = set()
-            for pos in positions:
-                x, y = map(int, pos.split("_"))
-                result.add(f"{x}_{y}")
-                mirror_x = cols - 1 - x
-                mirror_y = rows - 1 - y
-                if 0 <= mirror_x < cols:
-                    result.add(f"{mirror_x}_{y}")
-                if 0 <= mirror_y < rows:
-                    result.add(f"{x}_{mirror_y}")
-                if 0 <= mirror_x < cols and 0 <= mirror_y < rows:
-                    result.add(f"{mirror_x}_{mirror_y}")
-            return list(result)[:target_count]
-
-        return positions[:target_count]
-
     def _is_position_covered_by_upper(
         self, level: Dict[str, Any], layer_idx: int, col: int, row: int
     ) -> bool:
@@ -1428,6 +2512,13 @@ class LevelGenerator:
         obstacle_types = params.obstacle_types if params.obstacle_types is not None else ["chain", "frog"]
         target = params.target_difficulty
 
+        # Get gimmick intensity multiplier (0.0 = no gimmicks, 1.0 = normal, 2.0 = double)
+        gimmick_intensity = getattr(params, 'gimmick_intensity', 1.0)
+
+        # If gimmick_intensity is 0, skip all obstacle generation
+        if gimmick_intensity <= 0:
+            return level
+
         # Calculate target obstacle counts based on difficulty
         num_layers = level.get("layer", 8)
         total_tiles = sum(
@@ -1448,16 +2539,18 @@ class LevelGenerator:
                 config = params.obstacle_counts[obstacle_type]
                 min_count = config.get("min", 0)
                 max_count = config.get("max", 10)
-                return random.randint(min_count, max_count)
-            # Legacy behavior: scale with difficulty
-            return int(total_tiles * target * default_ratio)
+                # Apply gimmick_intensity to configured counts
+                return int(random.randint(min_count, max_count) * gimmick_intensity)
+            # Legacy behavior: scale with difficulty AND gimmick_intensity
+            return int(total_tiles * target * default_ratio * gimmick_intensity)
 
         # Helper to get per-layer obstacle target
         def get_layer_target(layer_idx: int, obstacle_type: str) -> Optional[int]:
             config = params.get_layer_obstacle_config(layer_idx, obstacle_type)
             if config is not None:
                 min_count, max_count = config
-                return random.randint(min_count, max_count)
+                # Apply gimmick_intensity to per-layer configs
+                return int(random.randint(min_count, max_count) * gimmick_intensity)
             return None
 
         # All supported obstacle types
@@ -2909,6 +4002,11 @@ class LevelGenerator:
         """
         symmetry_mode = params.symmetry_mode if params else "none"
 
+        # Check gimmick_intensity - if 0, don't add obstacles, only add tiles
+        # For values between 0 and 1, use as probability multiplier
+        gimmick_intensity = getattr(params, 'gimmick_intensity', 1.0) if params else 1.0
+        obstacles_disabled = gimmick_intensity <= 0
+
         # Obstacle addition actions
         obstacle_actions = [
             self._add_chain_to_tile,
@@ -2916,40 +4014,78 @@ class LevelGenerator:
             self._add_ice_to_tile,
         ]
 
+        # Helper: check if we should add obstacles based on gimmick_intensity probability
+        def should_add_obstacle() -> bool:
+            if obstacles_disabled:
+                return False
+            if gimmick_intensity >= 1.0:
+                return True
+            # For values 0 < gimmick_intensity < 1, use as probability
+            return random.random() < gimmick_intensity
+
+        # For low gimmick_intensity (< 0.5), prefer adding tiles over obstacles
+        # This ensures early levels have minimal gimmicks
+        prefer_tiles_over_obstacles = gimmick_intensity < 0.5
+
         # D grade (target >= 0.8): Very aggressive - always add multiple obstacles
         if target_difficulty >= 0.8:
-            # Add 2-4 obstacles per iteration
-            num_obstacles = random.randint(2, 4)
-            for _ in range(num_obstacles):
-                action = random.choice(obstacle_actions)
-                level = action(level)
-            # Also try to add tiles to increase complexity
-            if symmetry_mode == "none":
-                level = self._add_tile_to_layer(level)
-            return level
+            if prefer_tiles_over_obstacles and not tiles_maxed_out:
+                # Low intensity: add tiles instead of obstacles
+                if symmetry_mode == "none":
+                    return self._add_tile_to_layer(level)
+            else:
+                # High intensity: add 2-4 obstacles per iteration
+                num_obstacles = random.randint(2, 4)
+                obstacles_added = 0
+                for _ in range(num_obstacles):
+                    if should_add_obstacle():
+                        action = random.choice(obstacle_actions)
+                        level = action(level)
+                        obstacles_added += 1
+                if symmetry_mode == "none":
+                    level = self._add_tile_to_layer(level)
+                if obstacles_added > 0:
+                    return level
 
         # C grade (target >= 0.6): Aggressive - primarily obstacles
         if target_difficulty >= 0.6:
-            # Add 1-3 obstacles per iteration
-            num_obstacles = random.randint(1, 3)
-            for _ in range(num_obstacles):
-                action = random.choice(obstacle_actions)
-                level = action(level)
-            return level
+            if prefer_tiles_over_obstacles and not tiles_maxed_out:
+                # Low intensity: add tiles instead of obstacles
+                if symmetry_mode == "none":
+                    return self._add_tile_to_layer(level)
+            else:
+                # High intensity: add 1-3 obstacles per iteration
+                num_obstacles = random.randint(1, 3)
+                obstacles_added = 0
+                for _ in range(num_obstacles):
+                    if should_add_obstacle():
+                        action = random.choice(obstacle_actions)
+                        level = action(level)
+                        obstacles_added += 1
+                if obstacles_added > 0:
+                    return level
 
         # B grade (target >= 0.4): Mixed strategy - 60% obstacles, 40% tiles
         if target_difficulty >= 0.4:
-            if random.random() < 0.6 or tiles_maxed_out:
-                # Add 1-2 obstacles
+            if prefer_tiles_over_obstacles:
+                # Low intensity: always prefer tiles
+                if symmetry_mode == "none" and not tiles_maxed_out:
+                    return self._add_tile_to_layer(level)
+            elif random.random() < 0.6 or tiles_maxed_out:
+                # High intensity: 60% obstacles, 40% tiles
                 num_obstacles = random.randint(1, 2)
+                obstacles_added = 0
                 for _ in range(num_obstacles):
-                    action = random.choice(obstacle_actions)
-                    level = action(level)
-                return level
+                    if should_add_obstacle():
+                        action = random.choice(obstacle_actions)
+                        level = action(level)
+                        obstacles_added += 1
+                if obstacles_added > 0:
+                    return level
             # Fall through to add tiles
 
-        # If tiles are maxed out, add obstacles to increase difficulty
-        if tiles_maxed_out:
+        # If tiles are maxed out, add obstacles to increase difficulty (only if obstacles enabled)
+        if tiles_maxed_out and should_add_obstacle():
             action = random.choice(obstacle_actions)
             return action(level)
 

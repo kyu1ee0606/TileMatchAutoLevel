@@ -558,17 +558,41 @@ class LevelGenerator:
             if params.active_layer_count is not None:
                 active_layer_count = min(params.active_layer_count, params.max_layers)
             else:
-                # Calculate layer count based on difficulty within min/max range
-                # Lower difficulty = fewer layers, higher difficulty = more layers
+                # Tile Buster style layer count based on difficulty:
+                # - S grade (0-0.2): 2-3 layers (tutorial, simple)
+                # - A grade (0.2-0.4): 3-4 layers (easy-medium)
+                # - B grade (0.4-0.6): 4-5 layers (medium)
+                # - C grade (0.6-0.8): 5-6 layers (hard)
+                # - D grade (0.8-1.0): 6-8 layers (very hard)
                 min_layers = max(1, params.min_layers)
                 max_layers = params.max_layers
+
+                # Tutorial mode: For very low difficulty (≤0.15), use 2-3 layers
+                is_tutorial_mode = target <= 0.15
+                if is_tutorial_mode:
+                    max_layers = min(max_layers, 3)
+                    min_layers = min(min_layers, 2)
+                elif target < 0.4:
+                    # A grade: 3-4 layers
+                    min_layers = max(min_layers, 3)
+                    max_layers = min(max_layers, 4)
+                elif target < 0.6:
+                    # B grade: 4-5 layers
+                    min_layers = max(min_layers, 4)
+                    max_layers = min(max_layers, 5)
+                elif target < 0.8:
+                    # C grade: 5-6 layers
+                    min_layers = max(min_layers, 5)
+                    max_layers = min(max_layers, 6)
+                else:
+                    # D grade: 6-8 layers (use full range)
+                    min_layers = max(min_layers, 6)
 
                 # Ensure min <= max
                 if min_layers > max_layers:
                     min_layers = max_layers
 
-                # Linear interpolation based on difficulty
-                # difficulty 0.0 → min_layers, difficulty 1.0 → max_layers
+                # Linear interpolation based on difficulty within grade range
                 layer_range = max_layers - min_layers
                 active_layer_count = min_layers + int(layer_range * target)
 
@@ -587,27 +611,54 @@ class LevelGenerator:
                 if total_target < 9:
                     total_target = 9
             else:
-                # Use a tile count range based on difficulty
-                # For low difficulty (S grade < 0.2), use fewer tiles to achieve target
-                # S grade: ~9-24 tiles, A grade: ~24-45 tiles, B+ grades: ~45-120 tiles
+                # Tile Buster style tile count ranges:
+                # - Early levels (tutorial): 30-45 tiles, simple layout
+                # - Mid levels: 45-60 tiles, moderate complexity
+                # - Late levels: 60-90 tiles, high complexity
+                #
+                # S grade (0-0.2): Tutorial style, 30-45 tiles
+                # A grade (0.2-0.4): Easy-medium, 45-60 tiles
+                # B grade (0.4-0.6): Medium, 54-72 tiles
+                # C grade (0.6-0.8): Hard, 66-84 tiles
+                # D grade (0.8-1.0): Very hard, 78-99 tiles
                 if target < 0.2:
-                    # S grade: very few tiles
-                    min_tiles = 9
-                    max_tiles = 24
-                elif target < 0.4:
-                    # A grade: moderate tiles
-                    min_tiles = 24
+                    # S grade: tutorial style
+                    min_tiles = 30
                     max_tiles = 45
-                else:
-                    # B, C, D grades: more tiles + obstacles
+                elif target < 0.4:
+                    # A grade: easy-medium
                     min_tiles = 45
-                    max_tiles = 120
+                    max_tiles = 60
+                elif target < 0.6:
+                    # B grade: medium
+                    min_tiles = 54
+                    max_tiles = 72
+                elif target < 0.8:
+                    # C grade: hard
+                    min_tiles = 66
+                    max_tiles = 84
+                else:
+                    # D grade: very hard
+                    min_tiles = 78
+                    max_tiles = 99
 
-                base_tiles = int(min_tiles + (max_tiles - min_tiles) * ((target - (0.2 if target < 0.4 else 0.4)) / 0.2 if target < 0.4 else (target - 0.4) / 0.6))
+                # Linear interpolation within the grade range
+                if target < 0.2:
+                    t = target / 0.2
+                elif target < 0.4:
+                    t = (target - 0.2) / 0.2
+                elif target < 0.6:
+                    t = (target - 0.4) / 0.2
+                elif target < 0.8:
+                    t = (target - 0.6) / 0.2
+                else:
+                    t = (target - 0.8) / 0.2
+
+                base_tiles = int(min_tiles + (max_tiles - min_tiles) * t)
                 base_tiles = max(min_tiles, min(max_tiles, base_tiles))
                 total_target = (base_tiles // 3) * 3
-                if total_target < 9:
-                    total_target = 9
+                if total_target < 30:
+                    total_target = 30
 
             # Build per-layer tile counts - distribute evenly
             layer_tile_counts = {}
@@ -771,9 +822,9 @@ class LevelGenerator:
         # Default to geometric pattern for more regular shapes
         pattern = pattern_type or "geometric"
 
-        # Always enforce single-axis symmetry: horizontal or vertical
-        # Convert "both", "none", or None to random single-axis choice
-        if symmetry_mode is None or symmetry_mode in ("none", "both"):
+        # Resolve symmetry mode: convert None or "none" to random single-axis
+        # "both" is now preserved to enable 4-way symmetry for aesthetic patterns
+        if symmetry_mode is None or symmetry_mode == "none":
             symmetry = random.choice(["horizontal", "vertical"])
         else:
             symmetry = symmetry_mode
@@ -2504,6 +2555,95 @@ class LevelGenerator:
 
         return False
 
+    def _add_tutorial_gimmick(
+        self, level: Dict[str, Any], gimmick_type: str, min_count: int = 2
+    ) -> Dict[str, Any]:
+        """
+        Add tutorial gimmick to the top layer for tutorial UI display.
+
+        Tutorial gimmicks are placed on the topmost layer with tiles to make them
+        immediately visible when the level starts, facilitating tutorial UI overlay.
+
+        Args:
+            level: Level data to modify
+            gimmick_type: Type of gimmick to add (e.g., 'chain', 'ice', 'frog')
+            min_count: Minimum number of gimmicks to place (default: 2)
+
+        Returns:
+            Modified level with tutorial gimmicks placed on top layer
+        """
+        num_layers = level.get("layer", 8)
+
+        # Find the topmost layer with tiles (higher layer index = visually on top)
+        # layer_7 (highest index) = TOP (displayed first, blocking layers below)
+        # layer_6, layer_5, etc. = layers below
+        # This matches the game's visual layer system where higher indices are rendered on top
+        top_layer_idx = -1
+        for i in range(num_layers - 1, -1, -1):  # num_layers-1 → ... → 0 (highest first)
+            layer_key = f"layer_{i}"
+            layer_tiles = level.get(layer_key, {}).get("tiles", {})
+            if layer_tiles:
+                top_layer_idx = i
+                break
+
+        if top_layer_idx < 0:
+            return level  # No tiles found
+
+        layer_key = f"layer_{top_layer_idx}"
+        layer_data = level.get(layer_key, {})
+        tiles = layer_data.get("tiles", {})
+
+        # Find eligible tiles (normal tiles without existing gimmicks)
+        eligible_positions = []
+        for pos, tile_data in tiles.items():
+            if not isinstance(tile_data, list) or len(tile_data) == 0:
+                continue
+            tile_type = tile_data[0]
+            # Skip goal tiles (craft_*, stack_*)
+            if isinstance(tile_type, str) and (tile_type.startswith("craft_") or tile_type.startswith("stack_")):
+                continue
+            # Skip tiles with existing gimmicks
+            gimmick = tile_data[1] if len(tile_data) > 1 else ""
+            if gimmick:
+                continue
+            eligible_positions.append(pos)
+
+        if not eligible_positions:
+            return level  # No eligible positions
+
+        # Place gimmicks on top layer
+        positions_to_use = min(min_count, len(eligible_positions))
+        random.shuffle(eligible_positions)
+
+        # Map gimmick types to their attribute format
+        GIMMICK_ATTRIBUTES = {
+            "chain": "chain",
+            "ice": "ice",
+            "frog": "frog",
+            "grass": "grass",
+            "bomb": "bomb",
+            "curtain": "curtain",
+            "crate": "crate",
+            "link": "link_e",  # Default to east direction for link
+            "teleport": "teleport",
+        }
+
+        gimmick_attr = GIMMICK_ATTRIBUTES.get(gimmick_type, gimmick_type)
+
+        placed_count = 0
+        for pos in eligible_positions[:positions_to_use]:
+            tile_data = tiles[pos]
+            if len(tile_data) == 1:
+                tile_data.append(gimmick_attr)
+            else:
+                tile_data[1] = gimmick_attr
+            placed_count += 1
+            logger.debug(f"Tutorial gimmick '{gimmick_attr}' placed at layer {top_layer_idx}, pos {pos}")
+
+        logger.info(f"Tutorial gimmick '{gimmick_type}' placed: {placed_count} tiles on layer {top_layer_idx}")
+
+        return level
+
     def _add_obstacles(
         self, level: Dict[str, Any], params: GenerationParams
     ) -> Dict[str, Any]:
@@ -2515,7 +2655,16 @@ class LevelGenerator:
         # Get gimmick intensity multiplier (0.0 = no gimmicks, 1.0 = normal, 2.0 = double)
         gimmick_intensity = getattr(params, 'gimmick_intensity', 1.0)
 
-        # If gimmick_intensity is 0, skip all obstacle generation
+        # If gimmick_intensity is 0, skip all obstacle generation (except tutorial gimmick)
+        tutorial_gimmick = getattr(params, 'tutorial_gimmick', None)
+        tutorial_gimmick_min_count = getattr(params, 'tutorial_gimmick_min_count', 2)
+
+        # Handle tutorial gimmick first (always placed on top layer for tutorial UI)
+        logger.info(f"[_add_obstacles] tutorial_gimmick={tutorial_gimmick}, min_count={tutorial_gimmick_min_count}")
+        if tutorial_gimmick:
+            logger.info(f"[_add_obstacles] Calling _add_tutorial_gimmick with gimmick_type={tutorial_gimmick}")
+            level = self._add_tutorial_gimmick(level, tutorial_gimmick, tutorial_gimmick_min_count)
+
         if gimmick_intensity <= 0:
             return level
 
@@ -2570,16 +2719,27 @@ class LevelGenerator:
 
         # Get global targets (use configured values or calculate from difficulty)
         # These are only used when per-layer configs are NOT provided
+        #
+        # Tile Buster style gimmick distribution:
+        # - Gimmicks should be conservative, typically 10-20% of tiles at max difficulty
+        # - S grade (0-0.2): ~0% gimmicks
+        # - A grade (0.2-0.4): ~3-5% total gimmicks
+        # - B grade (0.4-0.6): ~5-8% total gimmicks
+        # - C grade (0.6-0.8): ~8-12% total gimmicks
+        # - D grade (0.8-1.0): ~12-15% total gimmicks
+        #
+        # Reduced ratios to match Tile Buster style (was: chain=0.15, frog=0.08, ice=0.12)
+        # Target: ~10-15% total gimmicks at max difficulty
         global_targets = {
-            "chain": get_global_target("chain", 0.15),
-            "frog": get_global_target("frog", 0.08),
-            "link": get_global_target("link", 0.05),
-            "grass": get_global_target("grass", 0.10),
-            "ice": get_global_target("ice", 0.12),
-            "bomb": get_global_target("bomb", 0.05),
-            "curtain": get_global_target("curtain", 0.08),
-            "teleport": get_global_target("teleport", 0.04),
-            "crate": get_global_target("crate", 0.06),
+            "chain": get_global_target("chain", 0.04),
+            "frog": get_global_target("frog", 0.02),
+            "link": get_global_target("link", 0.02),
+            "grass": get_global_target("grass", 0.03),
+            "ice": get_global_target("ice", 0.03),
+            "bomb": get_global_target("bomb", 0.01),
+            "curtain": get_global_target("curtain", 0.02),
+            "teleport": get_global_target("teleport", 0.01),
+            "crate": get_global_target("crate", 0.02),
         }
 
         # Distribute remaining to unconfigured layers
@@ -4005,14 +4165,23 @@ class LevelGenerator:
         # Check gimmick_intensity - if 0, don't add obstacles, only add tiles
         # For values between 0 and 1, use as probability multiplier
         gimmick_intensity = getattr(params, 'gimmick_intensity', 1.0) if params else 1.0
-        obstacles_disabled = gimmick_intensity <= 0
 
-        # Obstacle addition actions
-        obstacle_actions = [
-            self._add_chain_to_tile,
-            self._add_frog_to_tile,
-            self._add_ice_to_tile,
-        ]
+        # Also check obstacle_types - if empty list, no obstacles should be added
+        # This respects the gimmick unlock system where certain levels have no unlocked gimmicks
+        obstacle_types = getattr(params, 'obstacle_types', None) if params else None
+        obstacles_disabled = gimmick_intensity <= 0 or (obstacle_types is not None and len(obstacle_types) == 0)
+
+        # Obstacle addition actions - filter by allowed obstacle types
+        all_obstacle_actions = {
+            "chain": self._add_chain_to_tile,
+            "frog": self._add_frog_to_tile,
+            "ice": self._add_ice_to_tile,
+        }
+        # If obstacle_types is specified, only allow those actions
+        if obstacle_types is not None and len(obstacle_types) > 0:
+            obstacle_actions = [all_obstacle_actions[t] for t in obstacle_types if t in all_obstacle_actions]
+        else:
+            obstacle_actions = list(all_obstacle_actions.values())
 
         # Helper: check if we should add obstacles based on gimmick_intensity probability
         def should_add_obstacle() -> bool:
@@ -4027,65 +4196,57 @@ class LevelGenerator:
         # This ensures early levels have minimal gimmicks
         prefer_tiles_over_obstacles = gimmick_intensity < 0.5
 
-        # D grade (target >= 0.8): Very aggressive - always add multiple obstacles
+        # Tile Buster style: Very conservative gimmick addition
+        # - Primary difficulty comes from tiles and layers, not obstacles
+        # - Obstacles are added very sparingly (10-20% chance)
+        # - Skip obstacle addition if already at target gimmick percentage
+
+        # Count current gimmicks to cap at ~15% of total tiles
+        total_tiles = 0
+        total_gimmicks = 0
+        for layer_idx in range(8):
+            layer_key = f"layer_{layer_idx}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            total_tiles += len(tiles)
+            for tile_data in tiles.values():
+                if len(tile_data) > 1 and tile_data[1]:
+                    total_gimmicks += 1
+
+        # Cap gimmicks at 15% of total tiles
+        max_gimmicks = int(total_tiles * 0.15)
+        gimmicks_capped = total_gimmicks >= max_gimmicks
+
+        # D grade (target >= 0.8): Add 1 obstacle with 15% chance
         if target_difficulty >= 0.8:
             if prefer_tiles_over_obstacles and not tiles_maxed_out:
-                # Low intensity: add tiles instead of obstacles
                 if symmetry_mode == "none":
                     return self._add_tile_to_layer(level)
-            else:
-                # High intensity: add 2-4 obstacles per iteration
-                num_obstacles = random.randint(2, 4)
-                obstacles_added = 0
-                for _ in range(num_obstacles):
-                    if should_add_obstacle():
-                        action = random.choice(obstacle_actions)
-                        level = action(level)
-                        obstacles_added += 1
-                if symmetry_mode == "none":
-                    level = self._add_tile_to_layer(level)
-                if obstacles_added > 0:
-                    return level
+            elif not gimmicks_capped and random.random() < 0.15 and should_add_obstacle():
+                action = random.choice(obstacle_actions)
+                return action(level)
+            if symmetry_mode == "none" and not tiles_maxed_out:
+                return self._add_tile_to_layer(level)
 
-        # C grade (target >= 0.6): Aggressive - primarily obstacles
+        # C grade (target >= 0.6): Add 1 obstacle with 10% chance
         if target_difficulty >= 0.6:
             if prefer_tiles_over_obstacles and not tiles_maxed_out:
-                # Low intensity: add tiles instead of obstacles
                 if symmetry_mode == "none":
                     return self._add_tile_to_layer(level)
-            else:
-                # High intensity: add 1-3 obstacles per iteration
-                num_obstacles = random.randint(1, 3)
-                obstacles_added = 0
-                for _ in range(num_obstacles):
-                    if should_add_obstacle():
-                        action = random.choice(obstacle_actions)
-                        level = action(level)
-                        obstacles_added += 1
-                if obstacles_added > 0:
-                    return level
+            elif not gimmicks_capped and random.random() < 0.10 and should_add_obstacle():
+                action = random.choice(obstacle_actions)
+                return action(level)
 
-        # B grade (target >= 0.4): Mixed strategy - 60% obstacles, 40% tiles
+        # B grade (target >= 0.4): Add 1 obstacle with 5% chance
         if target_difficulty >= 0.4:
             if prefer_tiles_over_obstacles:
-                # Low intensity: always prefer tiles
                 if symmetry_mode == "none" and not tiles_maxed_out:
                     return self._add_tile_to_layer(level)
-            elif random.random() < 0.6 or tiles_maxed_out:
-                # High intensity: 60% obstacles, 40% tiles
-                num_obstacles = random.randint(1, 2)
-                obstacles_added = 0
-                for _ in range(num_obstacles):
-                    if should_add_obstacle():
-                        action = random.choice(obstacle_actions)
-                        level = action(level)
-                        obstacles_added += 1
-                if obstacles_added > 0:
-                    return level
-            # Fall through to add tiles
+            elif not gimmicks_capped and random.random() < 0.05 and should_add_obstacle():
+                action = random.choice(obstacle_actions)
+                return action(level)
 
-        # If tiles are maxed out, add obstacles to increase difficulty (only if obstacles enabled)
-        if tiles_maxed_out and should_add_obstacle():
+        # If tiles are maxed out, add obstacles sparingly (20% chance, if not capped)
+        if tiles_maxed_out and not gimmicks_capped and random.random() < 0.2 and should_add_obstacle():
             action = random.choice(obstacle_actions)
             return action(level)
 

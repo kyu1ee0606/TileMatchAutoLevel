@@ -1,0 +1,52 @@
+{
+  "id": "set_20260109_122203_552",
+  "name": "폴더테스트 8",
+  "created_at": "2026-01-09T12:22:03.351870",
+  "level_count": 5,
+  "difficulty_profile": [
+    0.55,
+    0.7000000000000001,
+    0.8500000000000001,
+    0.9,
+    0.95
+  ],
+  "actual_difficulties": [
+    0.5455833333333334,
+    0.6425833333333334,
+    0.6099166666666667,
+    0.51725,
+    0.40108333333333335
+  ],
+  "grades": [
+    "B",
+    "C",
+    "C",
+    "B",
+    "B"
+  ],
+  "generation_config": {
+    "grid_size": [
+      7,
+      7
+    ],
+    "min_layers": 3,
+    "max_layers": 7,
+    "tile_types": [
+      "t0",
+      "t2",
+      "t4",
+      "t5",
+      "t6"
+    ],
+    "obstacle_types": [],
+    "goals": [
+      {
+        "type": "craft",
+        "direction": "s",
+        "count": 3
+      }
+    ],
+    "symmetry_mode": "both",
+    "pattern_type": "aesthetic"
+  }
+}

@@ -1,8 +1,11 @@
 """Level generation API routes."""
 import time
+import logging
 from fastapi import APIRouter, Depends, HTTPException
 from typing import Dict, List, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+logger = logging.getLogger(__name__)
 
 from ...models.schemas import (
     GenerateRequest,
@@ -29,12 +32,138 @@ import random
 
 def resolve_symmetry_mode(symmetry_mode: str | None) -> str:
     """
-    Resolve symmetry mode to ensure single-axis symmetry.
-    Converts None, "none", or "both" to random "horizontal" or "vertical".
+    Resolve symmetry mode.
+    Converts None or "none" to random "horizontal" or "vertical".
+    "both" is now passed through to enable 4-way symmetry for aesthetic patterns.
     """
-    if symmetry_mode is None or symmetry_mode in ("none", "both"):
+    if symmetry_mode is None or symmetry_mode == "none":
         return random.choice(["horizontal", "vertical"])
     return symmetry_mode
+
+
+# Default gimmick unlock levels (5-stage intervals)
+# All 11 gimmicks unlock by level 55
+DEFAULT_GIMMICK_UNLOCK_LEVELS = {
+    "chain": 5,
+    "frog": 10,
+    "ice": 15,
+    "link": 20,
+    "grass": 25,
+    "bomb": 30,
+    "curtain": 35,
+    "teleport": 40,
+    "crate": 45,
+    "craft": 50,
+    "stack": 55,
+}
+
+
+def filter_obstacles_by_unlock_level(
+    obstacle_types: List[str] | None,
+    level_number: int | None,
+    unlock_levels: Dict[str, int] | None
+) -> List[str] | None:
+    """
+    Filter obstacle types based on unlock levels.
+    Only returns obstacles that have been unlocked at the current level.
+
+    Args:
+        obstacle_types: List of requested obstacle types
+        level_number: Current level number (1-based)
+        unlock_levels: Dict mapping gimmick names to unlock level numbers
+
+    Returns:
+        Filtered list of unlocked obstacles, or None if no obstacles
+    """
+    if obstacle_types is None or level_number is None:
+        return obstacle_types
+
+    # Use default unlock levels if not provided
+    actual_unlock_levels = unlock_levels or DEFAULT_GIMMICK_UNLOCK_LEVELS
+
+    # Filter to only include unlocked gimmicks
+    unlocked = [
+        obs for obs in obstacle_types
+        if actual_unlock_levels.get(obs, 0) <= level_number
+    ]
+
+    return unlocked if unlocked else None
+
+
+def filter_goals_by_unlock_level(
+    goals: List[Dict] | None,
+    level_number: int | None,
+    unlock_levels: Dict[str, int] | None
+) -> List[Dict] | None:
+    """
+    Filter goals based on unlock levels.
+    craft_* goals require "craft" to be unlocked, stack_* goals require "stack".
+
+    Args:
+        goals: List of goal configurations (e.g., [{"type": "craft_s", "count": 3}])
+        level_number: Current level number (1-based)
+        unlock_levels: Dict mapping gimmick names to unlock level numbers
+
+    Returns:
+        Filtered list of unlocked goals, or empty list if no goals are unlocked
+    """
+    if level_number is None:
+        return goals
+
+    # Use default unlock levels if not provided
+    actual_unlock_levels = unlock_levels or DEFAULT_GIMMICK_UNLOCK_LEVELS
+
+    # If goals is None, check if craft/stack are unlocked
+    # and return appropriate default or empty list
+    if goals is None:
+        craft_unlock = actual_unlock_levels.get("craft", 50)
+        if level_number >= craft_unlock:
+            # craft is unlocked, use default craft_s goal
+            return None  # Let generator use its default
+        else:
+            # craft is not unlocked, use empty goals
+            return []
+
+    # Filter goals based on unlock levels
+    filtered = []
+    for goal in goals:
+        goal_type = goal.get("type", "craft")
+        # Extract base type (craft or stack) from goal type
+        if goal_type.startswith("craft"):
+            base_type = "craft"
+        elif goal_type.startswith("stack"):
+            base_type = "stack"
+        else:
+            base_type = goal_type
+
+        unlock_level = actual_unlock_levels.get(base_type, 0)
+        if level_number >= unlock_level:
+            filtered.append(goal)
+
+    return filtered if filtered else []
+
+
+def get_tutorial_gimmick(
+    level_number: int | None,
+    unlock_levels: Dict[str, int] | None
+) -> str | None:
+    """
+    Check if this level is a tutorial level (first level where a gimmick unlocks).
+    Returns the gimmick name if this is a tutorial level, None otherwise.
+
+    Tutorial levels should feature the new gimmick prominently with easier settings.
+    """
+    if level_number is None:
+        return None
+
+    actual_unlock_levels = unlock_levels or DEFAULT_GIMMICK_UNLOCK_LEVELS
+
+    # Check if any gimmick unlocks at exactly this level
+    for gimmick, unlock_level in actual_unlock_levels.items():
+        if unlock_level == level_number:
+            return gimmick
+
+    return None
 
 
 # Base bot target clear rates (for target_difficulty=0.5)
@@ -305,26 +434,108 @@ async def generate_level(
                 for c in request.layer_obstacle_configs
             ]
 
+        # Check if this is a tutorial level (new gimmick introduction)
+        tutorial_gimmick = get_tutorial_gimmick(
+            request.level_number,
+            request.gimmick_unlock_levels
+        )
+
+        # Debug logging for tutorial gimmick
+        logger.info(f"[TUTORIAL_GIMMICK] level_number={request.level_number}, "
+                   f"unlock_levels={request.gimmick_unlock_levels}, "
+                   f"tutorial_gimmick={tutorial_gimmick}")
+
+        # Tutorial level settings: easier difficulty, only the new gimmick
+        target_difficulty = request.target_difficulty
+        if tutorial_gimmick and request.auto_select_gimmicks:
+            # Tutorial levels are easier (reduce difficulty by 30%)
+            target_difficulty = max(0.2, request.target_difficulty * 0.7)
+
         # Handle auto gimmick selection
         obstacle_types = request.obstacle_types
         if request.auto_select_gimmicks and request.available_gimmicks:
-            # Auto-select gimmicks based on target difficulty
-            auto_selected = select_gimmicks_for_difficulty(
-                request.target_difficulty,
-                request.available_gimmicks
+            # First, filter available gimmicks by unlock level BEFORE auto-selection
+            # This ensures locked gimmicks are never considered for selection
+            available_pool = list(request.available_gimmicks)
+            if request.level_number is not None:
+                unlock_levels = request.gimmick_unlock_levels or DEFAULT_GIMMICK_UNLOCK_LEVELS
+                available_pool = [
+                    g for g in available_pool
+                    if unlock_levels.get(g, 0) <= request.level_number
+                ]
+
+            # Tutorial level: only use the new gimmick for clear showcase
+            if tutorial_gimmick and tutorial_gimmick in available_pool:
+                obstacle_types = [tutorial_gimmick]
+            elif available_pool:
+                # Auto-select gimmicks from UNLOCKED pool based on target difficulty
+                auto_selected = select_gimmicks_for_difficulty(
+                    target_difficulty,
+                    available_pool
+                )
+
+                # When gimmick unlock system is enabled, ensure unlocked gimmicks can appear
+                # even if difficulty profile returns empty (e.g., S grade levels)
+                # This reinforces learning by using recently unlocked gimmicks
+                if not auto_selected and request.gimmick_unlock_levels and available_pool:
+                    # For levels after gimmick unlock, randomly select 1-2 unlocked gimmicks
+                    # This ensures unlocked gimmicks appear in subsequent stages
+                    num_to_select = min(len(available_pool), random.randint(1, 2))
+                    auto_selected = random.sample(available_pool, num_to_select)
+                    logger.info(f"[GIMMICK_UNLOCK] Level {request.level_number}: "
+                               f"Difficulty profile returned empty, fallback to unlocked gimmicks: {auto_selected}")
+
+                # Use empty list (not None) when no gimmicks selected, to avoid GenerationParams defaults
+                obstacle_types = auto_selected if auto_selected else []
+            else:
+                # Use empty list to explicitly indicate no obstacles (None would trigger defaults)
+                obstacle_types = []
+        elif request.auto_select_gimmicks and request.gimmick_unlock_levels:
+            # Gimmick unlock mode WITHOUT available_gimmicks pool
+            if tutorial_gimmick:
+                # Tutorial level: ONLY use the new gimmick for clear showcase
+                obstacle_types = [tutorial_gimmick]
+                logger.info(f"[TUTORIAL_GIMMICK] Tutorial level with gimmick unlock only: "
+                           f"setting obstacle_types=[{tutorial_gimmick}]")
+            else:
+                # Non-tutorial level in gimmick unlock mode: filter by unlock level
+                # If no obstacles manually selected, use empty list (no gimmicks)
+                if obstacle_types:
+                    obstacle_types = filter_obstacles_by_unlock_level(
+                        obstacle_types,
+                        request.level_number,
+                        request.gimmick_unlock_levels
+                    ) or []
+                else:
+                    # No manual selection + no tutorial = no gimmicks
+                    obstacle_types = []
+                logger.info(f"[GIMMICK_UNLOCK] Non-tutorial level {request.level_number}: "
+                           f"obstacle_types={obstacle_types}")
+        else:
+            # For non-auto mode, apply gimmick unlock filter to manual selection
+            obstacle_types = filter_obstacles_by_unlock_level(
+                obstacle_types,
+                request.level_number,
+                request.gimmick_unlock_levels
             )
-            obstacle_types = auto_selected if auto_selected else None
 
         # Resolve symmetry mode: convert "both"/"none"/None to random "horizontal" or "vertical"
         actual_symmetry = resolve_symmetry_mode(request.symmetry_mode)
 
+        # Filter goals by unlock level (craft/stack goals only available after unlock)
+        filtered_goals = filter_goals_by_unlock_level(
+            goals,
+            request.level_number,
+            request.gimmick_unlock_levels
+        )
+
         params = GenerationParams(
-            target_difficulty=request.target_difficulty,
+            target_difficulty=target_difficulty,  # Use adjusted difficulty for tutorial levels
             grid_size=tuple(request.grid_size),
             max_layers=request.max_layers,
             tile_types=request.tile_types,
             obstacle_types=obstacle_types,
-            goals=goals,
+            goals=filtered_goals,
             obstacle_counts=obstacle_counts,
             total_tile_count=request.total_tile_count,
             active_layer_count=request.active_layer_count,
@@ -334,12 +545,18 @@ async def generate_level(
             pattern_type=request.pattern_type,
             pattern_index=request.pattern_index,
             gimmick_intensity=request.gimmick_intensity,
+            # Tutorial gimmick: place on top layer for tutorial UI
+            tutorial_gimmick=tutorial_gimmick,
+            tutorial_gimmick_min_count=3,  # Ensure at least 3 tutorial gimmicks are visible
         )
 
         result = generator.generate(params)
 
         # Store target_difficulty and generation config in level_json for verification
-        result.level_json["target_difficulty"] = request.target_difficulty
+        result.level_json["target_difficulty"] = target_difficulty
+        # Mark tutorial levels with the gimmick being introduced
+        if tutorial_gimmick:
+            result.level_json["tutorial_gimmick"] = tutorial_gimmick
         # Store actual symmetry mode used (not request value)
         result.level_json["symmetry_mode"] = actual_symmetry
         if request.pattern_type:
@@ -449,6 +666,13 @@ async def generate_validated_level(
             for g in request.goals
         ]
 
+    # Filter goals by unlock level (craft/stack goals only available after unlock)
+    goals = filter_goals_by_unlock_level(
+        goals,
+        request.level_number,
+        request.gimmick_unlock_levels
+    )
+
     best_result = None
     best_match_score = -1
     best_actual_rates = {}
@@ -505,23 +729,72 @@ async def generate_validated_level(
     current_tile_type_count = len(current_tile_types)
 
     # Initial obstacle types from request (or auto-select based on difficulty)
-    available_obstacles = ["chain", "frog", "ice", "grass", "bomb", "curtain"]
+    available_obstacles = ["chain", "frog", "ice", "grass", "bomb", "curtain", "teleport", "crate", "craft", "stack"]
+
+    # Check if this is a tutorial level (new gimmick introduction)
+    tutorial_gimmick = get_tutorial_gimmick(
+        request.level_number,
+        request.gimmick_unlock_levels
+    )
+
+    # Tutorial level settings: adjust difficulty for easier learning
+    effective_difficulty = request.target_difficulty
+    if tutorial_gimmick and request.auto_select_gimmicks:
+        # Tutorial levels are easier (reduce difficulty by 30%)
+        effective_difficulty = max(0.2, request.target_difficulty * 0.7)
 
     # AUTO GIMMICK SELECTION: If enabled, select gimmicks based on difficulty
     if request.auto_select_gimmicks and request.available_gimmicks:
-        # Use gimmick profile system to select appropriate gimmicks
-        auto_selected_gimmicks = select_gimmicks_for_difficulty(
-            request.target_difficulty,
-            request.available_gimmicks
-        )
-        base_obstacle_types = auto_selected_gimmicks
+        # First, filter available gimmicks by unlock level BEFORE auto-selection
+        available_pool = list(request.available_gimmicks)
+        if request.level_number is not None:
+            unlock_levels = request.gimmick_unlock_levels or DEFAULT_GIMMICK_UNLOCK_LEVELS
+            available_pool = [
+                g for g in available_pool
+                if unlock_levels.get(g, 0) <= request.level_number
+            ]
+
+        # Tutorial level: only use the new gimmick for clear showcase
+        if tutorial_gimmick and tutorial_gimmick in available_pool:
+            base_obstacle_types = [tutorial_gimmick]
+        elif available_pool:
+            # Auto-select gimmicks from UNLOCKED pool based on effective difficulty
+            auto_selected_gimmicks = select_gimmicks_for_difficulty(
+                effective_difficulty,
+                available_pool
+            )
+
+            # When gimmick unlock system is enabled, ensure unlocked gimmicks can appear
+            # even if difficulty profile returns empty (e.g., S grade levels)
+            # This reinforces learning by using recently unlocked gimmicks
+            if not auto_selected_gimmicks and request.gimmick_unlock_levels and available_pool:
+                # For levels after gimmick unlock, randomly select 1-2 unlocked gimmicks
+                # This ensures unlocked gimmicks appear in subsequent stages
+                num_to_select = min(len(available_pool), random.randint(1, 2))
+                auto_selected_gimmicks = random.sample(available_pool, num_to_select)
+                logger.info(f"[GIMMICK_UNLOCK] Validated Level {request.level_number}: "
+                           f"Difficulty profile returned empty, fallback to unlocked gimmicks: {auto_selected_gimmicks}")
+
+            base_obstacle_types = auto_selected_gimmicks if auto_selected_gimmicks else []
+        else:
+            base_obstacle_types = []
     elif request.obstacle_types:
-        # Use explicitly specified obstacles
-        base_obstacle_types = list(request.obstacle_types)
+        # Use explicitly specified obstacles - apply unlock filter
+        filtered_obstacles = filter_obstacles_by_unlock_level(
+            list(request.obstacle_types),
+            request.level_number,
+            request.gimmick_unlock_levels
+        )
+        base_obstacle_types = list(filtered_obstacles) if filtered_obstacles else []
     elif request.target_difficulty >= 0.7:
-        # Default: add some obstacles for high difficulty
+        # Default: add some obstacles for high difficulty - apply unlock filter
         default_obstacles = ["chain", "frog"]
-        base_obstacle_types = default_obstacles
+        filtered_obstacles = filter_obstacles_by_unlock_level(
+            default_obstacles,
+            request.level_number,
+            request.gimmick_unlock_levels
+        )
+        base_obstacle_types = list(filtered_obstacles) if filtered_obstacles else []
     else:
         base_obstacle_types = []
 
@@ -573,12 +846,15 @@ async def generate_validated_level(
                 grid_size=tuple(current_grid_size),
                 max_layers=current_max_layers,
                 tile_types=current_tile_types,
-                obstacle_types=current_obstacle_types if current_obstacle_types else None,
+                obstacle_types=current_obstacle_types,  # Pass empty list explicitly (not None)
                 goals=goals,
                 symmetry_mode=actual_symmetry,
                 pattern_type=request.pattern_type,
                 pattern_index=request.pattern_index,
                 gimmick_intensity=request.gimmick_intensity,
+                # Tutorial gimmick: place on top layer for tutorial UI
+                tutorial_gimmick=tutorial_gimmick,
+                tutorial_gimmick_min_count=3,  # Ensure at least 3 tutorial gimmicks are visible
             )
 
             result = generator.generate(params)
@@ -595,7 +871,10 @@ async def generate_validated_level(
             ratio_based_moves = max(total_tiles, int(total_tiles * moves_ratio * max_moves_modifier))
             modified_max_moves = max(total_tiles, min(original_max_moves, ratio_based_moves))
             level_json["max_moves"] = modified_max_moves
-            level_json["target_difficulty"] = request.target_difficulty  # Store for verification
+            level_json["target_difficulty"] = effective_difficulty  # Store actual difficulty used
+            # Mark tutorial levels with the gimmick being introduced
+            if tutorial_gimmick:
+                level_json["tutorial_gimmick"] = tutorial_gimmick
             # Store actual symmetry mode used (not request value)
             level_json["symmetry_mode"] = actual_symmetry
             if request.pattern_type:
@@ -634,7 +913,10 @@ async def generate_validated_level(
                 best_match_score = match_score
                 best_result = result
                 best_result.level_json["max_moves"] = modified_max_moves  # Store modified max_moves
-                best_result.level_json["target_difficulty"] = request.target_difficulty  # Store for verification
+                best_result.level_json["target_difficulty"] = effective_difficulty  # Store actual difficulty used
+                # Mark tutorial levels with the gimmick being introduced
+                if tutorial_gimmick:
+                    best_result.level_json["tutorial_gimmick"] = tutorial_gimmick
                 # Store actual symmetry mode used (not request value)
                 best_result.level_json["symmetry_mode"] = actual_symmetry
                 if request.pattern_type:
@@ -716,12 +998,15 @@ async def generate_validated_level(
                     reduction = 0.02 * (1 + gap_factor)
                     moves_ratio = max(1.02, moves_ratio - reduction)
 
-                # Strategy 3: Add obstacles for complexity
+                # Strategy 3: Add obstacles for complexity (respecting unlock levels)
                 if request.target_difficulty >= 0.6 and avg_gap > 15:
+                    unlock_levels = request.gimmick_unlock_levels or DEFAULT_GIMMICK_UNLOCK_LEVELS
                     for obs in ["chain", "frog", "ice"]:
-                        if obs not in current_obstacle_types and len(current_obstacle_types) < 3:
-                            current_obstacle_types.append(obs)
-                            break
+                        # Only add if obstacle is unlocked at current level
+                        if request.level_number is None or unlock_levels.get(obs, 0) <= request.level_number:
+                            if obs not in current_obstacle_types and len(current_obstacle_types) < 3:
+                                current_obstacle_types.append(obs)
+                                break
 
                 # Strategy 4: Increase internal difficulty
                 difficulty_offset += 0.15 * (1 + gap_factor)

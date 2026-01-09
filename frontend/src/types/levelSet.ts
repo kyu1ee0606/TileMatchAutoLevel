@@ -93,6 +93,30 @@ export interface MultiSetProgressState {
 }
 
 /**
+ * 기믹 언락 레벨 설정
+ * key: 기믹 이름, value: 언락되는 레벨 번호
+ */
+export type GimmickUnlockLevels = Record<string, number>;
+
+/**
+ * 기본 기믹 언락 레벨 (5단위)
+ * 11개 기믹이 55레벨에 모두 언락됨
+ */
+export const DEFAULT_GIMMICK_UNLOCK_LEVELS: GimmickUnlockLevels = {
+  chain: 5,
+  frog: 10,
+  ice: 15,
+  link: 20,
+  grass: 25,
+  bomb: 30,
+  curtain: 35,
+  teleport: 40,
+  crate: 45,
+  craft: 50,
+  stack: 55,
+};
+
+/**
  * 레벨 세트 생성 설정
  */
 export interface LevelSetGenerationConfig {
@@ -106,6 +130,9 @@ export interface LevelSetGenerationConfig {
   levelGimmickOverrides?: LevelGimmickOverride[];  // 하이브리드 모드: 레벨별 기믹 오버라이드
   // 다중 세트 생성 관련
   multiSetConfig?: MultiSetConfig;
+  // 기믹 언락 시스템 (레벨 번호 기반)
+  gimmickUnlockLevels?: GimmickUnlockLevels;  // 각 기믹의 언락 레벨 (미설정 시 기본값 사용)
+  useGimmickUnlock?: boolean;  // 기믹 언락 시스템 사용 여부
 }
 
 /**

@@ -13,6 +13,7 @@ import {
   getGradeFromDifficulty,
   shiftDifficultyPoints,
   createDefaultMultiSetConfig,
+  DEFAULT_GIMMICK_UNLOCK_LEVELS,
   type DifficultyPoint,
   type LevelSetGenerationConfig,
   type GenerationProgressState,
@@ -161,8 +162,14 @@ export function LevelSetGenerator({ onLevelSetCreated }: LevelSetGeneratorProps)
         const totalLevels = totalGlobalLevels ?? config.levelCount;
         const gimmickIntensity = calculateGimmickIntensity(globalLevelIndex, totalLevels);
 
+        // Auto-add default goal if none specified (backend requires at least one goal)
+        const effectiveGoals = (config.baseParams.goals && config.baseParams.goals.length > 0)
+          ? config.baseParams.goals
+          : [{ type: 'craft', direction: 's', count: 3 }];
+
         const baseParams: GenerationParams = {
           ...config.baseParams,
+          goals: effectiveGoals,
           target_difficulty: plan.targetDifficulty,
           // Use different pattern for each set when using aesthetic pattern
           // setIndex % 50 cycles through all 50 patterns (0-49)
@@ -195,35 +202,108 @@ export function LevelSetGenerator({ onLevelSetCreated }: LevelSetGeneratorProps)
               auto_select_gimmicks: true,
               available_gimmicks: autoGimmickPool,
             }),
+            // Gimmick unlock system - filter gimmicks based on level number
+            ...(config.useGimmickUnlock && {
+              gimmick_unlock_levels: config.gimmickUnlockLevels ?? DEFAULT_GIMMICK_UNLOCK_LEVELS,
+              level_number: globalLevelIndex + 1,  // 1-based level number
+            }),
           };
 
-          console.log(`🎮 Global Level ${globalLevelIndex + 1}/${totalLevels}: intensity=${gimmickIntensity.toFixed(2)}`);
+          console.log(`🎮 Global Level ${globalLevelIndex + 1}/${totalLevels}: intensity=${gimmickIntensity.toFixed(2)}${config.useGimmickUnlock ? `, unlock@${globalLevelIndex + 1}` : ''}`);
 
           const MAX_RETRIES = 30;
-          let result = await generateLevel(baseParams, gimmickOpts);
+          const API_ERROR_RETRIES = 10;
           let retryCount = 0;
           let difficultyAdjustment = 0;
 
-          while (result.grade !== plan.grade && retryCount < MAX_RETRIES) {
+          // Helper function to generate with API error retry
+          // On repeated failures, progressively adjust parameters to find a working combination
+          const generateWithRetry = async (params: typeof baseParams, opts: typeof gimmickOpts) => {
+            let lastError: Error | null = null;
+            for (let apiRetry = 0; apiRetry < API_ERROR_RETRIES; apiRetry++) {
+              try {
+                // Progressive difficulty variation: starts small, gets larger on later retries
+                // Retry 1-3: ±5%, Retry 4-6: ±15%, Retry 7-10: ±25%
+                let variationRange = 0.1;
+                if (apiRetry >= 7) variationRange = 0.5;
+                else if (apiRetry >= 4) variationRange = 0.3;
+
+                const diffVariation = apiRetry > 0 ? (Math.random() - 0.5) * variationRange : 0;
+                const adjustedDiff = Math.max(0.05, Math.min(0.95, params.target_difficulty + diffVariation));
+
+                // On very late retries (7+), also try reducing gimmick intensity
+                const adjustedOpts = { ...opts };
+                if (apiRetry >= 7 && adjustedOpts.gimmick_intensity !== undefined) {
+                  adjustedOpts.gimmick_intensity = Math.max(0, adjustedOpts.gimmick_intensity - 0.3);
+                }
+
+                // On retries 4+, try reducing available gimmicks if auto mode
+                let adjustedParams = { ...params, target_difficulty: adjustedDiff };
+                if (apiRetry >= 4 && adjustedOpts.available_gimmicks && adjustedOpts.available_gimmicks.length > 3) {
+                  // Randomly remove some gimmicks to reduce complexity
+                  const shuffled = [...adjustedOpts.available_gimmicks].sort(() => Math.random() - 0.5);
+                  adjustedOpts.available_gimmicks = shuffled.slice(0, Math.max(3, shuffled.length - apiRetry + 3));
+                  console.log(`Retry ${apiRetry + 1}: Reduced gimmicks to [${adjustedOpts.available_gimmicks.join(', ')}]`);
+                }
+
+                return await generateLevel(adjustedParams, adjustedOpts);
+              } catch (err) {
+                lastError = err as Error;
+                console.warn(`API error (attempt ${apiRetry + 1}/${API_ERROR_RETRIES}):`, err);
+                // Wait with exponential backoff
+                await new Promise(resolve => setTimeout(resolve, 100 * Math.pow(1.5, apiRetry)));
+              }
+            }
+            throw lastError;
+          };
+
+          let result = await generateWithRetry(baseParams, gimmickOpts);
+
+          // Progressive retry logic with escalating adjustments
+          const gradeOrder = ['S', 'A', 'B', 'C', 'D'];
+          const targetGradeIdx = gradeOrder.indexOf(plan.grade);
+
+          const isAcceptableGrade = (grade: string, retry: number): boolean => {
+            const actualIdx = gradeOrder.indexOf(grade);
+            // After 20 retries, accept adjacent grade (±1)
+            if (retry >= 20 && Math.abs(actualIdx - targetGradeIdx) <= 1) {
+              return true;
+            }
+            return grade === plan.grade;
+          };
+
+          while (!isAcceptableGrade(result.grade, retryCount) && retryCount < MAX_RETRIES) {
             retryCount++;
-            const gradeOrder = ['S', 'A', 'B', 'C', 'D'];
-            const targetGradeIdx = gradeOrder.indexOf(plan.grade);
             const actualGradeIdx = gradeOrder.indexOf(result.grade);
 
-            if (actualGradeIdx < targetGradeIdx) {
-              difficultyAdjustment += 0.05;
+            // Progressive step size and cap based on retry count
+            let stepSize: number;
+            let maxCap: number;
+            if (retryCount <= 10) {
+              stepSize = 0.03;
+              maxCap = 0.15;
+            } else if (retryCount <= 20) {
+              stepSize = 0.05;
+              maxCap = 0.30;
             } else {
-              difficultyAdjustment -= 0.05;
+              stepSize = 0.08;
+              maxCap = 0.45;
             }
 
-            difficultyAdjustment = Math.max(-0.15, Math.min(0.15, difficultyAdjustment));
+            if (actualGradeIdx < targetGradeIdx) {
+              difficultyAdjustment += stepSize;
+            } else {
+              difficultyAdjustment -= stepSize;
+            }
+
+            difficultyAdjustment = Math.max(-maxCap, Math.min(maxCap, difficultyAdjustment));
 
             const adjustedParams = {
               ...baseParams,
               target_difficulty: Math.max(0.05, Math.min(0.95, plan.targetDifficulty + difficultyAdjustment)),
             };
 
-            result = await generateLevel(adjustedParams, gimmickOpts);
+            result = await generateWithRetry(adjustedParams, gimmickOpts);
           }
 
           generatedLevels.push(result.level_json);
@@ -551,42 +631,117 @@ export function LevelSetGenerator({ onLevelSetCreated }: LevelSetGeneratorProps)
 
           // Debug: log generation parameters
           const gimmickInfo = useAutoGimmicks ? `auto(pool: ${autoGimmickPool?.join(',')})` : `manual(${baseParams.obstacle_types?.join(',') || 'none'})`;
-          console.log(`🎮 Level ${levelIndex + 1}/${config.levelCount}: grade=${plan.grade}, intensity=${gimmickIntensity.toFixed(2)}, gimmicks=${gimmickInfo}`);
+          const unlockInfo = config.useGimmickUnlock ? `unlock_enabled(level=${levelIndex + 1})` : 'unlock_disabled';
+          console.log(`🎮 Level ${levelIndex + 1}/${config.levelCount}: grade=${plan.grade}, intensity=${gimmickIntensity.toFixed(2)}, gimmicks=${gimmickInfo}, ${unlockInfo}`);
 
           try {
+            // auto_select_gimmicks must be true when gimmick unlock is enabled (for tutorial_gimmick processing)
+            const needsAutoSelect = useAutoGimmicks || config.useGimmickUnlock;
+
             // Prepare gimmick options - always include gimmick_intensity for level progression
             const gimmickOpts = {
               gimmick_intensity: gimmickIntensity,  // Level progression: early levels have no gimmicks
+              auto_select_gimmicks: needsAutoSelect,  // Required for tutorial_gimmick in backend
               ...(useAutoGimmicks && {
-                auto_select_gimmicks: true,
                 available_gimmicks: autoGimmickPool,
+              }),
+              // Gimmick unlock system - filter gimmicks based on level number
+              ...(config.useGimmickUnlock && {
+                gimmick_unlock_levels: config.gimmickUnlockLevels ?? DEFAULT_GIMMICK_UNLOCK_LEVELS,
+                level_number: levelIndex + 1,  // 1-based level number
               }),
             };
 
             // Generate with strict grade matching - retry with adjusted difficulty until grade matches
             const MAX_RETRIES = 30;
-            let result = await generateLevel(baseParams, gimmickOpts);
+            const API_ERROR_RETRIES = 10;
             let retryCount = 0;
             let difficultyAdjustment = 0;
 
-            while (result.grade !== plan.grade && retryCount < MAX_RETRIES) {
-              retryCount++;
+            // Helper function to generate with API error retry
+            // On repeated failures, progressively adjust parameters to find a working combination
+            const generateWithRetry = async (params: typeof baseParams, opts: typeof gimmickOpts) => {
+              let lastError: Error | null = null;
+              for (let apiRetry = 0; apiRetry < API_ERROR_RETRIES; apiRetry++) {
+                try {
+                  // Progressive difficulty variation: starts small, gets larger on later retries
+                  // Retry 1-3: ±5%, Retry 4-6: ±15%, Retry 7-10: ±25%
+                  let variationRange = 0.1;
+                  if (apiRetry >= 7) variationRange = 0.5;
+                  else if (apiRetry >= 4) variationRange = 0.3;
 
-              // Adjust target difficulty based on grade mismatch
-              const gradeOrder = ['S', 'A', 'B', 'C', 'D'];
-              const targetGradeIdx = gradeOrder.indexOf(plan.grade);
+                  const diffVariation = apiRetry > 0 ? (Math.random() - 0.5) * variationRange : 0;
+                  const adjustedDiff = Math.max(0.05, Math.min(0.95, params.target_difficulty + diffVariation));
+
+                  // On very late retries (7+), also try reducing gimmick intensity
+                  const adjustedOpts = { ...opts };
+                  if (apiRetry >= 7 && adjustedOpts.gimmick_intensity !== undefined) {
+                    adjustedOpts.gimmick_intensity = Math.max(0, adjustedOpts.gimmick_intensity - 0.3);
+                  }
+
+                  // On retries 4+, try reducing available gimmicks if auto mode
+                  let adjustedParams = { ...params, target_difficulty: adjustedDiff };
+                  if (apiRetry >= 4 && adjustedOpts.available_gimmicks && adjustedOpts.available_gimmicks.length > 3) {
+                    // Randomly remove some gimmicks to reduce complexity
+                    const shuffled = [...adjustedOpts.available_gimmicks].sort(() => Math.random() - 0.5);
+                    adjustedOpts.available_gimmicks = shuffled.slice(0, Math.max(3, shuffled.length - apiRetry + 3));
+                    console.log(`Retry ${apiRetry + 1}: Reduced gimmicks to [${adjustedOpts.available_gimmicks.join(', ')}]`);
+                  }
+
+                  return await generateLevel(adjustedParams, adjustedOpts);
+                } catch (err) {
+                  lastError = err as Error;
+                  console.warn(`API error (attempt ${apiRetry + 1}/${API_ERROR_RETRIES}):`, err);
+                  // Wait with exponential backoff
+                  await new Promise(resolve => setTimeout(resolve, 100 * Math.pow(1.5, apiRetry)));
+                }
+              }
+              throw lastError;
+            };
+
+            let result = await generateWithRetry(baseParams, gimmickOpts);
+
+            // Progressive retry logic with escalating adjustments
+            const gradeOrder = ['S', 'A', 'B', 'C', 'D'];
+            const targetGradeIdx = gradeOrder.indexOf(plan.grade);
+
+            const isAcceptableGrade = (grade: string, retry: number): boolean => {
+              const actualIdx = gradeOrder.indexOf(grade);
+              // After 20 retries, accept adjacent grade (±1)
+              if (retry >= 20 && Math.abs(actualIdx - targetGradeIdx) <= 1) {
+                return true;
+              }
+              return grade === plan.grade;
+            };
+
+            while (!isAcceptableGrade(result.grade, retryCount) && retryCount < MAX_RETRIES) {
+              retryCount++;
               const actualGradeIdx = gradeOrder.indexOf(result.grade);
+
+              // Progressive step size and cap based on retry count
+              let stepSize: number;
+              let maxCap: number;
+              if (retryCount <= 10) {
+                stepSize = 0.03;
+                maxCap = 0.15;
+              } else if (retryCount <= 20) {
+                stepSize = 0.05;
+                maxCap = 0.30;
+              } else {
+                stepSize = 0.08;
+                maxCap = 0.45;
+              }
 
               if (actualGradeIdx < targetGradeIdx) {
                 // Got easier grade, increase difficulty
-                difficultyAdjustment += 0.05;
+                difficultyAdjustment += stepSize;
               } else {
                 // Got harder grade, decrease difficulty
-                difficultyAdjustment -= 0.05;
+                difficultyAdjustment -= stepSize;
               }
 
-              // Clamp adjustment
-              difficultyAdjustment = Math.max(-0.15, Math.min(0.15, difficultyAdjustment));
+              // Clamp adjustment with progressive cap
+              difficultyAdjustment = Math.max(-maxCap, Math.min(maxCap, difficultyAdjustment));
 
               const adjustedParams = {
                 ...baseParams,
@@ -603,12 +758,17 @@ export function LevelSetGenerator({ onLevelSetCreated }: LevelSetGeneratorProps)
                 ),
               }));
 
-              console.log(`Level ${levelIndex + 1}: Grade mismatch (wanted ${plan.grade}, got ${result.grade}, diff=${(result.actual_difficulty * 100).toFixed(1)}%), retry ${retryCount}/${MAX_RETRIES} (adj: ${difficultyAdjustment > 0 ? '+' : ''}${(difficultyAdjustment * 100).toFixed(0)}%)`);
-              result = await generateLevel(adjustedParams, gimmickOpts);
+              console.log(`Level ${levelIndex + 1}: Grade mismatch (wanted ${plan.grade}, got ${result.grade}, diff=${(result.actual_difficulty * 100).toFixed(1)}%), retry ${retryCount}/${MAX_RETRIES} (adj: ${difficultyAdjustment > 0 ? '+' : ''}${(difficultyAdjustment * 100).toFixed(0)}%, cap: ±${(maxCap * 100).toFixed(0)}%)`);
+              result = await generateWithRetry(adjustedParams, gimmickOpts);
             }
 
             if (result.grade !== plan.grade) {
-              console.warn(`Level ${levelIndex + 1}: Could not achieve grade ${plan.grade} after ${MAX_RETRIES} retries, got ${result.grade}`);
+              const wasAccepted = isAcceptableGrade(result.grade, retryCount);
+              if (wasAccepted) {
+                console.log(`Level ${levelIndex + 1}: Accepted adjacent grade ${result.grade} (target: ${plan.grade}) after ${retryCount} retries`);
+              } else {
+                console.warn(`Level ${levelIndex + 1}: Could not achieve grade ${plan.grade} after ${MAX_RETRIES} retries, got ${result.grade}`);
+              }
             }
 
             generatedLevels.push(result.level_json);

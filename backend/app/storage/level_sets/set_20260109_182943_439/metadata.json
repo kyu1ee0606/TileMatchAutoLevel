@@ -1,0 +1,67 @@
+{
+  "id": "set_20260109_182943_439",
+  "name": "full_gimmick_test 10",
+  "created_at": "2026-01-09T18:29:43.620380",
+  "level_count": 10,
+  "difficulty_profile": [
+    0.55,
+    0.65,
+    0.6,
+    0.75,
+    0.7,
+    0.8,
+    0.9,
+    0.8500000000000001,
+    0.95,
+    0.95
+  ],
+  "actual_difficulties": [
+    0.4590833333333333,
+    0.645,
+    0.424,
+    0.6564999999999999,
+    0.6679999999999999,
+    0.6263333333333333,
+    0.60625,
+    0.6157499999999999,
+    0.6058333333333333,
+    0.605
+  ],
+  "grades": [
+    "B",
+    "C",
+    "B",
+    "C",
+    "C",
+    "C",
+    "C",
+    "C",
+    "C",
+    "C"
+  ],
+  "generation_config": {
+    "grid_size": [
+      7,
+      7
+    ],
+    "min_layers": 3,
+    "max_layers": 7,
+    "tile_types": [
+      "t0",
+      "t2",
+      "t4",
+      "t5",
+      "t6"
+    ],
+    "obstacle_types": [],
+    "goals": [
+      {
+        "type": "craft",
+        "direction": "s",
+        "count": 3
+      }
+    ],
+    "symmetry_mode": "both",
+    "pattern_type": "aesthetic"
+  }
+}

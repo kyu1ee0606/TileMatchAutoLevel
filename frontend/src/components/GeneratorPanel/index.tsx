@@ -7,8 +7,10 @@ import { generateLevel, generateMultipleLevels } from '../../api/generate';
 import { saveLocalLevel } from '../../services/localLevelsApi';
 import { TILE_TYPES } from '../../types';
 import type { GenerationParams, GoalConfig, ObstacleCountConfig, LayerTileConfig, LayerObstacleConfig } from '../../types';
-import { Button, Tooltip, CollapsiblePanel } from '../ui';
+import { Button, Tooltip } from '../ui';
 import clsx from 'clsx';
+
+type GeneratorTab = 'single' | 'set';
 
 // Obstacle type definitions for UI
 const OBSTACLE_TYPES = [
@@ -30,6 +32,9 @@ interface GeneratorPanelProps {
 export function GeneratorPanel({ className }: GeneratorPanelProps) {
   const { setLevel } = useLevelStore();
   const { isGenerating, setIsGenerating, addNotification } = useUIStore();
+
+  // Tab state
+  const [activeTab, setActiveTab] = useState<GeneratorTab>('single');
 
   // Generation parameters
   const [targetDifficulty, setTargetDifficulty] = useState(0.5);
@@ -318,8 +323,43 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
     <div className={clsx('flex flex-col gap-4 p-4 bg-gray-800 rounded-xl shadow-lg border border-gray-700', className)}>
       <h2 className="text-lg font-bold text-gray-100">🎲 레벨 자동 생성</h2>
 
-      {/* Difficulty Slider */}
-      <DifficultySlider value={targetDifficulty} onChange={setTargetDifficulty} />
+      {/* Tab Navigation */}
+      <div className="flex border-b border-gray-600">
+        <button
+          onClick={() => setActiveTab('single')}
+          className={clsx(
+            'flex-1 py-2.5 px-4 text-sm font-medium transition-colors relative',
+            activeTab === 'single'
+              ? 'text-blue-400'
+              : 'text-gray-400 hover:text-gray-200'
+          )}
+        >
+          🎯 개별 생성
+          {activeTab === 'single' && (
+            <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-500" />
+          )}
+        </button>
+        <button
+          onClick={() => setActiveTab('set')}
+          className={clsx(
+            'flex-1 py-2.5 px-4 text-sm font-medium transition-colors relative',
+            activeTab === 'set'
+              ? 'text-purple-400'
+              : 'text-gray-400 hover:text-gray-200'
+          )}
+        >
+          📊 세트 생성
+          {activeTab === 'set' && (
+            <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-purple-500" />
+          )}
+        </button>
+      </div>
+
+      {/* Single Level Generation Tab */}
+      {activeTab === 'single' && (
+        <>
+          {/* Difficulty Slider */}
+          <DifficultySlider value={targetDifficulty} onChange={setTargetDifficulty} />
 
       {/* Grid Settings */}
       <div className="grid grid-cols-2 gap-4">
@@ -867,16 +907,15 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
           10개 일괄
         </Button>
       </div>
+        </>
+      )}
 
-      {/* Level Set Generator */}
-      <CollapsiblePanel
-        title="레벨 세트 생성기"
-        icon="📊"
-        defaultCollapsed={true}
-        className="mt-4"
-      >
-        <LevelSetGenerator />
-      </CollapsiblePanel>
+      {/* Level Set Generation Tab */}
+      {activeTab === 'set' && (
+        <div className="mt-2">
+          <LevelSetGenerator />
+        </div>
+      )}
     </div>
   );
 }

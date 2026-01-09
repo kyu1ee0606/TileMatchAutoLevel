@@ -1625,6 +1625,7 @@ async def save_level_set(data: Dict[str, Any]):
                 "set_id": set_id,
                 "set_name": name,
                 "level_index": i + 1,
+                "created_at": now.isoformat(),
             }
 
             local_level_file = LOCAL_LEVELS_DIR / f"{level_id}.json"

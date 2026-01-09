@@ -119,6 +119,9 @@ class GenerationParams:
     pattern_index: Optional[int] = None  # 0-49 for specific aesthetic pattern (None = auto-select)
     # Gimmick intensity control
     gimmick_intensity: float = 1.0  # 0.0=no gimmicks, 1.0=normal, 2.0=double
+    # Tutorial gimmick settings (for gimmick unlock levels)
+    tutorial_gimmick: Optional[str] = None  # Gimmick to introduce on this level (placed on top layer)
+    tutorial_gimmick_min_count: int = 2  # Minimum count for tutorial gimmick (guaranteed placement)
 
     def __post_init__(self):
         """Set default values after initialization."""

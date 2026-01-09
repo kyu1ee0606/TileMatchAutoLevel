@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { LevelSetGenerationConfig, GimmickMode, LevelGimmickOverride, DifficultyPoint, MultiSetConfig } from '../../types/levelSet';
-import { createDefaultMultiSetConfig, calculateTotalLevels, STEP_10_PRESET } from '../../types/levelSet';
+import { createDefaultMultiSetConfig, calculateTotalLevels, STEP_10_PRESET, DEFAULT_GIMMICK_UNLOCK_LEVELS } from '../../types/levelSet';
 import type { GoalConfig, SymmetryMode, PatternType } from '../../types';
 import { Button } from '../ui';
 import { LevelGimmickTable } from './LevelGimmickTable';
@@ -15,11 +15,15 @@ interface LevelSetConfigProps {
 const OBSTACLE_TYPES = [
   { id: 'chain', label: '⛓️ Chain' },
   { id: 'frog', label: '🐸 Frog' },
+  { id: 'ice', label: '❄️ Ice' },
   { id: 'link', label: '🔗 Link' },
   { id: 'grass', label: '🌿 Grass' },
-  { id: 'ice', label: '❄️ Ice' },
   { id: 'bomb', label: '💣 Bomb' },
   { id: 'curtain', label: '🎭 Curtain' },
+  { id: 'teleport', label: '🌀 Teleport' },
+  { id: 'crate', label: '📦 Crate' },
+  { id: 'craft', label: '🔧 Craft' },
+  { id: 'stack', label: '📚 Stack' },
 ] as const;
 
 const SYMMETRY_OPTIONS: { id: SymmetryMode; label: string; icon: string }[] = [
@@ -484,6 +488,127 @@ export function LevelSetConfig({
               disabled={disabled}
             />
           </div>
+        )}
+      </div>
+
+      {/* Gimmick Unlock System */}
+      <div className="bg-gradient-to-r from-amber-900/50 to-orange-900/50 rounded-lg p-4 border border-amber-500/30">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <span className="text-lg">🔓</span>
+            <label className="text-sm font-medium text-white">기믹 언락 시스템</label>
+          </div>
+          <button
+            onClick={() => onConfigChange({ ...config, useGimmickUnlock: !config.useGimmickUnlock })}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              config.useGimmickUnlock ? 'bg-amber-600' : 'bg-gray-600'
+            }`}
+            disabled={disabled}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                config.useGimmickUnlock ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+          </button>
+        </div>
+
+        {config.useGimmickUnlock && (
+          <div className="space-y-3">
+            <p className="text-xs text-amber-300 mb-3">
+              각 기믹이 특정 레벨에서 언락됩니다. 레벨 번호에 도달해야 해당 기믹이 사용됩니다.
+            </p>
+
+            {/* Quick Preset Buttons */}
+            <div className="flex flex-wrap gap-2 mb-3">
+              <button
+                onClick={() => onConfigChange({
+                  ...config,
+                  gimmickUnlockLevels: { ...DEFAULT_GIMMICK_UNLOCK_LEVELS }
+                })}
+                className="px-2 py-1 text-xs bg-amber-700 hover:bg-amber-600 text-white rounded"
+                disabled={disabled}
+              >
+                10단위 기본값
+              </button>
+              <button
+                onClick={() => onConfigChange({
+                  ...config,
+                  gimmickUnlockLevels: {
+                    chain: 20, frog: 40, ice: 60, link: 80, grass: 100,
+                    bomb: 120, curtain: 140, teleport: 160, crate: 180,
+                    craft: 200, stack: 220
+                  }
+                })}
+                className="px-2 py-1 text-xs bg-amber-700 hover:bg-amber-600 text-white rounded"
+                disabled={disabled}
+              >
+                20단위
+              </button>
+              <button
+                onClick={() => onConfigChange({
+                  ...config,
+                  gimmickUnlockLevels: {
+                    chain: 1, frog: 1, ice: 1, link: 1, grass: 1,
+                    bomb: 1, curtain: 1, teleport: 1, crate: 1,
+                    craft: 1, stack: 1
+                  }
+                })}
+                className="px-2 py-1 text-xs bg-amber-700 hover:bg-amber-600 text-white rounded"
+                disabled={disabled}
+              >
+                모두 시작부터
+              </button>
+            </div>
+
+            {/* Unlock Level Inputs */}
+            <div className="grid grid-cols-2 gap-2">
+              {OBSTACLE_TYPES.map((obs) => {
+                const currentUnlock = config.gimmickUnlockLevels?.[obs.id] ?? DEFAULT_GIMMICK_UNLOCK_LEVELS[obs.id] ?? 1;
+                return (
+                  <div key={obs.id} className="flex items-center gap-2 bg-gray-800/50 rounded p-2">
+                    <span className="text-sm w-24">{obs.label}</span>
+                    <input
+                      type="number"
+                      value={currentUnlock}
+                      onChange={(e) => {
+                        const newValue = parseInt(e.target.value) || 1;
+                        onConfigChange({
+                          ...config,
+                          gimmickUnlockLevels: {
+                            ...(config.gimmickUnlockLevels ?? DEFAULT_GIMMICK_UNLOCK_LEVELS),
+                            [obs.id]: newValue
+                          }
+                        });
+                      }}
+                      min={1}
+                      max={1000}
+                      className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-sm"
+                      disabled={disabled}
+                    />
+                    <span className="text-xs text-gray-400">레벨</span>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Preview */}
+            <div className="bg-gray-800/50 rounded p-2 text-xs mt-3">
+              <div className="text-gray-400 mb-1">📊 언락 순서:</div>
+              <div className="text-amber-300">
+                {Object.entries(config.gimmickUnlockLevels ?? DEFAULT_GIMMICK_UNLOCK_LEVELS)
+                  .sort(([, a], [, b]) => a - b)
+                  .map(([gimmick, level]) => `${gimmick}(${level})`)
+                  .join(' → ')}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {!config.useGimmickUnlock && (
+          <p className="text-xs text-gray-400">
+            활성화하면 레벨 번호에 따라 기믹이 순차적으로 언락됩니다. 튜토리얼 → 고급 레벨 구성에 적합합니다.
+          </p>
         )}
       </div>
 

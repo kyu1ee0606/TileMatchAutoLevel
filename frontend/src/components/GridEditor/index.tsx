@@ -9,6 +9,76 @@ import { Button, Tooltip } from '../ui';
 import { Eye, EyeOff, FileJson, RotateCcw, ZoomIn, Grid3X3, Map, AlertTriangle, CheckCircle } from 'lucide-react';
 import clsx from 'clsx';
 import { validateTileCount } from '../../utils/helpers';
+import type { LevelJSON, LevelLayer, TileData } from '../../types';
+
+// Gimmick counting helper
+interface GimmickCounts {
+  chain: number;
+  frog: number;
+  ice: number;
+  grass: number;
+  link: number;
+  bomb: number;
+  crate: number;
+  teleport: number;
+  curtain: number;
+  craft: number;
+  stack: number;
+}
+
+const GIMMICK_INFO: Record<string, { icon: string; name: string }> = {
+  chain: { icon: '⛓️', name: 'Chain' },
+  frog: { icon: '🐸', name: 'Frog' },
+  ice: { icon: '❄️', name: 'Ice' },
+  grass: { icon: '🌿', name: 'Grass' },
+  link: { icon: '🔗', name: 'Link' },
+  bomb: { icon: '💣', name: 'Bomb' },
+  crate: { icon: '📦', name: 'Crate' },
+  teleport: { icon: '🌀', name: 'Teleport' },
+  curtain: { icon: '🎭', name: 'Curtain' },
+  craft: { icon: '🎁', name: 'Craft' },
+  stack: { icon: '📚', name: 'Stack' },
+};
+
+function countGimmicks(levelData: LevelJSON): GimmickCounts {
+  const counts: GimmickCounts = {
+    chain: 0, frog: 0, ice: 0, grass: 0, link: 0,
+    bomb: 0, crate: 0, teleport: 0, curtain: 0,
+    craft: 0, stack: 0,
+  };
+
+  // Scan all layers (0-7)
+  for (let i = 0; i < 8; i++) {
+    const layer = (levelData as any)[`layer_${i}`] as LevelLayer | undefined;
+    if (!layer?.tiles) continue;
+
+    for (const pos in layer.tiles) {
+      const tileData = layer.tiles[pos] as TileData;
+      if (!tileData || !Array.isArray(tileData)) continue;
+
+      const [tileType, attribute] = tileData;
+
+      // Count tile type gimmicks (craft, stack)
+      if (tileType && typeof tileType === 'string') {
+        if (tileType.startsWith('craft_')) counts.craft++;
+        else if (tileType.startsWith('stack_')) counts.stack++;
+      }
+
+      // Count attribute gimmicks
+      if (!attribute) continue;
+      if (attribute === 'chain') counts.chain++;
+      else if (attribute === 'frog') counts.frog++;
+      else if (attribute.startsWith('ice')) counts.ice++;
+      else if (attribute.startsWith('grass')) counts.grass++;
+      else if (attribute.startsWith('link')) counts.link++;
+      else if (attribute === 'bomb') counts.bomb++;
+      else if (attribute === 'crate') counts.crate++;
+      else if (attribute.startsWith('teleport')) counts.teleport++;
+      else if (attribute === 'curtain') counts.curtain++;
+    }
+  }
+  return counts;
+}
 
 interface GridEditorProps {
   className?: string;
@@ -81,6 +151,13 @@ export function GridEditor({ className }: GridEditorProps) {
     return total;
   }, [level]);
 
+  // Count gimmicks in level
+  const gimmickCounts = useMemo(() => countGimmicks(level), [level]);
+  const activeGimmicks = useMemo(() =>
+    Object.entries(gimmickCounts).filter(([_, count]) => count > 0),
+    [gimmickCounts]
+  );
+
   return (
     <div className={clsx('flex flex-col gap-4 p-4 bg-gray-800 rounded-xl shadow-lg border border-gray-700', className)}>
       {/* Tile count info and validation */}
@@ -123,6 +200,25 @@ export function GridEditor({ className }: GridEditorProps) {
           </div>
         )}
       </div>
+
+      {/* Gimmick counts display */}
+      {activeGimmicks.length > 0 && (
+        <div className="flex items-center gap-2 px-3 py-2 bg-gray-700/30 rounded-lg">
+          <span className="text-gray-400 text-sm">기믹:</span>
+          <div className="flex flex-wrap gap-2">
+            {activeGimmicks.map(([gimmick, count]) => (
+              <span
+                key={gimmick}
+                className="inline-flex items-center gap-1 px-2 py-1 text-sm bg-gray-700/80 rounded-md"
+                title={`${GIMMICK_INFO[gimmick]?.name}: ${count}개`}
+              >
+                <span>{GIMMICK_INFO[gimmick]?.icon}</span>
+                <span className="text-gray-200 font-medium">{count}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-bold text-gray-100">그리드 에디터</h2>

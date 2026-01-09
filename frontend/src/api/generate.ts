@@ -21,6 +21,9 @@ export interface GenerateRequest {
   available_gimmicks?: string[];
   // Gimmick intensity control (0.0=no gimmicks, 1.0=normal, 2.0=double)
   gimmick_intensity?: number;
+  // Gimmick unlock system
+  gimmick_unlock_levels?: Record<string, number>;  // e.g., {chain: 50, frog: 100}
+  level_number?: number;  // Current level number for unlock checking
 }
 
 export interface SimulateRequest {
@@ -38,6 +41,8 @@ export async function generateLevel(
     auto_select_gimmicks?: boolean;
     available_gimmicks?: string[];
     gimmick_intensity?: number;  // 0.0=no gimmicks, 1.0=normal, 2.0=double
+    gimmick_unlock_levels?: Record<string, number>;  // e.g., {chain: 50, frog: 100}
+    level_number?: number;  // Current level number for unlock checking
   }
 ): Promise<GenerationResult> {
   const request: GenerateRequest = {
@@ -58,7 +63,15 @@ export async function generateLevel(
     available_gimmicks: gimmickOptions?.available_gimmicks,
     // Gimmick intensity control
     gimmick_intensity: gimmickOptions?.gimmick_intensity,
+    // Gimmick unlock system
+    gimmick_unlock_levels: gimmickOptions?.gimmick_unlock_levels,
+    level_number: gimmickOptions?.level_number,
   };
+
+  // Debug: Log gimmick unlock system params
+  if (gimmickOptions?.level_number) {
+    console.log(`[API] generate level_number=${gimmickOptions.level_number}, unlock_levels=`, gimmickOptions.gimmick_unlock_levels);
+  }
 
   // Increase timeout when using auto gimmick selection (requires additional processing)
   const timeoutMs = gimmickOptions?.auto_select_gimmicks ? 60000 : 30000;
@@ -119,6 +132,9 @@ export interface ValidatedGenerateRequest {
   available_gimmicks?: string[];    // Pool of available gimmicks for auto-selection
   // Gimmick intensity control (0.0=no gimmicks, 1.0=normal, 2.0=double)
   gimmick_intensity?: number;
+  // Gimmick unlock system
+  gimmick_unlock_levels?: Record<string, number>;  // e.g., {chain: 50, frog: 100}
+  level_number?: number;  // Current level number for unlock checking
 }
 
 export interface ValidatedGenerateResult {
@@ -154,6 +170,8 @@ export async function generateValidatedLevel(
   gimmickOptions?: {
     auto_select_gimmicks?: boolean;
     available_gimmicks?: string[];
+    gimmick_unlock_levels?: Record<string, number>;  // e.g., {chain: 50, frog: 100}
+    level_number?: number;  // Current level number for unlock checking
   }
 ): Promise<ValidatedGenerateResult> {
   const request: ValidatedGenerateRequest = {
@@ -174,6 +192,9 @@ export async function generateValidatedLevel(
     available_gimmicks: gimmickOptions?.available_gimmicks,
     // Gimmick intensity (for level progression)
     gimmick_intensity: params.gimmick_intensity,
+    // Gimmick unlock system
+    gimmick_unlock_levels: gimmickOptions?.gimmick_unlock_levels,
+    level_number: gimmickOptions?.level_number,
   };
 
   // Calculate timeout: base 60s + extra time for retries and simulations

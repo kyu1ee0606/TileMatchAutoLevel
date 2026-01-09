@@ -1,0 +1,115 @@
+{
+  "layer": 3,
+  "useTileCount": 5,
+  "randSeed": 909522,
+  "layer_0": {
+    "col": "8",
+    "row": "8",
+    "tiles": {
+      "4_3": [
+        "t2",
+        ""
+      ],
+      "4_4": [
+        "t0",
+        ""
+      ],
+      "3_3": [
+        "t0",
+        ""
+      ],
+      "3_4": [
+        "t5",
+        ""
+      ]
+    },
+    "num": "4"
+  },
+  "layer_1": {
+    "col": "7",
+    "row": "7",
+    "tiles": {
+      "4_3": [
+        "t5",
+        ""
+      ],
+      "3_3": [
+        "t4",
+        ""
+      ],
+      "3_2": [
+        "t2",
+        ""
+      ],
+      "2_3": [
+        "t2",
+        ""
+      ]
+    },
+    "num": "4"
+  },
+  "layer_2": {
+    "col": "8",
+    "row": "8",
+    "tiles": {
+      "4_3": [
+        "t4",
+        ""
+      ],
+      "4_4": [
+        "t0",
+        ""
+      ],
+      "3_3": [
+        "t4",
+        ""
+      ],
+      "3_4": [
+        "t5",
+        ""
+      ],
+      "2_2": [
+        "craft_s",
+        "",
+        [
+          3
+        ]
+      ]
+    },
+    "num": "5"
+  },
+  "layer_3": {
+    "col": "7",
+    "row": "7",
+    "tiles": {},
+    "num": "0"
+  },
+  "layer_4": {
+    "col": "8",
+    "row": "8",
+    "tiles": {},
+    "num": "0"
+  },
+  "layer_5": {
+    "col": "7",
+    "row": "7",
+    "tiles": {},
+    "num": "0"
+  },
+  "layer_6": {
+    "col": "8",
+    "row": "8",
+    "tiles": {},
+    "num": "0"
+  },
+  "goalCount": {
+    "craft_s": 3
+  },
+  "max_moves": 30,
+  "target_difficulty": 0.1,
+  "symmetry_mode": "horizontal",
+  "pattern_type": "aesthetic",
+  "level_index": 10,
+  "name": "미형테스트 1 - Level 10",
+  "id": "set_1767922327259_qjjexnzgj_level_010"
+}

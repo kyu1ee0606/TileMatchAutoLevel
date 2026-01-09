@@ -104,6 +104,17 @@ class GenerateRequest(BaseModel):
         le=2.0,
         description="Gimmick intensity multiplier (0.0=no gimmicks, 1.0=normal, 2.0=double). Use for level progression."
     )
+    # Gimmick unlock levels (level number at which each gimmick becomes available)
+    gimmick_unlock_levels: Optional[Dict[str, int]] = Field(
+        default=None,
+        description="Gimmick unlock levels (e.g., {'chain': 50, 'frog': 100, 'ice': 150}). Only gimmicks with unlock_level <= current_level are used."
+    )
+    # Current level number for gimmick unlock checking
+    level_number: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Current level number (used for gimmick unlock checking)"
+    )
 
 
 class GenerateResponse(BaseModel):
@@ -433,6 +444,18 @@ class ValidatedGenerateRequest(BaseModel):
 
     # Gimmick intensity control
     gimmick_intensity: float = Field(default=1.0, ge=0.0, le=2.0, description="Gimmick intensity multiplier (0.0=no gimmicks, 1.0=normal)")
+
+    # Gimmick unlock levels (level number at which each gimmick becomes available)
+    gimmick_unlock_levels: Optional[Dict[str, int]] = Field(
+        default=None,
+        description="Gimmick unlock levels (e.g., {'chain': 50, 'frog': 100, 'ice': 150}). Only gimmicks with unlock_level <= current_level are used."
+    )
+    # Current level number for gimmick unlock checking
+    level_number: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Current level number (used for gimmick unlock checking)"
+    )
 
     # Validation parameters
     max_retries: int = Field(default=5, ge=1, le=20, description="Maximum generation retries")

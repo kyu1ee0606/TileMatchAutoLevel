@@ -1,0 +1,52 @@
+{
+  "id": "set_20260109_122204_345",
+  "name": "폴더테스트 10",
+  "created_at": "2026-01-09T12:22:04.379462",
+  "level_count": 5,
+  "difficulty_profile": [
+    0.65,
+    0.8,
+    0.95,
+    0.95,
+    0.95
+  ],
+  "actual_difficulties": [
+    0.6864999999999999,
+    0.7515833333333333,
+    0.8145833333333333,
+    0.5960833333333333,
+    0.5681666666666666
+  ],
+  "grades": [
+    "C",
+    "C",
+    "D",
+    "B",
+    "B"
+  ],
+  "generation_config": {
+    "grid_size": [
+      7,
+      7
+    ],
+    "min_layers": 3,
+    "max_layers": 7,
+    "tile_types": [
+      "t0",
+      "t2",
+      "t4",
+      "t5",
+      "t6"
+    ],
+    "obstacle_types": [],
+    "goals": [
+      {
+        "type": "craft",
+        "direction": "s",
+        "count": 3
+      }
+    ],
+    "symmetry_mode": "both",
+    "pattern_type": "aesthetic"
+  }
+}

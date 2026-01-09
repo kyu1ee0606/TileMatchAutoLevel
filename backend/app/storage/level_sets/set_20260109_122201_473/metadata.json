@@ -1,0 +1,52 @@
+{
+  "id": "set_20260109_122201_473",
+  "name": "폴더테스트 4",
+  "created_at": "2026-01-09T12:22:01.266217",
+  "level_count": 5,
+  "difficulty_profile": [
+    0.35000000000000003,
+    0.5,
+    0.65,
+    0.8,
+    0.95
+  ],
+  "actual_difficulties": [
+    0.3843333333333333,
+    0.47191666666666665,
+    0.46741666666666665,
+    0.3125833333333334,
+    0.21400000000000002
+  ],
+  "grades": [
+    "A",
+    "B",
+    "B",
+    "A",
+    "A"
+  ],
+  "generation_config": {
+    "grid_size": [
+      7,
+      7
+    ],
+    "min_layers": 3,
+    "max_layers": 7,
+    "tile_types": [
+      "t0",
+      "t2",
+      "t4",
+      "t5",
+      "t6"
+    ],
+    "obstacle_types": [],
+    "goals": [
+      {
+        "type": "craft",
+        "direction": "s",
+        "count": 3
+      }
+    ],
+    "symmetry_mode": "both",
+    "pattern_type": "aesthetic"
+  }
+}

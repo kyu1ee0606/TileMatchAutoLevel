@@ -1251,26 +1251,49 @@ async def get_local_level(level_id: str):
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
-        # Metadata fields to separate
-        metadata_fields = ['id', 'name', 'difficulty', 'grade', 'set_id', 'set_name',
-                          'level_index', 'created_at', 'updated_at']
+        # Determine data format and extract level_data correctly
+        # Format 1: {level_data: {...}, metadata: {...}} - from save_local_level
+        # Format 2: {layer: N, layer_0: {...}, ...} - from save_level_set (flat level JSON)
 
-        # Extract metadata
-        metadata = {
-            "id": level_id,
-            "name": data.get("name", level_id),
-            "difficulty": data.get("difficulty", 0.5),
-            "grade": data.get("grade", "B"),
-        }
+        if "level_data" in data and isinstance(data["level_data"], dict):
+            # Format 1: Saved with save_local_level API
+            # Handle potential double-nesting: level_data.level_data
+            inner_data = data["level_data"]
+            if "level_data" in inner_data and isinstance(inner_data["level_data"], dict):
+                # Double-nested case: extract actual level JSON
+                level_data = inner_data["level_data"]
+                metadata = data.get("metadata", inner_data.get("metadata", {}))
+            elif "layer" in inner_data:
+                # Properly structured: level_data contains actual level JSON
+                level_data = inner_data
+                metadata = data.get("metadata", {})
+            else:
+                # Fallback: use entire inner_data
+                level_data = inner_data
+                metadata = data.get("metadata", {})
+        elif "layer" in data:
+            # Format 2: Flat level JSON (from level set generation)
+            level_data = data
+            metadata = {
+                "id": level_id,
+                "name": data.get("name", level_id),
+                "difficulty": data.get("difficulty", 0.5),
+                "grade": data.get("grade", "B"),
+            }
+            # Add optional metadata fields
+            for field in ['set_id', 'set_name', 'level_index', 'created_at', 'updated_at']:
+                if field in data:
+                    metadata[field] = data[field]
+        else:
+            # Unknown format - return as-is
+            level_data = data
+            metadata = {"id": level_id, "name": level_id}
 
-        # Add optional metadata fields
-        for field in ['set_id', 'set_name', 'level_index', 'created_at', 'updated_at']:
-            if field in data:
-                metadata[field] = data[field]
-
-        # Level data is everything (frontend may need metadata too for display)
-        # Keep full data as level_data for compatibility
-        level_data = data
+        # Ensure metadata has required fields
+        if "id" not in metadata:
+            metadata["id"] = level_id
+        if "name" not in metadata:
+            metadata["name"] = level_id
 
         return {
             "level_data": level_data,
@@ -1347,9 +1370,18 @@ async def save_local_level(data: Dict[str, Any]):
             data["metadata"]["active_layers"] = active_layers
             data["metadata"]["total_layers"] = total_layers
 
-        # Ensure level_data exists
+        # Ensure level_data exists and is properly structured
         if "level_data" not in data:
             raise HTTPException(status_code=400, detail="level_data is required")
+
+        # Prevent double-nesting: if level_data contains level_data, extract it
+        level_data = data["level_data"]
+        if isinstance(level_data, dict) and "level_data" in level_data and isinstance(level_data["level_data"], dict):
+            # Already nested - extract actual level data
+            data["level_data"] = level_data["level_data"]
+        elif isinstance(level_data, dict) and "layer" not in level_data and "level_data" not in level_data:
+            # Check if this looks like a wrapped structure without layer
+            raise HTTPException(status_code=400, detail="level_data must contain layer information")
 
         # Save to file
         file_path = LOCAL_LEVELS_DIR / f"{level_id}.json"

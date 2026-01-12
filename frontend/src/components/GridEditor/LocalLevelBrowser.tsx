@@ -5,6 +5,7 @@ import { useUIStore } from '../../stores/uiStore';
 import { Skeleton } from '../common/Skeleton';
 import type { LevelJSON, LevelLayer, TileData } from '../../types';
 import { TILE_TYPES, SPECIAL_IMAGES } from '../../types';
+import { GBoostUploadModal } from './GBoostUploadModal';
 import clsx from 'clsx';
 
 // Extract set name from level ID or name
@@ -153,7 +154,7 @@ interface GimmickCounts {
   grass: number;
   link: number;
   bomb: number;
-  crate: number;
+  unknown: number;
   teleport: number;
   curtain: number;
   craft: number;
@@ -167,7 +168,7 @@ const GIMMICK_INFO: Record<string, { icon: string; name: string }> = {
   grass: { icon: '🌿', name: 'Grass' },
   link: { icon: '🔗', name: 'Link' },
   bomb: { icon: '💣', name: 'Bomb' },
-  crate: { icon: '📦', name: 'Crate' },
+  unknown: { icon: '❓', name: 'Unknown' },
   teleport: { icon: '🌀', name: 'Teleport' },
   curtain: { icon: '🎭', name: 'Curtain' },
   craft: { icon: '🎁', name: 'Craft' },
@@ -177,7 +178,7 @@ const GIMMICK_INFO: Record<string, { icon: string; name: string }> = {
 function countGimmicks(levelData?: LevelJSON): GimmickCounts {
   const counts: GimmickCounts = {
     chain: 0, frog: 0, ice: 0, grass: 0, link: 0,
-    bomb: 0, crate: 0, teleport: 0, curtain: 0,
+    bomb: 0, unknown: 0, teleport: 0, curtain: 0,
     craft: 0, stack: 0,
   };
 
@@ -208,7 +209,7 @@ function countGimmicks(levelData?: LevelJSON): GimmickCounts {
       else if (attribute.startsWith('grass')) counts.grass++;
       else if (attribute.startsWith('link')) counts.link++;
       else if (attribute === 'bomb') counts.bomb++;
-      else if (attribute === 'crate') counts.crate++;
+      else if (attribute === 'unknown') counts.unknown++;
       else if (attribute.startsWith('teleport')) counts.teleport++;
       else if (attribute === 'curtain') counts.curtain++;
     }
@@ -373,6 +374,7 @@ export function LocalLevelBrowser({ className }: LocalLevelBrowserProps) {
   const [isSelectMode, setIsSelectMode] = useState(false);
   const [checkedLevelIds, setCheckedLevelIds] = useState<Set<string>>(new Set());
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isGBoostModalOpen, setIsGBoostModalOpen] = useState(false);
 
   // Folder expansion state (set name -> expanded)
   const [expandedSets, setExpandedSets] = useState<Set<string>>(new Set());
@@ -528,6 +530,21 @@ export function LocalLevelBrowser({ className }: LocalLevelBrowserProps) {
     } else {
       addNotification('warning', `${successCount}개 삭제, ${failCount}개 실패`);
     }
+  };
+
+  // GBoost upload modal handlers
+  const handleGBoostUpload = () => {
+    if (checkedLevelIds.size === 0) return;
+    setIsGBoostModalOpen(true);
+  };
+
+  const handleGBoostUploadComplete = (successCount: number, failCount: number) => {
+    if (failCount === 0) {
+      addNotification('success', `${successCount}개 레벨 GBoost 업로드 완료`);
+    } else {
+      addNotification('warning', `${successCount}개 업로드, ${failCount}개 실패`);
+    }
+    setCheckedLevelIds(new Set());
   };
 
   // Filter and sort levels
@@ -718,6 +735,18 @@ export function LocalLevelBrowser({ className }: LocalLevelBrowserProps) {
           <span className="text-xs text-gray-400">
             {checkedLevelIds.size}개 선택
           </span>
+          <button
+            onClick={handleGBoostUpload}
+            disabled={checkedLevelIds.size === 0}
+            className={clsx(
+              'px-3 py-1 text-xs rounded transition-colors',
+              checkedLevelIds.size === 0
+                ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
+                : 'bg-blue-600 hover:bg-blue-500 text-white'
+            )}
+          >
+            ☁️ GBoost 업로드
+          </button>
           <button
             onClick={handleBulkDelete}
             disabled={checkedLevelIds.size === 0 || isDeleting}
@@ -956,6 +985,14 @@ export function LocalLevelBrowser({ className }: LocalLevelBrowserProps) {
           </div>
         </>
       )}
+
+      {/* GBoost Upload Modal */}
+      <GBoostUploadModal
+        isOpen={isGBoostModalOpen}
+        onClose={() => setIsGBoostModalOpen(false)}
+        levelIds={Array.from(checkedLevelIds)}
+        onComplete={handleGBoostUploadComplete}
+      />
     </div>
   );
 }

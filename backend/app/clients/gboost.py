@@ -377,6 +377,83 @@ class GBoostClient:
         except aiohttp.ClientError:
             return False
 
+    async def save_thumbnail(
+        self,
+        board_id: str,
+        level_id: str,
+        png_data: bytes,
+        size: int = 128,
+    ) -> Dict[str, Any]:
+        """
+        Save thumbnail PNG to GBoost server.
+
+        Args:
+            board_id: Board identifier (bid parameter).
+            level_id: Level identifier.
+            png_data: PNG image data as bytes.
+            size: Thumbnail size (default 128).
+
+        Returns:
+            Response with success status.
+        """
+        if not self.is_configured:
+            return {
+                "success": False,
+                "error": "GBoost client not configured",
+            }
+
+        # Ensure level_id has proper prefix
+        array_id = level_id if level_id.startswith("level_") else f"level_{level_id}"
+
+        # Townpop pattern: POST to real_array.php with thumbpng action
+        endpoint = f"{self.base_url}/real_array.php"
+
+        try:
+            # Use aiohttp FormData for multipart upload
+            form_data = aiohttp.FormData()
+            form_data.add_field("act", "thumbpng")
+            form_data.add_field("gid", self.project_id)
+            form_data.add_field("bid", board_id)
+            form_data.add_field("id", array_id)
+            form_data.add_field("size", str(size))
+            form_data.add_field(
+                "png",
+                png_data,
+                filename="image.png",
+                content_type="image/png"
+            )
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    endpoint,
+                    data=form_data,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    result_text = await response.text()
+
+                    if response.status == 200:
+                        return {
+                            "success": True,
+                            "message": f"Thumbnail for {array_id} saved successfully",
+                        }
+                    else:
+                        return {
+                            "success": False,
+                            "error": f"Server error: {result_text}",
+                            "status_code": response.status,
+                        }
+
+        except aiohttp.ClientError as e:
+            return {
+                "success": False,
+                "error": f"Connection error: {str(e)}",
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Unexpected error: {str(e)}",
+            }
+
     async def health_check(self) -> Dict[str, Any]:
         """
         Check GBoost server health.

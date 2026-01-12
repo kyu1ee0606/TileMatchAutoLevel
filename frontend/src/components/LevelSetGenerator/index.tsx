@@ -165,7 +165,7 @@ export function LevelSetGenerator({ onLevelSetCreated }: LevelSetGeneratorProps)
         // Auto-add default goal if none specified (backend requires at least one goal)
         const effectiveGoals = (config.baseParams.goals && config.baseParams.goals.length > 0)
           ? config.baseParams.goals
-          : [{ type: 'craft', direction: 's', count: 3 }];
+          : [{ type: 'craft' as const, direction: 's' as const, count: 3 }];
 
         const baseParams: GenerationParams = {
           ...config.baseParams,

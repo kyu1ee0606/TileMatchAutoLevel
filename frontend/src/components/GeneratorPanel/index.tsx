@@ -22,7 +22,7 @@ const OBSTACLE_TYPES = [
   { id: 'bomb', label: '💣 Bomb', name: 'bomb' },
   { id: 'curtain', label: '🎭 Curtain', name: 'curtain' },
   { id: 'teleport', label: '🌀 Teleport', name: 'teleport' },
-  { id: 'crate', label: '📦 Crate', name: 'crate' },
+  { id: 'unknown', label: '❓ Unknown', name: 'unknown' },
 ] as const;
 
 interface GeneratorPanelProps {

@@ -10,6 +10,8 @@ const OBSTACLE_TYPES = [
   { id: 'ice', label: '❄️ Ice' },
   { id: 'bomb', label: '💣 Bomb' },
   { id: 'curtain', label: '🎭 Curtain' },
+  { id: 'teleport', label: '🌀 Teleport' },
+  { id: 'unknown', label: '❓ Unknown' },
 ] as const;
 
 // Grade-based gimmick recommendations (matching backend gimmick_profile.py)

@@ -3,7 +3,7 @@ import { useLevelStore } from '../../stores/levelStore';
 import { useUIStore } from '../../stores/uiStore';
 import { TILE_TYPES, ATTRIBUTES, type TileData } from '../../types';
 import { Button, Tooltip } from '../ui';
-import { Paintbrush, Eraser, Palette, Star, Target, PaintBucket, Trash2 } from 'lucide-react';
+import { Paintbrush, Eraser, Palette, Star, Target, PaintBucket, Trash2, Timer } from 'lucide-react';
 import clsx from 'clsx';
 
 // 타일 카테고리 정의
@@ -33,11 +33,13 @@ interface ToolPaletteProps {
 
 export function ToolPalette({ className }: ToolPaletteProps) {
   const {
+    level,
     selectedTileType,
     selectedAttribute,
     selectedLayer,
     setSelectedTileType,
     setSelectedAttribute,
+    setTimeAttack,
     clearLayer,
     fillLayer,
   } = useLevelStore();
@@ -145,6 +147,27 @@ export function ToolPalette({ className }: ToolPaletteProps) {
               <kbd className="text-[10px] px-1 py-0.5 bg-gray-900 rounded border border-gray-600">E</kbd>
             </button>
           </Tooltip>
+        </div>
+      </div>
+
+      {/* Time Attack Setting */}
+      <div>
+        <label className="text-sm font-medium text-gray-300 mb-2 block">
+          <Timer className="w-4 h-4 inline mr-1" />
+          타임어택
+        </label>
+        <div className="flex items-center gap-2">
+          <input
+            type="number"
+            min="0"
+            max="999"
+            value={level.timeAttack || 0}
+            onChange={(e) => setTimeAttack(parseInt(e.target.value) || 0)}
+            className="w-20 px-2 py-1 text-sm bg-gray-700 border border-gray-600 rounded text-white text-center"
+            placeholder="0"
+          />
+          <span className="text-sm text-gray-400">초</span>
+          <span className="text-xs text-gray-500">(0 = 비활성)</span>
         </div>
       </div>
 

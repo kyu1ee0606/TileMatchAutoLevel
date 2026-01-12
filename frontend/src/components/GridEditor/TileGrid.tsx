@@ -134,6 +134,32 @@ export function TileGrid({ className }: TileGridProps) {
     return layers;
   }, [level, selectedLayer, showOtherLayers]);
 
+  // Check if a tile position is covered by any upper layer (for unknown gimmick)
+  const isTileCoveredByUpperLayers = useCallback((layerIdx: number, x: number, y: number): boolean => {
+    try {
+      if (!level || typeof level.layer !== 'number') return false;
+      const totalLayers = level.layer || 8;
+
+      // Check all layers above this one
+      for (let upperLayer = layerIdx + 1; upperLayer < totalLayers; upperLayer++) {
+        const upperLayerKey = `layer_${upperLayer}` as `layer_${number}`;
+        const upperLayerData = level[upperLayerKey];
+
+        if (!upperLayerData || !upperLayerData.tiles) continue;
+
+        // Check if there's a tile at the same position in the upper layer
+        const pos = `${x}_${y}`;
+        if (upperLayerData.tiles[pos]) {
+          return true;
+        }
+      }
+
+      return false;
+    } catch {
+      return false;
+    }
+  }, [level]);
+
   if (!layerData) {
     return (
       <div className={clsx('flex items-center justify-center p-8 text-gray-400 bg-gray-900 rounded-lg', className)}>
@@ -363,6 +389,15 @@ export function TileGrid({ className }: TileGridProps) {
     const isRandomTile = tileType === 't0';
     const t0Info = TILE_TYPES['t0'];
 
+    // Check if this tile has unknown attribute and is covered by upper layers
+    let isUnknownAndCovered = false;
+    try {
+      isUnknownAndCovered = attribute === 'unknown' && isTileCoveredByUpperLayers(selectedLayer, x, y);
+    } catch {
+      isUnknownAndCovered = false;
+    }
+    const unknownImage = SPECIAL_IMAGES['unknown'];
+
     return (
       <div
         key={pos}
@@ -374,56 +409,84 @@ export function TileGrid({ className }: TileGridProps) {
         }}
         onMouseDown={() => handleMouseDown(x, y)}
         onMouseEnter={() => handleMouseEnter(x, y)}
-        title={`${tileInfo?.name || tileType} ${attrInfo?.name || ''}`}
+        title={isUnknownAndCovered
+          ? `??? (Unknown - 상위 타일에 가려짐)`
+          : `${tileInfo?.name || tileType} ${attrInfo?.name || ''}`}
       >
-        {/* t0 background layer (for t1+ tiles) */}
-        {!isRandomTile && t0Info?.image && (
-          <div className="absolute inset-0">
+        {/* Unknown covered state - show only unknown image */}
+        {isUnknownAndCovered ? (
+          <>
+            {/* t0 background for unknown covered tiles */}
+            {t0Info?.image && (
+              <div className="absolute inset-0">
+                <img
+                  src={t0Info.image}
+                  alt="tile background"
+                  className="w-full h-full object-cover pointer-events-none"
+                  draggable={false}
+                />
+              </div>
+            )}
+            {/* Unknown overlay - hides tile type */}
             <img
-              src={t0Info.image}
-              alt="tile background"
-              className="w-full h-full object-cover pointer-events-none"
+              src={unknownImage}
+              alt="Unknown"
+              className="absolute inset-0 w-full h-full object-cover pointer-events-none z-20"
               draggable={false}
             />
-          </div>
-        )}
-        {/* Current layer tile icon */}
-        <div className="absolute inset-0 flex items-center justify-center">
-          {tileInfo?.image ? (
-            <img
-              src={tileInfo.image}
-              alt={tileInfo.name}
-              className="w-full h-full object-cover pointer-events-none"
-              draggable={false}
-            />
-          ) : (
-            // Fallback color block when no image
-            <div
-              className="w-full h-full flex items-center justify-center"
-              style={{ backgroundColor: tileInfo?.color || '#888' }}
-            >
-              <span className="text-white text-shadow">
-                {tileType.replace('_s', '')}
-              </span>
+          </>
+        ) : (
+          <>
+            {/* t0 background layer (for t1+ tiles) */}
+            {!isRandomTile && t0Info?.image && (
+              <div className="absolute inset-0">
+                <img
+                  src={t0Info.image}
+                  alt="tile background"
+                  className="w-full h-full object-cover pointer-events-none"
+                  draggable={false}
+                />
+              </div>
+            )}
+            {/* Current layer tile icon */}
+            <div className="absolute inset-0 flex items-center justify-center">
+              {tileInfo?.image ? (
+                <img
+                  src={tileInfo.image}
+                  alt={tileInfo.name}
+                  className="w-full h-full object-cover pointer-events-none"
+                  draggable={false}
+                />
+              ) : (
+                // Fallback color block when no image
+                <div
+                  className="w-full h-full flex items-center justify-center"
+                  style={{ backgroundColor: tileInfo?.color || '#888' }}
+                >
+                  <span className="text-white text-shadow">
+                    {tileType.replace('_s', '')}
+                  </span>
+                </div>
+              )}
             </div>
-          )}
-        </div>
-        {attrImage && (
-          <img
-            src={attrImage}
-            alt={attribute}
-            className="absolute inset-0 w-full h-full object-cover pointer-events-none opacity-80 z-20"
-            draggable={false}
-          />
-        )}
-        {attribute && !attrImage && (
-          <span className="absolute bottom-0 right-0 text-[10px] bg-black/50 px-0.5 rounded z-20">
-            {attrInfo?.icon || attribute[0]}
-          </span>
-        )}
-        {/* Direction arrow overlay for craft tiles */}
-        {tileType.startsWith('craft_') && (
-          <DirectionArrow tileType={tileType} tileSize={TILE_SIZE} />
+            {attrImage && (
+              <img
+                src={attrImage}
+                alt={attribute}
+                className="absolute inset-0 w-full h-full object-cover pointer-events-none opacity-80 z-20"
+                draggable={false}
+              />
+            )}
+            {attribute && !attrImage && (
+              <span className="absolute bottom-0 right-0 text-[10px] bg-black/50 px-0.5 rounded z-20">
+                {attrInfo?.icon || attribute[0]}
+              </span>
+            )}
+            {/* Direction arrow overlay for craft tiles */}
+            {tileType.startsWith('craft_') && (
+              <DirectionArrow tileType={tileType} tileSize={TILE_SIZE} />
+            )}
+          </>
         )}
       </div>
     );

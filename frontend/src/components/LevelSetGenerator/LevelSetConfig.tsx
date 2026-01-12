@@ -21,7 +21,7 @@ const OBSTACLE_TYPES = [
   { id: 'bomb', label: '💣 Bomb' },
   { id: 'curtain', label: '🎭 Curtain' },
   { id: 'teleport', label: '🌀 Teleport' },
-  { id: 'crate', label: '📦 Crate' },
+  { id: 'unknown', label: '❓ Unknown' },
   { id: 'craft', label: '🔧 Craft' },
   { id: 'stack', label: '📚 Stack' },
 ] as const;

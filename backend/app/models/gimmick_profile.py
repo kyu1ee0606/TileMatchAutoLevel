@@ -20,7 +20,7 @@ class GimmickType(str, Enum):
     BOMB = "bomb"
     CURTAIN = "curtain"
     TELEPORT = "teleport"
-    CRATE = "crate"
+    UNKNOWN = "unknown"  # 상위 타일에 가려지면 타일 종류가 숨겨짐
 
 
 @dataclass
@@ -94,7 +94,7 @@ GIMMICK_DIFFICULTY_WEIGHTS: Dict[str, float] = {
     "bomb": 1.5,       # 어려움 - 시간/이동 제한
     "curtain": 1.3,    # 중간 - 가려진 타일
     "teleport": 1.2,   # 중간 - 위치 변경
-    "crate": 1.4,      # 어려움 - 특수 조건
+    "unknown": 1.2,    # 중간 - 상위 타일에 가려지면 타일 종류가 숨겨짐
 }
 
 

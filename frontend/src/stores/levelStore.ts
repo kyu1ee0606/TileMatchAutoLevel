@@ -100,6 +100,7 @@ interface LevelState {
   setSelectedLayer: (layer: number) => void;
   setSelectedTileType: (tileType: string) => void;
   setSelectedAttribute: (attribute: string) => void;
+  setTimeAttack: (seconds: number) => void;
 
   // Tile operations (with validation)
   setTile: (layer: number, x: number, y: number, tileData: TileData) => ValidationResult;
@@ -143,6 +144,10 @@ export const useLevelStore = create<LevelState>((set, get) => ({
   setSelectedLayer: (layer) => set({ selectedLayer: layer }),
   setSelectedTileType: (tileType) => set({ selectedTileType: tileType }),
   setSelectedAttribute: (attribute) => set({ selectedAttribute: attribute }),
+  setTimeAttack: (seconds) => set((state) => ({
+    level: { ...state.level, timeAttack: seconds },
+    analysisResult: null,
+  })),
 
   // Tile operations with validation
   setTile: (layer, x, y, tileData) => {

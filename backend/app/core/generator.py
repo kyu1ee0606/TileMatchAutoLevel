@@ -2623,7 +2623,7 @@ class LevelGenerator:
             "grass": "grass",
             "bomb": "bomb",
             "curtain": "curtain",
-            "crate": "crate",
+            "unknown": "unknown",
             "link": "link_e",  # Default to east direction for link
             "teleport": "teleport",
         }
@@ -2703,7 +2703,7 @@ class LevelGenerator:
             return None
 
         # All supported obstacle types
-        ALL_OBSTACLE_TYPES = ["chain", "frog", "link", "grass", "ice", "bomb", "curtain", "teleport", "crate"]
+        ALL_OBSTACLE_TYPES = ["chain", "frog", "link", "grass", "ice", "bomb", "curtain", "teleport", "unknown"]
 
         # Build per-layer obstacle targets
         layer_targets: Dict[int, Dict[str, int]] = {}
@@ -2739,7 +2739,7 @@ class LevelGenerator:
             "bomb": get_global_target("bomb", 0.01),
             "curtain": get_global_target("curtain", 0.02),
             "teleport": get_global_target("teleport", 0.01),
-            "crate": get_global_target("crate", 0.02),
+            "unknown": get_global_target("unknown", 0.02),
         }
 
         # Distribute remaining to unconfigured layers
@@ -2837,12 +2837,12 @@ class LevelGenerator:
                         level, layer_idx, teleport_target, obstacles_added
                     )
 
-            # Add crate obstacles (must be matched to break)
-            if "crate" in obstacle_types:
-                crate_target = targets.get("crate", 0)
-                if crate_target > 0:
-                    level = self._add_crate_obstacles_to_layer(
-                        level, layer_idx, crate_target, obstacles_added
+            # Add unknown obstacles (tile type hidden when covered by upper layer)
+            if "unknown" in obstacle_types:
+                unknown_target = targets.get("unknown", 0)
+                if unknown_target > 0:
+                    level = self._add_unknown_obstacles_to_layer(
+                        level, layer_idx, unknown_target, obstacles_added
                     )
 
         return level
@@ -3317,11 +3317,14 @@ class LevelGenerator:
 
         return level
 
-    def _add_crate_obstacles_to_layer(
+    def _add_unknown_obstacles_to_layer(
         self, level: Dict[str, Any], layer_idx: int, target: int, counter: Dict[str, int]
     ) -> Dict[str, Any]:
-        """Add crate obstacles to a specific layer.
-        Crates block tiles and must be broken by matches.
+        """Add unknown obstacles to a specific layer.
+
+        RULE: Unknown tiles should ONLY be placed on tiles that ARE covered by upper layers.
+        This is because the unknown effect only activates when the tile is hidden by upper tiles.
+        When upper tiles are removed, the tile type becomes visible.
         """
         layer_key = f"layer_{layer_idx}"
         tiles = level.get(layer_key, {}).get("tiles", {})
@@ -3333,6 +3336,7 @@ class LevelGenerator:
         max_attempts = target * 10
 
         positions = list(tiles.keys())
+        random.shuffle(positions)
 
         while added < target and attempts < max_attempts:
             attempts += 1
@@ -3351,27 +3355,13 @@ class LevelGenerator:
             except:
                 continue
 
-            # Crate needs at least one clearable neighbor
-            neighbors = [
-                (col, row-1), (col, row+1),
-                (col-1, row), (col+1, row),
-            ]
+            # RULE: Unknown tiles must be covered by upper layers to have any effect
+            if not self._is_position_covered_by_upper(level, layer_idx, col, row):
+                continue
 
-            has_clearable = False
-            for ncol, nrow in neighbors:
-                npos = f"{ncol}_{nrow}"
-                if npos in tiles:
-                    ndata = tiles[npos]
-                    if (isinstance(ndata, list) and len(ndata) >= 2 and
-                        (not ndata[1] or ndata[1] == "frog") and
-                        ndata[0] not in self.GOAL_TYPES):
-                        has_clearable = True
-                        break
-
-            if has_clearable:
-                tile_data[1] = "crate"
-                added += 1
-                counter["crate"] += 1
+            tile_data[1] = "unknown"
+            added += 1
+            counter["unknown"] += 1
 
         return level
 
@@ -4176,6 +4166,7 @@ class LevelGenerator:
             "chain": self._add_chain_to_tile,
             "frog": self._add_frog_to_tile,
             "ice": self._add_ice_to_tile,
+            "unknown": self._add_unknown_to_tile,
         }
         # If obstacle_types is specified, only allow those actions
         if obstacle_types is not None and len(obstacle_types) > 0:
@@ -4411,6 +4402,41 @@ class LevelGenerator:
         Ice is a good difficulty modifier as it doesn't require neighbor rules like chain.
         """
         return self._add_attribute_to_tile(level, "ice")
+
+    def _add_unknown_to_tile(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """Add unknown attribute to a random tile.
+
+        RULE: Unknown tiles should be placed on tiles that ARE covered by upper layers.
+        This is because the unknown effect only works when the tile is hidden by upper tiles.
+        When upper tiles are removed, the tile type becomes visible.
+        """
+        num_layers = level.get("layer", 8)
+
+        # Collect all tiles without attributes that ARE covered by upper layers
+        candidates = []
+        for i in range(num_layers - 1):  # Exclude top layer (no upper layers to cover)
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for pos, tile_data in tiles.items():
+                if (
+                    isinstance(tile_data, list)
+                    and len(tile_data) >= 2
+                    and not tile_data[1]
+                    and tile_data[0] not in self.GOAL_TYPES
+                ):
+                    try:
+                        col, row = map(int, pos.split('_'))
+                        # Only add to tiles covered by upper layers
+                        if self._is_position_covered_by_upper(level, i, col, row):
+                            candidates.append((layer_key, pos))
+                    except:
+                        continue
+
+        if candidates:
+            layer_key, pos = random.choice(candidates)
+            level[layer_key]["tiles"][pos][1] = "unknown"
+
+        return level
 
     def _add_attribute_to_tile(
         self, level: Dict[str, Any], attribute: str

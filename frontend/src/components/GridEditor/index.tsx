@@ -19,7 +19,7 @@ interface GimmickCounts {
   grass: number;
   link: number;
   bomb: number;
-  crate: number;
+  unknown: number;
   teleport: number;
   curtain: number;
   craft: number;
@@ -33,7 +33,7 @@ const GIMMICK_INFO: Record<string, { icon: string; name: string }> = {
   grass: { icon: '🌿', name: 'Grass' },
   link: { icon: '🔗', name: 'Link' },
   bomb: { icon: '💣', name: 'Bomb' },
-  crate: { icon: '📦', name: 'Crate' },
+  unknown: { icon: '❓', name: 'Unknown' },
   teleport: { icon: '🌀', name: 'Teleport' },
   curtain: { icon: '🎭', name: 'Curtain' },
   craft: { icon: '🎁', name: 'Craft' },
@@ -43,7 +43,7 @@ const GIMMICK_INFO: Record<string, { icon: string; name: string }> = {
 function countGimmicks(levelData: LevelJSON): GimmickCounts {
   const counts: GimmickCounts = {
     chain: 0, frog: 0, ice: 0, grass: 0, link: 0,
-    bomb: 0, crate: 0, teleport: 0, curtain: 0,
+    bomb: 0, unknown: 0, teleport: 0, curtain: 0,
     craft: 0, stack: 0,
   };
 
@@ -72,7 +72,7 @@ function countGimmicks(levelData: LevelJSON): GimmickCounts {
       else if (attribute.startsWith('grass')) counts.grass++;
       else if (attribute.startsWith('link')) counts.link++;
       else if (attribute === 'bomb') counts.bomb++;
-      else if (attribute === 'crate') counts.crate++;
+      else if (attribute === 'unknown') counts.unknown++;
       else if (attribute.startsWith('teleport')) counts.teleport++;
       else if (attribute === 'curtain') counts.curtain++;
     }

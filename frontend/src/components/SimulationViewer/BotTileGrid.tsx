@@ -1100,8 +1100,22 @@ export function BotTileGrid({
     // Get gimmick effect info for display
     const gimmickEffect = attribute ? GIMMICK_EFFECTS[attribute] : null;
 
+    // Get attribute image (same as editor)
+    // For grass tiles, hide the attribute image when grass is removed (grassLevel <= 0)
+    // For ice tiles, hide the attribute image when ice is removed (iceLevel <= 0)
+    // For unknown tiles, hide the attribute image when tile is no longer covered by upper layers
+    const isGrassAttribute = attribute?.startsWith('grass');
+    const isIceAttribute = attribute?.startsWith('ice');
+    const isTeleportAttribute = attribute === 'teleport';
+    const isUnknownAttribute = attribute === 'unknown';
+
+    // Check if unknown tile is still covered by upper layers
+    const [tileX, tileY] = pos.split('_').map(Number);
+    const isUnknownCovered = isUnknownAttribute ? isBlockedByUpper(layerIdx, tileX, tileY, tilesByLayer) : false;
+
     // Check if any gimmick is active (for border styling)
-    const hasActiveGimmick = (isIce && iceLevel > 0) || isChain || (isGrass && grassLevel > 0) || isLink || isBomb || isCurtain || isTeleport;
+    // Unknown gimmick is only active when tile is covered
+    const hasActiveGimmick = (isIce && iceLevel > 0) || isChain || (isGrass && grassLevel > 0) || isLink || isBomb || isCurtain || isTeleport || (isUnknownAttribute && isUnknownCovered);
 
     // Get gimmick border color
     const getGimmickBorderColor = () => {
@@ -1112,17 +1126,12 @@ export function BotTileGrid({
       if (isBomb) return bombRemaining !== undefined && bombRemaining <= 3 ? 'rgba(239, 68, 68, 0.8)' : 'rgba(239, 68, 68, 0.5)';
       if (isCurtain) return isCurtainOpen ? 'rgba(168, 85, 247, 0.4)' : 'rgba(124, 58, 237, 0.6)';
       if (isTeleport) return 'rgba(6, 182, 212, 0.6)';
+      if (isUnknownAttribute && isUnknownCovered) return 'rgba(107, 114, 128, 0.6)';  // Gray border for unknown
       return 'transparent';
     };
 
-    // Get attribute image (same as editor)
-    // For grass tiles, hide the attribute image when grass is removed (grassLevel <= 0)
-    // For ice tiles, hide the attribute image when ice is removed (iceLevel <= 0)
-    const isGrassAttribute = attribute?.startsWith('grass');
-    const isIceAttribute = attribute?.startsWith('ice');
-    const isTeleportAttribute = attribute === 'teleport';
-    // Hide attribute image when: grass removed, ice removed, or teleport (has dedicated badge with counter)
-    const shouldHideAttribute = (isGrassAttribute && grassLevel <= 0) || (isIceAttribute && iceLevel <= 0) || isTeleportAttribute;
+    // Hide attribute image when: grass removed, ice removed, teleport (has dedicated badge), or unknown uncovered
+    const shouldHideAttribute = (isGrassAttribute && grassLevel <= 0) || (isIceAttribute && iceLevel <= 0) || isTeleportAttribute || (isUnknownAttribute && !isUnknownCovered);
     const attrImage = attribute && !shouldHideAttribute ? SPECIAL_IMAGES[attribute] : null;
 
     // t0 is random tile, t1+ shows t0 background + tile icon (same as editor)
@@ -1289,6 +1298,17 @@ export function BotTileGrid({
             title={`텔레포트 카운터: ${currentTeleportClickCount} (3이 되면 셔플 후 0으로 리셋)`}
           >
             <span className="text-[8px]">🌀{currentTeleportClickCount}</span>
+          </div>
+        )}
+
+        {/* Unknown gimmick - only shows when tile is covered by upper layers */}
+        {isUnknownAttribute && isUnknownCovered && (
+          <div
+            className="absolute bottom-0 left-0 flex items-center justify-center rounded-tr bg-gray-600/80 text-white"
+            style={{ width: 16, height: 14 }}
+            title="Unknown - 상위 타일 제거 시 타일 종류 표시"
+          >
+            <span className="text-[9px]">❓</span>
           </div>
         )}
 

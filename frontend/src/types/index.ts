@@ -17,6 +17,7 @@ export interface LevelLayer {
 // Complete level JSON structure
 export interface LevelJSON {
   layer: number;
+  timeAttack?: number;  // Time attack seconds (0 = disabled)
   [key: `layer_${number}`]: LevelLayer;
 }
 
@@ -171,7 +172,6 @@ export const SPECIAL_IMAGES: Record<string, string> = {
   grass: '/tiles/special/tile_grass.png',
   grass_1: '/tiles/special/tile_grass.png',
   grass_2: '/tiles/special/tile_grass.png',
-  crate: '/tiles/special/tile_crate.png',
   bomb: '/tiles/special/bomb.png',
   unknown: '/tiles/special/tile_unknown.png',
   // Curtain gimmick
@@ -219,6 +219,7 @@ export const GIMMICK_EFFECTS: Record<string, GimmickEffect> = {
   curtain_open: { name: 'Curtain Open', icon: '🎭', color: '#a855f7', description: '커튼 열림' },
   curtain_close: { name: 'Curtain Closed', icon: '🎪', color: '#7c3aed', description: '커튼 닫힘 - 선택 불가' },
   teleport: { name: 'Teleport', icon: '🌀', color: '#06b6d4', description: '텔레포트 - 위치 이동' },
+  unknown: { name: 'Unknown', icon: '❓', color: '#6b7280', description: '물음표 - 상위 타일 제거 전까지 종류 숨김' },
   link_n: { name: 'Link North', icon: '🔗↑', color: '#f59e0b', description: '북쪽 연결' },
   link_s: { name: 'Link South', icon: '🔗↓', color: '#f59e0b', description: '남쪽 연결' },
   link_e: { name: 'Link East', icon: '🔗→', color: '#f59e0b', description: '동쪽 연결' },
@@ -232,6 +233,9 @@ export const ATTRIBUTES: Record<string, { name: string; icon: string }> = {
   frog: { name: 'Frog', icon: '🐸' },
   link_w: { name: 'Link West', icon: '🔗←' },
   link_n: { name: 'Link North', icon: '🔗↑' },
+  link_s: { name: 'Link South', icon: '🔗↓' },
+  link_e: { name: 'Link East', icon: '🔗→' },
+  unknown: { name: 'Unknown', icon: '❓' },
 };
 
 // Grade color mapping

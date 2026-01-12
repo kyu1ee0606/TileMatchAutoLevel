@@ -171,6 +171,41 @@ class GBoostListResponse(BaseModel):
     levels: List[LevelListItem] = Field(default=[], description="List of levels")
 
 
+class UploadLocalToGBoostRequest(BaseModel):
+    """Request schema for uploading local levels to GBoost server."""
+    board_id: str = Field(..., description="Target board ID on GBoost server")
+    level_ids: List[str] = Field(..., description="List of local level IDs to upload")
+    target_prefix: str = Field(default="level_", description="Prefix for target level IDs on GBoost")
+    rename_strategy: str = Field(
+        default="keep",
+        description="Rename strategy: 'keep' (original), 'sequential' (level_001, ...), 'custom'"
+    )
+    custom_names: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Custom name mapping {local_id: gboost_id} for 'custom' strategy"
+    )
+    overwrite: bool = Field(default=False, description="Overwrite existing levels on server")
+    start_index: int = Field(default=1, ge=1, description="Starting index for sequential naming")
+
+
+class UploadProgressItem(BaseModel):
+    """Progress item for a single level upload."""
+    level_id: str = Field(..., description="Local level ID")
+    target_id: str = Field(default="", description="Target ID on GBoost server")
+    status: str = Field(..., description="Status: pending, uploading, success, failed, skipped")
+    message: str = Field(default="", description="Status message")
+
+
+class UploadLocalToGBoostResponse(BaseModel):
+    """Response schema for upload local levels to GBoost."""
+    success: bool = Field(..., description="Overall success status")
+    total: int = Field(..., description="Total levels to upload")
+    uploaded: int = Field(default=0, description="Successfully uploaded count")
+    failed: int = Field(default=0, description="Failed upload count")
+    skipped: int = Field(default=0, description="Skipped count (already exists)")
+    results: List[UploadProgressItem] = Field(default=[], description="Per-level results")
+
+
 class BatchAnalyzeRequest(BaseModel):
     """Request schema for batch analysis."""
     levels: Optional[List[Dict[str, Any]]] = Field(default=None, description="List of level JSONs")

@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
-from .api.routes import analyze, generate, gboost, assess, simulate
+from .api.routes import analyze, generate, gboost, assess, simulate, leveling
 
 # Get settings
 settings = get_settings()
@@ -32,6 +32,7 @@ app.include_router(generate.router)
 app.include_router(gboost.router)
 app.include_router(assess.router)
 app.include_router(simulate.router)
+app.include_router(leveling.router)
 
 
 @app.get("/")

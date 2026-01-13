@@ -41,9 +41,28 @@ def resolve_symmetry_mode(symmetry_mode: str | None) -> str:
     return symmetry_mode
 
 
-# Default gimmick unlock levels (5-stage intervals)
-# All 11 gimmicks unlock by level 55
+# Professional gimmick unlock levels (15-stage intervals)
+# Based on Tile Buster/Explorer leveling patterns
+# - Levels 1-10: No gimmicks (pure matching learning)
+# - Each gimmick has 9 practice levels before next unlock
+# - All 11 gimmicks unlock by level 156
 DEFAULT_GIMMICK_UNLOCK_LEVELS = {
+    "chain": 11,      # 11-19: chain practice
+    "ice": 21,        # 21-29: ice practice
+    "frog": 36,       # 36-44: frog practice
+    "grass": 51,      # 51-59: grass practice
+    "link": 66,       # 66-74: link practice
+    "bomb": 81,       # 81-89: bomb practice
+    "curtain": 96,    # 96-104: curtain practice
+    "teleport": 111,  # 111-119: teleport practice
+    "unknown": 126,   # 126-134: unknown practice
+    "craft": 141,     # 141-149: craft goal practice
+    "stack": 156,     # 156-164: stack goal practice
+}
+
+# Legacy simple unlock levels (5-stage intervals)
+# All 11 gimmicks unlock by level 55
+SIMPLE_GIMMICK_UNLOCK_LEVELS = {
     "chain": 5,
     "frog": 10,
     "ice": 15,
@@ -52,7 +71,7 @@ DEFAULT_GIMMICK_UNLOCK_LEVELS = {
     "bomb": 30,
     "curtain": 35,
     "teleport": 40,
-    "crate": 45,
+    "unknown": 45,
     "craft": 50,
     "stack": 55,
 }
@@ -342,13 +361,14 @@ def generate_fallback_level(
     This is called when all normal generation attempts fail.
     """
     # Use very simple, safe parameters that are guaranteed to work
-    simple_tile_types = ["t0", "t2", "t4"]  # Only 3 types
+    # NOTE: t0 is excluded - causes issues with bot simulation
+    simple_tile_types = ["t1", "t2", "t3"]  # Only 3 types
     simple_grid = (5, 5)  # Small grid
     simple_layers = 4  # Few layers
 
     # Adjust parameters based on difficulty
     if target_difficulty >= 0.6:
-        simple_tile_types = ["t0", "t2", "t4", "t5"]
+        simple_tile_types = ["t1", "t2", "t3", "t4"]
         simple_grid = (6, 6)
         simple_layers = 5
 
@@ -705,24 +725,24 @@ async def generate_validated_level(
 
     # CALIBRATED tile types based on target difficulty
     # More types = harder (more variety to match)
-    # IMPROVED v2: Adjusted for 40-60% range underperformance
+    # NOTE: t0 is excluded - causes issues with bot simulation
     if request.target_difficulty >= 0.85:
-        default_tile_types = ["t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"]  # 9 types for extreme (80%+)
+        default_tile_types = ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9"]  # 9 types for extreme (80%+)
     elif request.target_difficulty >= 0.75:
-        default_tile_types = ["t0", "t2", "t3", "t4", "t5", "t6", "t7", "t8"]  # 8 types for very hard (70-80%)
+        default_tile_types = ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"]  # 8 types for very hard (70-80%)
     elif request.target_difficulty >= 0.6:
-        default_tile_types = ["t0", "t2", "t3", "t4", "t5", "t6", "t7"]  # 7 types for hard (60-70%)
+        default_tile_types = ["t1", "t2", "t3", "t4", "t5", "t6", "t7"]  # 7 types for hard (60-70%)
     elif request.target_difficulty >= 0.5:
-        default_tile_types = ["t0", "t2", "t3", "t4", "t5", "t6"]  # 6 types for medium-hard (50-60%)
+        default_tile_types = ["t1", "t2", "t3", "t4", "t5", "t6"]  # 6 types for medium-hard (50-60%)
     elif request.target_difficulty >= 0.4:
-        default_tile_types = ["t0", "t2", "t4", "t5", "t6"]  # 5 types for medium (40-50%)
+        default_tile_types = ["t1", "t2", "t3", "t4", "t5"]  # 5 types for medium (40-50%)
     elif request.target_difficulty >= 0.3:
-        default_tile_types = ["t0", "t2", "t4", "t5"]  # 4 types for easy (30-40%)
+        default_tile_types = ["t1", "t2", "t3", "t4"]  # 4 types for easy (30-40%)
     else:
-        default_tile_types = ["t0", "t2", "t4"]  # 3 types for very easy (<30%)
+        default_tile_types = ["t1", "t2", "t3"]  # 3 types for very easy (<30%)
 
     base_tile_types = list(request.tile_types) if request.tile_types else default_tile_types
-    all_tile_types = ["t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9"]  # Extended tile types
+    all_tile_types = ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9"]  # Extended tile types (t0 excluded)
     current_tile_types = base_tile_types.copy()
 
     # Track tile type count separately for fine-tuning

@@ -20,10 +20,9 @@ class LevelGenerator:
     """Generates levels with target difficulty."""
 
     # Default tile types for generation
-    # NOTE: t0 is the "random tile" that gets converted to t1~t{useTileCount} at runtime
-    # So we use t0 plus some explicit tile types (t2~t5)
-    # This gives useTileCount=5, meaning t0 can become t1~t5
-    DEFAULT_TILE_TYPES = ["t0", "t2", "t4", "t5"]  # Removed t6 to match useTileCount=5
+    # NOTE: t0 is excluded - use t1~t5 for consistent tile types
+    # t0 was previously used as "random tile" but causes issues with bot simulation
+    DEFAULT_TILE_TYPES = ["t1", "t2", "t3", "t4", "t5"]
     OBSTACLE_TILE_TYPES = ["t8", "t9"]
     SPECIAL_TILE_TYPES = ["t10", "t11", "t12", "t14", "t15"]
     # All goal types - craft and stack with all 4 directions (s=south, n=north, e=east, w=west)
@@ -55,9 +54,12 @@ class LevelGenerator:
         """
         start_time = time.time()
 
-        # Check if user has specified per-layer tile configs (strict mode)
-        # In strict mode, we respect user's tile counts exactly
-        has_strict_tile_config = bool(params.layer_tile_configs) and len(params.layer_tile_configs) > 0
+        # Check if user has specified per-layer tile configs OR total_tile_count (strict mode)
+        # In strict mode, we respect user's tile counts exactly without adjustment
+        has_strict_tile_config = (
+            (bool(params.layer_tile_configs) and len(params.layer_tile_configs) > 0) or
+            (params.total_tile_count is not None)
+        )
 
         # Calculate total goal inner tiles (craft_s with count=3 means 3 additional tiles inside)
         # Goal tiles are visual tiles that CONTAIN inner tiles, not replace them
@@ -75,8 +77,14 @@ class LevelGenerator:
 
         # Validate: In strict mode, total tile count (including goal inner tiles) must be divisible by 3
         if has_strict_tile_config:
-            # Visual tiles from config (includes goal tiles as 1 visual tile each)
-            config_tiles = sum(config.count for config in params.layer_tile_configs)
+            # Get config tiles from layer_tile_configs or total_tile_count
+            if params.layer_tile_configs and len(params.layer_tile_configs) > 0:
+                config_tiles = sum(config.count for config in params.layer_tile_configs)
+            elif params.total_tile_count is not None:
+                config_tiles = params.total_tile_count
+            else:
+                config_tiles = 0
+
             # Actual tiles = visual tiles + goal inner tiles
             # Goal tile itself is counted in config_tiles, but it contains inner tiles that need to be added
             # Example: 42 config tiles + 3 inner tiles = 45 actual tiles
@@ -182,7 +190,7 @@ class LevelGenerator:
             for pos, tile_data in tiles.items():
                 if not isinstance(tile_data, list):
                     continue
-                tile_type = tile_data[0] if len(tile_data) > 0 else "t0"
+                tile_type = tile_data[0] if len(tile_data) > 0 else "t1"
                 gimmick = tile_data[1] if len(tile_data) > 1 else ""
                 extra = tile_data[2] if len(tile_data) > 2 else None
 
@@ -677,6 +685,13 @@ class LevelGenerator:
             active_layers, base_pattern_index=params.pattern_index
         )
 
+        # When exact tile counts are specified, force symmetry_mode="none" to get exact counts
+        # (unless user explicitly requested a specific symmetry mode)
+        exact_count_mode = has_layer_tile_configs or (params.total_tile_count is not None)
+        effective_symmetry_mode = params.symmetry_mode
+        if exact_count_mode and params.symmetry_mode is None:
+            effective_symmetry_mode = "none"
+
         for layer_idx in active_layers:
             layer_key = f"layer_{layer_idx}"
             is_odd_layer = layer_idx % 2 == 1
@@ -696,7 +711,7 @@ class LevelGenerator:
             # Generate positions for this layer with symmetry and pattern options
             positions = self._generate_layer_positions_for_count(
                 layer_cols, layer_rows, target_count,
-                symmetry_mode=params.symmetry_mode,
+                symmetry_mode=effective_symmetry_mode,
                 pattern_type=params.pattern_type,
                 pattern_index=layer_pattern_index  # Use varied pattern per layer
             )
@@ -811,6 +826,27 @@ class LevelGenerator:
         selected = self._generate_positions_with_pattern(
             cols, rows, actual_count, symmetry_mode, pattern_type, pattern_index
         )
+
+        # CRITICAL: Ensure exact tile count by trimming or padding
+        # This is especially important when symmetry_mode="none" for exact counts
+        if len(selected) > actual_count:
+            # Trim excess - prefer to keep positions closer to center
+            center_x, center_y = cols / 2.0, rows / 2.0
+            def distance_from_center(pos: str) -> float:
+                parts = pos.split("_")
+                x, y = int(parts[0]), int(parts[1])
+                return ((x - center_x) ** 2 + (y - center_y) ** 2) ** 0.5
+            selected.sort(key=distance_from_center)
+            selected = selected[:actual_count]
+        elif len(selected) < actual_count:
+            # Pad with random unused positions
+            all_positions = set(f"{x}_{y}" for x in range(cols) for y in range(rows))
+            unused = list(all_positions - set(selected))
+            if unused:
+                random.shuffle(unused)
+                needed = actual_count - len(selected)
+                selected.extend(unused[:needed])
+
         return selected
 
     def _generate_positions_with_pattern(
@@ -822,9 +858,15 @@ class LevelGenerator:
         # Default to geometric pattern for more regular shapes
         pattern = pattern_type or "geometric"
 
-        # Resolve symmetry mode: convert None or "none" to random single-axis
-        # "both" is now preserved to enable 4-way symmetry for aesthetic patterns
-        if symmetry_mode is None or symmetry_mode == "none":
+        # Resolve symmetry mode:
+        # - "none" explicitly passed: truly no symmetry (for exact tile counts)
+        # - None (not specified): random single-axis for visual appeal
+        # - "both": 4-way symmetry for aesthetic patterns
+        if symmetry_mode == "none":
+            # User explicitly requested no symmetry - respect this for exact counts
+            symmetry = "none"
+        elif symmetry_mode is None:
+            # Default: random symmetry for visual appeal
             symmetry = random.choice(["horizontal", "vertical"])
         else:
             symmetry = symmetry_mode
@@ -4775,8 +4817,8 @@ class LevelGenerator:
                         if added_count >= tiles_to_add:
                             break
                         if pos not in used_positions:
-                            # Add a t0 tile to this position
-                            level[layer_key]["tiles"][pos] = ["t0", ""]
+                            # Add a t1 tile to this position (t0 is excluded)
+                            level[layer_key]["tiles"][pos] = ["t1", ""]
                             level[layer_key]["num"] = str(len(level[layer_key]["tiles"]))
                             added_count += 1
 

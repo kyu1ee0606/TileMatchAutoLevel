@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import type { LevelSetGenerationConfig, GimmickMode, LevelGimmickOverride, DifficultyPoint, MultiSetConfig } from '../../types/levelSet';
-import { createDefaultMultiSetConfig, calculateTotalLevels, STEP_10_PRESET, DEFAULT_GIMMICK_UNLOCK_LEVELS } from '../../types/levelSet';
+import type { LevelSetGenerationConfig, GimmickMode, LevelGimmickOverride, DifficultyPoint, MultiSetConfig, LevelingMode } from '../../types/levelSet';
+import { createDefaultMultiSetConfig, calculateTotalLevels, STEP_10_PRESET, DEFAULT_GIMMICK_UNLOCK_LEVELS, SIMPLE_GIMMICK_UNLOCK_LEVELS, PROFESSIONAL_GIMMICK_UNLOCK_LEVELS } from '../../types/levelSet';
 import type { GoalConfig, SymmetryMode, PatternType } from '../../types';
 import { Button } from '../ui';
 import { LevelGimmickTable } from './LevelGimmickTable';
@@ -44,6 +44,21 @@ const GIMMICK_MODE_OPTIONS: { id: GimmickMode; label: string; icon: string; desc
   { id: 'auto', label: '자동', icon: '🤖', description: '난이도에 따라 자동 배분' },
   { id: 'manual', label: '수동', icon: '✋', description: '모든 레벨에 동일 적용' },
   { id: 'hybrid', label: '하이브리드', icon: '🔀', description: '자동 + 레벨별 오버라이드' },
+];
+
+const LEVELING_MODE_OPTIONS: { id: LevelingMode; label: string; icon: string; description: string }[] = [
+  {
+    id: 'professional',
+    label: '프로페셔널',
+    icon: '🎮',
+    description: 'Tile Buster/Explorer 스타일: 15레벨 간격, 충분한 연습 기간, 톱니바퀴 난이도'
+  },
+  {
+    id: 'simple',
+    label: '심플',
+    icon: '📊',
+    description: '기존 방식: 5레벨 간격, 빠른 기믹 언락'
+  },
 ];
 
 export function LevelSetConfig({
@@ -251,6 +266,98 @@ export function LevelSetConfig({
             활성화하면 동일한 패턴의 세트를 여러 개 생성하면서 난이도를 점진적으로 상승시킬 수 있습니다.
           </p>
         )}
+      </div>
+
+      {/* Leveling Mode - Professional Leveling System */}
+      <div className="bg-gradient-to-r from-emerald-900/50 to-teal-900/50 rounded-lg p-4 border border-emerald-500/30">
+        <div className="flex items-center gap-2 mb-3">
+          <span className="text-lg">🎯</span>
+          <label className="text-sm font-medium text-white">레벨링 모드</label>
+          <span className="text-xs text-emerald-400 ml-2">(Tile Buster/Explorer 스타일)</span>
+        </div>
+
+        <div className="flex flex-wrap gap-2 mb-3">
+          {LEVELING_MODE_OPTIONS.map((opt) => {
+            const isSelected = (config.levelingMode || 'professional') === opt.id;
+            return (
+              <button
+                key={opt.id}
+                onClick={() => {
+                  const unlockLevels = opt.id === 'professional'
+                    ? PROFESSIONAL_GIMMICK_UNLOCK_LEVELS
+                    : SIMPLE_GIMMICK_UNLOCK_LEVELS;
+                  onConfigChange({
+                    ...config,
+                    levelingMode: opt.id,
+                    gimmickUnlockLevels: unlockLevels,
+                    useSawtoothPattern: opt.id === 'professional',
+                  });
+                }}
+                className={`px-3 py-2 text-sm rounded-lg transition-colors flex items-center gap-2 ${
+                  isSelected
+                    ? 'bg-emerald-600 text-white ring-2 ring-emerald-400'
+                    : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                }`}
+                disabled={disabled}
+                title={opt.description}
+              >
+                <span className="text-lg">{opt.icon}</span>
+                <div className="text-left">
+                  <div className="font-medium">{opt.label}</div>
+                  <div className="text-xs opacity-75">{opt.id === 'professional' ? '15레벨 간격' : '5레벨 간격'}</div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        <p className="text-xs text-emerald-300 mb-3">
+          {(config.levelingMode || 'professional') === 'professional'
+            ? '🎮 유명 타일 게임 패턴: 레벨 1-10 순수 학습 → 각 기믹 9레벨 연습 → 점진적 조합'
+            : '📊 기존 방식: 5레벨마다 새 기믹 언락, 빠른 진행'}
+        </p>
+
+        {/* Sawtooth Pattern Toggle */}
+        <div className="flex items-center justify-between bg-gray-800/50 rounded p-2">
+          <div>
+            <span className="text-sm text-gray-300">📈 톱니바퀴 난이도 패턴</span>
+            <p className="text-xs text-gray-500">10레벨 단위로 쉬움→어려움→보스→휴식 순환</p>
+          </div>
+          <button
+            onClick={() => onConfigChange({ ...config, useSawtoothPattern: !config.useSawtoothPattern })}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              config.useSawtoothPattern !== false ? 'bg-emerald-600' : 'bg-gray-600'
+            }`}
+            disabled={disabled}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                config.useSawtoothPattern !== false ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+          </button>
+        </div>
+
+        {/* Start Level Number */}
+        <div className="mt-3">
+          <label className="block text-xs font-medium text-gray-400 mb-1">
+            시작 레벨 번호 (기믹 언락 기준)
+          </label>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              value={config.startLevelNumber || 1}
+              onChange={(e) => onConfigChange({ ...config, startLevelNumber: parseInt(e.target.value) || 1 })}
+              min={1}
+              max={1000}
+              className="w-24 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white text-sm"
+              disabled={disabled}
+            />
+            <span className="text-xs text-gray-400">
+              예: 시작=51이면 레벨 51부터 기믹 언락 계산
+            </span>
+          </div>
+        </div>
       </div>
 
       {/* Level Count */}

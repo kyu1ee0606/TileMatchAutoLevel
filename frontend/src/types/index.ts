@@ -125,8 +125,8 @@ export interface LevelMetadata {
 }
 
 // Tile type definitions
+// Note: t1~t15 are ordered first, t0 is at the end (as per design requirement)
 export const TILE_TYPES: Record<string, { name: string; color: string; image?: string }> = {
-  t0: { name: '기본 타일 0', color: '#94a3b8', image: '/tiles/skin0/s0_t0.png' },
   t1: { name: '기본 타일 1', color: '#f87171', image: '/tiles/skin0/s0_t1.png' },
   t2: { name: '기본 타일 2', color: '#f87171', image: '/tiles/skin0/s0_t2.png' },
   t3: { name: '기본 타일 3', color: '#4ade80', image: '/tiles/skin0/s0_t3.png' },
@@ -142,6 +142,7 @@ export const TILE_TYPES: Record<string, { name: string; color: string; image?: s
   t13: { name: '기본 타일 13', color: '#22d3ee', image: '/tiles/skin0/s0_t13.png' },
   t14: { name: '기본 타일 14', color: '#22d3ee', image: '/tiles/skin0/s0_t14.png' },
   t15: { name: '기본 타일 15', color: '#a78bfa', image: '/tiles/skin0/s0_t15.png' },
+  t0: { name: '기본 타일 0', color: '#94a3b8', image: '/tiles/skin0/s0_t0.png' },
   craft_s: { name: 'Craft Goal', color: '#10b981', image: '/tiles/special/tile_craft.png' },
   craft_e: { name: 'Craft East', color: '#10b981', image: '/tiles/special/tile_craft.png' },
   craft_w: { name: 'Craft West', color: '#10b981', image: '/tiles/special/tile_craft.png' },

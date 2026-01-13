@@ -117,6 +117,8 @@ async def save_level_to_gboost(
     """
     Save a level to GBoost server.
 
+    Automatically converts to TownPop format and generates thumbnail.
+
     Args:
         board_id: Board identifier.
         level_id: Level identifier.
@@ -132,7 +134,13 @@ async def save_level_to_gboost(
             detail="GBoost client not configured",
         )
 
-    result = await client.save_level(board_id, level_id, request.level_json)
+    # Store original for thumbnail generation
+    original_level_json = request.level_json.copy()
+
+    # Convert to TownPop format (adds map field with layer data)
+    level_json = _convert_to_townpop_format(request.level_json)
+
+    result = await client.save_level(board_id, level_id, level_json)
 
     if not result.get("success"):
         raise HTTPException(
@@ -140,10 +148,25 @@ async def save_level_to_gboost(
             detail=result.get("error", "Failed to save level"),
         )
 
+    # Generate and upload thumbnail
+    thumbnail_msg = ""
+    thumbnail_data = _generate_thumbnail(original_level_json, size=192)
+    if thumbnail_data:
+        thumb_result = await client.save_thumbnail(
+            board_id,
+            level_id,
+            thumbnail_data,
+            size=128
+        )
+        if thumb_result.get("success"):
+            thumbnail_msg = " (with thumbnail)"
+        else:
+            thumbnail_msg = " (thumbnail failed)"
+
     return GBoostSaveResponse(
         success=True,
         saved_at=result.get("saved_at", ""),
-        message=result.get("message", "Level saved successfully"),
+        message=result.get("message", "Level saved successfully") + thumbnail_msg,
     )
 
 
@@ -380,6 +403,7 @@ def _convert_to_townpop_format(level_json: dict) -> dict:
 
     # Build GBoost-compatible structure (matching admin panel fields EXACTLY)
     # All fields from GBoost admin panel must be included
+    # IMPORTANT: GBoost stores fields as columns, so nested objects like 'map' must be stringified
     townpop_level = {
         # Display order matches GBoost admin panel
         "backgroundIndex": str(level_json.get("backgroundIndex", level_json.get("bgIdx", 0))),
@@ -389,12 +413,12 @@ def _convert_to_townpop_format(level_json: dict) -> dict:
         "col": str(col),
         "row": str(row),
         "rewardCoin": str(level_json.get("rewardCoin", 10)),
-        "useInRandomizer": level_json.get("useInRandomizer", False),
+        "useInRandomizer": "1" if level_json.get("useInRandomizer", False) else "0",
         "randSeed": str(level_json.get("randSeed", level_json.get("seed", 0))),
         "shuffleLayer": str(level_json.get("shuffleLayer", 0)),
         "shuffleTile": str(level_json.get("shuffleTile", 0)),
         "difficulty": str(level_json.get("difficulty", level_json.get("target_difficulty", 0))),
-        "useTeleportInRandomizer": level_json.get("useTeleportInRandomizer", False),
+        "useTeleportInRandomizer": "1" if level_json.get("useTeleportInRandomizer", False) else "0",
         "teleportRandSeed": str(level_json.get("teleportRandSeed", 0)),
 
         # Calculated fields
@@ -403,7 +427,7 @@ def _convert_to_townpop_format(level_json: dict) -> dict:
         "layer": str(active_layers),
         "useTileCount": str(level_json.get("useTileCount", 6)),
         "typeImbalance": str(level_json.get("typeImbalance", level_json.get("tileImbalance", ""))),
-        "rewardList": level_json.get("rewardList", []),
+        "rewardList": json.dumps(level_json.get("rewardList", [])),
         "etime": str(int(time.time())),
 
         # Map data - THE KEY FIELD containing all layer data

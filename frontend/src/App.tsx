@@ -7,6 +7,7 @@ import { GBoostPanel } from './components/GBoostPanel';
 import { LevelBrowser } from './components/GridEditor/LevelBrowser';
 import { LocalLevelBrowser } from './components/GridEditor/LocalLevelBrowser';
 import { SimulationViewer } from './components/SimulationViewer';
+import { PlayTab } from './components/PlayTab';
 import { useLevelStore } from './stores/levelStore';
 import { useUIStore } from './stores/uiStore';
 import { useSimulationStore } from './stores/simulationStore';
@@ -234,15 +235,22 @@ function Notifications() {
   );
 }
 
-type TabId = 'editor' | 'simulation' | 'generator' | 'gboost' | 'local';
+type TabId = 'editor' | 'simulation' | 'generator' | 'gboost' | 'local' | 'play';
 
 function AppContent() {
   const [activeTab, setActiveTab] = useState<TabId>('editor');
   const [isDragging, setIsDragging] = useState(false);
+  const [playLevelId, setPlayLevelId] = useState<string | null>(null);
   const { importJson, level } = useLevelStore();
   const { addNotification } = useUIStore();
   const { fetchSimulation, clearResults } = useSimulationStore();
   const dragCounterRef = useRef(0);
+
+  // Handler for playing a level from LocalLevelBrowser
+  const handlePlayLevel = useCallback((levelId: string) => {
+    setPlayLevelId(levelId);
+    setActiveTab('play');
+  }, []);
 
   const tabs: { id: TabId; label: string; icon: string }[] = [
     { id: 'editor', label: '에디터', icon: '🎮' },
@@ -250,6 +258,7 @@ function AppContent() {
     { id: 'generator', label: '자동 생성', icon: '🎲' },
     { id: 'local', label: '로컬 레벨', icon: '💾' },
     { id: 'gboost', label: '게임부스트', icon: '☁️' },
+    { id: 'play', label: '플레이', icon: '▶️' },
   ];
 
   // 시뮬레이션 탭으로 전환 시 자동으로 시뮬레이션 실행
@@ -402,7 +411,7 @@ function AppContent() {
               </div>
               {/* Right: Local Level Browser */}
               <div className="lg:col-span-1">
-                <LocalLevelBrowser className="h-full" />
+                <LocalLevelBrowser className="h-full" onPlay={handlePlayLevel} />
               </div>
             </div>
             {/* Bottom: Difficulty Panel */}
@@ -412,6 +421,14 @@ function AppContent() {
         {activeTab === 'gboost' && (
           <div className="max-w-2xl mx-auto">
             <GBoostPanel />
+          </div>
+        )}
+        {activeTab === 'play' && (
+          <div className="h-[calc(100vh-200px)]">
+            <PlayTab
+              initialLevelId={playLevelId}
+              onLevelLoaded={() => setPlayLevelId(null)}
+            />
           </div>
         )}
       </main>

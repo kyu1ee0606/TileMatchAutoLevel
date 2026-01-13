@@ -1,0 +1,64 @@
+{
+  "level_id": "tutorial_level_1",
+  "level_data": {
+    "layer": 1,
+    "useTileCount": 3,
+    "randSeed": 976587,
+    "layer_0": {
+      "col": "6",
+      "row": "6",
+      "tiles": {
+        "1_4": [
+          "t3",
+          ""
+        ],
+        "0_3": [
+          "t3",
+          ""
+        ],
+        "1_2": [
+          "t1",
+          ""
+        ],
+        "4_2": [
+          "t1",
+          ""
+        ],
+        "4_4": [
+          "t2",
+          ""
+        ],
+        "3_3": [
+          "t3",
+          ""
+        ],
+        "2_3": [
+          "t2",
+          ""
+        ],
+        "1_3": [
+          "t1",
+          ""
+        ],
+        "5_3": [
+          "t2",
+          ""
+        ]
+      },
+      "num": "9"
+    },
+    "max_moves": 30,
+    "target_difficulty": 0.01,
+    "symmetry_mode": "horizontal"
+  },
+  "name": "Tutorial Level 1",
+  "metadata": {
+    "saved_at": "2026-01-13T11:49:57.700435",
+    "created_at": "2026-01-13T11:49:57.700435",
+    "source": "local",
+    "name": "3종류 x 1L () - 01/13 11:49:57",
+    "use_tile_count": 3,
+    "active_layers": 1,
+    "total_layers": 1
+  }
+}

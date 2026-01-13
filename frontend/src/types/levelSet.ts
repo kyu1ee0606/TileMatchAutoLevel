@@ -99,10 +99,17 @@ export interface MultiSetProgressState {
 export type GimmickUnlockLevels = Record<string, number>;
 
 /**
- * 기본 기믹 언락 레벨 (5단위)
+ * 레벨링 모드
+ * - 'simple': 기존 단순 모드 (5레벨 간격)
+ * - 'professional': 프로 모드 (유명 게임 패턴 기반, 15레벨 간격)
+ */
+export type LevelingMode = 'simple' | 'professional';
+
+/**
+ * 기본 기믹 언락 레벨 (5단위) - 기존 심플 모드
  * 11개 기믹이 55레벨에 모두 언락됨
  */
-export const DEFAULT_GIMMICK_UNLOCK_LEVELS: GimmickUnlockLevels = {
+export const SIMPLE_GIMMICK_UNLOCK_LEVELS: GimmickUnlockLevels = {
   chain: 5,
   frog: 10,
   ice: 15,
@@ -111,10 +118,38 @@ export const DEFAULT_GIMMICK_UNLOCK_LEVELS: GimmickUnlockLevels = {
   bomb: 30,
   curtain: 35,
   teleport: 40,
-  crate: 45,
+  unknown: 45,
   craft: 50,
   stack: 55,
 };
+
+/**
+ * 프로페셔널 기믹 언락 레벨
+ * Tile Buster, Tile Explorer 등 유명 타일 게임 패턴 기반
+ *
+ * 특징:
+ * - 첫 10레벨은 기믹 없이 순수 매칭 학습
+ * - 새 기믹 도입 후 충분한 연습 기간 (9레벨)
+ * - 기믹 간 조합은 점진적으로 소개
+ */
+export const PROFESSIONAL_GIMMICK_UNLOCK_LEVELS: GimmickUnlockLevels = {
+  chain: 11,      // 11-19: chain 연습
+  ice: 21,        // 21-29: ice 연습
+  frog: 36,       // 36-44: frog 연습
+  grass: 51,      // 51-59: grass 연습
+  link: 66,       // 66-74: link 연습
+  bomb: 81,       // 81-89: bomb 연습
+  curtain: 96,    // 96-104: curtain 연습
+  teleport: 111,  // 111-119: teleport 연습
+  unknown: 126,   // 126-134: unknown 연습
+  craft: 141,     // 141-149: craft 연습
+  stack: 156,     // 156-164: stack 연습
+};
+
+/**
+ * 기본 기믹 언락 레벨 (프로페셔널 모드가 기본)
+ */
+export const DEFAULT_GIMMICK_UNLOCK_LEVELS: GimmickUnlockLevels = PROFESSIONAL_GIMMICK_UNLOCK_LEVELS;
 
 /**
  * 레벨 세트 생성 설정
@@ -133,6 +168,12 @@ export interface LevelSetGenerationConfig {
   // 기믹 언락 시스템 (레벨 번호 기반)
   gimmickUnlockLevels?: GimmickUnlockLevels;  // 각 기믹의 언락 레벨 (미설정 시 기본값 사용)
   useGimmickUnlock?: boolean;  // 기믹 언락 시스템 사용 여부
+  // 레벨링 모드 (프로페셔널 vs 심플)
+  levelingMode?: LevelingMode;  // 'professional' (기본) 또는 'simple'
+  // 톱니바퀴 난이도 패턴 사용 여부
+  useSawtoothPattern?: boolean;  // true: 10레벨 단위 보스/휴식 패턴, false: 단순 증가
+  // 시작 레벨 번호 (기믹 언락 계산용)
+  startLevelNumber?: number;  // 다중 세트에서 첫 레벨 번호 지정
 }
 
 /**

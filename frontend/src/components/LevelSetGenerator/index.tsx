@@ -14,6 +14,7 @@ import {
   shiftDifficultyPoints,
   createDefaultMultiSetConfig,
   DEFAULT_GIMMICK_UNLOCK_LEVELS,
+  PROFESSIONAL_GIMMICK_UNLOCK_LEVELS,
   type DifficultyPoint,
   type LevelSetGenerationConfig,
   type GenerationProgressState,
@@ -74,7 +75,7 @@ const DEFAULT_CONFIG: LevelSetGenerationConfig = {
     grid_size: [7, 7],
     min_layers: 3,  // 최소 레이어 (쉬운 난이도용)
     max_layers: 7,  // 최대 레이어 (어려운 난이도용)
-    tile_types: ['t0', 't2', 't4', 't5', 't6'],
+    tile_types: ['t1', 't2', 't3', 't4', 't5'],
     obstacle_types: [],  // 수동 모드일 때 사용
     goals: [{ type: 'craft', direction: 's', count: 3 }],
     symmetry_mode: 'both',  // 기본값: 양방향 대칭
@@ -82,8 +83,14 @@ const DEFAULT_CONFIG: LevelSetGenerationConfig = {
   },
   // 기믹 자동 선택 관련 - 기본값: 자동 모드
   gimmickMode: 'auto',
-  availableGimmicks: ['chain', 'frog', 'ice'],  // 기본 기믹 풀
+  availableGimmicks: ['chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport'],  // 기본 기믹 풀 (확장)
   levelGimmickOverrides: [],
+  // 프로페셔널 레벨링 모드 - Tile Buster/Explorer 스타일
+  levelingMode: 'professional',
+  gimmickUnlockLevels: PROFESSIONAL_GIMMICK_UNLOCK_LEVELS,
+  useGimmickUnlock: true,  // 기본으로 활성화
+  useSawtoothPattern: true,  // 톱니바퀴 난이도 패턴 활성화
+  startLevelNumber: 1,  // 시작 레벨 번호
 };
 
 export function LevelSetGenerator({ onLevelSetCreated }: LevelSetGeneratorProps) {

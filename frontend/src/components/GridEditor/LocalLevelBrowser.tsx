@@ -131,6 +131,7 @@ function LevelListSkeleton({ count = 5 }: { count?: number }) {
 
 interface LocalLevelBrowserProps {
   className?: string;
+  onPlay?: (levelId: string) => void;
 }
 
 type SortOption = 'name_asc' | 'name_desc' | 'date_asc' | 'date_desc' | 'difficulty_asc' | 'difficulty_desc';
@@ -358,7 +359,7 @@ function LevelThumbnail({ levelData, size = 48, className }: LevelThumbnailProps
   );
 }
 
-export function LocalLevelBrowser({ className }: LocalLevelBrowserProps) {
+export function LocalLevelBrowser({ className, onPlay }: LocalLevelBrowserProps) {
   const { setLevel } = useLevelStore();
   const { addNotification } = useUIStore();
 
@@ -894,14 +895,28 @@ export function LocalLevelBrowser({ className }: LocalLevelBrowserProps) {
                                 <GimmickBadges levelData={thumbnailCache[level.id]} compact />
                               </div>
 
-                              {/* Delete Button */}
-                              <button
-                                onClick={(e) => handleDelete(level.id, e)}
-                                className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-red-900/20 rounded-md transition-colors"
-                                title="삭제"
-                              >
-                                🗑️
-                              </button>
+                              {/* Action Buttons */}
+                              <div className="flex items-center gap-1">
+                                {onPlay && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onPlay(level.id);
+                                    }}
+                                    className="p-1.5 text-gray-400 hover:text-green-400 hover:bg-green-900/20 rounded-md transition-colors"
+                                    title="플레이"
+                                  >
+                                    ▶️
+                                  </button>
+                                )}
+                                <button
+                                  onClick={(e) => handleDelete(level.id, e)}
+                                  className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-red-900/20 rounded-md transition-colors"
+                                  title="삭제"
+                                >
+                                  🗑️
+                                </button>
+                              </div>
                             </div>
                           ))}
                         </div>
@@ -970,14 +985,28 @@ export function LocalLevelBrowser({ className }: LocalLevelBrowserProps) {
                       <GimmickBadges levelData={thumbnailCache[level.id]} compact />
                     </div>
 
-                    {/* Delete Button */}
-                    <button
-                      onClick={(e) => handleDelete(level.id, e)}
-                      className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-red-900/20 rounded-md transition-colors"
-                      title="삭제"
-                    >
-                      🗑️
-                    </button>
+                    {/* Action Buttons */}
+                    <div className="flex items-center gap-1">
+                      {onPlay && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onPlay(level.id);
+                          }}
+                          className="p-1.5 text-gray-400 hover:text-green-400 hover:bg-green-900/20 rounded-md transition-colors"
+                          title="플레이"
+                        >
+                          ▶️
+                        </button>
+                      )}
+                      <button
+                        onClick={(e) => handleDelete(level.id, e)}
+                        className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-red-900/20 rounded-md transition-colors"
+                        title="삭제"
+                      >
+                        🗑️
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>

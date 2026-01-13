@@ -7,6 +7,7 @@ from . import generate
 from . import gboost
 from . import assess
 from . import simulate
+from . import leveling
 
 __all__ = [
     "analyze",
@@ -14,4 +15,5 @@ __all__ = [
     "gboost",
     "assess",
     "simulate",
+    "leveling",
 ]

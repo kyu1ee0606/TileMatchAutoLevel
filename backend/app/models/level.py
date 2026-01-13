@@ -126,10 +126,9 @@ class GenerationParams:
     def __post_init__(self):
         """Set default values after initialization."""
         if self.tile_types is None:
-            # Default to t0~t5 (useTileCount=5)
-            # t0 is random tile that becomes t1~t{useTileCount} at runtime
-            # Using t0 plus explicit types gives variety while keeping useTileCount manageable
-            self.tile_types = ["t0", "t2", "t4", "t5"]
+            # Default to t1~t5 (useTileCount=5)
+            # NOTE: t0 is excluded - causes issues with bot simulation
+            self.tile_types = ["t1", "t2", "t3", "t4", "t5"]
         if self.obstacle_types is None:
             self.obstacle_types = ["chain", "frog"]
         # Only set default goals if None, not if empty list (empty list means no goals)

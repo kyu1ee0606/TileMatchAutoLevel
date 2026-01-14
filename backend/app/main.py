@@ -20,7 +20,7 @@ app = FastAPI(
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
+    allow_origins=settings.get_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -73,7 +73,7 @@ async def debug_env():
         "gboost_project_id": settings.gboost_project_id,
         "env_gboost_url": os.getenv("GBOOST_URL"),
         "env_gboost_project_id": os.getenv("GBOOST_PROJECT_ID"),
-        "cors_origins": settings.cors_origins,
+        "cors_origins": settings.get_cors_origins(),
     }
 
 

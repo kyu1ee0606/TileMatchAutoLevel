@@ -1,7 +1,12 @@
-import apiClient from './client';
 import type { LevelJSON, DifficultyGrade } from '../types';
 import type { LevelSetMetadata, LevelSetListItem, LevelSet, DifficultyPreset, DifficultyPoint } from '../types/levelSet';
 import { BUILT_IN_PRESETS } from '../types/levelSet';
+import {
+  saveLevelSetToStorage,
+  getLevelSetList,
+  getLevelSetById,
+  deleteLevelSetFromStorage,
+} from '../storage/levelStorage';
 
 const PRESETS_STORAGE_KEY = 'difficulty_presets';
 
@@ -35,35 +40,50 @@ export interface DeleteLevelSetResponse {
 }
 
 /**
- * Save a level set to local storage.
+ * Save a level set to browser localStorage.
+ * This ensures data persists even in deployed environments with ephemeral storage.
  */
 export async function saveLevelSet(data: SaveLevelSetRequest): Promise<SaveLevelSetResponse> {
-  const response = await apiClient.post<SaveLevelSetResponse>('/simulate/level-sets/save', data);
-  return response.data;
+  // Use browser localStorage instead of backend API
+  return saveLevelSetToStorage(data);
 }
 
 /**
- * List all saved level sets.
+ * List all saved level sets from browser localStorage.
  */
 export async function listLevelSets(): Promise<ListLevelSetsResponse> {
-  const response = await apiClient.get<ListLevelSetsResponse>('/simulate/level-sets/list');
-  return response.data;
+  return { level_sets: getLevelSetList() };
 }
 
 /**
- * Get a specific level set by ID.
+ * Get a specific level set by ID from browser localStorage.
  */
 export async function getLevelSet(setId: string): Promise<GetLevelSetResponse> {
-  const response = await apiClient.get<GetLevelSetResponse>(`/simulate/level-sets/${setId}`);
-  return response.data;
+  const levelSet = getLevelSetById(setId);
+  if (!levelSet) {
+    throw new Error(`Level set ${setId} not found`);
+  }
+
+  return {
+    metadata: {
+      id: levelSet.id,
+      name: levelSet.name,
+      created_at: levelSet.created_at,
+      level_count: levelSet.level_count,
+      difficulty_profile: levelSet.difficulty_profile,
+      actual_difficulties: levelSet.actual_difficulties,
+      grades: levelSet.grades,
+      generation_config: levelSet.generation_config,
+    },
+    levels: levelSet.levels,
+  };
 }
 
 /**
- * Delete a level set.
+ * Delete a level set from browser localStorage.
  */
 export async function deleteLevelSet(setId: string): Promise<DeleteLevelSetResponse> {
-  const response = await apiClient.delete<DeleteLevelSetResponse>(`/simulate/level-sets/${setId}`);
-  return response.data;
+  return deleteLevelSetFromStorage(setId);
 }
 
 /**

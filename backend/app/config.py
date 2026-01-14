@@ -1,5 +1,6 @@
 """Application configuration settings."""
-from pydantic_settings import BaseSettings
+import os
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
 from typing import Optional
 
@@ -21,6 +22,7 @@ class Settings(BaseSettings):
         "http://localhost:5173",
         "http://localhost:3000",
         "https://*.vercel.app",
+        "https://tile-match-auto-level.vercel.app",
     ]
 
     # GBoost settings
@@ -28,12 +30,20 @@ class Settings(BaseSettings):
     gboost_api_key: Optional[str] = None
     gboost_project_id: Optional[str] = None
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
 
-@lru_cache()
+# Don't use lru_cache in production to allow env var updates
+_settings: Optional[Settings] = None
+
+
 def get_settings() -> Settings:
-    """Get cached settings instance."""
-    return Settings()
+    """Get settings instance (cached in production for performance)."""
+    global _settings
+    if _settings is None or os.getenv("DEBUG", "false").lower() == "true":
+        _settings = Settings()
+    return _settings

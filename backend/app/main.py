@@ -64,6 +64,19 @@ async def health_check():
     }
 
 
+@app.get("/debug/env")
+async def debug_env():
+    """Debug endpoint to check environment variables."""
+    import os
+    return {
+        "gboost_url": settings.gboost_url,
+        "gboost_project_id": settings.gboost_project_id,
+        "env_gboost_url": os.getenv("GBOOST_URL"),
+        "env_gboost_project_id": os.getenv("GBOOST_PROJECT_ID"),
+        "cors_origins": settings.cors_origins,
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
 

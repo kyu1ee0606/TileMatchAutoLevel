@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: tilematch-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: CORS_ORIGINS
+        value: '["https://tilematch-level-designer.vercel.app"]'
+      - key: DEBUG
+        value: "false"
+      - key: GBOOST_URL
+        sync: false
+      - key: GBOOST_PROJECT_ID
+        sync: false

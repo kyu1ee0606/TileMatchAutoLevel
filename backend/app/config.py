@@ -16,8 +16,12 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
-    # CORS settings
-    cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
+    # CORS settings - includes localhost for dev and vercel for production
+    cors_origins: list[str] = [
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "https://*.vercel.app",
+    ]
 
     # GBoost settings
     gboost_url: Optional[str] = None

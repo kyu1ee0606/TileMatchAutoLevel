@@ -1,17 +1,68 @@
 /**
  * GamePlayer - 타일 매칭 게임 플레이어 메인 컴포넌트
+ *
+ * 백엔드 bot_simulator와 동일한 게임 규칙 사용
  */
 import { useState, useCallback, useEffect, useRef } from 'react';
-import type { GameTile, SlotTile, GameState, GameStats, LevelInfo } from '../../types/game';
-import {
-  parseLevelToTiles,
-  calculateSelectability,
-  DEFAULT_GAME_SETTINGS,
-  INITIAL_GAME_STATS,
-  isSpecialTile,
-} from '../../types/game';
+import { createGameEngine, type GameEngine, type TileEffectData } from '../../engine/gameEngine';
 import GameBoard from './GameBoard';
 import SlotArea from './SlotArea';
+
+// UI용 타입 정의
+interface GameTile {
+  id: string;
+  type: string;
+  attribute: string;
+  layer: number;
+  row: number;
+  col: number;
+  isSelectable: boolean;
+  isSelected: boolean;
+  isMatched: boolean;
+  isHidden: boolean;
+  effectData?: TileEffectData;
+}
+
+interface SlotTile {
+  id: string;
+  type: string;
+  attribute: string;
+  sourceLayer: number;
+  sourceRow: number;
+  sourceCol: number;
+}
+
+interface GameStats {
+  moves: number;
+  matches: number;
+  combos: number;
+  score: number;
+  timeElapsed: number;
+}
+
+interface LevelInfo {
+  id: string;
+  name: string;
+  source: 'local' | 'gboost';
+  difficulty?: number;
+  totalTiles: number;
+  layers: number;
+}
+
+type GameState = 'idle' | 'playing' | 'won' | 'lost' | 'paused';
+
+const INITIAL_GAME_STATS: GameStats = {
+  moves: 0,
+  matches: 0,
+  combos: 0,
+  score: 0,
+  timeElapsed: 0,
+};
+
+const DEFAULT_GAME_SETTINGS = {
+  maxSlots: 7,
+  enableUndo: false, // 새 엔진에서는 undo 미지원
+};
 
 interface GamePlayerProps {
   levelData: Record<string, unknown> | null;
@@ -27,6 +78,9 @@ export function GamePlayer({ levelData, levelInfo, onGameEnd, onBack }: GamePlay
   const [gameState, setGameState] = useState<GameState>('idle');
   const [stats, setStats] = useState<GameStats>(INITIAL_GAME_STATS);
   const [settings] = useState(DEFAULT_GAME_SETTINGS);
+
+  // Game engine reference
+  const engineRef = useRef<GameEngine | null>(null);
 
   // Timer
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -68,13 +122,48 @@ export function GamePlayer({ levelData, levelInfo, onGameEnd, onBack }: GamePlay
       levelToUse = data.map as Record<string, unknown>;
     }
 
-    const parsedTiles = parseLevelToTiles(levelToUse);
-    const selectableTiles = calculateSelectability(parsedTiles);
+    // Create new game engine
+    const engine = createGameEngine();
+    engine.initializeFromLevel(levelToUse);
+    engineRef.current = engine;
 
-    setTiles(selectableTiles);
-    setSlots([]);
+    // Update UI state from engine
+    updateUIFromEngine(engine);
+
     setStats(INITIAL_GAME_STATS);
     setGameState('playing');
+  }, []);
+
+  // Update UI state from engine
+  const updateUIFromEngine = useCallback((engine: GameEngine) => {
+    // Get tiles for UI
+    const engineTiles = engine.getTilesForUI();
+    const uiTiles: GameTile[] = engineTiles.map(t => ({
+      id: t.id,
+      type: t.type,
+      attribute: t.attribute,
+      layer: t.layer,
+      row: t.row,
+      col: t.col,
+      isSelectable: t.isSelectable,
+      isSelected: false,
+      isMatched: t.isMatched,
+      isHidden: t.isHidden,
+      effectData: t.effectData,
+    }));
+    setTiles(uiTiles);
+
+    // Get dock tiles for UI
+    const engineDockTiles = engine.getDockTilesForUI();
+    const uiSlots: SlotTile[] = engineDockTiles.map(t => ({
+      id: t.id,
+      type: t.type,
+      attribute: t.attribute,
+      sourceLayer: t.sourceLayer,
+      sourceRow: t.sourceRow,
+      sourceCol: t.sourceCol,
+    }));
+    setSlots(uiSlots);
   }, []);
 
   // Handle tile click
@@ -82,141 +171,35 @@ export function GamePlayer({ levelData, levelInfo, onGameEnd, onBack }: GamePlay
     if (gameState !== 'playing') return;
     if (!tile.isSelectable) return;
 
-    // Don't allow selection if slots are full
-    if (slots.length >= settings.maxSlots) return;
+    const engine = engineRef.current;
+    if (!engine) return;
 
-    // Add tile to slots
-    const newSlotTile: SlotTile = {
-      id: tile.id,
-      type: tile.type,
-      attribute: tile.attribute,
-      sourceLayer: tile.layer,
-      sourceRow: tile.row,
-      sourceCol: tile.col,
-    };
+    // Parse tile ID to get layer and position
+    const parts = tile.id.split('_');
+    if (parts.length < 3) return;
 
-    // Find position to insert (group same types together)
-    let insertIndex = slots.length;
-    for (let i = 0; i < slots.length; i++) {
-      if (slots[i].type === tile.type) {
-        // Find the end of this group
-        let endOfGroup = i;
-        while (endOfGroup < slots.length && slots[endOfGroup].type === tile.type) {
-          endOfGroup++;
-        }
-        insertIndex = endOfGroup;
-        break;
-      }
-    }
+    const layerIdx = parseInt(parts[0], 10);
+    const position = `${parts[1]}_${parts[2]}`;
 
-    const newSlots = [
-      ...slots.slice(0, insertIndex),
-      newSlotTile,
-      ...slots.slice(insertIndex),
-    ];
-
-    // Mark tile as matched (removed from board)
-    setTiles(prev => {
-      const updated = prev.map(t =>
-        t.id === tile.id ? { ...t, isMatched: true, isSelectable: false } : t
-      );
-      // Recalculate selectability
-      return calculateSelectability(updated);
-    });
+    // Try to select tile
+    const success = engine.selectTile(layerIdx, position);
+    if (!success) return;
 
     // Update stats
     setStats(prev => ({ ...prev, moves: prev.moves + 1 }));
 
-    // Check for matches (3 or more consecutive same-type tiles)
-    setTimeout(() => {
-      checkAndRemoveMatches(newSlots);
-    }, 100);
+    // Update UI from engine
+    updateUIFromEngine(engine);
 
-    setSlots(newSlots);
-  }, [gameState, slots, settings.maxSlots]);
-
-  // Check for matches and remove them
-  const checkAndRemoveMatches = useCallback((currentSlots: SlotTile[]) => {
-    let slotsToProcess = [...currentSlots];
-    let matchFound = false;
-    let totalMatchedSets = 0;
-
-    // Keep checking until no more matches
-    while (true) {
-      let matchStart = -1;
-      let matchCount = 0;
-
-      // Find consecutive same-type tiles (3 or more)
-      for (let i = 0; i < slotsToProcess.length; i++) {
-        if (i === 0 || slotsToProcess[i].type !== slotsToProcess[i - 1].type) {
-          // Start of a new group
-          if (matchCount >= 3) {
-            // Previous group was a match
-            break;
-          }
-          matchStart = i;
-          matchCount = 1;
-        } else {
-          matchCount++;
-        }
-      }
-
-      // Check if last group was a match
-      if (matchCount >= 3) {
-        matchFound = true;
-        totalMatchedSets++;
-
-        // Remove matched tiles
-        slotsToProcess = [
-          ...slotsToProcess.slice(0, matchStart),
-          ...slotsToProcess.slice(matchStart + matchCount),
-        ];
-      } else if (matchStart >= 0 && matchCount >= 3) {
-        matchFound = true;
-        totalMatchedSets++;
-
-        slotsToProcess = [
-          ...slotsToProcess.slice(0, matchStart),
-          ...slotsToProcess.slice(matchStart + matchCount),
-        ];
-      } else {
-        // No more matches
-        break;
-      }
+    // Check game state
+    if (engine.isCleared()) {
+      setGameState('won');
+      onGameEnd?.(true, { ...stats, moves: stats.moves + 1 });
+    } else if (engine.isFailed()) {
+      setGameState('lost');
+      onGameEnd?.(false, { ...stats, moves: stats.moves + 1 });
     }
-
-    if (matchFound) {
-      setSlots(slotsToProcess);
-      setStats(prev => ({
-        ...prev,
-        matches: prev.matches + totalMatchedSets,
-        score: prev.score + totalMatchedSets * 100,
-      }));
-
-      // Check win condition
-      setTimeout(() => {
-        checkWinCondition(slotsToProcess);
-      }, 100);
-    } else {
-      // Check lose condition (slots full)
-      if (currentSlots.length >= settings.maxSlots) {
-        setGameState('lost');
-        onGameEnd?.(false, stats);
-      }
-    }
-  }, [settings.maxSlots, stats, onGameEnd]);
-
-  // Check win condition
-  const checkWinCondition = useCallback((currentSlots: SlotTile[]) => {
-    setTiles(prev => {
-      const remaining = prev.filter(t => !t.isMatched && !isSpecialTile(t.type));
-      if (remaining.length === 0 && currentSlots.length === 0) {
-        setGameState('won');
-        onGameEnd?.(true, stats);
-      }
-      return prev;
-    });
-  }, [stats, onGameEnd]);
+  }, [gameState, stats, onGameEnd, updateUIFromEngine]);
 
   // Restart game
   const handleRestart = useCallback(() => {
@@ -224,27 +207,6 @@ export function GamePlayer({ levelData, levelInfo, onGameEnd, onBack }: GamePlay
       initGame(levelData);
     }
   }, [levelData, initGame]);
-
-  // Undo last move (simplified - just removes last slot tile)
-  const handleUndo = useCallback(() => {
-    if (slots.length === 0) return;
-
-    const lastSlot = slots[slots.length - 1];
-
-    // Restore tile to board
-    setTiles(prev => {
-      const updated = prev.map(t =>
-        t.id === lastSlot.id ? { ...t, isMatched: false } : t
-      );
-      return calculateSelectability(updated);
-    });
-
-    // Remove from slots
-    setSlots(prev => prev.slice(0, -1));
-
-    // Update stats
-    setStats(prev => ({ ...prev, moves: Math.max(0, prev.moves - 1) }));
-  }, [slots]);
 
   // Format time
   const formatTime = (seconds: number) => {
@@ -323,16 +285,6 @@ export function GamePlayer({ levelData, levelInfo, onGameEnd, onBack }: GamePlay
         >
           🔄 Restart
         </button>
-
-        {settings.enableUndo && (
-          <button
-            onClick={handleUndo}
-            disabled={slots.length === 0}
-            className="px-4 py-2 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed rounded font-medium"
-          >
-            ↩️ Undo
-          </button>
-        )}
       </div>
 
       {/* Game over overlay */}

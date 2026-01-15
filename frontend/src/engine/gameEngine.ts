@@ -84,6 +84,9 @@ export interface GameState {
   teleportClickCount: number;
   teleportTiles: Array<[number, string]>;
 
+  // 타이밍 (개구리 이동 딜레이용)
+  lastMoveTime: number;
+
   // 캐시
   maxLayerIdx: number;
 }
@@ -99,10 +102,16 @@ export interface Move {
 
 // ==================== 상수 ====================
 
+// 개구리 이동 딜레이 (밀리초) - 빠르게 타일을 선택하면 개구리가 이동하지 않음
+const FROG_MOVE_DELAY_MS = 500;
+
 const MATCHABLE_TYPES = new Set([
   't1', 't2', 't3', 't4', 't5', 't6', 't7', 't8',
   't9', 't10', 't11', 't12', 't13', 't14', 't15', 't16'
 ]);
+
+// 랜덤 타일 풀 (t0 할당용)
+const RANDOM_TILE_POOL = ['t1', 't2', 't3', 't4', 't5', 't6', 't7', 't8', 't9', 't10', 't11', 't12', 't13', 't14', 't15', 't16'];
 
 const EFFECT_MAPPING: Record<string, TileEffectType> = {
   'ice': TileEffectType.ICE,
@@ -195,6 +204,7 @@ export class GameEngine {
       craftBoxes: new Map(),
       teleportClickCount: 0,
       teleportTiles: [],
+      lastMoveTime: 0,
       maxLayerIdx: -1,
     };
   }
@@ -220,8 +230,12 @@ export class GameEngine {
 
       if (!layerData) continue;
 
-      // 레이어 col 저장
-      const layerCol = typeof layerData.col === 'number' ? layerData.col : 7;
+      // 레이어 col 저장 (level JSON에서 col은 문자열일 수 있음)
+      const layerCol = typeof layerData.col === 'number'
+        ? layerData.col
+        : typeof layerData.col === 'string'
+          ? parseInt(layerData.col, 10)
+          : 7;
       this.state.layerCols.set(layerIdx, layerCol);
 
       const tilesData = layerData.tiles as Record<string, unknown[]> | undefined;
@@ -235,9 +249,10 @@ export class GameEngine {
       for (const [pos, tileData] of Object.entries(tilesData)) {
         if (!Array.isArray(tileData) || tileData.length === 0) continue;
 
-        const [rowStr, colStr] = pos.split('_');
-        const xIdx = parseInt(rowStr, 10);
-        const yIdx = parseInt(colStr, 10);
+        // Position format: first_second where first→xIdx, second→yIdx
+        const [firstStr, secondStr] = pos.split('_');
+        const xIdx = parseInt(firstStr, 10);
+        const yIdx = parseInt(secondStr, 10);
 
         const tileType = String(tileData[0] || 't0');
         const effectStr = String(tileData[1] || '');
@@ -262,7 +277,8 @@ export class GameEngine {
               break;
 
             case TileEffectType.GRASS:
-              effectData.remaining = 1;
+              // 잔디는 주변 타일 2번 선택해야 제거됨
+              effectData.remaining = 2;
               break;
 
             case TileEffectType.LINK_EAST:
@@ -280,6 +296,7 @@ export class GameEngine {
               break;
 
             case TileEffectType.FROG:
+              effectData.onFrog = true;
               this.state.frogPositions.add(`${layerIdx}_${pos}`);
               break;
 
@@ -298,6 +315,12 @@ export class GameEngine {
               this.state.teleportTiles.push([layerIdx, pos]);
               break;
           }
+        }
+
+        // Craft/Stack 타일 처리
+        if (tileType.startsWith('craft_') || tileType.startsWith('stack_')) {
+          this.processStackCraftTile(layerIdx, pos, xIdx, yIdx, tileType, extraData);
+          continue; // craft/stack 타일은 별도 처리
         }
 
         const tile = createTileState({
@@ -326,6 +349,155 @@ export class GameEngine {
         this.state.goalsRemaining.set(key, count);
       }
     }
+  }
+
+  /**
+   * Craft/Stack 타일 처리 (백엔드 _process_stack_craft_tiles와 동일)
+   */
+  private processStackCraftTile(
+    layerIdx: number,
+    pos: string,
+    xIdx: number,
+    yIdx: number,
+    tileTypeStr: string,
+    extraData: unknown
+  ): void {
+    const isCraft = tileTypeStr.startsWith('craft_');
+    const isStack = tileTypeStr.startsWith('stack_');
+
+    if (!isCraft && !isStack) return;
+
+    // 방향 파싱
+    const direction = tileTypeStr.split('_')[1] || 's';
+
+    console.log(`[Craft] Processing ${tileTypeStr} at pos=${pos}, xIdx=${xIdx}, yIdx=${yIdx}, dir=${direction}, extraData=`, extraData);
+
+    // 스택 정보 파싱 - extraData는 [count] 형태
+    const stackInfo = Array.isArray(extraData) ? extraData : null;
+    if (!stackInfo || stackInfo.length < 1) return;
+
+    const totalCount = typeof stackInfo[0] === 'number' ? stackInfo[0] : 1;
+    if (totalCount <= 0) return;
+
+    // 방향별 스폰 위치 오프셋
+    let spawnOffsetX = 0, spawnOffsetY = 0;
+    if (direction === 'e') spawnOffsetX = 1;
+    else if (direction === 'w') spawnOffsetX = -1;
+    else if (direction === 's') spawnOffsetY = 1;
+    else if (direction === 'n') spawnOffsetY = -1;
+
+    // 스폰 위치
+    const spawnX = xIdx + spawnOffsetX;
+    const spawnY = yIdx + spawnOffsetY;
+    const spawnPos = getPositionKey(spawnX, spawnY);
+
+    // 내부 타일 생성
+    const stackTileKeys: string[] = [];
+
+    for (let stackIdx = 0; stackIdx < totalCount; stackIdx++) {
+      // t0 타입은 랜덤 타일로 할당 (3의 배수 규칙을 위해 순환)
+      const actualTileType = RANDOM_TILE_POOL[stackIdx % RANDOM_TILE_POOL.length];
+
+      // Effect type 결정
+      let effectType = TileEffectType.NONE;
+      if (isCraft) {
+        effectType = TileEffectType.CRAFT;
+      } else if (isStack) {
+        if (direction === 'n') effectType = TileEffectType.STACK_NORTH;
+        else if (direction === 's') effectType = TileEffectType.STACK_SOUTH;
+        else if (direction === 'e') effectType = TileEffectType.STACK_EAST;
+        else if (direction === 'w') effectType = TileEffectType.STACK_WEST;
+      }
+
+      // 첫 번째 타일만 crafted (스폰 위치에 배치)
+      const isCrafted = stackIdx === 0;
+      const tileX = isCrafted ? spawnX : xIdx;
+      const tileY = isCrafted ? spawnY : yIdx;
+
+      const fullKey = `${layerIdx}_${xIdx}_${yIdx}_${stackIdx}`;
+
+      const tile = createTileState({
+        tileType: actualTileType,
+        layerIdx,
+        xIdx: tileX,
+        yIdx: tileY,
+        effectType,
+        effectData: {},
+        isCraftTile: isCraft,
+        isStackTile: isStack,
+        isCrafted,
+        stackIndex: stackIdx,
+        stackMaxIndex: totalCount - 1,
+        craftDirection: direction,
+        originGoalType: tileTypeStr,
+      });
+
+      // 스택 연결 설정
+      if (stackIdx > 0) {
+        tile.underStackedTileKey = `${layerIdx}_${xIdx}_${yIdx}_${stackIdx - 1}`;
+      }
+      if (stackIdx < totalCount - 1) {
+        tile.upperStackedTileKey = `${layerIdx}_${xIdx}_${yIdx}_${stackIdx + 1}`;
+      }
+      tile.rootStackedTileKey = `${layerIdx}_${xIdx}_${yIdx}_0`;
+
+      // stackedTiles에 저장
+      this.state.stackedTiles.set(fullKey, tile);
+      stackTileKeys.push(fullKey);
+
+      // 첫 번째 타일(crafted)만 tiles 맵에 추가
+      if (isCrafted) {
+        if (!this.state.tiles.has(layerIdx)) {
+          this.state.tiles.set(layerIdx, new Map());
+        }
+        const layerTiles = this.state.tiles.get(layerIdx)!;
+        layerTiles.set(spawnPos, tile);
+        console.log(`[Craft] Added crafted tile at spawnPos=${spawnPos}, layer=${layerIdx}, type=${actualTileType}, tileX=${tileX}, tileY=${tileY}`);
+      }
+    }
+
+    // craftBoxes에 저장
+    this.state.craftBoxes.set(`${layerIdx}_${pos}`, stackTileKeys);
+
+    // Craft 타일은 목표에 추가
+    if (isCraft) {
+      const currentGoal = this.state.goalsRemaining.get(tileTypeStr) || 0;
+      this.state.goalsRemaining.set(tileTypeStr, currentGoal + 1);
+    }
+  }
+
+  /**
+   * Craft 타일 선택 후 처리 (다음 타일 스폰)
+   */
+  private processCraftAfterPick(pickedTile: TileState): void {
+    if (!pickedTile.isCraftTile && !pickedTile.isStackTile) return;
+
+    // 다음 타일 찾기
+    if (!pickedTile.underStackedTileKey) return;
+
+    const nextTile = this.state.stackedTiles.get(pickedTile.underStackedTileKey);
+    if (!nextTile || nextTile.picked) return;
+
+    // 스폰 위치는 선택된 타일 위치
+    const spawnX = pickedTile.xIdx;
+    const spawnY = pickedTile.yIdx;
+    const spawnPos = getPositionKey(spawnX, spawnY);
+
+    // 스폰 위치가 비어있는지 확인
+    const layerTiles = this.state.tiles.get(nextTile.layerIdx);
+    if (!layerTiles) return;
+
+    const existingTile = layerTiles.get(spawnPos);
+    if (existingTile && !existingTile.picked) return; // 위치가 차있음
+
+    // 다음 타일을 스폰 위치로 이동
+    nextTile.isCrafted = true;
+    nextTile.upperStackedTileKey = null;
+    nextTile.xIdx = spawnX;
+    nextTile.yIdx = spawnY;
+
+    // tiles 맵에 추가
+    layerTiles.set(spawnPos, nextTile);
   }
 
   /**
@@ -553,12 +725,16 @@ export class GameEngine {
       this.state.bombTiles.delete(`${layerIdx}_${position}`);
     }
 
+    // Craft/Stack 타일이면 다음 타일 스폰
+    this.processCraftAfterPick(tile);
+
     // 덱에 추가 (같은 타입끼리 그룹화)
     this.addToDock(tile);
 
     // 링크된 타일도 선택
     if (linkedTile && !linkedTile.picked) {
       linkedTile.picked = true;
+      this.processCraftAfterPick(linkedTile);
       this.addToDock(linkedTile);
       this.updateAdjacentEffects(linkedTile, unblockedIceBeforePick);
     }
@@ -571,6 +747,26 @@ export class GameEngine {
 
     // 이동 횟수 증가
     this.state.movesUsed++;
+
+    // === POST-MOVE EFFECTS (백엔드 _process_move_effects와 동일) ===
+
+    // 1. 노출된 폭탄 카운트다운 감소
+    this.decreaseBombCountdowns();
+
+    // 2. 노출된 커튼 토글
+    this.toggleExposedCurtains();
+
+    // 3. 개구리 이동 (모든 개구리가 랜덤 위치로 이동)
+    // 타운팝 규칙: 빠르게 타일을 선택하면 개구리가 이동하지 않음
+    const currentTime = Date.now();
+    const timeSinceLastMove = currentTime - this.state.lastMoveTime;
+    if (timeSinceLastMove >= FROG_MOVE_DELAY_MS) {
+      this.moveAllFrogs();
+    }
+    this.state.lastMoveTime = currentTime;
+
+    // 4. 텔레포트 처리 (3턴마다 셔플)
+    this.processTeleport();
 
     // 게임 상태 확인
     this.checkGameState();
@@ -805,6 +1001,181 @@ export class GameEngine {
     return remainingCount >= this.state.maxDockSlots;
   }
 
+  // ==================== POST-MOVE EFFECTS ====================
+
+  /**
+   * 노출된 폭탄 카운트다운 감소
+   * 백엔드 _process_move_effects와 동일
+   */
+  private decreaseBombCountdowns(): void {
+    for (const [bombKey, remaining] of this.state.bombTiles) {
+      // Parse layerIdx_x_y format
+      const parts = bombKey.split('_');
+      if (parts.length < 3) continue;
+
+      const layerIdx = parseInt(parts[0], 10);
+      const pos = `${parts[1]}_${parts[2]}`;
+
+      const layer = this.state.tiles.get(layerIdx);
+      const tile = layer?.get(pos);
+
+      if (!tile || tile.picked) continue;
+
+      // 노출된 폭탄만 카운트다운 (상위 레이어에 막히지 않은 경우)
+      if (!this.isBlockedByUpper(tile)) {
+        const newRemaining = remaining - 1;
+        this.state.bombTiles.set(bombKey, newRemaining);
+        tile.effectData.remaining = newRemaining;
+      }
+    }
+  }
+
+  /**
+   * 노출된 커튼 토글
+   * 백엔드 _process_move_effects와 동일
+   */
+  private toggleExposedCurtains(): void {
+    for (const [curtainKey, isOpen] of this.state.curtainTiles) {
+      const parts = curtainKey.split('_');
+      if (parts.length < 3) continue;
+
+      const layerIdx = parseInt(parts[0], 10);
+      const pos = `${parts[1]}_${parts[2]}`;
+
+      const layer = this.state.tiles.get(layerIdx);
+      const tile = layer?.get(pos);
+
+      if (!tile || tile.picked) continue;
+
+      // 노출된 커튼만 토글
+      if (!this.isBlockedByUpper(tile)) {
+        const newState = !isOpen;
+        this.state.curtainTiles.set(curtainKey, newState);
+        tile.effectData.isOpen = newState;
+      }
+    }
+  }
+
+  /**
+   * 개구리가 이동할 수 있는 타일 목록 반환
+   */
+  private getFrogMovableTiles(): Array<{ layerIdx: number; pos: string; tile: TileState }> {
+    const available: Array<{ layerIdx: number; pos: string; tile: TileState }> = [];
+
+    for (const [layerIdx, layer] of this.state.tiles) {
+      for (const [pos, tile] of layer) {
+        // 이미 선택된 타일 제외
+        if (tile.picked) continue;
+
+        // 매치 불가능한 타일 제외
+        if (!MATCHABLE_TYPES.has(tile.tileType)) continue;
+
+        // 이미 개구리가 있는 타일 제외
+        if (tile.effectData.onFrog) continue;
+
+        // 상위 레이어에 막힌 타일 제외
+        if (this.isBlockedByUpper(tile)) continue;
+
+        // 기믹으로 선택 불가능한 타일 제외
+        if (!this.canPickTile(tile)) continue;
+
+        available.push({ layerIdx, pos, tile });
+      }
+    }
+
+    return available;
+  }
+
+  /**
+   * 모든 개구리를 랜덤 위치로 이동
+   * 백엔드 _move_all_frogs와 동일
+   */
+  private moveAllFrogs(): void {
+    if (this.state.frogPositions.size === 0) return;
+
+    // 이동 가능한 타일 목록
+    const availableTiles = this.getFrogMovableTiles();
+
+    // 랜덤 셔플
+    for (let i = availableTiles.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [availableTiles[i], availableTiles[j]] = [availableTiles[j], availableTiles[i]];
+    }
+
+    // 현재 개구리 위치의 타일들 수집
+    const currentFrogTiles: Array<{ layerIdx: number; pos: string; tile: TileState }> = [];
+    for (const [layerIdx, layer] of this.state.tiles) {
+      for (const [pos, tile] of layer) {
+        if (tile.effectData.onFrog) {
+          currentFrogTiles.push({ layerIdx, pos, tile });
+        }
+      }
+    }
+
+    // 모든 현재 개구리 위치 초기화
+    for (const { tile } of currentFrogTiles) {
+      tile.effectData.onFrog = false;
+    }
+    this.state.frogPositions.clear();
+
+    // 새로운 위치로 개구리 이동
+    const numFrogsToMove = Math.min(currentFrogTiles.length, availableTiles.length);
+    for (let i = 0; i < numFrogsToMove; i++) {
+      const { layerIdx, pos, tile } = availableTiles[i];
+      tile.effectData.onFrog = true;
+      this.state.frogPositions.add(`${layerIdx}_${pos}`);
+    }
+  }
+
+  /**
+   * 텔레포트 처리 (3턴마다 타일 타입 셔플)
+   * 백엔드 _process_teleport와 동일
+   */
+  private processTeleport(): void {
+    // 텔레포트 타일이 없으면 스킵
+    if (this.state.teleportTiles.length < 2) return;
+
+    // 클릭 카운트 증가
+    this.state.teleportClickCount++;
+
+    // 3턴마다 셔플
+    if (this.state.teleportClickCount >= 3) {
+      this.state.teleportClickCount = 0;
+
+      // 유효한 텔레포트 타일 수집
+      const validTeleportTiles: Array<{ layerIdx: number; pos: string; tile: TileState }> = [];
+      for (const [layerIdx, pos] of this.state.teleportTiles) {
+        const layer = this.state.tiles.get(layerIdx);
+        const tile = layer?.get(pos);
+        if (tile && !tile.picked) {
+          validTeleportTiles.push({ layerIdx, pos, tile });
+        }
+      }
+
+      // 2개 미만이면 텔레포트 효과 제거
+      if (validTeleportTiles.length < 2) {
+        // 텔레포트 효과 제거
+        for (const { tile } of validTeleportTiles) {
+          tile.effectType = TileEffectType.NONE;
+        }
+        this.state.teleportTiles = [];
+        return;
+      }
+
+      // Sattolo 셔플 (모든 타일이 다른 위치로 이동)
+      const tileTypes = validTeleportTiles.map(t => t.tile.tileType);
+      for (let i = tileTypes.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * i); // 0 to i-1 (not including i)
+        [tileTypes[i], tileTypes[j]] = [tileTypes[j], tileTypes[i]];
+      }
+
+      // 새로운 타일 타입 적용
+      for (let i = 0; i < validTeleportTiles.length; i++) {
+        validTeleportTiles[i].tile.tileType = tileTypes[i];
+      }
+    }
+  }
+
   // ==================== Getter 메서드들 ====================
 
   getState(): GameState {
@@ -866,7 +1237,9 @@ export class GameEngine {
           !this.isBlockedByUpper(tile) &&
           !(tile.isStackTile && this.isStackBlocked(tile));
 
-        const isHidden = tile.effectType === TileEffectType.UNKNOWN ||
+        // Unknown 타일은 위에 다른 타일이 있을 때만 숨김 (위 타일이 제거되면 공개)
+        const isBlockedByUpperTile = this.isBlockedByUpper(tile);
+        const isHidden = (tile.effectType === TileEffectType.UNKNOWN && isBlockedByUpperTile) ||
           (tile.effectType === TileEffectType.CURTAIN && !tile.effectData.isOpen);
 
         result.push({
@@ -874,8 +1247,8 @@ export class GameEngine {
           type: tile.tileType,
           attribute: tile.effectType,
           layer: layerIdx,
-          row: tile.xIdx,
-          col: tile.yIdx,
+          row: tile.yIdx,  // yIdx = row = vertical position
+          col: tile.xIdx,  // xIdx = col = horizontal position
           isSelectable,
           isMatched: tile.picked,
           isHidden,
@@ -903,8 +1276,8 @@ export class GameEngine {
       type: tile.tileType,
       attribute: tile.effectType,
       sourceLayer: tile.layerIdx,
-      sourceRow: tile.xIdx,
-      sourceCol: tile.yIdx,
+      sourceRow: tile.yIdx,  // yIdx = row = vertical position
+      sourceCol: tile.xIdx,  // xIdx = col = horizontal position
     }));
   }
 }

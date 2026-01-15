@@ -414,182 +414,231 @@ async def generate_level(
     Returns:
         GenerateResponse with generated level and actual difficulty.
     """
-    try:
-        # Convert goals from Pydantic models to dicts
-        # Use None check to allow empty list (empty list means no goals)
-        goals = None
-        if request.goals is not None:
-            goals = [
-                {"type": g.type, "direction": g.direction, "count": g.count}
-                for g in request.goals
+    # Convert goals from Pydantic models to dicts
+    # Use None check to allow empty list (empty list means no goals)
+    goals = None
+    if request.goals is not None:
+        goals = [
+            {"type": g.type, "direction": g.direction, "count": g.count}
+            for g in request.goals
+        ]
+
+    # Convert obstacle_counts from Pydantic models to dicts
+    obstacle_counts = None
+    if request.obstacle_counts is not None:
+        obstacle_counts = {
+            k: {"min": v.min, "max": v.max}
+            for k, v in request.obstacle_counts.items()
+        }
+
+    # Convert layer_tile_configs from Pydantic models to dataclasses
+    layer_tile_configs = None
+    if request.layer_tile_configs is not None:
+        layer_tile_configs = [
+            LayerTileConfig(layer=c.layer, count=c.count)
+            for c in request.layer_tile_configs
+        ]
+
+    # Convert layer_obstacle_configs from Pydantic models to dataclasses
+    layer_obstacle_configs = None
+    if request.layer_obstacle_configs is not None:
+        layer_obstacle_configs = [
+            LayerObstacleConfig(
+                layer=c.layer,
+                counts={
+                    k: {"min": v.min, "max": v.max}
+                    for k, v in c.counts.items()
+                }
+            )
+            for c in request.layer_obstacle_configs
+        ]
+
+    # Check if this is a tutorial level (new gimmick introduction)
+    tutorial_gimmick = get_tutorial_gimmick(
+        request.level_number,
+        request.gimmick_unlock_levels
+    )
+
+    # Debug logging for tutorial gimmick
+    logger.info(f"[TUTORIAL_GIMMICK] level_number={request.level_number}, "
+               f"unlock_levels={request.gimmick_unlock_levels}, "
+               f"tutorial_gimmick={tutorial_gimmick}")
+
+    # Tutorial level settings: easier difficulty, only the new gimmick
+    target_difficulty = request.target_difficulty
+    if tutorial_gimmick and request.auto_select_gimmicks:
+        # Tutorial levels are easier (reduce difficulty by 30%)
+        target_difficulty = max(0.2, request.target_difficulty * 0.7)
+
+    # Handle auto gimmick selection
+    obstacle_types = request.obstacle_types
+    if request.auto_select_gimmicks and request.available_gimmicks:
+        # First, filter available gimmicks by unlock level BEFORE auto-selection
+        # This ensures locked gimmicks are never considered for selection
+        available_pool = list(request.available_gimmicks)
+        if request.level_number is not None:
+            unlock_levels = request.gimmick_unlock_levels or DEFAULT_GIMMICK_UNLOCK_LEVELS
+            available_pool = [
+                g for g in available_pool
+                if unlock_levels.get(g, 0) <= request.level_number
             ]
 
-        # Convert obstacle_counts from Pydantic models to dicts
-        obstacle_counts = None
-        if request.obstacle_counts is not None:
-            obstacle_counts = {
-                k: {"min": v.min, "max": v.max}
-                for k, v in request.obstacle_counts.items()
-            }
-
-        # Convert layer_tile_configs from Pydantic models to dataclasses
-        layer_tile_configs = None
-        if request.layer_tile_configs is not None:
-            layer_tile_configs = [
-                LayerTileConfig(layer=c.layer, count=c.count)
-                for c in request.layer_tile_configs
-            ]
-
-        # Convert layer_obstacle_configs from Pydantic models to dataclasses
-        layer_obstacle_configs = None
-        if request.layer_obstacle_configs is not None:
-            layer_obstacle_configs = [
-                LayerObstacleConfig(
-                    layer=c.layer,
-                    counts={
-                        k: {"min": v.min, "max": v.max}
-                        for k, v in c.counts.items()
-                    }
-                )
-                for c in request.layer_obstacle_configs
-            ]
-
-        # Check if this is a tutorial level (new gimmick introduction)
-        tutorial_gimmick = get_tutorial_gimmick(
-            request.level_number,
-            request.gimmick_unlock_levels
-        )
-
-        # Debug logging for tutorial gimmick
-        logger.info(f"[TUTORIAL_GIMMICK] level_number={request.level_number}, "
-                   f"unlock_levels={request.gimmick_unlock_levels}, "
-                   f"tutorial_gimmick={tutorial_gimmick}")
-
-        # Tutorial level settings: easier difficulty, only the new gimmick
-        target_difficulty = request.target_difficulty
-        if tutorial_gimmick and request.auto_select_gimmicks:
-            # Tutorial levels are easier (reduce difficulty by 30%)
-            target_difficulty = max(0.2, request.target_difficulty * 0.7)
-
-        # Handle auto gimmick selection
-        obstacle_types = request.obstacle_types
-        if request.auto_select_gimmicks and request.available_gimmicks:
-            # First, filter available gimmicks by unlock level BEFORE auto-selection
-            # This ensures locked gimmicks are never considered for selection
-            available_pool = list(request.available_gimmicks)
-            if request.level_number is not None:
-                unlock_levels = request.gimmick_unlock_levels or DEFAULT_GIMMICK_UNLOCK_LEVELS
-                available_pool = [
-                    g for g in available_pool
-                    if unlock_levels.get(g, 0) <= request.level_number
-                ]
-
-            # Tutorial level: only use the new gimmick for clear showcase
-            if tutorial_gimmick and tutorial_gimmick in available_pool:
-                obstacle_types = [tutorial_gimmick]
-            elif available_pool:
-                # Auto-select gimmicks from UNLOCKED pool based on target difficulty
-                auto_selected = select_gimmicks_for_difficulty(
-                    target_difficulty,
-                    available_pool
-                )
-
-                # When gimmick unlock system is enabled, ensure unlocked gimmicks can appear
-                # even if difficulty profile returns empty (e.g., S grade levels)
-                # This reinforces learning by using recently unlocked gimmicks
-                if not auto_selected and request.gimmick_unlock_levels and available_pool:
-                    # For levels after gimmick unlock, randomly select 1-2 unlocked gimmicks
-                    # This ensures unlocked gimmicks appear in subsequent stages
-                    num_to_select = min(len(available_pool), random.randint(1, 2))
-                    auto_selected = random.sample(available_pool, num_to_select)
-                    logger.info(f"[GIMMICK_UNLOCK] Level {request.level_number}: "
-                               f"Difficulty profile returned empty, fallback to unlocked gimmicks: {auto_selected}")
-
-                # Use empty list (not None) when no gimmicks selected, to avoid GenerationParams defaults
-                obstacle_types = auto_selected if auto_selected else []
-            else:
-                # Use empty list to explicitly indicate no obstacles (None would trigger defaults)
-                obstacle_types = []
-        elif request.auto_select_gimmicks and request.gimmick_unlock_levels:
-            # Gimmick unlock mode WITHOUT available_gimmicks pool
-            if tutorial_gimmick:
-                # Tutorial level: ONLY use the new gimmick for clear showcase
-                obstacle_types = [tutorial_gimmick]
-                logger.info(f"[TUTORIAL_GIMMICK] Tutorial level with gimmick unlock only: "
-                           f"setting obstacle_types=[{tutorial_gimmick}]")
-            else:
-                # Non-tutorial level in gimmick unlock mode: filter by unlock level
-                # If no obstacles manually selected, use empty list (no gimmicks)
-                if obstacle_types:
-                    obstacle_types = filter_obstacles_by_unlock_level(
-                        obstacle_types,
-                        request.level_number,
-                        request.gimmick_unlock_levels
-                    ) or []
-                else:
-                    # No manual selection + no tutorial = no gimmicks
-                    obstacle_types = []
-                logger.info(f"[GIMMICK_UNLOCK] Non-tutorial level {request.level_number}: "
-                           f"obstacle_types={obstacle_types}")
-        else:
-            # For non-auto mode, apply gimmick unlock filter to manual selection
-            obstacle_types = filter_obstacles_by_unlock_level(
-                obstacle_types,
-                request.level_number,
-                request.gimmick_unlock_levels
+        # Tutorial level: only use the new gimmick for clear showcase
+        if tutorial_gimmick and tutorial_gimmick in available_pool:
+            obstacle_types = [tutorial_gimmick]
+        elif available_pool:
+            # Auto-select gimmicks from UNLOCKED pool based on target difficulty
+            auto_selected = select_gimmicks_for_difficulty(
+                target_difficulty,
+                available_pool
             )
 
-        # Resolve symmetry mode: convert "both"/"none"/None to random "horizontal" or "vertical"
-        actual_symmetry = resolve_symmetry_mode(request.symmetry_mode)
+            # When gimmick unlock system is enabled, ensure unlocked gimmicks can appear
+            # even if difficulty profile returns empty (e.g., S grade levels)
+            # This reinforces learning by using recently unlocked gimmicks
+            if not auto_selected and request.gimmick_unlock_levels and available_pool:
+                # For levels after gimmick unlock, randomly select 1-2 unlocked gimmicks
+                # This ensures unlocked gimmicks appear in subsequent stages
+                num_to_select = min(len(available_pool), random.randint(1, 2))
+                auto_selected = random.sample(available_pool, num_to_select)
+                logger.info(f"[GIMMICK_UNLOCK] Level {request.level_number}: "
+                           f"Difficulty profile returned empty, fallback to unlocked gimmicks: {auto_selected}")
 
-        # Filter goals by unlock level (craft/stack goals only available after unlock)
-        filtered_goals = filter_goals_by_unlock_level(
-            goals,
+            # Use empty list (not None) when no gimmicks selected, to avoid GenerationParams defaults
+            obstacle_types = auto_selected if auto_selected else []
+        else:
+            # Use empty list to explicitly indicate no obstacles (None would trigger defaults)
+            obstacle_types = []
+    elif request.auto_select_gimmicks and request.gimmick_unlock_levels:
+        # Gimmick unlock mode WITHOUT available_gimmicks pool
+        if tutorial_gimmick:
+            # Tutorial level: ONLY use the new gimmick for clear showcase
+            obstacle_types = [tutorial_gimmick]
+            logger.info(f"[TUTORIAL_GIMMICK] Tutorial level with gimmick unlock only: "
+                       f"setting obstacle_types=[{tutorial_gimmick}]")
+        else:
+            # Non-tutorial level in gimmick unlock mode: filter by unlock level
+            # If no obstacles manually selected, use empty list (no gimmicks)
+            if obstacle_types:
+                obstacle_types = filter_obstacles_by_unlock_level(
+                    obstacle_types,
+                    request.level_number,
+                    request.gimmick_unlock_levels
+                ) or []
+            else:
+                # No manual selection + no tutorial = no gimmicks
+                obstacle_types = []
+            logger.info(f"[GIMMICK_UNLOCK] Non-tutorial level {request.level_number}: "
+                       f"obstacle_types={obstacle_types}")
+    else:
+        # For non-auto mode, apply gimmick unlock filter to manual selection
+        obstacle_types = filter_obstacles_by_unlock_level(
+            obstacle_types,
             request.level_number,
             request.gimmick_unlock_levels
         )
 
-        params = GenerationParams(
-            target_difficulty=target_difficulty,  # Use adjusted difficulty for tutorial levels
-            grid_size=tuple(request.grid_size),
-            max_layers=request.max_layers,
-            tile_types=request.tile_types,
-            obstacle_types=obstacle_types,
-            goals=filtered_goals,
-            obstacle_counts=obstacle_counts,
-            total_tile_count=request.total_tile_count,
-            active_layer_count=request.active_layer_count,
-            layer_tile_configs=layer_tile_configs,
-            layer_obstacle_configs=layer_obstacle_configs,
-            symmetry_mode=actual_symmetry,
-            pattern_type=request.pattern_type,
-            pattern_index=request.pattern_index,
-            gimmick_intensity=request.gimmick_intensity,
-            # Tutorial gimmick: place on top layer for tutorial UI
-            tutorial_gimmick=tutorial_gimmick,
-            tutorial_gimmick_min_count=3,  # Ensure at least 3 tutorial gimmicks are visible
-        )
+    # Resolve symmetry mode: convert "both"/"none"/None to random "horizontal" or "vertical"
+    actual_symmetry = resolve_symmetry_mode(request.symmetry_mode)
 
-        result = generator.generate(params)
+    # Filter goals by unlock level (craft/stack goals only available after unlock)
+    filtered_goals = filter_goals_by_unlock_level(
+        goals,
+        request.level_number,
+        request.gimmick_unlock_levels
+    )
 
-        # Store target_difficulty and generation config in level_json for verification
-        result.level_json["target_difficulty"] = target_difficulty
-        # Mark tutorial levels with the gimmick being introduced
-        if tutorial_gimmick:
-            result.level_json["tutorial_gimmick"] = tutorial_gimmick
-        # Store actual symmetry mode used (not request value)
-        result.level_json["symmetry_mode"] = actual_symmetry
-        if request.pattern_type:
-            result.level_json["pattern_type"] = request.pattern_type
+    params = GenerationParams(
+        target_difficulty=target_difficulty,  # Use adjusted difficulty for tutorial levels
+        grid_size=tuple(request.grid_size),
+        max_layers=request.max_layers,
+        tile_types=request.tile_types,
+        obstacle_types=obstacle_types,
+        goals=filtered_goals,
+        obstacle_counts=obstacle_counts,
+        total_tile_count=request.total_tile_count,
+        active_layer_count=request.active_layer_count,
+        layer_tile_configs=layer_tile_configs,
+        layer_obstacle_configs=layer_obstacle_configs,
+        symmetry_mode=actual_symmetry,
+        pattern_type=request.pattern_type,
+        pattern_index=request.pattern_index,
+        gimmick_intensity=request.gimmick_intensity,
+        # Tutorial gimmick: place on top layer for tutorial UI
+        tutorial_gimmick=tutorial_gimmick,
+        tutorial_gimmick_min_count=3,  # Ensure at least 3 tutorial gimmicks are visible
+    )
 
-        return GenerateResponse(
-            level_json=result.level_json,
-            actual_difficulty=result.actual_difficulty,
-            grade=result.grade.value,
-            generation_time_ms=result.generation_time_ms,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Generation failed: {str(e)}")
+    # Try generation with up to 3 fallback attempts
+    MAX_GENERATION_ATTEMPTS = 3
+    last_error = None
+
+    for attempt in range(MAX_GENERATION_ATTEMPTS):
+        try:
+            if attempt > 0:
+                # Simplify parameters for fallback attempts
+                logger.warning(f"[GENERATE] Fallback attempt {attempt + 1}/{MAX_GENERATION_ATTEMPTS}")
+
+                # Progressively simplify parameters
+                if attempt >= 1:
+                    # Remove obstacles on first retry
+                    params = GenerationParams(
+                        target_difficulty=params.target_difficulty,
+                        grid_size=params.grid_size,
+                        max_layers=min(params.max_layers, 5),  # Reduce layers
+                        tile_types=params.tile_types[:4] if params.tile_types else ["t1", "t2", "t3", "t4"],
+                        obstacle_types=[],  # No obstacles
+                        goals=params.goals,
+                        symmetry_mode=params.symmetry_mode,
+                        pattern_type=params.pattern_type,
+                        gimmick_intensity=0,  # No gimmick intensity
+                    )
+
+                if attempt >= 2:
+                    # Use simplest possible parameters
+                    params = GenerationParams(
+                        target_difficulty=params.target_difficulty,
+                        grid_size=(6, 6),  # Simple grid
+                        max_layers=4,  # Few layers
+                        tile_types=["t1", "t2", "t3"],  # Minimum tile types
+                        obstacle_types=[],
+                        goals=[{"type": "craft", "direction": "s", "count": 3}],
+                        symmetry_mode="horizontal",
+                        pattern_type="geometric",
+                    )
+
+            result = generator.generate(params)
+
+            # Store target_difficulty and generation config in level_json for verification
+            result.level_json["target_difficulty"] = target_difficulty
+            # Mark tutorial levels with the gimmick being introduced
+            if tutorial_gimmick:
+                result.level_json["tutorial_gimmick"] = tutorial_gimmick
+            # Store actual symmetry mode used (not request value)
+            result.level_json["symmetry_mode"] = actual_symmetry
+            if request.pattern_type:
+                result.level_json["pattern_type"] = request.pattern_type
+
+            # Mark if this was a fallback generation
+            if attempt > 0:
+                result.level_json["_fallback_attempt"] = attempt + 1
+
+            return GenerateResponse(
+                level_json=result.level_json,
+                actual_difficulty=result.actual_difficulty,
+                grade=result.grade.value,
+                generation_time_ms=result.generation_time_ms,
+            )
+        except Exception as e:
+            import traceback
+            last_error = e
+            error_details = traceback.format_exc()
+            logger.error(f"[GENERATE] Attempt {attempt + 1} failed: {str(e)}\n{error_details}")
+            continue
+
+    # All attempts failed
+    logger.error(f"[GENERATE] All {MAX_GENERATION_ATTEMPTS} attempts failed. Last error: {str(last_error)}")
+    raise HTTPException(status_code=400, detail=f"Generation failed after {MAX_GENERATION_ATTEMPTS} attempts: {str(last_error)}")
 
 
 @router.post("/simulate", response_model=SimulateResponse)

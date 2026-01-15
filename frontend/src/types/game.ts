@@ -3,6 +3,16 @@
  * 타일 매칭 게임 플레이어를 위한 타입 정의
  */
 
+/** 기믹 효과 데이터 */
+export interface TileEffectData {
+  remaining?: number;      // ice, grass, bomb 남은 횟수
+  unlocked?: boolean;      // chain 잠금 해제 여부
+  canPick?: boolean;       // link 선택 가능 여부
+  linkedPos?: string;      // link 연결 위치
+  isOpen?: boolean;        // curtain 열림 여부
+  onFrog?: boolean;        // frog가 위에 있는지
+}
+
 /** 게임 내 타일 상태 */
 export interface GameTile {
   id: string;           // 고유 ID (layer_row_col)
@@ -16,6 +26,7 @@ export interface GameTile {
   isMatched: boolean;   // 매치되어 제거 예정
   isHidden: boolean;    // 숨겨진 상태 (unknown, curtain 등)
   extra?: number[];     // 추가 데이터 (craft/stack의 타일 수 등)
+  effectData?: TileEffectData; // 기믹 효과 상태
 }
 
 /** 슬롯 영역의 타일 */

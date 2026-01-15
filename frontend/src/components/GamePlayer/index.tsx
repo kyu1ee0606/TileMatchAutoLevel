@@ -7,6 +7,7 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { createGameEngine, type GameEngine, type TileEffectData } from '../../engine/gameEngine';
 import GameBoard from './GameBoard';
 import SlotArea from './SlotArea';
+import { TILE_COLORS } from '../../types/game';
 
 // UI용 타입 정의
 interface GameTile {
@@ -64,6 +65,27 @@ const DEFAULT_GAME_SETTINGS = {
   enableUndo: false, // 새 엔진에서는 undo 미지원
 };
 
+// Animation state for tile moving to dock
+interface AnimatingTile {
+  tile: GameTile;
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+}
+
+// 타일 이미지 경로
+const getTileImagePath = (type: string, skinId: number = 0): string => {
+  if (type.startsWith('craft_')) {
+    return '/tiles/special/tile_craft.png';
+  }
+  if (type.startsWith('stack_')) {
+    const dir = type.split('_')[1] || 's';
+    return `/tiles/special/stack_${dir}.png`;
+  }
+  return `/tiles/skin${skinId}/s${skinId}_${type}.png`;
+};
+
 interface GamePlayerProps {
   levelData: Record<string, unknown> | null;
   levelInfo?: LevelInfo;
@@ -79,8 +101,17 @@ export function GamePlayer({ levelData, levelInfo, onGameEnd, onBack }: GamePlay
   const [stats, setStats] = useState<GameStats>(INITIAL_GAME_STATS);
   const [settings] = useState(DEFAULT_GAME_SETTINGS);
 
+  // Animation state
+  const [animatingTile, setAnimatingTile] = useState<AnimatingTile | null>(null);
+  const tileSize = 48;
+
   // Game engine reference
   const engineRef = useRef<GameEngine | null>(null);
+
+  // Refs for animation positioning
+  const containerRef = useRef<HTMLDivElement>(null);
+  const boardRef = useRef<HTMLDivElement>(null);
+  const dockRef = useRef<HTMLDivElement>(null);
 
   // Timer
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -166,10 +197,11 @@ export function GamePlayer({ levelData, levelInfo, onGameEnd, onBack }: GamePlay
     setSlots(uiSlots);
   }, []);
 
-  // Handle tile click
-  const handleTileClick = useCallback((tile: GameTile) => {
+  // Handle tile click with animation
+  const handleTileClick = useCallback((tile: GameTile, event?: React.MouseEvent) => {
     if (gameState !== 'playing') return;
     if (!tile.isSelectable) return;
+    if (animatingTile) return; // Don't allow clicks during animation
 
     const engine = engineRef.current;
     if (!engine) return;
@@ -181,25 +213,75 @@ export function GamePlayer({ levelData, levelInfo, onGameEnd, onBack }: GamePlay
     const layerIdx = parseInt(parts[0], 10);
     const position = `${parts[1]}_${parts[2]}`;
 
-    // Try to select tile
-    const success = engine.selectTile(layerIdx, position);
-    if (!success) return;
+    // Get positions for animation
+    const container = containerRef.current;
+    const dock = dockRef.current;
 
-    // Update stats
-    setStats(prev => ({ ...prev, moves: prev.moves + 1 }));
+    if (container && dock && event) {
+      const containerRect = container.getBoundingClientRect();
+      const dockRect = dock.getBoundingClientRect();
 
-    // Update UI from engine
-    updateUIFromEngine(engine);
+      // Start position (clicked tile position)
+      const startX = event.clientX - containerRect.left - tileSize / 2;
+      const startY = event.clientY - containerRect.top - tileSize / 2;
 
-    // Check game state
-    if (engine.isCleared()) {
-      setGameState('won');
-      onGameEnd?.(true, { ...stats, moves: stats.moves + 1 });
-    } else if (engine.isFailed()) {
-      setGameState('lost');
-      onGameEnd?.(false, { ...stats, moves: stats.moves + 1 });
+      // End position (next slot in dock)
+      const currentSlotCount = slots.length;
+      const slotWidth = tileSize + 4; // tile + gap
+      const dockStartX = dockRect.left - containerRect.left + 12; // padding
+      const endX = dockStartX + currentSlotCount * slotWidth;
+      const endY = dockRect.top - containerRect.top + 12; // padding
+
+      // Start animation
+      setAnimatingTile({
+        tile,
+        startX,
+        startY,
+        endX,
+        endY,
+      });
+
+      // After animation, execute the actual move
+      setTimeout(() => {
+        // Try to select tile
+        const success = engine.selectTile(layerIdx, position);
+        if (success) {
+          // Update stats
+          setStats(prev => ({ ...prev, moves: prev.moves + 1 }));
+
+          // Update UI from engine
+          updateUIFromEngine(engine);
+
+          // Check game state
+          if (engine.isCleared()) {
+            setGameState('won');
+            onGameEnd?.(true, { ...stats, moves: stats.moves + 1 });
+          } else if (engine.isFailed()) {
+            setGameState('lost');
+            onGameEnd?.(false, { ...stats, moves: stats.moves + 1 });
+          }
+        }
+
+        // Clear animation state
+        setAnimatingTile(null);
+      }, 200); // Animation duration
+    } else {
+      // Fallback without animation
+      const success = engine.selectTile(layerIdx, position);
+      if (!success) return;
+
+      setStats(prev => ({ ...prev, moves: prev.moves + 1 }));
+      updateUIFromEngine(engine);
+
+      if (engine.isCleared()) {
+        setGameState('won');
+        onGameEnd?.(true, { ...stats, moves: stats.moves + 1 });
+      } else if (engine.isFailed()) {
+        setGameState('lost');
+        onGameEnd?.(false, { ...stats, moves: stats.moves + 1 });
+      }
     }
-  }, [gameState, stats, onGameEnd, updateUIFromEngine]);
+  }, [gameState, stats, onGameEnd, updateUIFromEngine, animatingTile, slots.length]);
 
   // Restart game
   const handleRestart = useCallback(() => {
@@ -227,7 +309,7 @@ export function GamePlayer({ levelData, levelInfo, onGameEnd, onBack }: GamePlay
   }
 
   return (
-    <div className="game-player flex flex-col h-full">
+    <div ref={containerRef} className="game-player flex flex-col h-full relative">
       {/* Header */}
       <div className="flex items-center justify-between p-4 bg-gray-800/50 rounded-t-lg">
         <div className="flex items-center gap-4">
@@ -263,19 +345,78 @@ export function GamePlayer({ levelData, levelInfo, onGameEnd, onBack }: GamePlay
       {/* Game area */}
       <div className="flex-1 flex flex-col items-center justify-center p-4 gap-6 overflow-auto">
         {/* Game board */}
-        <GameBoard
-          tiles={tiles}
-          onTileClick={handleTileClick}
-          tileSize={48}
-        />
+        <div ref={boardRef}>
+          <GameBoard
+            tiles={tiles.map(t =>
+              // Hide tile that is currently animating
+              animatingTile && t.id === animatingTile.tile.id
+                ? { ...t, isMatched: true }
+                : t
+            )}
+            onTileClick={handleTileClick}
+            tileSize={tileSize}
+          />
+        </div>
 
         {/* Slot area */}
-        <SlotArea
-          slots={slots}
-          maxSlots={settings.maxSlots}
-          tileSize={48}
-        />
+        <div ref={dockRef}>
+          <SlotArea
+            slots={slots}
+            maxSlots={settings.maxSlots}
+            tileSize={tileSize}
+          />
+        </div>
       </div>
+
+      {/* Animated tile overlay */}
+      {animatingTile && (
+        <div
+          className="absolute pointer-events-none z-[1000]"
+          style={{
+            left: animatingTile.startX,
+            top: animatingTile.startY,
+            width: tileSize,
+            height: tileSize,
+            animation: 'tileToDock 200ms ease-out forwards',
+            '--start-x': `${animatingTile.startX}px`,
+            '--start-y': `${animatingTile.startY}px`,
+            '--end-x': `${animatingTile.endX}px`,
+            '--end-y': `${animatingTile.endY}px`,
+          } as React.CSSProperties}
+        >
+          {/* Base background */}
+          <img
+            src="/tiles/skin0/s0_t0.png"
+            alt=""
+            className="absolute inset-0 w-full h-full object-contain"
+          />
+          {/* Tile image */}
+          <img
+            src={getTileImagePath(animatingTile.tile.type)}
+            alt={animatingTile.tile.type}
+            className="absolute inset-0 w-full h-full object-contain"
+            onError={(e) => {
+              const img = e.target as HTMLImageElement;
+              img.style.display = 'none';
+              const fallbackColor = TILE_COLORS[animatingTile.tile.type] || TILE_COLORS.t0;
+              const parent = img.parentElement;
+              if (parent) {
+                const fallback = document.createElement('div');
+                fallback.style.cssText = `
+                  width: 100%;
+                  height: 100%;
+                  background-color: ${fallbackColor};
+                  border-radius: 6px;
+                  position: absolute;
+                  top: 0;
+                  left: 0;
+                `;
+                parent.appendChild(fallback);
+              }
+            }}
+          />
+        </div>
+      )}
 
       {/* Controls */}
       <div className="flex items-center justify-center gap-4 p-4 bg-gray-800/50 rounded-b-lg">

@@ -5,7 +5,8 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import GamePlayer from '../GamePlayer';
 import type { LevelInfo, GameStats } from '../../types/game';
-import { listLocalLevels, loadLocalLevel, type LocalLevelListItem } from '../../api/simulate';
+import { listLocalLevels as listLocalLevelsBackend, loadLocalLevel as loadLocalLevelBackend, type LocalLevelListItem } from '../../api/simulate';
+import { listLocalLevels as listLocalLevelsStorage, getLocalLevel } from '../../services/localLevelsApi';
 import { listFromGBoost, loadFromGBoost, checkGBoostHealth } from '../../api/gboost';
 
 type LevelSource = 'local' | 'gboost';
@@ -159,16 +160,39 @@ export function PlayTab({ initialLevelId, onLevelLoaded }: PlayTabProps) {
     setLoading(true);
     try {
       if (source === 'local') {
-        const result = await listLocalLevels();
-        setLevels(
-          result.levels.map((l: LocalLevelListItem) => ({
-            id: l.id,
-            name: l.name || l.id,
-            source: 'local' as LevelSource,
-            difficulty: typeof l.difficulty === 'number' ? l.difficulty : undefined,
-            createdAt: l.created_at,
-          }))
-        );
+        // Load from both localStorage and backend, then merge
+        const [storageResult, backendResult] = await Promise.all([
+          listLocalLevelsStorage().catch(() => ({ levels: [], count: 0, storage_path: '' })),
+          listLocalLevelsBackend().catch(() => ({ levels: [], count: 0, storage_path: '' })),
+        ]);
+
+        // Map storage levels
+        const storageLevels = storageResult.levels.map((l) => ({
+          id: l.id,
+          name: l.name || l.id,
+          source: 'local' as LevelSource,
+          difficulty: typeof l.difficulty === 'string' ? parseFloat(l.difficulty) : undefined,
+          createdAt: l.created_at,
+          fromStorage: true,
+        }));
+
+        // Map backend levels
+        const backendLevels = backendResult.levels.map((l: LocalLevelListItem) => ({
+          id: l.id,
+          name: l.name || l.id,
+          source: 'local' as LevelSource,
+          difficulty: typeof l.difficulty === 'number' ? l.difficulty : undefined,
+          createdAt: l.created_at,
+          fromStorage: false,
+        }));
+
+        // Merge and deduplicate by ID (prefer storage version)
+        const levelMap = new Map<string, LevelListItem & { fromStorage?: boolean }>();
+        backendLevels.forEach(l => levelMap.set(l.id, l));
+        storageLevels.forEach(l => levelMap.set(l.id, l)); // Storage overwrites backend
+
+        const mergedLevels = Array.from(levelMap.values()).map(({ fromStorage, ...rest }) => rest);
+        setLevels(mergedLevels);
       } else {
         const result = await listFromGBoost(boardId, 'level_', 200);
         setLevels(
@@ -222,7 +246,20 @@ export function PlayTab({ initialLevelId, onLevelLoaded }: PlayTabProps) {
 
     try {
       if (level.source === 'local') {
-        const result = await loadLocalLevel(level.id);
+        // Try localStorage first, then backend
+        try {
+          const storageResult = await getLocalLevel(level.id);
+          if (storageResult.level_data) {
+            setLevelData(storageResult.level_data as unknown as Record<string, unknown>);
+            setIsPlaying(true);
+            return;
+          }
+        } catch {
+          // Fall through to backend
+        }
+
+        // Fallback to backend
+        const result = await loadLocalLevelBackend(level.id);
         if (result.level_data) {
           setLevelData(result.level_data as unknown as Record<string, unknown>);
         } else {

@@ -15,7 +15,7 @@ interface BoardBounds {
 
 interface GameBoardProps {
   tiles: GameTile[];
-  onTileClick: (tile: GameTile) => void;
+  onTileClick: (tile: GameTile, event?: React.MouseEvent) => void;
   tileSize?: number;
   showDebug?: boolean;
 }
@@ -170,11 +170,11 @@ export function GameBoard({
                 transform: 'translate(-50%, -50%)',
                 zIndex: tile.layer, // Higher layer = higher z-index (on top)
               }}
+              onClick={(e) => onTileClick(tile, e)}
             >
               <TileRenderer
                 tile={tile}
                 size={tileSize}
-                onClick={onTileClick}
                 showDebug={showDebug}
               />
             </div>

@@ -129,6 +129,8 @@ class LevelGenerator:
         # Final check: if obstacle removal broke divisibility, fix it again (only if not strict)
         if not has_strict_tile_config:
             level = self._ensure_tile_count_divisible_by_3(level, params)
+            # Re-validate obstacles since tile removal might have broken chain/link neighbors
+            level = self._validate_and_fix_obstacles(level)
 
         # Calculate final metrics
         analyzer = get_analyzer()
@@ -2691,7 +2693,9 @@ class LevelGenerator:
     ) -> Dict[str, Any]:
         """Add obstacles and attributes to tiles following game rules."""
         # Use None check to allow empty list (empty list means no obstacles)
-        obstacle_types = params.obstacle_types if params.obstacle_types is not None else ["chain", "frog"]
+        # Default: ALL obstacle types (filtering by unlock level should happen at API level)
+        ALL_OBSTACLE_TYPES_DEFAULT = ["chain", "frog", "link", "grass", "ice", "bomb", "curtain", "teleport", "unknown"]
+        obstacle_types = params.obstacle_types if params.obstacle_types is not None else ALL_OBSTACLE_TYPES_DEFAULT
         target = params.target_difficulty
 
         # Get gimmick intensity multiplier (0.0 = no gimmicks, 1.0 = normal, 2.0 = double)

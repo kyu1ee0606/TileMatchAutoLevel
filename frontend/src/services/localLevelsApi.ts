@@ -1,8 +1,8 @@
 /**
  * Local Levels API Service
  *
- * Uses browser localStorage for persistent storage that works in deployed environments.
- * Backend API is only used for simulation, not for storage.
+ * Hybrid storage: Uses backend API for listing/loading levels (from file system)
+ * and localStorage as additional storage for deployed environments.
  */
 
 import apiClient from '../api/client';
@@ -66,51 +66,127 @@ export interface ImportResponse {
 }
 
 /**
- * Get list of all locally saved levels from browser localStorage
+ * Get list of all locally saved levels - combines backend storage and localStorage
  */
 export async function listLocalLevels(): Promise<LocalLevelListResponse> {
-  const levels = getLocalLevelList();
-  const storageInfo = getStorageInfo();
+  // Try backend API first
+  try {
+    const response = await apiClient.get('/simulate/local/list');
+    const backendLevels = response.data.levels || [];
 
-  return {
-    levels: levels.map(l => ({
-      id: l.id,
-      name: l.name,
-      description: l.description,
-      tags: l.tags,
-      difficulty: l.difficulty,
-      created_at: l.created_at,
-      source: l.source,
-      validation_status: l.validation_status,
-    })),
-    count: levels.length,
-    storage_path: `localStorage (${storageInfo.estimatedSize})`,
-  };
+    // Also get localStorage levels
+    const localStorageLevels = getLocalLevelList();
+    const storageInfo = getStorageInfo();
+
+    // Merge levels (backend first, then localStorage, avoid duplicates by id)
+    const seenIds = new Set<string>();
+    const mergedLevels: LocalLevelMetadata[] = [];
+
+    for (const l of backendLevels) {
+      if (!seenIds.has(l.id)) {
+        seenIds.add(l.id);
+        mergedLevels.push({
+          id: l.id,
+          name: l.name || l.id,
+          description: l.description || '',
+          tags: l.tags || [],
+          difficulty: l.difficulty || 'unknown',
+          created_at: l.created_at || '',
+          source: l.source || 'backend',
+          validation_status: l.validation_status || 'unknown',
+        });
+      }
+    }
+
+    for (const l of localStorageLevels) {
+      if (!seenIds.has(l.id)) {
+        seenIds.add(l.id);
+        mergedLevels.push({
+          id: l.id,
+          name: l.name,
+          description: l.description,
+          tags: l.tags,
+          difficulty: l.difficulty,
+          created_at: l.created_at,
+          source: l.source || 'localStorage',
+          validation_status: l.validation_status,
+        });
+      }
+    }
+
+    return {
+      levels: mergedLevels,
+      count: mergedLevels.length,
+      storage_path: `backend + localStorage (${storageInfo.estimatedSize})`,
+    };
+  } catch (err) {
+    // Fallback to localStorage only if backend is unavailable
+    console.warn('Backend API unavailable, using localStorage only:', err);
+    const levels = getLocalLevelList();
+    const storageInfo = getStorageInfo();
+
+    return {
+      levels: levels.map(l => ({
+        id: l.id,
+        name: l.name,
+        description: l.description,
+        tags: l.tags,
+        difficulty: l.difficulty,
+        created_at: l.created_at,
+        source: l.source,
+        validation_status: l.validation_status,
+      })),
+      count: levels.length,
+      storage_path: `localStorage (${storageInfo.estimatedSize})`,
+    };
+  }
 }
 
 /**
- * Get a specific local level by ID from browser localStorage
+ * Get a specific local level by ID - tries backend first, then localStorage
  */
 export async function getLocalLevel(levelId: string): Promise<LocalLevel> {
-  const level = getLocalLevelById(levelId);
-  if (!level) {
-    throw new Error(`Level ${levelId} not found`);
-  }
+  // Try backend API first
+  try {
+    const response = await apiClient.get(`/simulate/local/${levelId}`);
+    const data = response.data;
 
-  return {
-    level_id: level.id,
-    level_data: level.level_data,
-    metadata: {
-      name: level.name,
-      description: level.description,
-      tags: level.tags,
-      difficulty: typeof level.difficulty === 'number' ? String(level.difficulty) : level.difficulty,
-      created_at: level.created_at,
-      saved_at: level.saved_at,
-      source: level.source,
-      validation_status: level.validation_status,
-    },
-  };
+    return {
+      level_id: data.level_id || levelId,
+      level_data: data.level_data,
+      metadata: {
+        name: data.name || data.metadata?.name || levelId,
+        description: data.description || data.metadata?.description,
+        tags: data.tags || data.metadata?.tags,
+        difficulty: data.difficulty || data.metadata?.difficulty || 'unknown',
+        created_at: data.created_at || data.metadata?.created_at,
+        saved_at: data.saved_at || data.metadata?.saved_at,
+        source: data.source || data.metadata?.source || 'backend',
+        validation_status: data.validation_status || data.metadata?.validation_status,
+      },
+    };
+  } catch (err) {
+    // Fallback to localStorage
+    const level = getLocalLevelById(levelId);
+    if (!level) {
+      throw new Error(`Level ${levelId} not found`);
+    }
+
+    return {
+      level_id: level.id,
+      level_data: level.level_data,
+      metadata: {
+        name: level.name,
+        description: level.description,
+        tags: level.tags,
+        difficulty: typeof level.difficulty === 'number' ? String(level.difficulty) : level.difficulty,
+        created_at: level.created_at,
+        saved_at: level.saved_at,
+        source: level.source,
+        validation_status: level.validation_status,
+      },
+    };
+  }
 }
 
 /**
@@ -136,10 +212,19 @@ export async function saveLocalLevel(levelData: LocalLevel): Promise<SaveLevelRe
 }
 
 /**
- * Delete a local level from browser localStorage
+ * Delete a local level - tries backend first, then localStorage
  */
 export async function deleteLocalLevel(levelId: string): Promise<{ success: boolean; message: string }> {
-  return deleteLocalLevelFromStorage(levelId);
+  // Try backend API first
+  try {
+    await apiClient.delete(`/simulate/local/${levelId}`);
+    // Also remove from localStorage if exists
+    deleteLocalLevelFromStorage(levelId);
+    return { success: true, message: `Level ${levelId} deleted successfully` };
+  } catch (err) {
+    // Fallback to localStorage only
+    return deleteLocalLevelFromStorage(levelId);
+  }
 }
 
 /**

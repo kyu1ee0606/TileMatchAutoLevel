@@ -1,0 +1,49 @@
+{
+  "level_name": "chain_block_test",
+  "level_data": {
+    "layer": 2,
+    "useTileCount": 3,
+    "randSeed": 12345,
+    "layer_0": {
+      "col": "7",
+      "row": "7",
+      "tiles": {
+        "3_3": ["t1", "chain"],
+        "4_3": ["t1", ""],
+        "5_3": ["t1", ""],
+        "3_4": ["t2", ""],
+        "4_4": ["t2", ""],
+        "5_4": ["t2", ""],
+        "3_5": ["t3", ""],
+        "4_5": ["t3", ""],
+        "5_5": ["t3", ""]
+      },
+      "num": "9"
+    },
+    "layer_1": {
+      "col": "6",
+      "row": "6",
+      "tiles": {
+        "3_3": ["t1", ""],
+        "4_3": ["t1", ""],
+        "5_3": ["t1", ""],
+        "3_4": ["t2", ""],
+        "4_4": ["t2", ""],
+        "5_4": ["t2", ""],
+        "3_5": ["t3", ""],
+        "4_5": ["t3", ""],
+        "5_5": ["t3", ""]
+      },
+      "num": "9"
+    },
+    "goalCount": {},
+    "max_moves": 50
+  },
+  "metadata": {
+    "saved_at": "2026-01-16T12:40:00.000000",
+    "created_at": "2026-01-16T12:40:00.000000",
+    "source": "local",
+    "name": "Chain Block Test",
+    "description": "Test: chain tile blocked by upper layer should not unlock when adjacent tile is picked"
+  }
+}

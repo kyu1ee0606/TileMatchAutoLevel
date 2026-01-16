@@ -456,6 +456,19 @@ export function TileGrid({ className }: TileGridProps) {
                   alt={tileInfo.name}
                   className="w-full h-full object-cover pointer-events-none"
                   draggable={false}
+                  onError={(e) => {
+                    // 이미지 로드 실패 시 fallback 색상 블록 표시
+                    const img = e.target as HTMLImageElement;
+                    img.style.display = 'none';
+                    const parent = img.parentElement;
+                    if (parent && !parent.querySelector('.fallback-block')) {
+                      const fallback = document.createElement('div');
+                      fallback.className = 'fallback-block w-full h-full flex items-center justify-center';
+                      fallback.style.backgroundColor = tileInfo?.color || '#888';
+                      fallback.innerHTML = `<span class="text-white text-xs font-bold">${tileType.replace('_s', '')}</span>`;
+                      parent.appendChild(fallback);
+                    }
+                  }}
                 />
               ) : (
                 // Fallback color block when no image

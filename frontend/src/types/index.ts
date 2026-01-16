@@ -227,15 +227,31 @@ export const GIMMICK_EFFECTS: Record<string, GimmickEffect> = {
   link_w: { name: 'Link West', icon: '🔗←', color: '#f59e0b', description: '서쪽 연결' },
 };
 
-// Attribute definitions
+// Attribute definitions (타일에 적용하는 기믹 속성)
 export const ATTRIBUTES: Record<string, { name: string; icon: string }> = {
   '': { name: 'None', icon: '' },
+  // 잠금 계열
   chain: { name: 'Chain', icon: '⛓️' },
+  ice: { name: 'Ice', icon: '❄️' },
+  ice_1: { name: 'Ice 1', icon: '❄️' },
+  ice_2: { name: 'Ice 2', icon: '❄️' },
+  ice_3: { name: 'Ice 3', icon: '❄️' },
+  grass: { name: 'Grass', icon: '🌿' },
+  grass_1: { name: 'Grass 1', icon: '🌿' },
+  grass_2: { name: 'Grass 2', icon: '🌿' },
+  // 특수 효과
   frog: { name: 'Frog', icon: '🐸' },
-  link_w: { name: 'Link West', icon: '🔗←' },
-  link_n: { name: 'Link North', icon: '🔗↑' },
-  link_s: { name: 'Link South', icon: '🔗↓' },
-  link_e: { name: 'Link East', icon: '🔗→' },
+  bomb: { name: 'Bomb', icon: '💣' },
+  // 연결 계열
+  link_n: { name: 'Link N', icon: '🔗↑' },
+  link_s: { name: 'Link S', icon: '🔗↓' },
+  link_e: { name: 'Link E', icon: '🔗→' },
+  link_w: { name: 'Link W', icon: '🔗←' },
+  // 가시성 계열
+  curtain: { name: 'Curtain', icon: '🎪' },
+  curtain_open: { name: 'Curtain Open', icon: '🎭' },
+  curtain_close: { name: 'Curtain Close', icon: '🎪' },
+  teleport: { name: 'Teleport', icon: '🌀' },
   unknown: { name: 'Unknown', icon: '❓' },
 };
 

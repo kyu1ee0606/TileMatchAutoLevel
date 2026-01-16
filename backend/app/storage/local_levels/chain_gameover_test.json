@@ -1,0 +1,37 @@
+{
+  "level_name": "chain_gameover_test",
+  "level_data": {
+    "layer": 2,
+    "useTileCount": 2,
+    "randSeed": 99999,
+    "layer_0": {
+      "col": "7",
+      "row": "7",
+      "tiles": {
+        "3_3": ["t1", "chain"],
+        "4_3": ["t2", ""],
+        "5_3": ["t2", ""],
+        "6_3": ["t2", ""]
+      },
+      "num": "4"
+    },
+    "layer_1": {
+      "col": "6",
+      "row": "6",
+      "tiles": {
+        "3_3": ["t1", ""],
+        "4_3": ["t1", ""]
+      },
+      "num": "2"
+    },
+    "goalCount": {},
+    "max_moves": 50
+  },
+  "metadata": {
+    "saved_at": "2026-01-16T12:45:00.000000",
+    "created_at": "2026-01-16T12:45:00.000000",
+    "source": "local",
+    "name": "Chain GameOver Test",
+    "description": "Test: Pick all t2 tiles first, then t1s. Chain at 3_3 blocked by layer1, should fail when no moves left."
+  }
+}

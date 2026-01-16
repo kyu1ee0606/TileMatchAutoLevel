@@ -2038,7 +2038,7 @@ class BotSimulator:
                     if remaining > 0:
                         adj_tile.effect_data["remaining"] = remaining - 1
 
-        # === Chain 처리: 수평 인접 타일에만 영향 ===
+        # === Chain 처리: 수평 인접 타일에만 영향, 덮여있지 않은 경우에만 해제 ===
         horizontal_positions = [(x + 1, y), (x - 1, y)]
 
         for adj_x, adj_y in horizontal_positions:
@@ -2051,7 +2051,9 @@ class BotSimulator:
                 continue
 
             if adj_tile.effect_type == TileEffectType.CHAIN:
-                adj_tile.effect_data["unlocked"] = True
+                # 체인 타일이 덮여있으면 해제하지 않음 (잔디와 동일한 규칙)
+                if not self._is_blocked_by_upper(state, adj_tile):
+                    adj_tile.effect_data["unlocked"] = True
 
         # Update link tiles status
         self._update_link_tiles_status(state)

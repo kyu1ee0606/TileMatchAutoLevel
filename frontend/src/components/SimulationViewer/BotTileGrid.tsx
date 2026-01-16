@@ -891,6 +891,18 @@ export function BotTileGrid({
               alt={stackInfo.isStack ? 'Stack' : 'Craft'}
               className="w-full h-full object-cover pointer-events-none"
               draggable={false}
+              onError={(e) => {
+                // 이미지 로드 실패 시 fallback 표시
+                const img = e.target as HTMLImageElement;
+                img.style.display = 'none';
+                const parent = img.parentElement;
+                if (parent && !parent.querySelector('.fallback-gimmick')) {
+                  const fallback = document.createElement('div');
+                  fallback.className = 'fallback-gimmick w-full h-full flex items-center justify-center text-[6px] font-bold bg-purple-600';
+                  fallback.innerHTML = `<span class="text-white">${stackInfo.isStack ? 'STK' : 'CRF'}</span>`;
+                  parent.appendChild(fallback);
+                }
+              }}
             />
           ) : (
             <div

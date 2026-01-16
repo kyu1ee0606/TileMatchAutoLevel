@@ -3,11 +3,11 @@ import { useLevelStore } from '../../stores/levelStore';
 import { useUIStore } from '../../stores/uiStore';
 import { TILE_TYPES, ATTRIBUTES, type TileData } from '../../types';
 import { Button, Tooltip } from '../ui';
-import { Paintbrush, Eraser, Palette, Star, Target, PaintBucket, Trash2, Timer } from 'lucide-react';
+import { Paintbrush, Eraser, Palette, Box, PaintBucket, Trash2, Timer } from 'lucide-react';
 import clsx from 'clsx';
 
 // 타일 카테고리 정의
-type TileCategory = 'basic' | 'special' | 'goal';
+type TileCategory = 'basic' | 'generator';
 
 const TILE_CATEGORIES: Record<TileCategory, { label: string; icon: typeof Palette; filter: (type: string) => boolean }> = {
   basic: {
@@ -15,15 +15,10 @@ const TILE_CATEGORIES: Record<TileCategory, { label: string; icon: typeof Palett
     icon: Palette,
     filter: (type) => /^t\d+$/.test(type), // t0, t1, t2, ...
   },
-  special: {
-    label: '특수',
-    icon: Star,
-    filter: (type) => !type.endsWith('_s') && !/^t\d+$/.test(type), // 기본도 아니고 목표도 아닌 것
-  },
-  goal: {
-    label: '목표',
-    icon: Target,
-    filter: (type) => type.endsWith('_s'), // craft_s, stack_s
+  generator: {
+    label: '생성기',
+    icon: Box,
+    filter: (type) => type.startsWith('craft_') || type.startsWith('stack_'), // 타일 생성 기믹
   },
 };
 
@@ -224,6 +219,18 @@ export function ToolPalette({ className }: ToolPaletteProps) {
                     alt={info.name}
                     className="w-full h-full object-cover"
                     draggable={false}
+                    onError={(e) => {
+                      // 이미지 로드 실패 시 fallback 표시
+                      const img = e.target as HTMLImageElement;
+                      img.style.display = 'none';
+                      const parent = img.parentElement;
+                      if (parent && !parent.querySelector('.fallback-text')) {
+                        const fallback = document.createElement('span');
+                        fallback.className = 'fallback-text text-white text-xs';
+                        fallback.textContent = type.replace('_s', '').replace('craft_', 'C').replace('stack_', 'S');
+                        parent.appendChild(fallback);
+                      }
+                    }}
                   />
                 ) : (
                   type.replace('_s', '')
@@ -248,22 +255,27 @@ export function ToolPalette({ className }: ToolPaletteProps) {
 
       {/* Attribute Selection */}
       <div>
-        <label className="text-sm font-medium text-gray-300 mb-2 block">속성</label>
-        <div className="flex flex-wrap gap-1">
+        <label className="text-sm font-medium text-gray-300 mb-2 block">속성 (기믹)</label>
+        <div className="grid grid-cols-5 gap-1 max-h-32 overflow-y-auto">
           {attributes.map(([attr, info]) => (
             <button
               key={attr || 'none'}
               onClick={() => setSelectedAttribute(attr)}
+              title={info.name}
               className={clsx(
-                'px-3 py-1.5 text-sm rounded-md transition-colors',
+                'w-10 h-10 rounded-md border-2 flex items-center justify-center text-lg transition-transform hover:scale-105',
                 selectedAttribute === attr
-                  ? 'bg-primary-600 text-white'
-                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                  ? 'border-primary-500 ring-2 ring-primary-300 bg-primary-600'
+                  : 'border-gray-600 bg-gray-700 hover:bg-gray-600'
               )}
             >
-              {info.icon || '없음'} {info.name}
+              {info.icon || '∅'}
             </button>
           ))}
+        </div>
+        {/* 선택된 속성 정보 */}
+        <div className="mt-1 text-xs text-gray-400">
+          선택: {ATTRIBUTES[selectedAttribute]?.icon} {ATTRIBUTES[selectedAttribute]?.name || 'None'}
         </div>
       </div>
 

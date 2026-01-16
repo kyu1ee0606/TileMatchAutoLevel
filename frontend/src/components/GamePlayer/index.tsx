@@ -22,6 +22,7 @@ interface GameTile {
   isMatched: boolean;
   isHidden: boolean;
   effectData?: TileEffectData;
+  extra?: number[];
 }
 
 interface SlotTile {
@@ -181,6 +182,7 @@ export function GamePlayer({ levelData, levelInfo, onGameEnd, onBack }: GamePlay
       isMatched: t.isMatched,
       isHidden: t.isHidden,
       effectData: t.effectData,
+      extra: t.extra,
     }));
     setTiles(uiTiles);
 

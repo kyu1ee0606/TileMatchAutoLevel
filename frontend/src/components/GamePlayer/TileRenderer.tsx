@@ -175,10 +175,25 @@ export function TileRenderer({ tile, size, showDebug }: TileRendererProps) {
   const fallbackColor = TILE_COLORS[tile.type] || TILE_COLORS.t0;
 
   // Determine if attribute image should be hidden
-  // Frog overlay is handled separately based on effectData.onFrog
-  // Chain overlay is hidden when unlocked
+  // Gimmick overlays are hidden when:
+  // - Frog: handled separately based on effectData.onFrog
+  // - Chain: when unlocked
+  // - Ice/Grass: when remaining <= 0
+  // - Link: when canPick is true (link unlocked)
+  // - Unknown: when tile is selectable (unknown revealed)
+  // - Curtain: when open (handled specially below)
+  // - Teleport: always hidden (shown as badge only)
   const isFrogAttribute = attribute === 'frog';
-  const shouldHideAttribute = (isGrass && grassLevel <= 0) || (isIce && iceLevel <= 0) || isTeleport || isFrogAttribute || (isChain && isChainUnlocked);
+  const isUnknown = attribute === 'unknown';
+  const shouldHideAttribute =
+    (isGrass && grassLevel <= 0) ||
+    (isIce && iceLevel <= 0) ||
+    isTeleport ||
+    isFrogAttribute ||
+    (isChain && isChainUnlocked) ||
+    (isLink && canPickLink) ||
+    (isUnknown && tile.isSelectable) ||
+    (isCurtain && isCurtainOpen);
 
   return (
     <div
@@ -334,31 +349,45 @@ export function TileRenderer({ tile, size, showDebug }: TileRendererProps) {
         </div>
       )}
 
-      {/* Link gimmick badge */}
-      {isLink && (
+      {/* Link gimmick badge (hidden when unlocked) */}
+      {isLink && !canPickLink && (
         <div
           style={{
             ...badgeStyle,
-            backgroundColor: canPickLink ? 'rgba(74, 222, 128, 0.8)' : 'rgba(234, 179, 8, 0.8)',
+            backgroundColor: 'rgba(234, 179, 8, 0.8)',
             color: 'white',
           }}
-          title={canPickLink ? '링크 선택 가능' : '링크 잠김'}
+          title="링크 잠김"
         >
           🔗
         </div>
       )}
 
-      {/* Curtain gimmick badge */}
-      {isCurtain && (
+      {/* Curtain gimmick badge (hidden when open) */}
+      {isCurtain && !isCurtainOpen && (
         <div
           style={{
             ...badgeStyle,
-            backgroundColor: isCurtainOpen ? 'rgba(168, 85, 247, 0.8)' : 'rgba(124, 58, 237, 0.8)',
+            backgroundColor: 'rgba(124, 58, 237, 0.8)',
             color: 'white',
           }}
-          title={isCurtainOpen ? '커튼 열림' : '커튼 닫힘'}
+          title="커튼 닫힘"
         >
-          {isCurtainOpen ? '🎭' : '🎪'}
+          🎪
+        </div>
+      )}
+
+      {/* Unknown gimmick badge (hidden when revealed/selectable) */}
+      {isUnknown && !tile.isSelectable && (
+        <div
+          style={{
+            ...badgeStyle,
+            backgroundColor: 'rgba(107, 114, 128, 0.8)',
+            color: 'white',
+          }}
+          title="미공개 타일"
+        >
+          ❓
         </div>
       )}
 

@@ -314,7 +314,7 @@ export function GridEditor({ className }: GridEditorProps) {
       <LayerSelector />
 
       <div className="flex gap-4">
-        <div className="flex-1 overflow-auto relative">
+        <div className="flex-1 overflow-auto relative flex justify-center items-start min-h-[400px] bg-gray-900/50 rounded-lg p-4">
           <TileGrid />
           {/* Minimap overlay */}
           {showMinimap && (

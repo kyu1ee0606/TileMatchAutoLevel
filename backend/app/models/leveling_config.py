@@ -9,7 +9,9 @@ Tile Buster, Tile Explorer, Triple Match 3D 등 유명 타일 게임의
 2. 톱니바퀴 난이도 패턴 (10레벨 단위 순환)
 3. 레이어/타일 종류 점진적 증가
 4. 마스터리 존 (새 기믹 전 기존 기믹 충분히 연습)
+5. 로그 난이도 곡선 (1000레벨 이후 완만한 증가)
 """
+import math
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
@@ -206,6 +208,13 @@ PHASE_CONFIGS: Dict[LevelPhase, PhaseConfig] = {
         base_difficulty=0.05,
         difficulty_increment=0.015,
     ),
+    # 난이도 연결: 각 단계의 끝 난이도가 다음 단계의 시작 난이도와 일치하도록 설계
+    # TUTORIAL 끝(10): 0.05 + 9*0.015 = 0.185
+    # BASIC 시작(11): 0.20 → 끝(50): 0.20 + 39*0.008 = 0.512
+    # INTERMEDIATE 시작(51): 0.52 → 끝(100): 0.52 + 49*0.004 = 0.716
+    # ADVANCED 시작(101): 0.72 → 끝(150): 0.72 + 49*0.0016 = 0.798
+    # EXPERT 시작(151): 0.80 → 끝(200): 0.80 + 49*0.001 = 0.849
+    # MASTER 시작(201): 0.85 → 로그 곡선으로 0.95 수렴
     LevelPhase.BASIC: PhaseConfig(
         phase=LevelPhase.BASIC,
         level_range=(11, 50),
@@ -214,8 +223,8 @@ PHASE_CONFIGS: Dict[LevelPhase, PhaseConfig] = {
         min_layers=2,
         max_layers=4,
         max_gimmick_types=1,  # 1개 기믹만
-        base_difficulty=0.15,
-        difficulty_increment=0.01,
+        base_difficulty=0.20,  # TUTORIAL 끝과 연결
+        difficulty_increment=0.008,  # 레벨 50에서 ~0.51
     ),
     LevelPhase.INTERMEDIATE: PhaseConfig(
         phase=LevelPhase.INTERMEDIATE,
@@ -225,8 +234,8 @@ PHASE_CONFIGS: Dict[LevelPhase, PhaseConfig] = {
         min_layers=3,
         max_layers=5,
         max_gimmick_types=2,  # 2개 기믹 조합
-        base_difficulty=0.35,
-        difficulty_increment=0.008,
+        base_difficulty=0.52,  # BASIC 끝과 연결
+        difficulty_increment=0.004,  # 레벨 100에서 ~0.71
     ),
     LevelPhase.ADVANCED: PhaseConfig(
         phase=LevelPhase.ADVANCED,
@@ -236,8 +245,8 @@ PHASE_CONFIGS: Dict[LevelPhase, PhaseConfig] = {
         min_layers=4,
         max_layers=6,
         max_gimmick_types=3,  # 3개 기믹 조합
-        base_difficulty=0.55,
-        difficulty_increment=0.006,
+        base_difficulty=0.72,  # INTERMEDIATE 끝과 연결
+        difficulty_increment=0.0016,  # 레벨 150에서 ~0.80
     ),
     LevelPhase.EXPERT: PhaseConfig(
         phase=LevelPhase.EXPERT,
@@ -247,8 +256,8 @@ PHASE_CONFIGS: Dict[LevelPhase, PhaseConfig] = {
         min_layers=4,
         max_layers=7,
         max_gimmick_types=4,
-        base_difficulty=0.70,
-        difficulty_increment=0.004,
+        base_difficulty=0.80,  # ADVANCED 끝과 연결
+        difficulty_increment=0.001,  # 레벨 200에서 ~0.85
     ),
     LevelPhase.MASTER: PhaseConfig(
         phase=LevelPhase.MASTER,
@@ -258,8 +267,8 @@ PHASE_CONFIGS: Dict[LevelPhase, PhaseConfig] = {
         min_layers=5,
         max_layers=7,
         max_gimmick_types=5,
-        base_difficulty=0.80,
-        difficulty_increment=0.002,
+        base_difficulty=0.85,  # EXPERT 끝과 연결 (로그 곡선 시작)
+        difficulty_increment=0.0,  # 사용 안함 (로그 곡선)
     ),
 }
 
@@ -375,6 +384,12 @@ def calculate_level_difficulty(
     """
     레벨 번호에 따른 목표 난이도 계산
 
+    난이도 곡선 (전체 1500+ 레벨에 걸쳐 자연스러운 로그 곡선):
+    - 1-50: 튜토리얼/기본 (0.05 → 0.30)
+    - 51-200: 중급/고급 (0.30 → 0.72)
+    - 201-1000: 마스터 초반 (0.72 → 0.85, 로그 곡선)
+    - 1000+: 마스터 후반 (0.85 → 0.95, 매우 완만한 로그)
+
     Args:
         level_number: 레벨 번호 (1-based)
         use_sawtooth: 톱니바퀴 패턴 적용 여부
@@ -382,21 +397,46 @@ def calculate_level_difficulty(
     Returns:
         0.0 ~ 1.0 사이의 난이도 값
     """
-    phase_config = get_phase_config(level_number)
+    # 레벨 200 이하: 단계별 선형 시스템
+    if level_number <= 200:
+        phase_config = get_phase_config(level_number)
+        level_in_phase = level_number - phase_config.level_range[0]
+        base = phase_config.base_difficulty + (level_in_phase * phase_config.difficulty_increment)
+    else:
+        # 레벨 201+: 로그 곡선 적용
+        # 레벨 200에서의 난이도: 0.80 + 49 * 0.001 = 0.849 ≈ 0.85
+        # 이 값에서 자연스럽게 이어지도록 로그 곡선 설계
+        #
+        # 목표 난이도:
+        # - 201 → 0.85 (레벨 200과 연결)
+        # - 500 → 0.88
+        # - 1000 → 0.90
+        # - 1500 → 0.91
+        # - 3000 → 0.93
+        # - 5000+ → 0.95 수렴
+        start_difficulty = 0.85  # 레벨 200 종료점과 일치
+        max_difficulty = 0.95    # 최대 난이도
+        max_increase = max_difficulty - start_difficulty  # 0.10
 
-    # 단계 내 위치 계산
-    level_in_phase = level_number - phase_config.level_range[0]
-
-    # 기본 난이도 계산
-    base = phase_config.base_difficulty + (level_in_phase * phase_config.difficulty_increment)
+        # 로그 곡선: 레벨 5000에서 max_difficulty에 도달
+        reference_level = 4800  # 4800 레벨 동안 0.10 증가
+        level_offset = level_number - 200
+        log_progress = math.log(level_offset + 1) / math.log(reference_level + 1)
+        base = start_difficulty + max_increase * log_progress
 
     if use_sawtooth:
         # 톱니바퀴 패턴 적용 (10레벨 단위)
         position_in_10 = (level_number - 1) % 10
         sawtooth_modifier = SAWTOOTH_PATTERN_10[position_in_10]
 
-        # 톱니바퀴는 ±0.1 범위로 조절
-        difficulty = base + (sawtooth_modifier - 0.5) * 0.2
+        # 톱니바퀴 범위: 저레벨 ±0.1, 고레벨 ±0.075 (레벨이 올라갈수록 범위 축소)
+        if level_number <= 200:
+            sawtooth_range = 0.2
+        elif level_number <= 500:
+            sawtooth_range = 0.15
+        else:
+            sawtooth_range = 0.10
+        difficulty = base + (sawtooth_modifier - 0.5) * sawtooth_range
     else:
         difficulty = base
 

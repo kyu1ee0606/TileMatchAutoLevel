@@ -1523,11 +1523,14 @@ class BotSimulator:
         return remaining_count >= state.max_dock_slots
 
     def _check_grass_impossible(self, state: GameState) -> bool:
-        """Check if any blocked grass tile cannot be cleared due to insufficient adjacent tiles.
+        """Check if any grass tile cannot be cleared due to insufficient adjacent tiles.
 
         A grass tile is impossible to clear when:
-        1. It is blocked by upper layer tiles (cannot be picked directly)
-        2. The number of remaining adjacent unpicked tiles < grass remaining layers
+        - The number of remaining adjacent unpicked tiles < grass remaining layers
+
+        This applies to both blocked and unblocked grass tiles.
+        Similar to chain blocking rule: if adjacent tiles needed to clear grass
+        are all removed, it becomes impossible to clear the grass.
 
         Returns True if game is in impossible state.
         """
@@ -1545,14 +1548,8 @@ class BotSimulator:
                     # Grass already cleared, no issue
                     continue
 
-                # Check if tile is blocked by upper layer
-                if not self._is_blocked_by_upper(state, tile):
-                    # Tile is not blocked, can be picked after grass clears
-                    continue
-
-                # Tile is blocked - count adjacent unpicked tiles that can reduce grass
-                # Count ALL unpicked adjacent tiles (even if currently blocked/can't pick)
-                # because they may eventually be picked and reduce grass layers
+                # Count adjacent unpicked tiles that can reduce grass
+                # Check both blocked and unblocked grass tiles
                 x, y = tile.x_idx, tile.y_idx
                 adjacent_positions = [
                     (x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)

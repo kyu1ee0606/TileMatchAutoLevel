@@ -694,6 +694,14 @@ class LevelGenerator:
         if exact_count_mode and params.symmetry_mode is None:
             effective_symmetry_mode = "none"
 
+        # DEBUG: Log symmetry mode in generator
+        import logging
+        _logger = logging.getLogger(__name__)
+        _logger.info(f"[GENERATOR_DEBUG] params.symmetry_mode={params.symmetry_mode}, "
+                     f"exact_count_mode={exact_count_mode}, "
+                     f"effective_symmetry_mode={effective_symmetry_mode}, "
+                     f"pattern_type={params.pattern_type}")
+
         for layer_idx in active_layers:
             layer_key = f"layer_{layer_idx}"
             is_odd_layer = layer_idx % 2 == 1
@@ -829,8 +837,16 @@ class LevelGenerator:
             cols, rows, actual_count, symmetry_mode, pattern_type, pattern_index
         )
 
-        # CRITICAL: Ensure exact tile count by trimming or padding
-        # This is especially important when symmetry_mode="none" for exact counts
+        # CRITICAL: When symmetry is applied, do NOT trim or pad randomly
+        # as it would break the symmetric pattern. Only adjust for "none" symmetry.
+        has_symmetry = symmetry_mode and symmetry_mode != "none"
+
+        if has_symmetry:
+            # For symmetric patterns, return as-is to preserve symmetry
+            # The tile assignment code will handle any count differences
+            return selected
+
+        # Only for symmetry_mode="none": Ensure exact tile count by trimming or padding
         if len(selected) > actual_count:
             # Trim excess - prefer to keep positions closer to center
             center_x, center_y = cols / 2.0, rows / 2.0
@@ -872,6 +888,12 @@ class LevelGenerator:
             symmetry = random.choice(["horizontal", "vertical"])
         else:
             symmetry = symmetry_mode
+
+        # DEBUG: Log position generation parameters
+        import logging
+        _logger = logging.getLogger(__name__)
+        _logger.debug(f"[POSITION_GEN_DEBUG] cols={cols}, rows={rows}, target_count={target_count}, "
+                      f"symmetry_mode={symmetry_mode}, symmetry={symmetry}, pattern={pattern}")
 
         # Generate base positions based on pattern type
         if pattern == "aesthetic":
@@ -2672,6 +2694,11 @@ class LevelGenerator:
             "teleport": "teleport",
         }
 
+        # craft/stack are tile types, not attributes - skip tutorial gimmick placement
+        if gimmick_type in ("craft", "stack"):
+            logger.info(f"Tutorial gimmick '{gimmick_type}' is a goal tile type, not an attribute - skipping")
+            return level
+
         gimmick_attr = GIMMICK_ATTRIBUTES.get(gimmick_type, gimmick_type)
 
         placed_count = 0
@@ -2782,9 +2809,9 @@ class LevelGenerator:
             "link": get_global_target("link", 0.02),
             "grass": get_global_target("grass", 0.03),
             "ice": get_global_target("ice", 0.03),
-            "bomb": get_global_target("bomb", 0.01),
+            "bomb": get_global_target("bomb", 0.02),  # Increased from 0.01 to ensure at least 1 bomb
             "curtain": get_global_target("curtain", 0.02),
-            "teleport": get_global_target("teleport", 0.01),
+            "teleport": get_global_target("teleport", 0.02),  # Increased from 0.01 to ensure at least 1 teleport
             "unknown": get_global_target("unknown", 0.02),
         }
 
@@ -2797,6 +2824,10 @@ class LevelGenerator:
                 if level.get(layer_key, {}).get("tiles", {}):
                     unconfigured_layers.append(i)
 
+            # Gimmicks that benefit from being on lower layers (blocked by upper tiles)
+            # These should be placed on layer_1+ for higher difficulty
+            PREFER_LOWER_LAYER_GIMMICKS = {"chain", "grass", "ice", "link"}
+
             for obs_type in ALL_OBSTACLE_TYPES:
                 remaining = max(0, global_targets[obs_type] - configured_totals[obs_type])
                 if remaining > 0 and unconfigured_layers:
@@ -2805,6 +2836,34 @@ class LevelGenerator:
                         l for l in unconfigured_layers
                         if obs_type not in layer_targets.get(l, {})
                     ]
+
+                    # DIFFICULTY ENHANCEMENT: For blockable gimmicks at high difficulty,
+                    # prefer lower layers (layer_1+) so they can be blocked by upper tiles
+                    if obs_type in PREFER_LOWER_LAYER_GIMMICKS and target >= 0.5:
+                        # Sort layers by index descending (lower layers first for gimmicks)
+                        # But keep some on layer_0 for variety
+                        layers_needing_sorted = sorted(layers_needing, reverse=True)
+                        # Allocate more to lower layers (70% to layer_1+, 30% to layer_0)
+                        lower_layers = [l for l in layers_needing_sorted if l > 0]
+                        if lower_layers and remaining > 1:
+                            # Put majority on lower layers
+                            lower_allocation = int(remaining * 0.7)
+                            upper_allocation = remaining - lower_allocation
+                            # Distribute to lower layers
+                            if lower_allocation > 0:
+                                per_lower = lower_allocation // len(lower_layers)
+                                extra_lower = lower_allocation % len(lower_layers)
+                                for idx, layer_idx in enumerate(lower_layers):
+                                    if layer_idx not in layer_targets:
+                                        layer_targets[layer_idx] = {}
+                                    layer_targets[layer_idx][obs_type] = per_lower + (1 if idx < extra_lower else 0)
+                            # Distribute remaining to layer_0 if it exists
+                            if 0 in layers_needing and upper_allocation > 0:
+                                if 0 not in layer_targets:
+                                    layer_targets[0] = {}
+                                layer_targets[0][obs_type] = upper_allocation
+                            continue
+
                     if layers_needing:
                         per_layer = remaining // len(layers_needing)
                         extra = remaining % len(layers_needing)
@@ -2890,6 +2949,124 @@ class LevelGenerator:
                     level = self._add_unknown_obstacles_to_layer(
                         level, layer_idx, unknown_target, obstacles_added
                     )
+
+        # DIFFICULTY ENHANCEMENT: Place blocking tiles above chain/grass gimmicks
+        # This increases difficulty by requiring players to clear upper tiles first
+        if target >= 0.5:  # Only apply for medium+ difficulty levels
+            level = self._add_blocking_tiles_above_gimmicks(level, target)
+
+        return level
+
+    def _add_blocking_tiles_above_gimmicks(
+        self, level: Dict[str, Any], target_difficulty: float
+    ) -> Dict[str, Any]:
+        """
+        DIFFICULTY ENHANCEMENT: Place blocking tiles on upper layers above chain/grass gimmicks.
+
+        This increases difficulty by:
+        - Requiring players to clear upper tiles first before accessing gimmicks
+        - Chain tiles become harder because adjacent matches are blocked
+        - Grass tiles become harder because neighbors are covered
+
+        The blocking probability scales with difficulty:
+        - 0.5 difficulty: ~20% of gimmicks get blocked
+        - 0.7 difficulty: ~40% of gimmicks get blocked
+        - 0.85 difficulty: ~60% of gimmicks get blocked
+        - 1.0 difficulty: ~80% of gimmicks get blocked
+        """
+        num_layers = level.get("layer", 8)
+
+        # Helper to check if gimmick type is blockable
+        # Includes variants like ice_1, ice_2, link_e, link_w, link_s, link_n
+        def is_blockable_gimmick(gimmick: str) -> bool:
+            if not gimmick:
+                return False
+            return (gimmick in {"chain", "grass"} or
+                    gimmick.startswith("ice") or
+                    gimmick.startswith("link"))
+
+        # Calculate blocking probability based on difficulty
+        # Higher difficulty = more blocking = harder to access gimmicks
+        # Maps difficulty 0.5-1.0 to probability 0.3-0.9
+        blocking_probability = 0.3 + (target_difficulty - 0.5) * 1.2
+        blocking_probability = max(0.3, min(0.9, blocking_probability))
+
+        # Collect all gimmick positions per layer (except layer 0 which has no upper layer)
+        gimmick_positions = []  # List of (layer_idx, position, gimmick_type)
+
+        for layer_idx in range(1, num_layers):  # Start from 1 (layer 0 has no upper layer)
+            layer_key = f"layer_{layer_idx}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+
+            for pos, tile_data in tiles.items():
+                if not isinstance(tile_data, list) or len(tile_data) < 2:
+                    continue
+                gimmick_type = tile_data[1]
+                if is_blockable_gimmick(gimmick_type):
+                    gimmick_positions.append((layer_idx, pos, gimmick_type))
+
+        if not gimmick_positions:
+            return level
+
+        # Randomly select gimmicks to block based on probability
+        random.shuffle(gimmick_positions)
+        num_to_block = int(len(gimmick_positions) * blocking_probability)
+        positions_to_block = gimmick_positions[:num_to_block]
+
+        # Get available tile types from layer_0 for creating blocking tiles
+        layer_0_tiles = level.get("layer_0", {}).get("tiles", {})
+        available_tile_types = set()
+        for tile_data in layer_0_tiles.values():
+            if isinstance(tile_data, list) and len(tile_data) >= 1:
+                tile_type = tile_data[0]
+                if tile_type and tile_type not in self.GOAL_TYPES:
+                    available_tile_types.add(tile_type)
+
+        if not available_tile_types:
+            available_tile_types = {"A", "B", "C", "D", "E"}  # Default tile types
+
+        tile_types_list = list(available_tile_types)
+
+        # Place blocking tiles on upper layers
+        blocked_count = 0
+        for layer_idx, pos, gimmick_type in positions_to_block:
+            upper_layer_idx = layer_idx - 1
+            upper_layer_key = f"layer_{upper_layer_idx}"
+
+            # Check if upper layer exists and has tiles dict
+            if upper_layer_key not in level:
+                continue
+
+            upper_tiles = level[upper_layer_key].get("tiles", {})
+            if upper_tiles is None:
+                level[upper_layer_key]["tiles"] = {}
+                upper_tiles = level[upper_layer_key]["tiles"]
+
+            # Try to add blocking tile at the exact position first
+            if pos not in upper_tiles:
+                # Create a new blocking tile (random type, no gimmick)
+                blocking_tile_type = random.choice(tile_types_list)
+                upper_tiles[pos] = [blocking_tile_type, None]
+                blocked_count += 1
+            else:
+                # If exact position is occupied, try adjacent positions
+                # This still increases difficulty by limiting access paths to the gimmick
+                try:
+                    col, row = map(int, pos.split('_'))
+                    adjacent_positions = [
+                        f"{col-1}_{row}",  # left
+                        f"{col+1}_{row}",  # right
+                        f"{col}_{row-1}",  # up
+                        f"{col}_{row+1}",  # down
+                    ]
+                    for adj_pos in adjacent_positions:
+                        if adj_pos not in upper_tiles:
+                            blocking_tile_type = random.choice(tile_types_list)
+                            upper_tiles[adj_pos] = [blocking_tile_type, None]
+                            blocked_count += 1
+                            break  # Only add one adjacent blocking tile
+                except (ValueError, AttributeError):
+                    pass
 
         return level
 
@@ -4029,14 +4206,31 @@ class LevelGenerator:
             row_order_list = list(row_order)
             random.shuffle(row_order_list)
 
+            # For symmetric modes, goals should REPLACE existing tiles at self-symmetric positions
+            # to preserve overall symmetry. For non-symmetric modes, add at new positions.
+            use_replacement_mode = symmetry_mode in ("horizontal", "vertical", "both")
+
             # Try positions in randomized order
             for try_row in row_order_list:
                 for try_col in col_search_order:
                     try_pos = f"{try_col}_{try_row}"
 
-                    # Check if position is not occupied and not already used
-                    if try_pos in tiles or try_pos in placed_positions:
-                        continue
+                    # In symmetric mode: REPLACE existing tiles at self-symmetric positions
+                    # In non-symmetric mode: ADD at new positions (original behavior)
+                    if use_replacement_mode:
+                        # For symmetry preservation: must be an existing tile position
+                        if try_pos not in tiles:
+                            continue
+                        # Must be a self-symmetric position (its own mirror)
+                        if not is_self_symmetric_position(try_col, try_row):
+                            continue
+                        # Must not be already used by another goal
+                        if try_pos in placed_positions:
+                            continue
+                    else:
+                        # Original behavior: add at new positions
+                        if try_pos in tiles or try_pos in placed_positions:
+                            continue
 
                     # Check if this position is valid for the goal direction
                     if not is_valid_goal_position(try_col, try_row, goal_type):
@@ -4046,8 +4240,12 @@ class LevelGenerator:
                     col_off, row_off = get_output_direction(goal_type)
                     output_pos = f"{try_col + col_off}_{try_row + row_off}"
 
-                    # Check output position is not occupied
-                    if output_pos in tiles or output_pos in placed_positions or output_pos in output_positions:
+                    # Check output position is not occupied by goals
+                    if output_pos in placed_positions or output_pos in output_positions:
+                        continue
+                    # For replacement mode, output can overlap existing tiles (they'll be cleared)
+                    # For non-replacement mode, output should not overlap existing tiles
+                    if not use_replacement_mode and output_pos in tiles:
                         continue
 
                     # Check no adjacent to existing goals (minimum 1 cell gap)
@@ -5071,7 +5269,8 @@ class LevelGenerator:
         # FINAL STEP: FORCE divisibility by 3
         # If still_broken has any types, it means the total is not divisible by 3
         # or the reassignment strategies failed. Force fix by removing tiles.
-        if still_broken:
+        # CRITICAL: For symmetric patterns, skip tile removal to preserve symmetry!
+        if still_broken and symmetry_mode == "none":
             # Recount everything one more time
             total_matchable = 0
             removable_tiles_final: List[Tuple[int, str, str]] = []  # (layer_idx, pos, tile_type)
@@ -5223,7 +5422,7 @@ class LevelGenerator:
 
                 # Validate link tiles - connected direction MUST have a tile
                 # Position format is "col_row" (x_y)
-                elif attr.startswith("link_"):
+                elif attr and attr.startswith("link_"):
                     col, row = map(int, pos.split('_'))
 
                     # Determine the position that the link points to
@@ -5259,7 +5458,7 @@ class LevelGenerator:
 
                 # Validate grass tiles - must have at least 2 clearable neighbors in 4 directions
                 # Position format is "col_row" (x_y)
-                elif attr == "grass" or attr.startswith("grass_"):
+                elif attr and (attr == "grass" or attr.startswith("grass_")):
                     col, row = map(int, pos.split('_'))
                     neighbors = [
                         (col, row-1),  # Up

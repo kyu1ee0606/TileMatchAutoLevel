@@ -97,15 +97,16 @@ class LevelAnalyzer:
                     # Count tile types
                     tile_types[tile_type] = tile_types.get(tile_type, 0) + 1
 
-                    # Count attributes
-                    if attribute == "chain":
-                        chain_count += 1
-                    elif attribute == "frog":
-                        frog_count += 1
-                    elif attribute == "ice":
-                        ice_count += 1
-                    elif attribute.startswith("link_"):
-                        link_count += 1
+                    # Count attributes (skip if None)
+                    if attribute:
+                        if attribute == "chain":
+                            chain_count += 1
+                        elif attribute == "frog":
+                            frog_count += 1
+                        elif attribute == "ice":
+                            ice_count += 1
+                        elif attribute.startswith("link_"):
+                            link_count += 1
 
                     # Extract goals (support all direction variants: s, n, e, w)
                     if tile_type.startswith(("craft_", "stack_")):

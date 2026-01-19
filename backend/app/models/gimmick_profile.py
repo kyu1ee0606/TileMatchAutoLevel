@@ -5,6 +5,7 @@
 레벨 디자이너가 기믹 풀만 선택하면, 각 레벨의 난이도에 따라
 자동으로 적절한 기믹이 배분됩니다.
 """
+import random
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from enum import Enum
@@ -36,11 +37,18 @@ class GimmickProfile:
 
 
 # 등급별 기믹 프로파일 정의
+# 난이도 가중치 순서: chain(1.0) < grass(1.1) < frog/teleport/unknown(1.2) < ice/curtain(1.3) < link(1.4) < bomb(1.5)
+#
+# 프로페셔널 게임 참고 (Tile Buster, Tile Explorer 등):
+# - 레벨당 기믹 종류는 최대 3개가 적정 (플레이어 인지 부하 고려)
+# - 기믹 밀도보다 타일 종류와 무브 제한이 더 큰 난이도 영향
+# - 튜토리얼 레벨: 1-3개 메커닉
+# - 기믹은 "3회 이하 움직임으로 해제"가 기본 설계
 GIMMICK_PROFILES: Dict[str, GimmickProfile] = {
     "S": GimmickProfile(
         grade="S",
         difficulty_range=(0.0, 0.2),
-        recommended_gimmicks=[],  # S등급은 기믹 없음 권장
+        recommended_gimmicks=[],  # S등급은 기믹 없음 권장 (순수 매칭 학습)
         max_gimmick_types=0,
         gimmick_density=0.0,
         min_gimmick_count=0,
@@ -49,38 +57,38 @@ GIMMICK_PROFILES: Dict[str, GimmickProfile] = {
     "A": GimmickProfile(
         grade="A",
         difficulty_range=(0.2, 0.4),
-        recommended_gimmicks=["chain"],  # 가장 기본적인 기믹만
+        recommended_gimmicks=["chain", "grass"],  # 기본적인 기믹 (해제 용이)
         max_gimmick_types=1,
         gimmick_density=0.05,
         min_gimmick_count=0,
-        max_gimmick_count=3,
+        max_gimmick_count=4,  # 기존 3 → 4 (기믹 존재감 확보)
     ),
     "B": GimmickProfile(
         grade="B",
         difficulty_range=(0.4, 0.6),
-        recommended_gimmicks=["chain", "frog"],  # 기본 + 전략적 기믹
+        recommended_gimmicks=["chain", "grass", "frog", "teleport", "unknown"],  # 기본 + 중간 난이도 기믹
         max_gimmick_types=2,
-        gimmick_density=0.1,
+        gimmick_density=0.10,
         min_gimmick_count=2,
         max_gimmick_count=6,
     ),
     "C": GimmickProfile(
         grade="C",
         difficulty_range=(0.6, 0.8),
-        recommended_gimmicks=["chain", "frog", "ice"],  # 다양한 기믹
-        max_gimmick_types=3,
+        recommended_gimmicks=["chain", "grass", "frog", "teleport", "ice", "unknown", "curtain"],  # 다양한 기믹 (link, bomb 제외 - 고난이도 전용)
+        max_gimmick_types=3,  # 최대 3종류 유지 (프로페셔널 게임 기준)
         gimmick_density=0.15,
-        min_gimmick_count=4,
-        max_gimmick_count=10,
+        min_gimmick_count=3,  # 기존 4 → 3 (과도한 기믹 방지)
+        max_gimmick_count=8,  # 기존 10 → 8
     ),
     "D": GimmickProfile(
         grade="D",
         difficulty_range=(0.8, 1.0),
-        recommended_gimmicks=["chain", "frog", "ice", "bomb", "curtain"],  # 모든 기믹
-        max_gimmick_types=5,
-        gimmick_density=0.2,
-        min_gimmick_count=6,
-        max_gimmick_count=15,
+        recommended_gimmicks=["chain", "grass", "frog", "teleport", "ice", "unknown", "curtain", "link", "bomb"],  # 모든 기믹
+        max_gimmick_types=3,  # 기존 5 → 3 (프로페셔널 게임 기준: 최대 3종류)
+        gimmick_density=0.18,  # 기존 0.2 → 0.18
+        min_gimmick_count=4,  # 기존 6 → 4
+        max_gimmick_count=10,  # 기존 15 → 10 (과도한 기믹 방지)
     ),
 }
 
@@ -122,14 +130,16 @@ def select_gimmicks_for_difficulty(
     target_difficulty: float,
     available_gimmicks: List[str],
     force_gimmicks: Optional[List[str]] = None,
+    ensure_even_distribution: bool = True,
 ) -> List[str]:
     """
     난이도에 맞는 기믹 자동 선택
 
     Args:
         target_difficulty: 목표 난이도 (0.0-1.0)
-        available_gimmicks: 사용 가능한 기믹 풀 (사용자가 선택한)
+        available_gimmicks: 사용 가능한 기믹 풀 (언락된 기믹들)
         force_gimmicks: 강제로 포함할 기믹 (수동 오버라이드)
+        ensure_even_distribution: True면 언락된 모든 기믹이 골고루 선택될 수 있도록 함
 
     Returns:
         선택된 기믹 리스트
@@ -143,21 +153,58 @@ def select_gimmicks_for_difficulty(
     if profile.max_gimmick_types == 0 or not available_gimmicks:
         return []
 
+    max_types = profile.max_gimmick_types
+    available = list(available_gimmicks)
+
     # 프로파일의 권장 기믹 중 사용 가능한 것만 필터링
-    recommended = [g for g in profile.recommended_gimmicks if g in available_gimmicks]
+    recommended = [g for g in profile.recommended_gimmicks if g in available]
+    # 권장되지 않지만 사용 가능한 기믹
+    non_recommended = [g for g in available if g not in profile.recommended_gimmicks]
 
-    # 권장 기믹이 없으면 사용 가능한 기믹에서 난이도에 맞게 선택
-    if not recommended:
-        # 난이도 가중치로 정렬하여 적절한 개수 선택
-        sorted_gimmicks = sorted(
-            available_gimmicks,
-            key=lambda g: GIMMICK_DIFFICULTY_WEIGHTS.get(g, 1.0)
-        )
-        # 프로파일의 max_gimmick_types 만큼만 선택
-        recommended = sorted_gimmicks[:profile.max_gimmick_types]
+    # ensure_even_distribution 모드: 모든 언락된 기믹이 골고루 사용되도록
+    # 전략: 전체 available에서 균등하게 선택하되, 첫 번째 슬롯만 권장에 약간 가중치
+    if ensure_even_distribution and non_recommended:
+        # 가중치 기반 선택: 권장 기믹 1.2배 가중치, 비권장 기믹 1.0배 가중치
+        # 이렇게 하면 권장 기믹이 약간 더 자주 나오지만, 비권장도 충분히 등장
+        weights = []
+        for g in available:
+            if g in recommended:
+                weights.append(1.2)  # 권장 기믹은 1.2배 가중치
+            else:
+                weights.append(1.0)  # 비권장 기믹은 1.0배 가중치
 
-    # max_gimmick_types 제한 적용
-    return recommended[:profile.max_gimmick_types]
+        # 가중치 기반 랜덤 선택
+        result = []
+        available_copy = list(available)
+        weights_copy = list(weights)
+
+        while len(result) < max_types and available_copy:
+            # 가중치 합 계산
+            total_weight = sum(weights_copy)
+            # 가중치 기반 랜덤 선택
+            r = random.random() * total_weight
+            cumulative = 0
+            selected_idx = 0
+            for i, w in enumerate(weights_copy):
+                cumulative += w
+                if r <= cumulative:
+                    selected_idx = i
+                    break
+
+            # 선택된 기믹 추가 및 제거
+            result.append(available_copy[selected_idx])
+            available_copy.pop(selected_idx)
+            weights_copy.pop(selected_idx)
+
+        return result
+    else:
+        # 기존 로직: 권장 기믹만 사용
+        selection_pool = recommended if recommended else list(available)
+
+        if len(selection_pool) <= max_types:
+            return selection_pool
+
+        return random.sample(selection_pool, max_types)
 
 
 def get_gimmick_count_range(

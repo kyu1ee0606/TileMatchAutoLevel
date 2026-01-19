@@ -30,15 +30,147 @@ from ..deps import get_level_generator, get_level_simulator
 import random
 
 
-def resolve_symmetry_mode(symmetry_mode: str | None) -> str:
+def resolve_symmetry_mode(symmetry_mode: str | None, allow_none: bool = False) -> str:
     """
     Resolve symmetry mode.
-    Converts None or "none" to random "horizontal" or "vertical".
-    "both" is now passed through to enable 4-way symmetry for aesthetic patterns.
+
+    Rules:
+    - Default: At least one axis symmetry required (horizontal OR vertical)
+    - Occasionally use "both" (4-way symmetry) for variety
+    - "none" only allowed for special shape levels (allow_none=True)
+
+    Args:
+        symmetry_mode: Requested symmetry mode or None for auto
+        allow_none: If True, allows asymmetric levels for special shapes
+
+    Returns:
+        Resolved symmetry mode string
     """
-    if symmetry_mode is None or symmetry_mode == "none":
-        return random.choice(["horizontal", "vertical"])
-    return symmetry_mode
+    # If explicitly set to a valid mode, use it
+    if symmetry_mode and symmetry_mode != "none":
+        return symmetry_mode
+
+    # "none" only allowed for special shape levels
+    if symmetry_mode == "none" and allow_none:
+        return "none"
+
+    # Default: random single-axis symmetry with occasional both
+    # 45% horizontal, 45% vertical, 10% both (4-way)
+    return random.choice([
+        "horizontal", "horizontal", "horizontal", "horizontal", "horizontal",  # 45%
+        "vertical", "vertical", "vertical", "vertical", "vertical",              # 45%
+        "both",                                                                   # 10%
+    ])
+
+
+# Special shape level cycle configuration
+# 톱니바퀴 사이클: 10스테이지 단위
+# - 보스 레벨: 10, 20, 30, ... (매 10번째)
+# - 특수 모양 레벨: 9, 19, 29, ... (보스 전 스테이지)
+SPECIAL_SHAPE_CYCLE_SIZE = 10  # 10개 레벨 = 1사이클
+
+
+def is_special_shape_level(level_number: int | None, cycle_size: int = SPECIAL_SHAPE_CYCLE_SIZE) -> bool:
+    """
+    Determine if a level should be a special shape level based on cycle position.
+
+    톱니바퀴 규칙:
+    - 10스테이지 단위로 보스 레벨 등장 (10, 20, 30, ...)
+    - 보스 전 스테이지가 특수 모양 레벨 (9, 19, 29, ...)
+    - 특수 모양 레벨은 비대칭(asymmetric) 허용
+
+    Args:
+        level_number: Current level number (1-based)
+        cycle_size: Number of levels per cycle (default: 10)
+
+    Returns:
+        True if this level should be a special shape level (pre-boss level)
+    """
+    if level_number is None or level_number < 1:
+        return False
+
+    # Skip tutorial levels (1-3)
+    if level_number <= 3:
+        return False
+
+    # Special shape level is the level BEFORE boss level
+    # Boss levels: 10, 20, 30, ... (level_number % cycle_size == 0)
+    # Special shape levels: 9, 19, 29, ... (level_number % cycle_size == cycle_size - 1)
+    return level_number % cycle_size == (cycle_size - 1)  # 9, 19, 29, ...
+
+
+def get_special_shape_pattern_index() -> int:
+    """
+    Get a random pattern index suitable for special shape levels.
+    Special shapes use visually distinctive patterns like stars, letters, arrows.
+
+    Returns:
+        Pattern index (0-49) for aesthetic mode
+    """
+    # Special shape patterns: visually distinctive, works well without strict symmetry
+    special_patterns = [
+        8,   # heart_shape
+        15,  # star_five_point
+        16,  # star_six_point
+        17,  # crescent_moon
+        18,  # sun_burst
+        19,  # spiral
+        20,  # letter_H
+        24,  # letter_X
+        25,  # letter_Y
+        45,  # butterfly
+        46,  # flower_pattern
+    ]
+    return random.choice(special_patterns)
+
+
+# Tutorial level configurations (levels 1-3)
+# These are special introductory levels with minimal complexity
+TUTORIAL_LEVEL_CONFIGS = {
+    1: {
+        "description": "첫 번째 레벨: 3종류 타일 × 3개 = 9타일 기본 매칭",
+        "tile_types": ["t1", "t2", "t3"],
+        "total_tiles": 9,  # Exactly 3 sets of 3
+        "grid_size": (5, 5),
+        "max_layers": 1,
+        "goals": [],  # No craft/stack goals
+        "obstacle_types": [],
+        "symmetry_mode": "both",
+        "target_difficulty": 0.05,
+    },
+    2: {
+        "description": "두 번째 레벨: 3종류 타일 × 6개 = 18타일, 2레이어",
+        "tile_types": ["t1", "t2", "t3"],
+        "total_tiles": 18,  # 6 sets of 3
+        "grid_size": (5, 5),
+        "max_layers": 2,
+        "goals": [],
+        "obstacle_types": [],
+        "symmetry_mode": "both",
+        "target_difficulty": 0.08,
+    },
+    3: {
+        "description": "세 번째 레벨: 4종류 타일 × 6개 = 24타일, 2-3레이어",
+        "tile_types": ["t1", "t2", "t3", "t4"],
+        "total_tiles": 24,  # 8 sets of 3
+        "grid_size": (5, 5),
+        "max_layers": 3,
+        "goals": [],
+        "obstacle_types": [],
+        "symmetry_mode": "both",
+        "target_difficulty": 0.10,
+    },
+}
+
+
+def get_tutorial_config(level_number: int | None) -> dict | None:
+    """
+    Get tutorial configuration for early levels (1-3).
+    Returns None if not a tutorial level.
+    """
+    if level_number is None:
+        return None
+    return TUTORIAL_LEVEL_CONFIGS.get(level_number)
 
 
 # Professional gimmick unlock levels (15-stage intervals)
@@ -414,6 +546,40 @@ async def generate_level(
     Returns:
         GenerateResponse with generated level and actual difficulty.
     """
+    # Check for tutorial levels (1-3) - use special simplified configurations
+    tutorial_config = get_tutorial_config(request.level_number)
+    if tutorial_config:
+        logger.info(f"[TUTORIAL_LEVEL] Generating level {request.level_number}: {tutorial_config['description']}")
+
+        # Generate tutorial level with fixed parameters
+        params = GenerationParams(
+            target_difficulty=tutorial_config["target_difficulty"],
+            grid_size=tuple(tutorial_config["grid_size"]),
+            max_layers=tutorial_config["max_layers"],
+            tile_types=tutorial_config["tile_types"],
+            obstacle_types=tutorial_config["obstacle_types"],
+            goals=tutorial_config["goals"],
+            total_tile_count=tutorial_config["total_tiles"],
+            symmetry_mode=tutorial_config["symmetry_mode"],
+            pattern_type="geometric",
+        )
+
+        result = generator.generate(params)
+
+        # Ensure generous moves for tutorial
+        total_tiles = tutorial_config["total_tiles"]
+        result.level_json["max_moves"] = total_tiles + 10  # Very generous
+        result.level_json["target_difficulty"] = tutorial_config["target_difficulty"]
+        result.level_json["is_tutorial"] = True
+        result.level_json["tutorial_level"] = request.level_number
+
+        return GenerateResponse(
+            level_json=result.level_json,
+            actual_difficulty=result.actual_difficulty,
+            grade=result.grade.value,
+            generation_time_ms=result.generation_time_ms,
+        )
+
     # Convert goals from Pydantic models to dicts
     # Use None check to allow empty list (empty list means no goals)
     goals = None
@@ -538,8 +704,28 @@ async def generate_level(
             request.gimmick_unlock_levels
         )
 
-    # Resolve symmetry mode: convert "both"/"none"/None to random "horizontal" or "vertical"
-    actual_symmetry = resolve_symmetry_mode(request.symmetry_mode)
+    # Check if this is a special shape level (톱니바퀴 사이클: 매 10레벨마다 1개)
+    is_special_shape = is_special_shape_level(request.level_number)
+
+    # For special shape levels, use distinctive patterns and allow asymmetry
+    pattern_index = request.pattern_index
+    pattern_type = request.pattern_type
+    if is_special_shape and pattern_index is None:
+        pattern_index = get_special_shape_pattern_index()
+        pattern_type = "aesthetic"
+        logger.info(f"[SPECIAL_SHAPE] Level {request.level_number} is a special shape level, using pattern {pattern_index}")
+
+    # Resolve symmetry mode
+    # At least one axis symmetry required, unless it's a special shape level
+    actual_symmetry = resolve_symmetry_mode(request.symmetry_mode, allow_none=is_special_shape)
+
+    # DEBUG: Log symmetry mode resolution
+    logger.info(f"[SYMMETRY_DEBUG] Level {request.level_number}: "
+                f"request.symmetry_mode={request.symmetry_mode}, "
+                f"is_special_shape={is_special_shape}, "
+                f"actual_symmetry={actual_symmetry}, "
+                f"pattern_type={pattern_type}, "
+                f"pattern_index={pattern_index}")
 
     # Filter goals by unlock level (craft/stack goals only available after unlock)
     filtered_goals = filter_goals_by_unlock_level(
@@ -561,8 +747,8 @@ async def generate_level(
         layer_tile_configs=layer_tile_configs,
         layer_obstacle_configs=layer_obstacle_configs,
         symmetry_mode=actual_symmetry,
-        pattern_type=request.pattern_type,
-        pattern_index=request.pattern_index,
+        pattern_type=pattern_type,  # Use local variable (may be overridden for special shape)
+        pattern_index=pattern_index,  # Use local variable (may be overridden for special shape)
         gimmick_intensity=request.gimmick_intensity,
         # Tutorial gimmick: place on top layer for tutorial UI
         tutorial_gimmick=tutorial_gimmick,
@@ -709,6 +895,52 @@ async def generate_validated_level(
         ValidatedGenerateResponse with generated level and validation results.
     """
     start_time = time.time()
+
+    # Check for tutorial levels (1-3) - use special simplified configurations
+    tutorial_config = get_tutorial_config(request.level_number)
+    if tutorial_config:
+        logger.info(f"[TUTORIAL_LEVEL] Generating validated level {request.level_number}: {tutorial_config['description']}")
+
+        # Generate tutorial level with fixed parameters - no validation needed
+        params = GenerationParams(
+            target_difficulty=tutorial_config["target_difficulty"],
+            grid_size=tuple(tutorial_config["grid_size"]),
+            max_layers=tutorial_config["max_layers"],
+            tile_types=tutorial_config["tile_types"],
+            obstacle_types=tutorial_config["obstacle_types"],
+            goals=tutorial_config["goals"],
+            total_tile_count=tutorial_config["total_tiles"],
+            symmetry_mode=tutorial_config["symmetry_mode"],
+            pattern_type="geometric",
+        )
+
+        result = generator.generate(params)
+
+        # Ensure generous moves for tutorial
+        total_tiles = tutorial_config["total_tiles"]
+        result.level_json["max_moves"] = total_tiles + 10
+        result.level_json["target_difficulty"] = tutorial_config["target_difficulty"]
+        result.level_json["is_tutorial"] = True
+        result.level_json["tutorial_level"] = request.level_number
+        result.level_json["symmetry_mode"] = tutorial_config["symmetry_mode"]
+
+        generation_time_ms = int((time.time() - start_time) * 1000)
+
+        # Tutorial levels always pass validation with perfect scores
+        return ValidatedGenerateResponse(
+            level_json=result.level_json,
+            actual_difficulty=result.actual_difficulty,
+            grade=result.grade.value,
+            generation_time_ms=generation_time_ms,
+            validation_passed=True,
+            attempts=1,
+            bot_clear_rates={"novice": 0.99, "casual": 0.99, "average": 0.99, "expert": 0.99, "optimal": 0.99},
+            target_clear_rates={"novice": 0.99, "casual": 0.99, "average": 0.99, "expert": 0.99, "optimal": 0.99},
+            avg_gap=0.0,
+            max_gap=0.0,
+            match_score=100.0,
+        )
+
     bot_simulator = BotSimulator()
 
     # Import analyzer for static analysis (only used once at the end)
@@ -775,23 +1007,30 @@ async def generate_validated_level(
     # CALIBRATED tile types based on target difficulty
     # More types = harder (more variety to match)
     # NOTE: t0 is excluded - causes issues with bot simulation
+    #
+    # 프로페셔널 게임 참고 (Tile Buster, Tile Explorer 등):
+    # - 대부분의 타일 매칭 게임은 4-8개 타일 타입 사용
+    # - 9개 이상은 인지 부하가 과도하여 플레이 경험 저하
+    # - 최대 난이도에서도 8개로 제한 (기믹과 무브 제한으로 난이도 조절)
     if request.target_difficulty >= 0.85:
-        default_tile_types = ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9"]  # 9 types for extreme (80%+)
+        default_tile_types = ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"]  # 8 types for extreme (85%+)
     elif request.target_difficulty >= 0.75:
-        default_tile_types = ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"]  # 8 types for very hard (70-80%)
-    elif request.target_difficulty >= 0.6:
-        default_tile_types = ["t1", "t2", "t3", "t4", "t5", "t6", "t7"]  # 7 types for hard (60-70%)
-    elif request.target_difficulty >= 0.5:
-        default_tile_types = ["t1", "t2", "t3", "t4", "t5", "t6"]  # 6 types for medium-hard (50-60%)
-    elif request.target_difficulty >= 0.4:
-        default_tile_types = ["t1", "t2", "t3", "t4", "t5"]  # 5 types for medium (40-50%)
-    elif request.target_difficulty >= 0.3:
-        default_tile_types = ["t1", "t2", "t3", "t4"]  # 4 types for easy (30-40%)
+        default_tile_types = ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"]  # 8 types for very hard (75-85%)
+    elif request.target_difficulty >= 0.65:
+        default_tile_types = ["t1", "t2", "t3", "t4", "t5", "t6", "t7"]  # 7 types for hard (65-75%)
+    elif request.target_difficulty >= 0.55:
+        default_tile_types = ["t1", "t2", "t3", "t4", "t5", "t6"]  # 6 types for medium-hard (55-65%)
+    elif request.target_difficulty >= 0.45:
+        default_tile_types = ["t1", "t2", "t3", "t4", "t5"]  # 5 types for medium (45-55%)
+    elif request.target_difficulty >= 0.35:
+        default_tile_types = ["t1", "t2", "t3", "t4", "t5"]  # 5 types for medium-easy (35-45%)
+    elif request.target_difficulty >= 0.25:
+        default_tile_types = ["t1", "t2", "t3", "t4"]  # 4 types for easy (25-35%)
     else:
-        default_tile_types = ["t1", "t2", "t3"]  # 3 types for very easy (<30%)
+        default_tile_types = ["t1", "t2", "t3"]  # 3 types for very easy (<25%)
 
     base_tile_types = list(request.tile_types) if request.tile_types else default_tile_types
-    all_tile_types = ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9"]  # Extended tile types (t0 excluded)
+    all_tile_types = ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"]  # Extended tile types (t0 excluded, max 8)
     current_tile_types = base_tile_types.copy()
 
     # Track tile type count separately for fine-tuning
@@ -907,8 +1146,19 @@ async def generate_validated_level(
             # Adjust internal target difficulty based on previous results
             adjusted_difficulty = min(1.0, max(0.0, request.target_difficulty + difficulty_offset))
 
-            # Resolve symmetry mode: convert "both"/"none"/None to random "horizontal" or "vertical"
-            actual_symmetry = resolve_symmetry_mode(request.symmetry_mode)
+            # Check if this is a special shape level (보스 전 스테이지: 9, 19, 29...)
+            is_special_shape = is_special_shape_level(request.level_number)
+
+            # For special shape levels, use distinctive patterns and allow asymmetry
+            pattern_index = request.pattern_index
+            pattern_type = request.pattern_type
+            if is_special_shape and pattern_index is None:
+                pattern_index = get_special_shape_pattern_index()
+                pattern_type = "aesthetic"
+                logger.info(f"[SPECIAL_SHAPE] Level {request.level_number} is a special shape level (pre-boss), using pattern {pattern_index}")
+
+            # Resolve symmetry mode
+            actual_symmetry = resolve_symmetry_mode(request.symmetry_mode, allow_none=is_special_shape)
 
             params = GenerationParams(
                 target_difficulty=adjusted_difficulty,
@@ -918,8 +1168,8 @@ async def generate_validated_level(
                 obstacle_types=current_obstacle_types,  # Pass empty list explicitly (not None)
                 goals=goals,
                 symmetry_mode=actual_symmetry,
-                pattern_type=request.pattern_type,
-                pattern_index=request.pattern_index,
+                pattern_type=pattern_type,  # Use local variable (may be overridden for special shape)
+                pattern_index=pattern_index,  # Use local variable (may be overridden for special shape)
                 gimmick_intensity=request.gimmick_intensity,
                 # Tutorial gimmick: place on top layer for tutorial UI
                 tutorial_gimmick=tutorial_gimmick,
@@ -1056,7 +1306,7 @@ async def generate_validated_level(
                     types_to_add = 1 if avg_gap < 20 else 2
                     for _ in range(types_to_add):
                         for t in all_tile_types:
-                            if t not in current_tile_types and len(current_tile_types) < 9:
+                            if t not in current_tile_types and len(current_tile_types) < 8:
                                 current_tile_types.append(t)
                                 current_tile_type_count = len(current_tile_types)
                                 break

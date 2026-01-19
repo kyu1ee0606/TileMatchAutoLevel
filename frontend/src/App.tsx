@@ -8,6 +8,7 @@ import { LevelBrowser } from './components/GridEditor/LevelBrowser';
 import { LocalLevelBrowser } from './components/GridEditor/LocalLevelBrowser';
 import { SimulationViewer } from './components/SimulationViewer';
 import { PlayTab } from './components/PlayTab';
+import { ProductionDashboard } from './components/ProductionDashboard';
 import { useLevelStore } from './stores/levelStore';
 import { useUIStore } from './stores/uiStore';
 import { useSimulationStore } from './stores/simulationStore';
@@ -235,7 +236,7 @@ function Notifications() {
   );
 }
 
-type TabId = 'editor' | 'simulation' | 'generator' | 'gboost' | 'local' | 'play';
+type TabId = 'editor' | 'simulation' | 'generator' | 'gboost' | 'local' | 'play' | 'production';
 
 function AppContent() {
   const [activeTab, setActiveTab] = useState<TabId>('editor');
@@ -257,6 +258,7 @@ function AppContent() {
     { id: 'simulation', label: '시뮬레이션', icon: '🎬' },
     { id: 'generator', label: '자동 생성', icon: '🎲' },
     { id: 'local', label: '로컬 레벨', icon: '💾' },
+    { id: 'production', label: '프로덕션', icon: '🚀' },
     { id: 'gboost', label: '게임부스트', icon: '☁️' },
     { id: 'play', label: '플레이', icon: '▶️' },
   ];
@@ -421,6 +423,11 @@ function AppContent() {
         {activeTab === 'gboost' && (
           <div className="max-w-2xl mx-auto">
             <GBoostPanel />
+          </div>
+        )}
+        {activeTab === 'production' && (
+          <div className="max-w-6xl mx-auto">
+            <ProductionDashboard />
           </div>
         )}
         {activeTab === 'play' && (

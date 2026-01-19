@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import { listLocalLevels, getLocalLevel, deleteLocalLevel } from '../../services/localLevelsApi';
+import { listLocalLevels, getLocalLevel, deleteLocalLevel, deleteBulkLocalLevels } from '../../services/localLevelsApi';
 import { useLevelStore } from '../../stores/levelStore';
 import { useUIStore } from '../../stores/uiStore';
 import { Skeleton } from '../common/Skeleton';
@@ -498,25 +498,17 @@ export function LocalLevelBrowser({ className, onPlay }: LocalLevelBrowserProps)
     setCheckedLevelIds(new Set());
   };
 
-  // Bulk delete
+  // Bulk delete - optimized for instant deletion without API calls
   const handleBulkDelete = async () => {
     if (checkedLevelIds.size === 0) return;
 
     if (!confirm(`선택한 ${checkedLevelIds.size}개의 레벨을 삭제하시겠습니까?`)) return;
 
     setIsDeleting(true);
-    let successCount = 0;
-    let failCount = 0;
 
-    for (const levelId of checkedLevelIds) {
-      try {
-        await deleteLocalLevel(levelId);
-        successCount++;
-      } catch (err) {
-        console.error(`Failed to delete level ${levelId}:`, err);
-        failCount++;
-      }
-    }
+    // Use bulk delete for instant deletion (no individual API calls)
+    const levelIdsArray = Array.from(checkedLevelIds);
+    const result = deleteBulkLocalLevels(levelIdsArray);
 
     // Update state
     setLevels(prev => prev.filter(l => !checkedLevelIds.has(l.id)));
@@ -526,10 +518,10 @@ export function LocalLevelBrowser({ className, onPlay }: LocalLevelBrowserProps)
     setCheckedLevelIds(new Set());
     setIsDeleting(false);
 
-    if (failCount === 0) {
-      addNotification('success', `${successCount}개의 레벨이 삭제되었습니다`);
+    if (result.success) {
+      addNotification('success', `${result.deleted_count}개의 레벨이 삭제되었습니다`);
     } else {
-      addNotification('warning', `${successCount}개 삭제, ${failCount}개 실패`);
+      addNotification('error', `삭제 실패: ${result.message}`);
     }
   };
 
@@ -598,7 +590,7 @@ export function LocalLevelBrowser({ className, onPlay }: LocalLevelBrowserProps)
   // Check if we should show grouped view
   const showGroupedView = !searchQuery && groupedLevelSets.length > 0;
 
-  // Toggle set folder expansion
+  // Toggle set folder expansion and load thumbnails for the set
   const toggleSetExpansion = useCallback((setName: string) => {
     setExpandedSets(prev => {
       const newSet = new Set(prev);
@@ -606,16 +598,32 @@ export function LocalLevelBrowser({ className, onPlay }: LocalLevelBrowserProps)
         newSet.delete(setName);
       } else {
         newSet.add(setName);
+        // Load thumbnails for levels in this set if not already cached
+        const levelSet = groupedLevelSets.find(s => s.setName === setName);
+        if (levelSet) {
+          const uncachedIds = levelSet.levels
+            .map(l => l.id)
+            .filter(id => !thumbnailCache[id]);
+          if (uncachedIds.length > 0) {
+            loadThumbnails(uncachedIds);
+          }
+        }
       }
       return newSet;
     });
-  }, []);
+  }, [groupedLevelSets, thumbnailCache]);
 
-  // Expand all sets
+  // Expand all sets and load all thumbnails
   const expandAllSets = useCallback(() => {
     const allSetNames = groupedLevelSets.map(s => s.setName);
     setExpandedSets(new Set(allSetNames));
-  }, [groupedLevelSets]);
+    // Load thumbnails for all uncached levels
+    const allLevelIds = groupedLevelSets.flatMap(s => s.levels.map(l => l.id));
+    const uncachedIds = allLevelIds.filter(id => !thumbnailCache[id]);
+    if (uncachedIds.length > 0) {
+      loadThumbnails(uncachedIds);
+    }
+  }, [groupedLevelSets, thumbnailCache]);
 
   // Collapse all sets
   const collapseAllSets = useCallback(() => {

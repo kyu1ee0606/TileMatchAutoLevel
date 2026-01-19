@@ -44,3 +44,6 @@ htmlcov/
 *.bak
 *.tmp
 .cache/
+
+# Generated level files
+backend/app/storage/local_levels/*.json

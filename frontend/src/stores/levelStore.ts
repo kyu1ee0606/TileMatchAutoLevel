@@ -57,6 +57,84 @@ function wouldBreakChainClearability(
   return { wouldBreak: false };
 }
 
+// Get grass layer count from tile data (default 1)
+function getGrassLayers(tileData: TileData | undefined): number {
+  if (!tileData || !Array.isArray(tileData)) return 1;
+  const attr = tileData[1];
+  if (!attr || !attr.startsWith('grass')) return 1;
+  // Parse grass_2, grass_3, etc.
+  const match = attr.match(/grass_(\d+)/);
+  if (match) return parseInt(match[1], 10);
+  // Check extra data for grass_layer
+  const extra = tileData[2];
+  if (extra && typeof extra === 'object' && 'grass_layer' in extra) {
+    return (extra as { grass_layer: number }).grass_layer;
+  }
+  return 1;
+}
+
+// Check if a grass tile has enough adjacent tiles to clear (4 directions)
+function hasGrassAdjacentTiles(
+  tiles: Record<string, TileData>,
+  x: number,
+  y: number,
+  grassLayers: number = 1
+): boolean {
+  const adjacentPositions = [
+    `${x + 1}_${y}`, `${x - 1}_${y}`, `${x}_${y + 1}`, `${x}_${y - 1}`
+  ];
+
+  let adjacentCount = 0;
+  for (const pos of adjacentPositions) {
+    if (tiles[pos]) adjacentCount++;
+  }
+
+  return adjacentCount >= grassLayers;
+}
+
+// Check if removing a tile would break any grass's clearability
+function wouldBreakGrassClearability(
+  tiles: Record<string, TileData>,
+  removeX: number,
+  removeY: number
+): { wouldBreak: boolean; grassPos?: string } {
+  // Check all 4 adjacent positions for grass tiles
+  const adjacentPositions = [
+    { x: removeX + 1, y: removeY },
+    { x: removeX - 1, y: removeY },
+    { x: removeX, y: removeY + 1 },
+    { x: removeX, y: removeY - 1 }
+  ];
+
+  for (const { x, y } of adjacentPositions) {
+    const grassPos = `${x}_${y}`;
+    const grassTile = tiles[grassPos];
+
+    if (!grassTile || !Array.isArray(grassTile)) continue;
+    const attr = grassTile[1];
+    if (!attr || !attr.startsWith('grass')) continue;
+
+    const grassLayers = getGrassLayers(grassTile);
+
+    // Count remaining adjacent tiles after removal (excluding the tile being removed)
+    const grassAdjacentPositions = [
+      `${x + 1}_${y}`, `${x - 1}_${y}`, `${x}_${y + 1}`, `${x}_${y - 1}`
+    ];
+
+    let remainingAdjacent = 0;
+    for (const pos of grassAdjacentPositions) {
+      if (pos === `${removeX}_${removeY}`) continue; // Skip the tile being removed
+      if (tiles[pos]) remainingAdjacent++;
+    }
+
+    if (grassLayers > remainingAdjacent) {
+      return { wouldBreak: true, grassPos };
+    }
+  }
+
+  return { wouldBreak: false };
+}
+
 // Validation result type
 export interface ValidationResult {
   valid: boolean;
@@ -128,11 +206,17 @@ export const useLevelStore = create<LevelState>((set, get) => ({
 
   // Level management
   setLevel: (level) => {
-    // Adjust selectedLayer if current selection exceeds new level's layer count
-    const currentSelectedLayer = get().selectedLayer;
-    const maxLayer = level.layer - 1;
-    const newSelectedLayer = currentSelectedLayer > maxLayer ? maxLayer : currentSelectedLayer;
-    set({ level, analysisResult: null, selectedLayer: newSelectedLayer });
+    // Find the topmost layer with tiles (highest index with non-empty tiles)
+    let topLayerWithTiles = 0;
+    for (let i = level.layer - 1; i >= 0; i--) {
+      const layerKey = `layer_${i}` as `layer_${number}`;
+      const layerData = level[layerKey];
+      if (layerData?.tiles && Object.keys(layerData.tiles).length > 0) {
+        topLayerWithTiles = i;
+        break;
+      }
+    }
+    set({ level, analysisResult: null, selectedLayer: topLayerWithTiles });
   },
 
   resetLevel: (layers = 8, gridSize = [7, 7]) =>
@@ -171,13 +255,32 @@ export const useLevelStore = create<LevelState>((set, get) => ({
       }
     }
 
-    // Validate: If placing an obstacle on a clearable tile, check if it breaks any chain
-    if (attr && attr !== 'frog') {
-      const breakCheck = wouldBreakChainClearability(layerData.tiles, x, y);
-      if (breakCheck.wouldBreak) {
+    // Validate: If placing grass, check if it has enough adjacent tiles
+    if (attr && attr.startsWith('grass')) {
+      const grassLayers = getGrassLayers(tileData);
+      if (!hasGrassAdjacentTiles(newTiles, x, y, grassLayers)) {
         return {
           valid: false,
-          reason: `이 타일에 장애물을 배치하면 Chain(${breakCheck.chainPos})을 해제할 수 없게 됩니다`,
+          reason: `Grass 타일은 상하좌우 중 최소 ${grassLayers}개의 인접 타일이 필요합니다`,
+        };
+      }
+    }
+
+    // Validate: If placing an obstacle on a clearable tile, check if it breaks any chain or grass
+    if (attr && attr !== 'frog') {
+      const chainBreakCheck = wouldBreakChainClearability(layerData.tiles, x, y);
+      if (chainBreakCheck.wouldBreak) {
+        return {
+          valid: false,
+          reason: `이 타일에 장애물을 배치하면 Chain(${chainBreakCheck.chainPos})을 해제할 수 없게 됩니다`,
+        };
+      }
+
+      const grassBreakCheck = wouldBreakGrassClearability(layerData.tiles, x, y);
+      if (grassBreakCheck.wouldBreak) {
+        return {
+          valid: false,
+          reason: `이 타일에 장애물을 배치하면 Grass(${grassBreakCheck.grassPos})를 해제할 수 없게 됩니다`,
         };
       }
     }
@@ -207,11 +310,20 @@ export const useLevelStore = create<LevelState>((set, get) => ({
     const position = `${x}_${y}`;
 
     // Validate: Check if removing this tile would break any chain's clearability
-    const breakCheck = wouldBreakChainClearability(layerData.tiles, x, y);
-    if (breakCheck.wouldBreak) {
+    const chainBreakCheck = wouldBreakChainClearability(layerData.tiles, x, y);
+    if (chainBreakCheck.wouldBreak) {
       return {
         valid: false,
-        reason: `이 타일을 삭제하면 Chain(${breakCheck.chainPos})을 해제할 수 없게 됩니다`,
+        reason: `이 타일을 삭제하면 Chain(${chainBreakCheck.chainPos})을 해제할 수 없게 됩니다`,
+      };
+    }
+
+    // Validate: Check if removing this tile would break any grass's clearability
+    const grassBreakCheck = wouldBreakGrassClearability(layerData.tiles, x, y);
+    if (grassBreakCheck.wouldBreak) {
+      return {
+        valid: false,
+        reason: `이 타일을 삭제하면 Grass(${grassBreakCheck.grassPos})를 해제할 수 없게 됩니다`,
       };
     }
 

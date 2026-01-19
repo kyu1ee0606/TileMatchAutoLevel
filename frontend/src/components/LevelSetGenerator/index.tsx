@@ -38,30 +38,18 @@ interface LevelSetGeneratorProps {
  * @returns intensity value from 0.0 to 1.0
  *
  * Progression curve:
- * - First 20% of levels: intensity = 0 (no gimmicks for early levels)
- * - 20% ~ 100%: linear increase from 0 to 1.0
+ * - Linear increase from 0 to 1.0 across all levels
  *
- * Examples for 30 total levels:
- * - Level 1-6 (0-20%): intensity = 0.0
- * - Level 7 (23%): intensity ≈ 0.04
- * - Level 15 (50%): intensity ≈ 0.38
- * - Level 24 (80%): intensity ≈ 0.75
- * - Level 30 (100%): intensity = 1.0
+ * Examples for 10 total levels:
+ * - Level 1 (0%): intensity = 0.0
+ * - Level 5 (50%): intensity ≈ 0.44
+ * - Level 10 (100%): intensity = 1.0
  */
 function calculateGimmickIntensity(globalLevelIndex: number, totalLevels: number): number {
-  if (totalLevels <= 1) return 0;
+  if (totalLevels <= 1) return 1.0;
 
-  // First 20% of levels have no gimmicks
-  const noGimmickThreshold = 0.2;
-  const position = globalLevelIndex / (totalLevels - 1);
-
-  if (position <= noGimmickThreshold) {
-    return 0;
-  }
-
-  // Linear increase from threshold to end
-  // Map (noGimmickThreshold, 1.0) → (0, 1.0)
-  const intensity = (position - noGimmickThreshold) / (1 - noGimmickThreshold);
+  // Linear increase from 0 to 1.0
+  const intensity = globalLevelIndex / (totalLevels - 1);
 
   // Round to 2 decimal places for cleaner values
   return Math.round(intensity * 100) / 100;
@@ -83,7 +71,7 @@ const DEFAULT_CONFIG: LevelSetGenerationConfig = {
   },
   // 기믹 자동 선택 관련 - 기본값: 자동 모드
   gimmickMode: 'auto',
-  availableGimmicks: ['chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport'],  // 기본 기믹 풀 (확장)
+  availableGimmicks: ['chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport', 'unknown'],  // 기본 기믹 풀 (전체)
   levelGimmickOverrides: [],
   // 프로페셔널 레벨링 모드 - Tile Buster/Explorer 스타일
   levelingMode: 'professional',

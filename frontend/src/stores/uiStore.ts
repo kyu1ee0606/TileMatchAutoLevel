@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 
 type Tool = 'paint' | 'erase' | 'fill' | 'inspect';
-type Panel = 'editor' | 'generator' | 'gboost';
+type Panel = 'editor' | 'generator' | 'gboost' | 'production';
 
 interface UIState {
   // Tool state
@@ -123,7 +123,7 @@ export const useUIStore = create<UIState>((set, get) => ({
   setGboostLevelId: (id) => set({ gboostLevelId: id }),
 
   // Layer transparency
-  showOtherLayers: false,
+  showOtherLayers: true,
   setShowOtherLayers: (show) => set({ showOtherLayers: show }),
 
   // Grid zoom (0.5 ~ 2.0, default 1.0)

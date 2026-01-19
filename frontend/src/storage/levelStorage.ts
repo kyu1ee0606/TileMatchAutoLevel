@@ -359,6 +359,32 @@ export function deleteLocalLevelFromStorage(levelId: string): { success: boolean
 }
 
 /**
+ * Delete multiple local levels by IDs (bulk operation - much faster than individual deletes)
+ */
+export function deleteBulkLocalLevelsFromStorage(levelIds: string[]): { success: boolean; deleted_count: number; message: string } {
+  try {
+    const idSet = new Set(levelIds);
+    const levels = getAllLocalLevels();
+    const filtered = levels.filter(l => !idSet.has(l.id));
+    const deletedCount = levels.length - filtered.length;
+
+    localStorage.setItem(LOCAL_LEVELS_KEY, JSON.stringify(filtered));
+
+    return {
+      success: true,
+      deleted_count: deletedCount,
+      message: `Deleted ${deletedCount} levels`,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      deleted_count: 0,
+      message: `Failed to delete levels: ${error}`,
+    };
+  }
+}
+
+/**
  * Delete all local levels
  */
 export function deleteAllLocalLevelsFromStorage(): { success: boolean; deleted_count: number; message: string } {

@@ -1330,6 +1330,18 @@ export class GameEngine {
       return;
     }
 
+    // 잔디 클리어 불가 확인 (인접 타일 부족)
+    if (this.checkGrassImpossible()) {
+      this.state.failed = true;
+      return;
+    }
+
+    // 체인 클리어 불가 확인 (좌우 인접 타일 모두 제거됨)
+    if (this.checkChainImpossible()) {
+      this.state.failed = true;
+      return;
+    }
+
     // 선택 가능한 타일이 없으면 실패 (덮여있는 체인 등으로 인해 진행 불가)
     if (remainingTiles > 0 && this.getAvailableMoves().length === 0) {
       this.state.failed = true;
@@ -1353,6 +1365,84 @@ export class GameEngine {
     }
 
     return remainingCount >= this.state.maxDockSlots;
+  }
+
+  /**
+   * 잔디 클리어 불가능 상태 확인
+   * 잔디 레이어 수 > 인접 미선택 타일 수 → 불가능
+   */
+  private checkGrassImpossible(): boolean {
+    for (const [_layerIdx, layerTiles] of this.state.tiles) {
+      for (const [_posKey, tile] of layerTiles) {
+        if (tile.picked) continue;
+        if (tile.effectType !== TileEffectType.GRASS) continue;
+
+        const grassRemaining = tile.effectData.remaining || 0;
+        if (grassRemaining <= 0) continue;
+
+        // 인접 타일(상하좌우) 카운트
+        const x = tile.xIdx;
+        const y = tile.yIdx;
+        const adjacentPositions = [
+          [x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]
+        ];
+
+        let adjacentUnpickedCount = 0;
+        for (const [adjX, adjY] of adjacentPositions) {
+          const adjPosKey = getPositionKey(adjX, adjY);
+          const adjTile = layerTiles.get(adjPosKey);
+          if (adjTile && !adjTile.picked) {
+            adjacentUnpickedCount++;
+          }
+        }
+
+        // 잔디 레이어 > 인접 타일 수 → 불가능
+        if (grassRemaining > adjacentUnpickedCount) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * 체인 클리어 불가능 상태 확인
+   * 체인이 잠겨있고 좌우 인접 타일이 모두 제거됨 → 불가능
+   */
+  private checkChainImpossible(): boolean {
+    for (const [_layerIdx, layerTiles] of this.state.tiles) {
+      for (const [_posKey, tile] of layerTiles) {
+        if (tile.picked) continue;
+        if (tile.effectType !== TileEffectType.CHAIN) continue;
+        if (tile.effectData.unlocked) continue; // 이미 해제됨
+
+        // 좌우 인접 타일 확인 (체인은 좌우로만 해제 가능)
+        const x = tile.xIdx;
+        const y = tile.yIdx;
+        const horizontalPositions = [
+          [x + 1, y], [x - 1, y]
+        ];
+
+        let hasClearableNeighbor = false;
+        for (const [adjX, adjY] of horizontalPositions) {
+          const adjPosKey = getPositionKey(adjX, adjY);
+          const adjTile = layerTiles.get(adjPosKey);
+          // 인접 타일이 있고, 선택 안됐고, 장애물이 없거나 frog만 있으면 clearable
+          if (adjTile && !adjTile.picked) {
+            const adjAttr = adjTile.effectType;
+            if (adjAttr === TileEffectType.NONE || adjAttr === TileEffectType.FROG) {
+              hasClearableNeighbor = true;
+              break;
+            }
+          }
+        }
+
+        if (!hasClearableNeighbor) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   // ==================== POST-MOVE EFFECTS ====================

@@ -7,6 +7,7 @@ import {
   getLevelSetById,
   deleteLevelSetFromStorage,
 } from '../storage/levelStorage';
+import apiClient from './client';
 
 const PRESETS_STORAGE_KEY = 'difficulty_presets';
 
@@ -40,12 +41,59 @@ export interface DeleteLevelSetResponse {
 }
 
 /**
- * Save a level set to browser localStorage.
- * This ensures data persists even in deployed environments with ephemeral storage.
+ * Save a level set to browser localStorage AND backend storage.
+ * This ensures data persists in both localStorage and backend file system.
  */
 export async function saveLevelSet(data: SaveLevelSetRequest): Promise<SaveLevelSetResponse> {
-  // Use browser localStorage instead of backend API
-  return saveLevelSetToStorage(data);
+  // First save to localStorage
+  const localResult = saveLevelSetToStorage(data);
+
+  if (!localResult.success) {
+    return localResult;
+  }
+
+  // Also save individual levels to backend for persistence
+  try {
+    const setId = localResult.id;
+
+    // Save each level to backend in parallel (batch of 10 to avoid overwhelming server)
+    const batchSize = 10;
+    for (let i = 0; i < data.levels.length; i += batchSize) {
+      const batch = data.levels.slice(i, i + batchSize);
+      const promises = batch.map((level, batchIndex) => {
+        const index = i + batchIndex;
+        const levelId = `${setId}_level_${String(index + 1).padStart(3, '0')}`;
+        const difficulty = data.actual_difficulties[index] ?? 0.5;
+        const grade = data.grades[index] ?? 'B';
+
+        return apiClient.post('/simulate/local/save', {
+          level_id: levelId,
+          metadata: {
+            name: `${data.name} - Level ${index + 1}`,
+            difficulty: typeof difficulty === 'number' ? difficulty.toFixed(2) : difficulty,
+            grade,
+            source: 'level_set',
+            set_id: setId,
+            set_name: data.name,
+            level_index: index + 1,
+          },
+          level_data: level,
+        }).catch((err: unknown) => {
+          console.warn(`Failed to save level ${levelId} to backend:`, err);
+          return null; // Continue with other levels even if one fails
+        });
+      });
+
+      await Promise.all(promises);
+    }
+
+    console.log(`[saveLevelSet] Saved ${data.levels.length} levels to backend`);
+  } catch (err) {
+    console.warn('[saveLevelSet] Backend save failed (localStorage save succeeded):', err);
+    // Don't fail the operation - localStorage save succeeded
+  }
+
+  return localResult;
 }
 
 /**

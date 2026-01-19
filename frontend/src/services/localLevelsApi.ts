@@ -11,6 +11,7 @@ import {
   getLocalLevelById,
   saveLocalLevelToStorage,
   deleteLocalLevelFromStorage,
+  deleteBulkLocalLevelsFromStorage,
   deleteAllLocalLevelsFromStorage,
   getStorageInfo,
 } from '../storage/levelStorage';
@@ -78,6 +79,10 @@ export async function listLocalLevels(): Promise<LocalLevelListResponse> {
     const localStorageLevels = getLocalLevelList();
     const storageInfo = getStorageInfo();
 
+    // Debug logging
+    console.log('[listLocalLevels] Backend levels:', backendLevels.length);
+    console.log('[listLocalLevels] LocalStorage levels:', localStorageLevels.length);
+
     // Merge levels (backend first, then localStorage, avoid duplicates by id)
     const seenIds = new Set<string>();
     const mergedLevels: LocalLevelMetadata[] = [];
@@ -114,6 +119,8 @@ export async function listLocalLevels(): Promise<LocalLevelListResponse> {
       }
     }
 
+    console.log('[listLocalLevels] Merged total:', mergedLevels.length);
+
     return {
       levels: mergedLevels,
       count: mergedLevels.length,
@@ -143,10 +150,30 @@ export async function listLocalLevels(): Promise<LocalLevelListResponse> {
 }
 
 /**
- * Get a specific local level by ID - tries backend first, then localStorage
+ * Get a specific local level by ID - tries localStorage first, then backend
+ * This prevents unnecessary 404 errors for levels that exist only in localStorage
  */
 export async function getLocalLevel(levelId: string): Promise<LocalLevel> {
-  // Try backend API first
+  // Try localStorage first (faster, no network request, no 404 errors)
+  const localLevel = getLocalLevelById(levelId);
+  if (localLevel) {
+    return {
+      level_id: localLevel.id,
+      level_data: localLevel.level_data,
+      metadata: {
+        name: localLevel.name,
+        description: localLevel.description,
+        tags: localLevel.tags,
+        difficulty: typeof localLevel.difficulty === 'number' ? String(localLevel.difficulty) : localLevel.difficulty,
+        created_at: localLevel.created_at,
+        saved_at: localLevel.saved_at,
+        source: localLevel.source || 'localStorage',
+        validation_status: localLevel.validation_status,
+      },
+    };
+  }
+
+  // Fallback to backend API if not in localStorage
   try {
     const response = await apiClient.get(`/simulate/local/${levelId}`);
     const data = response.data;
@@ -166,26 +193,7 @@ export async function getLocalLevel(levelId: string): Promise<LocalLevel> {
       },
     };
   } catch (err) {
-    // Fallback to localStorage
-    const level = getLocalLevelById(levelId);
-    if (!level) {
-      throw new Error(`Level ${levelId} not found`);
-    }
-
-    return {
-      level_id: level.id,
-      level_data: level.level_data,
-      metadata: {
-        name: level.name,
-        description: level.description,
-        tags: level.tags,
-        difficulty: typeof level.difficulty === 'number' ? String(level.difficulty) : level.difficulty,
-        created_at: level.created_at,
-        saved_at: level.saved_at,
-        source: level.source,
-        validation_status: level.validation_status,
-      },
-    };
+    throw new Error(`Level ${levelId} not found`);
   }
 }
 
@@ -212,19 +220,31 @@ export async function saveLocalLevel(levelData: LocalLevel): Promise<SaveLevelRe
 }
 
 /**
- * Delete a local level - tries backend first, then localStorage
+ * Delete a local level - checks localStorage first, only calls backend if needed
  */
 export async function deleteLocalLevel(levelId: string): Promise<{ success: boolean; message: string }> {
-  // Try backend API first
-  try {
-    await apiClient.delete(`/simulate/local/${levelId}`);
-    // Also remove from localStorage if exists
-    deleteLocalLevelFromStorage(levelId);
-    return { success: true, message: `Level ${levelId} deleted successfully` };
-  } catch (err) {
-    // Fallback to localStorage only
+  // Check if level exists in localStorage
+  const localLevel = getLocalLevelById(levelId);
+
+  if (localLevel) {
+    // Level is in localStorage - delete directly without API call
     return deleteLocalLevelFromStorage(levelId);
   }
+
+  // Level not in localStorage - try backend API
+  try {
+    await apiClient.delete(`/simulate/local/${levelId}`);
+    return { success: true, message: `Level ${levelId} deleted successfully` };
+  } catch (err) {
+    return { success: false, message: `Level ${levelId} not found` };
+  }
+}
+
+/**
+ * Delete multiple local levels by IDs (bulk operation - instant, no API calls)
+ */
+export function deleteBulkLocalLevels(levelIds: string[]): { success: boolean; deleted_count: number; message: string } {
+  return deleteBulkLocalLevelsFromStorage(levelIds);
 }
 
 /**

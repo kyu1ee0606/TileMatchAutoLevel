@@ -124,26 +124,26 @@ export const SIMPLE_GIMMICK_UNLOCK_LEVELS: GimmickUnlockLevels = {
 };
 
 /**
- * 프로페셔널 기믹 언락 레벨
- * Tile Buster, Tile Explorer 등 유명 타일 게임 패턴 기반
+ * 프로페셔널 기믹 언락 레벨 (10레벨 간격)
  *
  * 특징:
  * - 첫 10레벨은 기믹 없이 순수 매칭 학습
+ * - 11, 21, 31, 41... 레벨에서 새 기믹 튜토리얼
  * - 새 기믹 도입 후 충분한 연습 기간 (9레벨)
- * - 기믹 간 조합은 점진적으로 소개
+ * - 백엔드 DEFAULT_GIMMICK_UNLOCK_LEVELS와 동기화됨
  */
 export const PROFESSIONAL_GIMMICK_UNLOCK_LEVELS: GimmickUnlockLevels = {
-  chain: 11,      // 11-19: chain 연습
-  ice: 21,        // 21-29: ice 연습
-  frog: 36,       // 36-44: frog 연습
-  grass: 51,      // 51-59: grass 연습
-  link: 66,       // 66-74: link 연습
-  bomb: 81,       // 81-89: bomb 연습
-  curtain: 96,    // 96-104: curtain 연습
-  teleport: 111,  // 111-119: teleport 연습
-  unknown: 126,   // 126-134: unknown 연습
-  craft: 141,     // 141-149: craft 연습
-  stack: 156,     // 156-164: stack 연습
+  chain: 11,      // 11-20: chain 연습
+  ice: 21,        // 21-30: ice 연습
+  frog: 31,       // 31-40: frog 연습
+  grass: 41,      // 41-50: grass 연습
+  link: 51,       // 51-60: link 연습
+  bomb: 61,       // 61-70: bomb 연습
+  curtain: 71,    // 71-80: curtain 연습
+  teleport: 81,   // 81-90: teleport 연습
+  unknown: 91,    // 91-100: unknown 연습
+  craft: 101,     // 101-110: craft 연습
+  stack: 111,     // 111-120: stack 연습
 };
 
 /**

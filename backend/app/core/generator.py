@@ -13,6 +13,7 @@ from ..models.level import (
     DifficultyGrade,
     TILE_TYPES,
 )
+from ..models.leveling_config import calculate_hidden_tile_ratio
 from .analyzer import get_analyzer
 
 
@@ -32,12 +33,121 @@ class LevelGenerator:
     ]
 
     # Generation parameters
-    MAX_ADJUSTMENT_ITERATIONS = 30
-    DIFFICULTY_TOLERANCE = 5.0  # ±5 points
+    MAX_ADJUSTMENT_ITERATIONS = 50
+    DIFFICULTY_TOLERANCE = 3.0  # ±3 points (tighter tolerance for better accuracy)
 
     # Maximum useTileCount - user can specify up to 15 tile types
     # Note: More tile types = harder levels (with 7-slot dock)
     MAX_USE_TILE_COUNT = 15
+
+    # Level similarity threshold (0.0-1.0) - levels more similar than this are considered duplicates
+    SIMILARITY_THRESHOLD = 0.75
+
+    # Pattern diversity tracking - class-level to persist across instances
+    # Tracks recently used pattern categories to avoid repetition between levels
+    _recent_pattern_categories: List[int] = []
+    _PATTERN_HISTORY_SIZE = 5  # Remember last N pattern categories to avoid
+
+    @staticmethod
+    def calculate_level_similarity(level1: Dict[str, Any], level2: Dict[str, Any]) -> float:
+        """Calculate similarity between two levels based on layout patterns.
+
+        Returns a score from 0.0 (completely different) to 1.0 (identical).
+
+        Compares:
+        - Tile positions per layer (weighted by layer)
+        - Total tile count
+        - Layer structure
+        """
+        try:
+            map1 = level1.get("map", level1)
+            map2 = level2.get("map", level2)
+
+            # Extract layer data
+            layers1 = {}
+            layers2 = {}
+
+            for key, value in map1.items():
+                if key.startswith("layer") and isinstance(value, dict):
+                    layer_idx = int(key.replace("layer", ""))
+                    positions = set(value.get("position", {}).keys())
+                    layers1[layer_idx] = positions
+
+            for key, value in map2.items():
+                if key.startswith("layer") and isinstance(value, dict):
+                    layer_idx = int(key.replace("layer", ""))
+                    positions = set(value.get("position", {}).keys())
+                    layers2[layer_idx] = positions
+
+            if not layers1 or not layers2:
+                return 0.0
+
+            # Compare layer structure
+            all_layers = set(layers1.keys()) | set(layers2.keys())
+            layer_count_sim = 1.0 - abs(len(layers1) - len(layers2)) / max(len(all_layers), 1)
+
+            # Compare positions per layer with weighted importance
+            position_similarities = []
+            for layer_idx in all_layers:
+                pos1 = layers1.get(layer_idx, set())
+                pos2 = layers2.get(layer_idx, set())
+
+                if not pos1 and not pos2:
+                    continue
+
+                intersection = len(pos1 & pos2)
+                union = len(pos1 | pos2)
+                jaccard = intersection / union if union > 0 else 0.0
+
+                # Higher layers (more visible) weighted more
+                weight = 1.0 + layer_idx * 0.2
+                position_similarities.append((jaccard, weight))
+
+            if not position_similarities:
+                return layer_count_sim * 0.5
+
+            weighted_pos_sim = sum(s * w for s, w in position_similarities) / sum(w for _, w in position_similarities)
+
+            # Compare total tile counts
+            total1 = sum(len(p) for p in layers1.values())
+            total2 = sum(len(p) for p in layers2.values())
+            count_sim = 1.0 - abs(total1 - total2) / max(total1, total2, 1)
+
+            # Final weighted similarity
+            similarity = (
+                weighted_pos_sim * 0.6 +  # Position similarity most important
+                layer_count_sim * 0.2 +   # Layer structure
+                count_sim * 0.2           # Total count
+            )
+
+            return min(1.0, max(0.0, similarity))
+
+        except Exception as e:
+            logger.warning(f"Error calculating level similarity: {e}")
+            return 0.0
+
+    @staticmethod
+    def is_too_similar(new_level: Dict[str, Any], recent_levels: List[Dict[str, Any]], threshold: float = None) -> bool:
+        """Check if new level is too similar to any recent levels.
+
+        Args:
+            new_level: The newly generated level
+            recent_levels: List of recently generated levels to compare against
+            threshold: Similarity threshold (default: SIMILARITY_THRESHOLD)
+
+        Returns:
+            True if the level is too similar to any recent level
+        """
+        if threshold is None:
+            threshold = LevelGenerator.SIMILARITY_THRESHOLD
+
+        for recent_level in recent_levels:
+            similarity = LevelGenerator.calculate_level_similarity(new_level, recent_level)
+            if similarity > threshold:
+                logger.debug(f"Level too similar: {similarity:.2f} > {threshold}")
+                return True
+
+        return False
 
     def generate(self, params: GenerationParams) -> GenerationResult:
         """
@@ -115,7 +225,9 @@ class LevelGenerator:
         if not has_strict_tile_config:
             # Pass max tile count to prevent adding tiles beyond the target
             max_tiles = params.total_tile_count if params.total_tile_count else None
-            level = self._adjust_difficulty(level, params.target_difficulty, max_tiles=max_tiles, params=params)
+            # Pass tutorial_gimmick to preserve it during difficulty adjustment
+            tutorial_gimmick = getattr(params, 'tutorial_gimmick', None)
+            level = self._adjust_difficulty(level, params.target_difficulty, max_tiles=max_tiles, params=params, tutorial_gimmick=tutorial_gimmick)
 
         # CRITICAL: Ensure tile count is divisible by 3 (only if NOT using strict config)
         # When user specifies exact counts, they are responsible for divisibility
@@ -131,6 +243,31 @@ class LevelGenerator:
             level = self._ensure_tile_count_divisible_by_3(level, params)
             # Re-validate obstacles since tile removal might have broken chain/link neighbors
             level = self._validate_and_fix_obstacles(level)
+
+        # CRITICAL: Ensure tutorial gimmicks are maintained after all validations
+        # Tutorial gimmick count may have been reduced by obstacle validation
+        tutorial_gimmick = getattr(params, 'tutorial_gimmick', None)
+        tutorial_gimmick_min_count = getattr(params, 'tutorial_gimmick_min_count', 3)
+        if tutorial_gimmick:
+            if tutorial_gimmick == "unknown":
+                # Unknown gimmicks need special handling - must be covered by upper layers
+                level = self._ensure_unknown_tutorial_count(level, tutorial_gimmick_min_count)
+            else:
+                level = self._ensure_tutorial_gimmick_count(level, tutorial_gimmick, tutorial_gimmick_min_count)
+
+        # FINAL VALIDATION: Ensure level is playable (all tile types divisible by 3)
+        validation_result = self._validate_playability(level)
+        if not validation_result["is_playable"]:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"Generated level may not be playable! "
+                f"Total tiles: {validation_result['total_tiles']}, "
+                f"Types with bad count: {validation_result['bad_types']}"
+            )
+            # Try one more aggressive fix for non-symmetric levels
+            if params.symmetry_mode == "none":
+                level = self._force_fix_tile_counts(level, params)
 
         # Calculate final metrics
         analyzer = get_analyzer()
@@ -443,6 +580,19 @@ class LevelGenerator:
 
         return level
 
+    @classmethod
+    def _record_used_pattern_category(cls, category_idx: int) -> None:
+        """Record a used pattern category for diversity tracking between levels."""
+        cls._recent_pattern_categories.append(category_idx)
+        # Keep only the most recent N categories
+        if len(cls._recent_pattern_categories) > cls._PATTERN_HISTORY_SIZE:
+            cls._recent_pattern_categories = cls._recent_pattern_categories[-cls._PATTERN_HISTORY_SIZE:]
+
+    @classmethod
+    def clear_pattern_history(cls) -> None:
+        """Clear pattern history - useful when starting a new batch."""
+        cls._recent_pattern_categories = []
+
     def _select_layer_pattern_indices(
         self, active_layers: List[int], base_pattern_index: Optional[int] = None
     ) -> Dict[int, int]:
@@ -459,6 +609,7 @@ class LevelGenerator:
 
         Strategy: Select patterns from different categories for adjacent layers
         to create visually interesting, non-repetitive geometric compositions.
+        Also avoids recently used patterns from previous levels for batch diversity.
 
         Args:
             active_layers: List of layer indices that will be populated
@@ -469,15 +620,25 @@ class LevelGenerator:
         """
         # Define pattern categories with complementary aesthetics
         # Each category has patterns that look distinct from each other
+        # Extended categories for maximum variety
         pattern_categories = [
             [0, 1, 2],      # Basic shapes: rectangle, diamond, oval
             [3, 4, 5],      # Structural: cross, donut, chevron
-            [10, 11, 12],   # Directional: arrows
-            [15, 16, 17],   # Celestial: stars
+            [10, 11, 12],   # Directional: arrows (up, down, left)
+            [13, 14],       # More arrows (right, double)
+            [15, 16, 17],   # Celestial: stars (5pt, 6pt, scattered)
+            [18, 19],       # Celestial: crescents
+            [20, 21, 22],   # Letters: H, I, L
+            [23, 24, 25],   # Letters: U, X, Y
+            [26, 27, 28, 29],  # Letters: Z, S, O, C
             [30, 31, 32],   # Geometric: triangles, hourglass
+            [33, 34, 35],   # Advanced: stairs, pyramid, zigzag
+            [36, 37, 38, 39],  # More advanced geometric
             [40, 41, 42],   # Frames: borders
+            [43, 44],       # More frames
+            [45, 46, 47],   # Artistic: butterfly, flower, islands
+            [48, 49],       # Artistic: stripes, honeycomb
             [6, 7, 8, 9],   # Misc basic shapes
-            [33, 34, 35],   # More advanced geometric
         ]
 
         # Flatten for random selection if needed
@@ -486,8 +647,14 @@ class LevelGenerator:
         layer_patterns: Dict[int, int] = {}
         used_categories: Set[int] = set()
 
+        # Also consider categories used in recent levels (for batch diversity)
+        recently_used_in_batch = set(self._recent_pattern_categories)
+
         # Sort layers to ensure consistent ordering (top to bottom)
         sorted_layers = sorted(active_layers, reverse=True)
+
+        # Track the first category selected for this level (to record later)
+        first_category_selected: Optional[int] = None
 
         for i, layer_idx in enumerate(sorted_layers):
             if base_pattern_index is not None and i == 0:
@@ -497,12 +664,18 @@ class LevelGenerator:
                 for cat_idx, cat in enumerate(pattern_categories):
                     if base_pattern_index in cat:
                         used_categories.add(cat_idx)
+                        first_category_selected = cat_idx
                         break
             else:
+                # For the first layer without base pattern, also avoid recent batch categories
+                exclude_categories = used_categories.copy()
+                if i == 0:
+                    exclude_categories = exclude_categories.union(recently_used_in_batch)
+
                 # Select from a different category than recent layers
                 available_categories = [
                     cat_idx for cat_idx in range(len(pattern_categories))
-                    if cat_idx not in used_categories
+                    if cat_idx not in exclude_categories
                 ]
 
                 # If all categories used, reset but avoid immediate repeat
@@ -525,6 +698,8 @@ class LevelGenerator:
                     selected_cat_idx = random.choice(available_categories)
                     selected_pattern = random.choice(pattern_categories[selected_cat_idx])
                     used_categories.add(selected_cat_idx)
+                    if i == 0:
+                        first_category_selected = selected_cat_idx
                 else:
                     # Fallback: random pattern avoiding immediate repeat
                     prev_pattern = layer_patterns.get(sorted_layers[i - 1], -1) if i > 0 else -1
@@ -532,6 +707,10 @@ class LevelGenerator:
                     selected_pattern = random.choice(candidates) if candidates else random.choice(all_patterns)
 
                 layer_patterns[layer_idx] = selected_pattern
+
+        # Record the first category used for batch diversity tracking
+        if first_category_selected is not None:
+            self._record_used_pattern_category(first_category_selected)
 
         return layer_patterns
 
@@ -666,17 +845,47 @@ class LevelGenerator:
 
                 base_tiles = int(min_tiles + (max_tiles - min_tiles) * t)
                 base_tiles = max(min_tiles, min(max_tiles, base_tiles))
+
+                # Add random variation for diversity (±15% within grade range)
+                variation_range = int((max_tiles - min_tiles) * 0.3)  # 30% of grade range
+                random_variation = random.randint(-variation_range, variation_range)
+                base_tiles = max(min_tiles, min(max_tiles, base_tiles + random_variation))
+
                 total_target = (base_tiles // 3) * 3
                 if total_target < 30:
                     total_target = 30
 
-            # Build per-layer tile counts - distribute evenly
+            # Build per-layer tile counts with random variation for diversity
             layer_tile_counts = {}
             tiles_per_layer = total_target // len(active_layers)
             extra_tiles = total_target % len(active_layers)
 
-            for i, layer_idx in enumerate(active_layers):
-                layer_tile_counts[layer_idx] = tiles_per_layer + (1 if i < extra_tiles else 0)
+            # Shuffle which layers get extra tiles for variety
+            extra_tile_layers = random.sample(active_layers, min(extra_tiles, len(active_layers)))
+
+            # Create varied distribution patterns (e.g., heavy top, heavy bottom, alternating)
+            distribution_pattern = random.choice(['uniform', 'top_heavy', 'bottom_heavy', 'alternating', 'random'])
+
+            for layer_idx in active_layers:
+                # More aggressive per-layer variation for diversity
+                if distribution_pattern == 'uniform':
+                    layer_variation = random.choice([-6, -3, 0, 3, 6])
+                elif distribution_pattern == 'top_heavy':
+                    # Higher layers get more tiles
+                    layer_variation = (layer_idx - len(active_layers) // 2) * 3
+                elif distribution_pattern == 'bottom_heavy':
+                    # Lower layers get more tiles
+                    layer_variation = -(layer_idx - len(active_layers) // 2) * 3
+                elif distribution_pattern == 'alternating':
+                    # Alternating heavy/light layers
+                    layer_variation = 6 if layer_idx % 2 == 0 else -6
+                else:  # random
+                    layer_variation = random.randint(-3, 3) * 3
+
+                base_count = tiles_per_layer + (3 if layer_idx in extra_tile_layers else 0)
+                final_count = max(6, base_count + layer_variation)  # Minimum 6 tiles per layer
+                # Ensure divisible by 3
+                layer_tile_counts[layer_idx] = (final_count // 3) * 3
 
         # Collect all positions across all layers
         all_layer_positions: List[Tuple[int, str]] = []  # (layer_idx, pos)
@@ -884,8 +1093,12 @@ class LevelGenerator:
             # User explicitly requested no symmetry - respect this for exact counts
             symmetry = "none"
         elif symmetry_mode is None:
-            # Default: random symmetry for visual appeal
-            symmetry = random.choice(["horizontal", "vertical"])
+            # Default: weighted random symmetry for variety
+            # Include "none" for asymmetric interesting shapes
+            # Include "both" for occasional 4-way symmetry
+            symmetry_options = ["horizontal", "vertical", "none", "both"]
+            symmetry_weights = [0.30, 0.30, 0.25, 0.15]  # 30% h, 30% v, 25% none, 15% both
+            symmetry = random.choices(symmetry_options, weights=symmetry_weights, k=1)[0]
         else:
             symmetry = symmetry_mode
 
@@ -1714,8 +1927,7 @@ class LevelGenerator:
         # Pattern 47: Scattered Islands
         def scattered_islands():
             positions = []
-            # Create 4-6 island clusters
-            random.seed(42)  # Deterministic for consistency
+            # Create 4-6 island clusters with random positions for variety
             num_islands = min(6, max(4, (cols * rows) // 30))
             islands = []
             for _ in range(num_islands):
@@ -1852,9 +2064,23 @@ class LevelGenerator:
             if not pattern_results:
                 return filled_rectangle()[:target_count]
 
-            # Sort by score and pick best pattern
+            # Sort by score and pick from top candidates with randomness
             pattern_results.sort(key=lambda x: x[0], reverse=True)
-            _, best_positions, _ = pattern_results[0]
+
+            # Pick from top 5-8 candidates randomly for variety
+            # Filter to only include patterns within reasonable score range
+            top_score = pattern_results[0][0]
+            viable_candidates = [p for p in pattern_results if p[0] >= top_score - 15]
+            num_candidates = min(len(viable_candidates), random.randint(5, 8))
+            top_candidates = viable_candidates[:num_candidates]
+
+            # Weighted random selection - higher scores more likely but not guaranteed
+            weights = [max(1, p[0] - top_score + 20) for p in top_candidates]
+            total_weight = sum(weights)
+            weights = [w / total_weight for w in weights]
+
+            selected_idx = random.choices(range(len(top_candidates)), weights=weights, k=1)[0]
+            _, best_positions, selected_pattern = top_candidates[selected_idx]
 
         # If we have too many positions, trim from edges (maintain symmetry)
         if len(best_positions) > target_count:
@@ -2625,10 +2851,11 @@ class LevelGenerator:
         self, level: Dict[str, Any], gimmick_type: str, min_count: int = 2
     ) -> Dict[str, Any]:
         """
-        Add tutorial gimmick to the top layer for tutorial UI display.
+        Add tutorial gimmick to the top layers for tutorial UI display.
 
-        Tutorial gimmicks are placed on the topmost layer with tiles to make them
+        Tutorial gimmicks are placed on the topmost layers with tiles to make them
         immediately visible when the level starts, facilitating tutorial UI overlay.
+        If the top layer doesn't have enough eligible positions, lower layers are tried.
 
         Args:
             level: Level data to modify
@@ -2636,25 +2863,22 @@ class LevelGenerator:
             min_count: Minimum number of gimmicks to place (default: 2)
 
         Returns:
-            Modified level with tutorial gimmicks placed on top layer
+            Modified level with tutorial gimmicks placed on top layers
         """
         num_layers = level.get("layer", 8)
 
-        # Find the topmost layer with tiles (higher layer index = visually on top)
-        # layer_7 (highest index) = TOP (displayed first, blocking layers below)
-        # layer_6, layer_5, etc. = layers below
-        # This matches the game's visual layer system where higher indices are rendered on top
-        top_layer_idx = -1
+        # Find all layers with tiles, sorted from top to bottom
+        layers_with_tiles = []
         for i in range(num_layers - 1, -1, -1):  # num_layers-1 → ... → 0 (highest first)
             layer_key = f"layer_{i}"
             layer_tiles = level.get(layer_key, {}).get("tiles", {})
             if layer_tiles:
-                top_layer_idx = i
-                break
+                layers_with_tiles.append(i)
 
-        if top_layer_idx < 0:
+        if not layers_with_tiles:
             return level  # No tiles found
 
+        top_layer_idx = layers_with_tiles[0]
         layer_key = f"layer_{top_layer_idx}"
         layer_data = level.get(layer_key, {})
         tiles = layer_data.get("tiles", {})
@@ -2677,10 +2901,6 @@ class LevelGenerator:
         if not eligible_positions:
             return level  # No eligible positions
 
-        # Place gimmicks on top layer
-        positions_to_use = min(min_count, len(eligible_positions))
-        random.shuffle(eligible_positions)
-
         # Map gimmick types to their attribute format
         GIMMICK_ATTRIBUTES = {
             "chain": "chain",
@@ -2699,9 +2919,128 @@ class LevelGenerator:
             logger.info(f"Tutorial gimmick '{gimmick_type}' is a goal tile type, not an attribute - skipping")
             return level
 
-        gimmick_attr = GIMMICK_ATTRIBUTES.get(gimmick_type, gimmick_type)
+        # unknown gimmick requires tiles to be COVERED by upper layers to work
+        # Placing on top layer would make them visible (no curtain effect)
+        # Unknown tutorial is handled by boosting unknown ratio in _add_obstacles instead
+        if gimmick_type == "unknown":
+            logger.info(f"Tutorial gimmick 'unknown' requires covered tiles - will boost ratio in _add_obstacles instead")
+            return level
 
+        # SPECIAL HANDLING: Grass needs 2+ clearable neighbors
+        if gimmick_type == "grass":
+            grass_eligible = []
+            for pos in eligible_positions:
+                try:
+                    col, row = map(int, pos.split('_'))
+                except:
+                    continue
+                # Check 4 directions for clearable neighbors
+                neighbors = [(col, row-1), (col, row+1), (col-1, row), (col+1, row)]
+                clearable_count = 0
+                for ncol, nrow in neighbors:
+                    npos = f"{ncol}_{nrow}"
+                    if npos in tiles:
+                        ndata = tiles[npos]
+                        if (isinstance(ndata, list) and len(ndata) >= 1 and
+                            not (isinstance(ndata[0], str) and (ndata[0].startswith("craft_") or ndata[0].startswith("stack_")))):
+                            clearable_count += 1
+                if clearable_count >= 2:
+                    grass_eligible.append(pos)
+
+            if not grass_eligible:
+                logger.warning(f"Tutorial gimmick 'grass' - no positions with 2+ clearable neighbors found")
+                # Fallback: use any eligible position
+                grass_eligible = eligible_positions
+
+            eligible_positions = grass_eligible
+            logger.info(f"Tutorial gimmick 'grass' - {len(eligible_positions)} positions with valid neighbors")
+
+        # SPECIAL HANDLING: Link needs pairs with matching directions
+        if gimmick_type == "link":
+            placed_count = 0
+            target_count = min_count  # Need at least min_count link tiles (2 tiles per pair)
+
+            # Try each layer from top to bottom
+            for current_layer_idx in layers_with_tiles:
+                if placed_count >= target_count:
+                    break
+
+                current_layer_key = f"layer_{current_layer_idx}"
+                current_tiles = level.get(current_layer_key, {}).get("tiles", {})
+
+                # Find eligible positions on this layer
+                layer_eligible = []
+                for pos, tile_data in current_tiles.items():
+                    if not isinstance(tile_data, list) or len(tile_data) == 0:
+                        continue
+                    tile_type = tile_data[0]
+                    if isinstance(tile_type, str) and (tile_type.startswith("craft_") or tile_type.startswith("stack_")):
+                        continue
+                    gimmick = tile_data[1] if len(tile_data) > 1 else ""
+                    if gimmick:
+                        continue
+                    layer_eligible.append(pos)
+
+                # Find horizontal and vertical pairs
+                link_pairs = []
+                used_positions = set()
+
+                for pos in layer_eligible:
+                    if pos in used_positions:
+                        continue
+                    try:
+                        col, row = map(int, pos.split('_'))
+                    except:
+                        continue
+
+                    # Check for horizontal pair (east-west)
+                    east_pos = f"{col+1}_{row}"
+                    if east_pos in layer_eligible and east_pos not in used_positions:
+                        link_pairs.append((pos, east_pos, "link_e", "link_w", current_tiles))
+                        used_positions.add(pos)
+                        used_positions.add(east_pos)
+                        continue
+
+                    # Check for vertical pair (north-south)
+                    south_pos = f"{col}_{row+1}"
+                    if south_pos in layer_eligible and south_pos not in used_positions:
+                        link_pairs.append((pos, south_pos, "link_n", "link_s", current_tiles))
+                        used_positions.add(pos)
+                        used_positions.add(south_pos)
+
+                # Place link pairs on this layer
+                random.shuffle(link_pairs)
+                for pos1, pos2, attr1, attr2, layer_tiles in link_pairs:
+                    if placed_count >= target_count:
+                        break
+
+                    tile1 = layer_tiles[pos1]
+                    tile2 = layer_tiles[pos2]
+
+                    if len(tile1) == 1:
+                        tile1.append(attr1)
+                    else:
+                        tile1[1] = attr1
+
+                    if len(tile2) == 1:
+                        tile2.append(attr2)
+                    else:
+                        tile2[1] = attr2
+
+                    placed_count += 2
+                    logger.debug(f"Tutorial gimmick 'link' pair placed at layer {current_layer_idx}: {pos1}({attr1}), {pos2}({attr2})")
+
+            logger.info(f"Tutorial gimmick 'link' placed: {placed_count} tiles total")
+            return level
+
+        # Place gimmicks on top layer (for non-special gimmicks)
+        gimmick_attr = GIMMICK_ATTRIBUTES.get(gimmick_type, gimmick_type)
         placed_count = 0
+
+        # Try to place on top layer first
+        positions_to_use = min(min_count, len(eligible_positions))
+        random.shuffle(eligible_positions)
+
         for pos in eligible_positions[:positions_to_use]:
             tile_data = tiles[pos]
             if len(tile_data) == 1:
@@ -2711,8 +3050,511 @@ class LevelGenerator:
             placed_count += 1
             logger.debug(f"Tutorial gimmick '{gimmick_attr}' placed at layer {top_layer_idx}, pos {pos}")
 
-        logger.info(f"Tutorial gimmick '{gimmick_type}' placed: {placed_count} tiles on layer {top_layer_idx}")
+        # If we didn't place enough, try lower layers
+        if placed_count < min_count and len(layers_with_tiles) > 1:
+            for lower_layer_idx in layers_with_tiles[1:]:  # Skip top layer, try lower ones
+                if placed_count >= min_count:
+                    break
 
+                lower_layer_key = f"layer_{lower_layer_idx}"
+                lower_tiles = level.get(lower_layer_key, {}).get("tiles", {})
+
+                # Find eligible positions on this layer
+                lower_eligible = []
+                for pos, tile_data in lower_tiles.items():
+                    if not isinstance(tile_data, list) or len(tile_data) == 0:
+                        continue
+                    tile_type = tile_data[0]
+                    if isinstance(tile_type, str) and (tile_type.startswith("craft_") or tile_type.startswith("stack_")):
+                        continue
+                    gimmick = tile_data[1] if len(tile_data) > 1 else ""
+                    if gimmick:
+                        continue
+
+                    # For grass, check neighbors on this layer
+                    if gimmick_type == "grass":
+                        try:
+                            col, row = map(int, pos.split('_'))
+                        except:
+                            continue
+                        neighbors = [(col, row-1), (col, row+1), (col-1, row), (col+1, row)]
+                        clearable_count = 0
+                        for ncol, nrow in neighbors:
+                            npos = f"{ncol}_{nrow}"
+                            if npos in lower_tiles:
+                                ndata = lower_tiles[npos]
+                                if isinstance(ndata, list) and len(ndata) >= 1:
+                                    clearable_count += 1
+                        if clearable_count < 2:
+                            continue
+
+                    lower_eligible.append(pos)
+
+                if lower_eligible:
+                    random.shuffle(lower_eligible)
+                    for pos in lower_eligible:
+                        if placed_count >= min_count:
+                            break
+                        tile_data = lower_tiles[pos]
+                        if len(tile_data) == 1:
+                            tile_data.append(gimmick_attr)
+                        else:
+                            tile_data[1] = gimmick_attr
+                        placed_count += 1
+                        logger.debug(f"Tutorial gimmick '{gimmick_attr}' placed at layer {lower_layer_idx}, pos {pos} (fallback)")
+
+        logger.info(f"Tutorial gimmick '{gimmick_type}' placed: {placed_count} tiles (top layer: {top_layer_idx})")
+
+        return level
+
+    def _ensure_tutorial_gimmick_count(
+        self, level: Dict[str, Any], gimmick_type: str, min_count: int
+    ) -> Dict[str, Any]:
+        """
+        Ensure the tutorial gimmick has at least min_count instances after all validations.
+
+        This is called at the END of generation after all obstacle validations, which may have
+        removed some gimmicks. If count is below minimum, adds more in valid positions.
+
+        Args:
+            level: Level data
+            gimmick_type: Type of gimmick to ensure (e.g., 'chain', 'ice', 'frog')
+            min_count: Minimum number of gimmicks required
+
+        Returns:
+            Modified level with tutorial gimmicks ensured
+        """
+        num_layers = level.get("layer", 8)
+
+        # Map gimmick types to their attribute format
+        GIMMICK_ATTRIBUTES = {
+            "chain": "chain",
+            "ice": "ice",
+            "frog": "frog",
+            "grass": "grass",
+            "bomb": "bomb",
+            "curtain": "curtain",
+            "link": "link_e",
+            "teleport": "teleport",
+        }
+
+        gimmick_attr = GIMMICK_ATTRIBUTES.get(gimmick_type, gimmick_type)
+
+        # Count current gimmick instances
+        current_count = 0
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for pos, tile_data in tiles.items():
+                if isinstance(tile_data, list) and len(tile_data) > 1:
+                    attr = tile_data[1]
+                    # Handle variants (link_e, link_w, link_n, link_s)
+                    if attr == gimmick_attr or (gimmick_type == "link" and attr and attr.startswith("link_")):
+                        current_count += 1
+
+        if current_count >= min_count:
+            return level  # Already have enough
+
+        needed = min_count - current_count
+        logger.info(f"Tutorial gimmick '{gimmick_type}' needs {needed} more (current: {current_count}, min: {min_count})")
+
+        # Find layers with tiles, sorted from top to bottom
+        layers_with_tiles = []
+        for i in range(num_layers - 1, -1, -1):
+            layer_key = f"layer_{i}"
+            layer_tiles = level.get(layer_key, {}).get("tiles", {})
+            if layer_tiles:
+                layers_with_tiles.append(i)
+
+        if not layers_with_tiles:
+            return level
+
+        added = 0
+
+        # For chain: need LEFT or RIGHT clearable neighbor
+        if gimmick_type == "chain":
+            for layer_idx in layers_with_tiles:
+                if added >= needed:
+                    break
+
+                layer_key = f"layer_{layer_idx}"
+                tiles = level.get(layer_key, {}).get("tiles", {})
+
+                # Find eligible positions with valid neighbors
+                candidates = []
+                for pos, tile_data in tiles.items():
+                    if not isinstance(tile_data, list) or len(tile_data) < 1:
+                        continue
+                    # Skip goal tiles
+                    if tile_data[0] in self.GOAL_TYPES or tile_data[0].startswith("craft_") or tile_data[0].startswith("stack_"):
+                        continue
+                    # Skip tiles with existing gimmicks
+                    if len(tile_data) >= 2 and tile_data[1]:
+                        continue
+
+                    # Check for clearable left or right neighbor
+                    try:
+                        col, row = map(int, pos.split('_'))
+                    except:
+                        continue
+
+                    for ncol in [col - 1, col + 1]:
+                        npos = f"{ncol}_{row}"
+                        if npos in tiles:
+                            ndata = tiles[npos]
+                            if isinstance(ndata, list) and len(ndata) >= 2:
+                                # Neighbor must be clearable (no obstacle or frog only)
+                                if not ndata[1] or ndata[1] == "frog":
+                                    candidates.append(pos)
+                                    break
+
+                if candidates:
+                    random.shuffle(candidates)
+                    for pos in candidates:
+                        if added >= needed:
+                            break
+                        tile_data = tiles[pos]
+                        if len(tile_data) == 1:
+                            tile_data.append("chain")
+                        else:
+                            tile_data[1] = "chain"
+                        added += 1
+                        logger.debug(f"Tutorial gimmick 'chain' ensured at layer {layer_idx}, pos {pos}")
+
+        # For link: need pairs
+        elif gimmick_type == "link":
+            for layer_idx in layers_with_tiles:
+                if added >= needed:
+                    break
+
+                layer_key = f"layer_{layer_idx}"
+                tiles = level.get(layer_key, {}).get("tiles", {})
+
+                # Find eligible pairs
+                used = set()
+                pairs = []
+                for pos, tile_data in tiles.items():
+                    if pos in used:
+                        continue
+                    if not isinstance(tile_data, list) or len(tile_data) < 1:
+                        continue
+                    if tile_data[0] in self.GOAL_TYPES or tile_data[0].startswith("craft_") or tile_data[0].startswith("stack_"):
+                        continue
+                    if len(tile_data) >= 2 and tile_data[1]:
+                        continue
+
+                    try:
+                        col, row = map(int, pos.split('_'))
+                    except:
+                        continue
+
+                    # Check east neighbor
+                    east_pos = f"{col+1}_{row}"
+                    if east_pos in tiles and east_pos not in used:
+                        east_data = tiles[east_pos]
+                        if isinstance(east_data, list) and len(east_data) >= 1:
+                            if not (east_data[0] in self.GOAL_TYPES or east_data[0].startswith("craft_") or east_data[0].startswith("stack_")):
+                                if len(east_data) < 2 or not east_data[1]:
+                                    pairs.append((pos, east_pos, "link_e", "link_w"))
+                                    used.add(pos)
+                                    used.add(east_pos)
+                                    continue
+
+                    # Check south neighbor
+                    south_pos = f"{col}_{row+1}"
+                    if south_pos in tiles and south_pos not in used:
+                        south_data = tiles[south_pos]
+                        if isinstance(south_data, list) and len(south_data) >= 1:
+                            if not (south_data[0] in self.GOAL_TYPES or south_data[0].startswith("craft_") or south_data[0].startswith("stack_")):
+                                if len(south_data) < 2 or not south_data[1]:
+                                    pairs.append((pos, south_pos, "link_n", "link_s"))
+                                    used.add(pos)
+                                    used.add(south_pos)
+
+                for pos1, pos2, attr1, attr2 in pairs:
+                    if added >= needed:
+                        break
+                    tile1 = tiles[pos1]
+                    tile2 = tiles[pos2]
+                    if len(tile1) == 1:
+                        tile1.append(attr1)
+                    else:
+                        tile1[1] = attr1
+                    if len(tile2) == 1:
+                        tile2.append(attr2)
+                    else:
+                        tile2[1] = attr2
+                    added += 2
+                    logger.debug(f"Tutorial gimmick 'link' ensured at layer {layer_idx}: {pos1}, {pos2}")
+
+        # For grass: need 2+ clearable neighbors
+        elif gimmick_type == "grass":
+            for layer_idx in layers_with_tiles:
+                if added >= needed:
+                    break
+
+                layer_key = f"layer_{layer_idx}"
+                tiles = level.get(layer_key, {}).get("tiles", {})
+
+                candidates = []
+                for pos, tile_data in tiles.items():
+                    if not isinstance(tile_data, list) or len(tile_data) < 1:
+                        continue
+                    if tile_data[0] in self.GOAL_TYPES or tile_data[0].startswith("craft_") or tile_data[0].startswith("stack_"):
+                        continue
+                    if len(tile_data) >= 2 and tile_data[1]:
+                        continue
+
+                    try:
+                        col, row = map(int, pos.split('_'))
+                    except:
+                        continue
+
+                    # Count clearable neighbors
+                    neighbors = [(col-1, row), (col+1, row), (col, row-1), (col, row+1)]
+                    clearable = 0
+                    for ncol, nrow in neighbors:
+                        npos = f"{ncol}_{nrow}"
+                        if npos in tiles:
+                            ndata = tiles[npos]
+                            if isinstance(ndata, list) and len(ndata) >= 1:
+                                clearable += 1
+                    if clearable >= 2:
+                        candidates.append(pos)
+
+                if candidates:
+                    random.shuffle(candidates)
+                    for pos in candidates:
+                        if added >= needed:
+                            break
+                        tile_data = tiles[pos]
+                        if len(tile_data) == 1:
+                            tile_data.append("grass")
+                        else:
+                            tile_data[1] = "grass"
+                        added += 1
+                        logger.debug(f"Tutorial gimmick 'grass' ensured at layer {layer_idx}, pos {pos}")
+
+        # For simple gimmicks (ice, frog, bomb, curtain, teleport): just add to any empty tile
+        else:
+            for layer_idx in layers_with_tiles:
+                if added >= needed:
+                    break
+
+                layer_key = f"layer_{layer_idx}"
+                tiles = level.get(layer_key, {}).get("tiles", {})
+
+                candidates = []
+                for pos, tile_data in tiles.items():
+                    if not isinstance(tile_data, list) or len(tile_data) < 1:
+                        continue
+                    if tile_data[0] in self.GOAL_TYPES or tile_data[0].startswith("craft_") or tile_data[0].startswith("stack_"):
+                        continue
+                    if len(tile_data) >= 2 and tile_data[1]:
+                        continue
+                    candidates.append(pos)
+
+                if candidates:
+                    random.shuffle(candidates)
+                    for pos in candidates:
+                        if added >= needed:
+                            break
+                        tile_data = tiles[pos]
+                        if len(tile_data) == 1:
+                            tile_data.append(gimmick_attr)
+                        else:
+                            tile_data[1] = gimmick_attr
+                        added += 1
+                        logger.debug(f"Tutorial gimmick '{gimmick_attr}' ensured at layer {layer_idx}, pos {pos}")
+
+        logger.info(f"Tutorial gimmick '{gimmick_type}' ensured: added {added}, total now {current_count + added}")
+        return level
+
+    def _ensure_unknown_tutorial_count(
+        self, level: Dict[str, Any], min_count: int
+    ) -> Dict[str, Any]:
+        """
+        Ensure the tutorial 'unknown' gimmick has at least min_count instances.
+
+        Unknown gimmicks are special because they MUST be covered by upper layer tiles
+        to show the curtain effect. This method:
+        1. Counts current covered unknown gimmicks
+        2. If below minimum, finds tiles that ARE covered and adds unknown to them
+        3. If not enough covered positions, adds tiles to create coverage
+
+        Args:
+            level: Level data
+            min_count: Minimum number of unknown gimmicks required
+
+        Returns:
+            Modified level with unknown tutorial gimmicks ensured
+        """
+        num_layers = level.get("layer", 8)
+
+        # Count current unknown gimmicks that are properly covered
+        current_count = 0
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for pos, tile_data in tiles.items():
+                if isinstance(tile_data, list) and len(tile_data) > 1 and tile_data[1] == "unknown":
+                    # Verify it's covered
+                    try:
+                        col, row = map(int, pos.split('_'))
+                        if self._is_position_covered_by_upper(level, i, col, row):
+                            current_count += 1
+                    except:
+                        pass
+
+        if current_count >= min_count:
+            return level  # Already have enough
+
+        needed = min_count - current_count
+        logger.info(f"Tutorial gimmick 'unknown' needs {needed} more (current covered: {current_count}, min: {min_count})")
+
+        # Find tiles that ARE covered by upper layers but don't have a gimmick
+        covered_candidates = []
+        for i in range(num_layers - 1):  # Skip top layer (can't be covered)
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for pos, tile_data in tiles.items():
+                if not isinstance(tile_data, list) or len(tile_data) < 1:
+                    continue
+                # Skip goal tiles
+                if tile_data[0] in self.GOAL_TYPES or tile_data[0].startswith("craft_") or tile_data[0].startswith("stack_"):
+                    continue
+                # Skip tiles with existing gimmicks
+                if len(tile_data) >= 2 and tile_data[1]:
+                    continue
+                # Check if covered
+                try:
+                    col, row = map(int, pos.split('_'))
+                    if self._is_position_covered_by_upper(level, i, col, row):
+                        covered_candidates.append((i, pos, tile_data))
+                except:
+                    continue
+
+        # Add unknown to covered candidates
+        added = 0
+        random.shuffle(covered_candidates)
+        for layer_idx, pos, tile_data in covered_candidates:
+            if added >= needed:
+                break
+            if len(tile_data) == 1:
+                tile_data.append("unknown")
+            else:
+                tile_data[1] = "unknown"
+            added += 1
+            logger.debug(f"Tutorial gimmick 'unknown' ensured at layer {layer_idx}, pos {pos}")
+
+        # If still need more, we need to create coverage by adding tiles above existing tiles
+        if added < needed:
+            remaining = needed - added
+            logger.info(f"Need {remaining} more unknown gimmicks - will create coverage")
+
+            # Find tiles without gimmicks on lower layers (0, 1, 2) that could potentially be covered
+            for target_layer in range(min(3, num_layers - 1)):  # Lower layers have more room for upper tiles
+                if added >= needed:
+                    break
+
+                layer_key = f"layer_{target_layer}"
+                tiles = level.get(layer_key, {}).get("tiles", {})
+
+                for pos, tile_data in list(tiles.items()):
+                    if added >= needed:
+                        break
+                    if not isinstance(tile_data, list) or len(tile_data) < 1:
+                        continue
+                    if tile_data[0] in self.GOAL_TYPES or tile_data[0].startswith("craft_") or tile_data[0].startswith("stack_"):
+                        continue
+                    if len(tile_data) >= 2 and tile_data[1]:
+                        continue
+
+                    try:
+                        col, row = map(int, pos.split('_'))
+                    except:
+                        continue
+
+                    # Check if already covered
+                    if self._is_position_covered_by_upper(level, target_layer, col, row):
+                        # Already covered - just add unknown
+                        if len(tile_data) == 1:
+                            tile_data.append("unknown")
+                        else:
+                            tile_data[1] = "unknown"
+                        added += 1
+                        logger.debug(f"Tutorial gimmick 'unknown' added to already-covered tile at layer {target_layer}, pos {pos}")
+                        continue
+
+                    # Not covered - try to add a tile above to create coverage
+                    # Find the nearest upper layer that could cover this position
+                    tile_added = False
+                    for upper_layer in range(target_layer + 1, num_layers):
+                        upper_layer_key = f"layer_{upper_layer}"
+                        if upper_layer_key not in level:
+                            continue
+
+                        upper_tiles = level.get(upper_layer_key, {}).get("tiles", {})
+                        upper_layer_data = level.get(upper_layer_key, {})
+
+                        # Calculate the covering position based on parity
+                        tile_parity = target_layer % 2
+                        upper_parity = upper_layer % 2
+
+                        if tile_parity == upper_parity:
+                            # Same parity - same position covers
+                            cover_pos = pos
+                        else:
+                            upper_col = int(upper_layer_data.get("col", 7))
+                            current_col = int(level.get(layer_key, {}).get("col", 7))
+
+                            if upper_col > current_col:
+                                # Check if any of the 4 positions would cover - use (0,0) for simplicity
+                                cover_pos = pos
+                            else:
+                                # Use offset position
+                                cover_pos = pos
+
+                        # Check if position is valid for this layer (within bounds)
+                        try:
+                            c, r = map(int, cover_pos.split('_'))
+                            layer_col = int(upper_layer_data.get("col", 7))
+                            layer_row = int(upper_layer_data.get("row", 7))
+                            if c < 0 or r < 0 or c >= layer_col or r >= layer_row:
+                                continue
+                        except:
+                            continue
+
+                        # Add tile to upper layer if position is empty
+                        if cover_pos not in upper_tiles:
+                            # Get a tile type from existing tiles
+                            tile_types = []
+                            for td in tiles.values():
+                                if isinstance(td, list) and len(td) >= 1 and td[0] not in self.GOAL_TYPES:
+                                    if not td[0].startswith("craft_") and not td[0].startswith("stack_"):
+                                        tile_types.append(td[0])
+                            if tile_types:
+                                new_tile_type = random.choice(tile_types)
+                                upper_tiles[cover_pos] = [new_tile_type, ""]
+                                level[upper_layer_key]["tiles"] = upper_tiles
+                                # Update num count
+                                level[upper_layer_key]["num"] = str(len(upper_tiles))
+
+                                # Now add unknown to the target tile
+                                if len(tile_data) == 1:
+                                    tile_data.append("unknown")
+                                else:
+                                    tile_data[1] = "unknown"
+                                added += 1
+                                tile_added = True
+                                logger.debug(f"Tutorial gimmick 'unknown' created by adding cover tile at layer {upper_layer}, pos {cover_pos}")
+                                break
+
+                    if not tile_added:
+                        # Couldn't create coverage - skip this position
+                        pass
+
+        logger.info(f"Tutorial gimmick 'unknown' ensured: added {added}, total now {current_count + added}")
         return level
 
     def _add_obstacles(
@@ -2803,6 +3645,24 @@ class LevelGenerator:
         #
         # Reduced ratios to match Tile Buster style (was: chain=0.15, frog=0.08, ice=0.12)
         # Target: ~10-15% total gimmicks at max difficulty
+        # [연구 근거] Room 8 Studio: 레벨 175+ 히든 타일 본격 도입
+        # 레벨 번호에 따른 unknown 비율 동적 계산
+        level_number = getattr(params, 'level_number', None)
+        unknown_ratio = 0.02  # 기본값 2%
+        if level_number is not None:
+            # calculate_hidden_tile_ratio returns 0.0-0.6 based on level number
+            # Level 1-90: 0%, Level 91-175: 0-15%, Level 175+: 15-60%
+            unknown_ratio = max(0.02, calculate_hidden_tile_ratio(level_number))
+
+        # Boost unknown ratio for tutorial level (unknown gimmick introduction)
+        # Tutorial needs more visible unknown tiles to demonstrate the mechanic
+        unknown_min_count = 0
+        if tutorial_gimmick == "unknown":
+            # Minimum 15% for tutorial to ensure enough unknown tiles are visible
+            unknown_ratio = max(0.15, unknown_ratio)
+            unknown_min_count = tutorial_gimmick_min_count  # Ensure at least min_count unknown tiles
+            logger.info(f"Tutorial gimmick 'unknown' - boosted ratio to {unknown_ratio:.0%}, min_count={unknown_min_count}")
+
         global_targets = {
             "chain": get_global_target("chain", 0.04),
             "frog": get_global_target("frog", 0.02),
@@ -2812,7 +3672,8 @@ class LevelGenerator:
             "bomb": get_global_target("bomb", 0.02),  # Increased from 0.01 to ensure at least 1 bomb
             "curtain": get_global_target("curtain", 0.02),
             "teleport": get_global_target("teleport", 0.02),  # Increased from 0.01 to ensure at least 1 teleport
-            "unknown": get_global_target("unknown", 0.02),
+            # [연구 근거] 레벨 기반 동적 비율, tutorial에서는 최소 min_count 보장
+            "unknown": max(unknown_min_count, get_global_target("unknown", unknown_ratio)),
         }
 
         # Distribute remaining to unconfigured layers
@@ -4325,7 +5186,7 @@ class LevelGenerator:
         return level
 
     def _adjust_difficulty(
-        self, level: Dict[str, Any], target: float, max_tiles: Optional[int] = None, params: Optional["GenerationParams"] = None
+        self, level: Dict[str, Any], target: float, max_tiles: Optional[int] = None, params: Optional["GenerationParams"] = None, tutorial_gimmick: Optional[str] = None
     ) -> Dict[str, Any]:
         """Adjust level to match target difficulty within tolerance.
 
@@ -4334,6 +5195,7 @@ class LevelGenerator:
             target: Target difficulty (0.0-1.0)
             max_tiles: If specified, don't add tiles beyond this count
             params: Generation parameters (for symmetry awareness)
+            tutorial_gimmick: Tutorial gimmick type to preserve during adjustment
         """
         analyzer = get_analyzer()
         target_score = target * 100
@@ -4378,7 +5240,8 @@ class LevelGenerator:
                 level = self._increase_difficulty(level, params, tiles_maxed_out=tiles_maxed_out, target_difficulty=target)
             else:
                 # Need to decrease difficulty - pass target for aggressive reduction at low targets
-                level = self._decrease_difficulty(level, params, target_difficulty=target)
+                # Also pass tutorial_gimmick to preserve it during obstacle removal
+                level = self._decrease_difficulty(level, params, target_difficulty=target, tutorial_gimmick=tutorial_gimmick)
 
         return level
 
@@ -4406,6 +5269,10 @@ class LevelGenerator:
         obstacles_disabled = gimmick_intensity <= 0 or (obstacle_types is not None and len(obstacle_types) == 0)
 
         # Obstacle addition actions - filter by allowed obstacle types
+        # NOTE: link, grass, bomb, curtain, teleport are NOT in this list because they:
+        # - Are added during initial generation (_add_obstacles)
+        # - Require special placement rules (pairs, neighbors, etc.)
+        # - Should not be randomly added during difficulty adjustment
         all_obstacle_actions = {
             "chain": self._add_chain_to_tile,
             "frog": self._add_frog_to_tile,
@@ -4417,6 +5284,10 @@ class LevelGenerator:
             obstacle_actions = [all_obstacle_actions[t] for t in obstacle_types if t in all_obstacle_actions]
         else:
             obstacle_actions = list(all_obstacle_actions.values())
+
+        # If no valid obstacle actions available, mark obstacles as disabled for this adjustment
+        if not obstacle_actions:
+            obstacles_disabled = True
 
         # Helper: check if we should add obstacles based on gimmick_intensity probability
         def should_add_obstacle() -> bool:
@@ -4447,36 +5318,45 @@ class LevelGenerator:
                 if len(tile_data) > 1 and tile_data[1]:
                     total_gimmicks += 1
 
-        # Cap gimmicks at 15% of total tiles
-        max_gimmicks = int(total_tiles * 0.15)
+        # Cap gimmicks based on target difficulty
+        # Low difficulty (S/A): 15% cap
+        # Medium difficulty (B): 25% cap
+        # High difficulty (C/D): 40% cap
+        if target_difficulty >= 0.6:
+            max_gimmick_ratio = 0.40
+        elif target_difficulty >= 0.4:
+            max_gimmick_ratio = 0.25
+        else:
+            max_gimmick_ratio = 0.15
+        max_gimmicks = int(total_tiles * max_gimmick_ratio)
         gimmicks_capped = total_gimmicks >= max_gimmicks
 
-        # D grade (target >= 0.8): Add 1 obstacle with 15% chance
+        # D grade (target >= 0.8): Add obstacles aggressively (70% chance)
         if target_difficulty >= 0.8:
             if prefer_tiles_over_obstacles and not tiles_maxed_out:
                 if symmetry_mode == "none":
                     return self._add_tile_to_layer(level)
-            elif not gimmicks_capped and random.random() < 0.15 and should_add_obstacle():
+            elif not gimmicks_capped and random.random() < 0.70 and should_add_obstacle():
                 action = random.choice(obstacle_actions)
                 return action(level)
             if symmetry_mode == "none" and not tiles_maxed_out:
                 return self._add_tile_to_layer(level)
 
-        # C grade (target >= 0.6): Add 1 obstacle with 10% chance
+        # C grade (target >= 0.6): Add obstacles frequently (50% chance)
         if target_difficulty >= 0.6:
             if prefer_tiles_over_obstacles and not tiles_maxed_out:
                 if symmetry_mode == "none":
                     return self._add_tile_to_layer(level)
-            elif not gimmicks_capped and random.random() < 0.10 and should_add_obstacle():
+            elif not gimmicks_capped and random.random() < 0.50 and should_add_obstacle():
                 action = random.choice(obstacle_actions)
                 return action(level)
 
-        # B grade (target >= 0.4): Add 1 obstacle with 5% chance
+        # B grade (target >= 0.4): Add obstacles moderately (30% chance)
         if target_difficulty >= 0.4:
             if prefer_tiles_over_obstacles:
                 if symmetry_mode == "none" and not tiles_maxed_out:
                     return self._add_tile_to_layer(level)
-            elif not gimmicks_capped and random.random() < 0.05 and should_add_obstacle():
+            elif not gimmicks_capped and random.random() < 0.30 and should_add_obstacle():
                 action = random.choice(obstacle_actions)
                 return action(level)
 
@@ -4492,13 +5372,19 @@ class LevelGenerator:
         # Default: add tiles (for S/A grade targets)
         return self._add_tile_to_layer(level)
 
-    def _decrease_difficulty(self, level: Dict[str, Any], params: Optional["GenerationParams"] = None, target_difficulty: float = 0.5) -> Dict[str, Any]:
+    def _decrease_difficulty(self, level: Dict[str, Any], params: Optional["GenerationParams"] = None, target_difficulty: float = 0.5, tutorial_gimmick: Optional[str] = None) -> Dict[str, Any]:
         """Apply a random modification to decrease difficulty.
 
         Strategy based on target_difficulty:
         - target >= 0.4: Remove 1 tile (gentle reduction)
         - target >= 0.2 (A grade): Remove 1-2 tiles, possibly remove obstacle
         - target < 0.2 (S grade): Aggressively remove 2-3 tiles and obstacles
+
+        Args:
+            level: Level data
+            params: Generation parameters
+            target_difficulty: Target difficulty score
+            tutorial_gimmick: Tutorial gimmick type to preserve (don't remove this type)
         """
         symmetry_mode = params.symmetry_mode if params else "none"
         # For symmetric patterns, skip random tile removal to preserve symmetry
@@ -4511,9 +5397,9 @@ class LevelGenerator:
             num_removals = random.randint(2, 3)
             for _ in range(num_removals):
                 level = self._remove_tile_from_layer(level)
-            # Also try to remove obstacles if any exist
+            # Also try to remove obstacles if any exist (but preserve tutorial gimmick)
             if random.random() < 0.7:
-                level = self._remove_random_obstacle(level)
+                level = self._remove_random_obstacle(level, tutorial_gimmick=tutorial_gimmick)
             return level
 
         # A grade (target < 0.4): Moderate reduction
@@ -4522,19 +5408,24 @@ class LevelGenerator:
             num_removals = random.randint(1, 2)
             for _ in range(num_removals):
                 level = self._remove_tile_from_layer(level)
-            # Sometimes remove obstacles
+            # Sometimes remove obstacles (but preserve tutorial gimmick)
             if random.random() < 0.3:
-                level = self._remove_random_obstacle(level)
+                level = self._remove_random_obstacle(level, tutorial_gimmick=tutorial_gimmick)
             return level
 
         # Default: gentle reduction - remove 1 tile
         return self._remove_tile_from_layer(level)
 
-    def _remove_random_obstacle(self, level: Dict[str, Any]) -> Dict[str, Any]:
-        """Remove a random obstacle (chain, frog, ice) from the level."""
+    def _remove_random_obstacle(self, level: Dict[str, Any], tutorial_gimmick: Optional[str] = None) -> Dict[str, Any]:
+        """Remove a random obstacle (chain, frog, ice) from the level.
+
+        Args:
+            level: Level data
+            tutorial_gimmick: Tutorial gimmick type to preserve (don't remove this type)
+        """
         num_layers = level.get("layer", 8)
 
-        # Find all tiles with obstacles
+        # Find all tiles with obstacles (excluding tutorial gimmick type)
         candidates = []
         for i in range(num_layers):
             layer_key = f"layer_{i}"
@@ -4542,6 +5433,9 @@ class LevelGenerator:
             for pos, tile_data in tiles.items():
                 if (isinstance(tile_data, list) and len(tile_data) >= 2
                     and tile_data[1] in ["chain", "frog", "ice"]):
+                    # Skip if this is the tutorial gimmick type
+                    if tutorial_gimmick and tile_data[1] == tutorial_gimmick:
+                        continue
                     candidates.append((layer_key, pos))
 
         if candidates:
@@ -5370,6 +6264,144 @@ class LevelGenerator:
 
         return level
 
+    def _validate_playability(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Validate that a level is playable (can be cleared).
+
+        Rules for playability:
+        1. Total matchable tiles must be divisible by 3
+        2. Each tile type count must be divisible by 3
+
+        Returns:
+            Dict with is_playable (bool), total_tiles (int), bad_types (list)
+        """
+        num_layers = level.get("layer", 8)
+        type_counts: Dict[str, int] = {}
+        total_matchable = 0
+
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for pos, tile_data in tiles.items():
+                if isinstance(tile_data, list) and len(tile_data) > 0:
+                    tile_type = tile_data[0]
+                    # Count internal tiles for craft/stack
+                    if tile_type in self.GOAL_TYPES or tile_type.startswith("craft_") or tile_type.startswith("stack_"):
+                        if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
+                            internal_count = int(tile_data[2][0]) if tile_data[2][0] else 0
+                            type_counts["t0"] = type_counts.get("t0", 0) + internal_count
+                            total_matchable += internal_count
+                    else:
+                        type_counts[tile_type] = type_counts.get(tile_type, 0) + 1
+                        total_matchable += 1
+
+        # Check for types with count not divisible by 3
+        bad_types = [(t, c) for t, c in type_counts.items() if c % 3 != 0]
+        is_playable = len(bad_types) == 0 and total_matchable % 3 == 0
+
+        return {
+            "is_playable": is_playable,
+            "total_tiles": total_matchable,
+            "bad_types": bad_types,
+            "type_counts": type_counts
+        }
+
+    def _force_fix_tile_counts(self, level: Dict[str, Any], params: GenerationParams) -> Dict[str, Any]:
+        """
+        Aggressively fix tile counts to ensure playability.
+        This is a last-resort function that will force-fix any remaining issues.
+        """
+        import random
+        num_layers = level.get("layer", 8)
+
+        # Count current tiles
+        type_counts: Dict[str, int] = {}
+        type_positions: Dict[str, List[Tuple[int, str]]] = {}
+        total_matchable = 0
+
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for pos, tile_data in tiles.items():
+                if isinstance(tile_data, list) and len(tile_data) > 0:
+                    tile_type = tile_data[0]
+                    if tile_type in self.GOAL_TYPES or tile_type.startswith("craft_") or tile_type.startswith("stack_"):
+                        if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
+                            internal_count = int(tile_data[2][0]) if tile_data[2][0] else 0
+                            type_counts["t0"] = type_counts.get("t0", 0) + internal_count
+                            total_matchable += internal_count
+                    else:
+                        type_counts[tile_type] = type_counts.get(tile_type, 0) + 1
+                        total_matchable += 1
+                        if tile_type not in type_positions:
+                            type_positions[tile_type] = []
+                        type_positions[tile_type].append((i, pos))
+
+        # If total is not divisible by 3, remove tiles
+        total_remainder = total_matchable % 3
+        if total_remainder != 0:
+            tiles_to_remove = total_remainder
+
+            # Find removable tiles (no attributes)
+            removable = []
+            for i in range(num_layers):
+                layer_key = f"layer_{i}"
+                tiles = level.get(layer_key, {}).get("tiles", {})
+                for pos, tile_data in tiles.items():
+                    if isinstance(tile_data, list) and len(tile_data) >= 2:
+                        tile_type = tile_data[0]
+                        attr = tile_data[1] if len(tile_data) > 1 else ""
+                        if not attr and tile_type not in self.GOAL_TYPES:
+                            removable.append((i, pos, tile_type))
+
+            random.shuffle(removable)
+            for layer_idx, pos, _ in removable[:tiles_to_remove]:
+                layer_key = f"layer_{layer_idx}"
+                if pos in level.get(layer_key, {}).get("tiles", {}):
+                    del level[layer_key]["tiles"][pos]
+                    level[layer_key]["num"] = str(len(level[layer_key]["tiles"]))
+
+        # Recount and fix type distribution
+        type_counts = {}
+        type_positions = {}
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for pos, tile_data in tiles.items():
+                if isinstance(tile_data, list) and len(tile_data) > 0:
+                    tile_type = tile_data[0]
+                    if tile_type not in self.GOAL_TYPES and not tile_type.startswith("craft_") and not tile_type.startswith("stack_"):
+                        type_counts[tile_type] = type_counts.get(tile_type, 0) + 1
+                        if tile_type not in type_positions:
+                            type_positions[tile_type] = []
+                        type_positions[tile_type].append((i, pos))
+
+        # Pair up types with remainder 1 and remainder 2
+        max_iterations = 20
+        for _ in range(max_iterations):
+            rem1 = [t for t, c in type_counts.items() if c % 3 == 1 and type_positions.get(t)]
+            rem2 = [t for t, c in type_counts.items() if c % 3 == 2 and type_positions.get(t)]
+
+            if not rem1 and not rem2:
+                break
+
+            if rem1 and rem2:
+                # Move 1 tile from rem1 type to rem2 type
+                type_a = rem1[0]
+                type_b = rem2[0]
+                if type_positions[type_a]:
+                    layer_idx, pos = type_positions[type_a].pop()
+                    layer_key = f"layer_{layer_idx}"
+                    if pos in level.get(layer_key, {}).get("tiles", {}):
+                        level[layer_key]["tiles"][pos][0] = type_b
+                        type_counts[type_a] -= 1
+                        type_counts[type_b] = type_counts.get(type_b, 0) + 1
+            else:
+                # Need to handle 3 types with same remainder
+                break
+
+        return level
+
     def _validate_and_fix_obstacles(self, level: Dict[str, Any]) -> Dict[str, Any]:
         """
         Final validation pass to ensure all obstacles follow game rules.
@@ -5478,6 +6510,14 @@ class LevelGenerator:
 
                     # RULE: Must have at least 2 clearable neighbors
                     if clearable_count < 2:
+                        invalid_obstacles.append(pos)
+
+                # Validate unknown tiles - must be covered by upper layer
+                # Position format is "col_row" (x_y)
+                elif attr == "unknown":
+                    col, row = map(int, pos.split('_'))
+                    # Unknown tiles MUST be covered by upper layers to show curtain effect
+                    if not self._is_position_covered_by_upper(level, i, col, row):
                         invalid_obstacles.append(pos)
 
             # Remove invalid obstacles

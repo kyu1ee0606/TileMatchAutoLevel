@@ -18,6 +18,8 @@ interface GameBoardProps {
   onTileClick: (tile: GameTile, event?: React.MouseEvent) => void;
   tileSize?: number;
   showDebug?: boolean;
+  showStats?: boolean;
+  fixedGridSize?: number; // If set, use fixed NxN grid instead of dynamic bounds
 }
 
 export function GameBoard({
@@ -25,6 +27,8 @@ export function GameBoard({
   onTileClick,
   tileSize = 48,
   showDebug = false,
+  showStats = true,
+  fixedGridSize,
 }: GameBoardProps) {
   // Store initial bounds and tile count (to detect new level)
   const initialBoundsRef = useRef<BoardBounds | null>(null);
@@ -66,6 +70,22 @@ export function GameBoard({
 
   // Use initial bounds or calculate temporary bounds for first render
   const bounds = useMemo(() => {
+    // If fixedGridSize is provided, use fixed bounds
+    if (fixedGridSize) {
+      // Calculate maxLayer from tiles
+      let maxLayer = 0;
+      for (const tile of tiles) {
+        maxLayer = Math.max(maxLayer, tile.layer);
+      }
+      return {
+        minRow: 0,
+        maxRow: fixedGridSize - 1,
+        minCol: 0,
+        maxCol: fixedGridSize - 1,
+        maxLayer,
+      };
+    }
+
     if (initialBoundsRef.current) {
       return initialBoundsRef.current;
     }
@@ -94,7 +114,7 @@ export function GameBoard({
       maxCol: maxCol === -Infinity ? 7 : maxCol,
       maxLayer,
     };
-  }, [tiles]);
+  }, [tiles, fixedGridSize]);
 
   // Calculate board dimensions (fixed size based on initial bounds)
   // Add extra 0.5 tile space for odd layer offset
@@ -130,10 +150,12 @@ export function GameBoard({
   return (
     <div className="game-board-container">
       {/* Stats bar */}
-      <div className="flex justify-between items-center mb-2 px-2 text-sm text-gray-400">
-        <span>Tiles: {remainingTiles}</span>
-        <span>Selectable: {selectableTiles}</span>
-      </div>
+      {showStats && (
+        <div className="flex justify-between items-center mb-2 px-2 text-sm text-gray-400">
+          <span>Tiles: {remainingTiles}</span>
+          <span>Selectable: {selectableTiles}</span>
+        </div>
+      )}
 
       {/* Game board */}
       <div

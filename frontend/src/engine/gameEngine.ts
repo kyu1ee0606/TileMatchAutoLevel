@@ -751,10 +751,10 @@ export class GameEngine {
     // craftBoxes에 저장
     this.state.craftBoxes.set(`${layerIdx}_${pos}`, stackTileKeys);
 
-    // Craft 타일은 목표에 추가
-    if (isCraft) {
+    // Craft/Stack 타일은 목표에 추가 (totalCount만큼)
+    if (isCraft || isStack) {
       const currentGoal = this.state.goalsRemaining.get(tileTypeStr) || 0;
-      this.state.goalsRemaining.set(tileTypeStr, currentGoal + 1);
+      this.state.goalsRemaining.set(tileTypeStr, currentGoal + totalCount);
     }
   }
 
@@ -1043,6 +1043,7 @@ export class GameEngine {
 
     // 링크된 타일 찾기
     let linkedTile: TileState | null = null;
+    let isReverseLinkTarget = false;  // 클릭한 타일이 링크 타겟(link 속성이 없는 쪽)인지 여부
     if (tile.effectType === TileEffectType.LINK_EAST ||
         tile.effectType === TileEffectType.LINK_WEST ||
         tile.effectType === TileEffectType.LINK_SOUTH ||
@@ -1052,13 +1053,28 @@ export class GameEngine {
         linkedTile = layer.get(linkedPos) || null;
       }
     } else {
-      // 역방향 링크 확인
+      // 역방향 링크 확인 (이 타일을 가리키는 링크 타일이 있는지)
       for (const [, t] of layer) {
         if (t.picked) continue;
         if (t.effectData.linkedPos === position) {
           linkedTile = t;
+          isReverseLinkTarget = true;
           break;
         }
+      }
+    }
+
+    // 역방향 링크 타겟인 경우: 링크 소스 타일의 canPick 상태 확인
+    // 링크 타일 중 하나라도 막혀있으면 둘 다 선택 불가능해야 함
+    if (isReverseLinkTarget && linkedTile) {
+      // linkedTile이 링크 소스 (link 속성을 가진 타일)
+      // 소스 타일의 canPick이 false면 타겟도 선택 불가
+      if (linkedTile.effectData.canPick !== true) {
+        return false;
+      }
+      // 소스 타일이 상위 레이어에 막혀있으면 선택 불가
+      if (this.isBlockedByUpper(linkedTile)) {
+        return false;
       }
     }
 
@@ -1172,8 +1188,8 @@ export class GameEngine {
           }
           clearedByType.set(tileType, (clearedByType.get(tileType) || 0) + 1);
 
-          // 골 감소
-          if (removed.isCraftTile && removed.originGoalType) {
+          // 골 감소 (Craft와 Stack 타일 모두 처리)
+          if ((removed.isCraftTile || removed.isStackTile) && removed.originGoalType) {
             const goalKey = removed.originGoalType;
             if (this.state.goalsRemaining.has(goalKey)) {
               this.state.goalsRemaining.set(
@@ -1679,14 +1695,34 @@ export class GameEngine {
     }> = [];
 
     for (const [layerIdx, layerTiles] of this.state.tiles) {
-      for (const [, tile] of layerTiles) {
+      for (const [pos, tile] of layerTiles) {
         // Craft/Stack 박스는 선택 불가능
         const isCraftStackBox = tile.tileType.startsWith('craft_') || tile.tileType.startsWith('stack_');
-        const isSelectable = !tile.picked &&
+
+        // 기본 선택 가능 여부
+        let isSelectable = !tile.picked &&
           !isCraftStackBox &&
           this.canPickTile(tile) &&
           !this.isBlockedByUpper(tile) &&
           !(tile.isStackTile && this.isStackBlocked(tile));
+
+        // 역방향 링크 타겟 확인: 이 타일을 가리키는 링크 타일이 있고, 그 타일이 막혀있으면 선택 불가
+        if (isSelectable && tile.effectType !== TileEffectType.LINK_EAST &&
+            tile.effectType !== TileEffectType.LINK_WEST &&
+            tile.effectType !== TileEffectType.LINK_SOUTH &&
+            tile.effectType !== TileEffectType.LINK_NORTH) {
+          // 이 타일을 가리키는 링크 타일 찾기
+          for (const [, t] of layerTiles) {
+            if (t.picked) continue;
+            if (t.effectData.linkedPos === pos) {
+              // 링크 소스 타일이 있음 - canPick이 false면 이 타일도 선택 불가
+              if (t.effectData.canPick !== true || this.isBlockedByUpper(t)) {
+                isSelectable = false;
+              }
+              break;
+            }
+          }
+        }
 
         // Unknown 타일은 위에 다른 타일이 있을 때만 숨김 (위 타일이 제거되면 공개)
         const isBlockedByUpperTile = this.isBlockedByUpper(tile);

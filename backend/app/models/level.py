@@ -122,6 +122,9 @@ class GenerationParams:
     # Tutorial gimmick settings (for gimmick unlock levels)
     tutorial_gimmick: Optional[str] = None  # Gimmick to introduce on this level (placed on top layer)
     tutorial_gimmick_min_count: int = 2  # Minimum count for tutorial gimmick (guaranteed placement)
+    # Level number for research-based unknown ratio calculation
+    # [연구 근거] Room 8 Studio: 레벨 175+ 히든 타일 본격 도입
+    level_number: Optional[int] = None  # Current level number for gimmick unlock & unknown ratio
 
     def __post_init__(self):
         """Set default values after initialization."""

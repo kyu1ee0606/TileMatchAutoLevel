@@ -8,8 +8,10 @@ import { Button } from '../ui';
 import { useUIStore } from '../../stores/uiStore';
 import { generateLevel } from '../../api/generate';
 import GamePlayer from '../GamePlayer';
-import type { GameStats, LevelInfo } from '../../types/game';
-import type { GenerationParams, DifficultyGrade } from '../../types';
+import GameBoard from '../GamePlayer/GameBoard';
+import { createGameEngine } from '../../engine/gameEngine';
+import type { GameStats, LevelInfo, GameTile } from '../../types/game';
+import type { GenerationParams, DifficultyGrade, LevelJSON } from '../../types';
 import {
   ProductionBatch,
   ProductionLevel,
@@ -230,16 +232,31 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
           }));
 
           try {
-            // Generate level
+            // Generate level with randomized variety
+            // Randomize pattern type for visual diversity
+            const patternTypes: Array<'aesthetic' | 'geometric' | 'clustered'> = ['aesthetic', 'geometric', 'clustered'];
+            const patternType = patternTypes[Math.floor(Math.random() * patternTypes.length)];
+
+            // Let backend handle symmetry randomly (removed fixed 'both')
+            // This allows horizontal, vertical, none, or both symmetry for variety
+
+            // Randomize goal directions for variety
+            const goalDirections: Array<'s' | 'n' | 'e' | 'w'> = ['s', 'n', 'e', 'w'];
+            const goalDirection = goalDirections[Math.floor(Math.random() * goalDirections.length)];
+
+            // Randomize goal types between craft and stack
+            const goalTypes: Array<'craft' | 'stack'> = ['craft', 'stack'];
+            const goalType = goalTypes[Math.floor(Math.random() * goalTypes.length)];
+
             const params: GenerationParams = {
               target_difficulty: targetDifficulty,
               grid_size: [7, 7],
               max_layers: Math.min(7, 3 + Math.floor(targetDifficulty * 4)),
               tile_types: ['t1', 't2', 't3', 't4', 't5', 't6'].slice(0, 3 + Math.floor(targetDifficulty * 3)),
               obstacle_types: [],
-              goals: [{ type: 'craft', direction: 's', count: Math.max(2, Math.floor(3 + targetDifficulty * 2)) }],
-              symmetry_mode: 'both',
-              pattern_type: 'aesthetic',
+              goals: [{ type: goalType, direction: goalDirection, count: Math.max(2, Math.floor(3 + targetDifficulty * 2)) }],
+              // symmetry_mode not specified - let backend choose randomly
+              pattern_type: patternType,
             };
 
             const result = await generateLevel(params, {
@@ -727,6 +744,77 @@ function GenerateTab({
   );
 }
 
+// Helper function to extract gimmicks from level_json
+function extractGimmicksFromLevel(levelJson: LevelJSON): string[] {
+  const gimmicks = new Set<string>();
+  const numLayers = levelJson.layer || 8;
+
+  for (let i = 0; i < numLayers; i++) {
+    const layerKey = `layer_${i}` as `layer_${number}`;
+    const layerData = levelJson[layerKey];
+    if (!layerData || !layerData.tiles) continue;
+
+    for (const pos in layerData.tiles) {
+      const tileData = layerData.tiles[pos];
+      // tileData can be [tileType, attribute] or just [tileType]
+      if (tileData && tileData.length > 1) {
+        const attr = tileData[1];
+        // Filter out tile types (t0, t1, t2, etc.) - only match exact patterns like t0, t1, t2...
+        // Don't filter 'teleport' which also starts with 't'
+        if (attr && typeof attr === 'string' && !attr.match(/^t\d+$/)) {
+          // Normalize gimmick names:
+          // - link_e, link_w, link_n, link_s → link
+          // - ice_1, ice_2, ice_3 → ice
+          // - curtain_open, curtain_close → curtain
+          // - grass_1, grass_2 → grass
+          let baseName = attr;
+          if (attr.startsWith('link_')) {
+            baseName = 'link';
+          } else if (attr.startsWith('curtain_')) {
+            baseName = 'curtain';
+          } else {
+            // Remove numeric suffixes like ice_1, grass_2
+            baseName = attr.replace(/_\d+$/, '');
+          }
+          gimmicks.add(baseName);
+        }
+      }
+    }
+  }
+
+  return Array.from(gimmicks);
+}
+
+// Gimmick display names in Korean
+const GIMMICK_NAMES: Record<string, string> = {
+  chain: '체인',
+  ice: '얼음',
+  frog: '개구리',
+  grass: '잔디',
+  link: '링크',
+  bomb: '폭탄',
+  curtain: '커튼',
+  teleport: '텔레포트',
+  unknown: '???',
+  craft: '조합',
+  stack: '스택',
+};
+
+// Gimmick colors for display
+const GIMMICK_COLORS: Record<string, string> = {
+  chain: 'bg-yellow-600',
+  ice: 'bg-blue-400',
+  frog: 'bg-green-500',
+  grass: 'bg-green-700',
+  link: 'bg-purple-500',
+  bomb: 'bg-red-500',
+  curtain: 'bg-gray-500',
+  teleport: 'bg-indigo-500',
+  unknown: 'bg-gray-600',
+  craft: 'bg-orange-500',
+  stack: 'bg-pink-500',
+};
+
 // Test Tab Component - 레벨 직접 플레이 테스트
 function TestTab({
   batchId,
@@ -743,6 +831,11 @@ function TestTab({
   const [filter, setFilter] = useState<LevelStatus | 'all'>('all');
   const [searchQuery, setSearchQuery] = useState('');
 
+  // Preview tiles for selected level
+  const [previewTiles, setPreviewTiles] = useState<GameTile[]>([]);
+  const [previewScale, setPreviewScale] = useState(1);
+  const previewContainerRef = useRef<HTMLDivElement>(null);
+
   // Playtest result state (after game ends)
   const [showResultForm, setShowResultForm] = useState(false);
   const [gameResult, setGameResult] = useState<{ won: boolean; stats: GameStats } | null>(null);
@@ -754,6 +847,65 @@ function TestTab({
   useEffect(() => {
     loadLevels();
   }, [batchId, filter]);
+
+  // Generate preview tiles when selected level changes
+  useEffect(() => {
+    if (!selectedLevel) {
+      setPreviewTiles([]);
+      return;
+    }
+
+    try {
+      // Parse level data
+      let levelToUse = selectedLevel.level_json as unknown as Record<string, unknown>;
+      if (levelToUse.map && typeof levelToUse.map === 'object') {
+        levelToUse = levelToUse.map as Record<string, unknown>;
+      }
+
+      // Create game engine to extract tiles
+      const engine = createGameEngine();
+      engine.initializeFromLevel(levelToUse);
+      const tiles = engine.getTilesForUI();
+
+      // Convert to GameTile format
+      const gameTiles: GameTile[] = tiles.map(t => ({
+        id: t.id,
+        type: t.type,
+        attribute: t.attribute,
+        layer: t.layer,
+        row: t.row,
+        col: t.col,
+        isSelectable: t.isSelectable,
+        isSelected: false,
+        isMatched: false,
+        isHidden: t.isHidden,
+        effectData: t.effectData,
+        extra: t.extra,
+      }));
+
+      // Calculate scale based on fixed 7x7 grid and container size
+      // Fixed board size: 7 tiles + 1 extra tile + 0.5 tile for odd layer offset
+      const fixedTileSize = 48;
+      const fixedGridSize = 7;
+      const fixedBoardWidth = (fixedGridSize) * fixedTileSize + fixedTileSize + fixedTileSize * 0.5;
+      const fixedBoardHeight = fixedBoardWidth;
+
+      if (previewContainerRef.current) {
+        const containerWidth = previewContainerRef.current.clientWidth;
+        const containerHeight = previewContainerRef.current.clientHeight;
+        const scaleX = containerWidth / fixedBoardWidth;
+        const scaleY = containerHeight / fixedBoardHeight;
+        const scale = Math.min(scaleX, scaleY) * 0.95; // Fit container with slight padding
+        setPreviewScale(scale);
+      } else {
+        setPreviewScale(1.0);
+      }
+      setPreviewTiles(gameTiles);
+    } catch (err) {
+      console.error('Failed to generate preview tiles:', err);
+      setPreviewTiles([]);
+    }
+  }, [selectedLevel]);
 
   const loadLevels = async () => {
     setIsLoading(true);
@@ -1045,7 +1197,7 @@ function TestTab({
                         레벨 {level.meta.level_number}
                       </div>
                       <div className="text-xs text-gray-400">
-                        난이도: {(level.meta.actual_difficulty * 100).toFixed(0)}%
+                        난이도: {level.meta.actual_difficulty.toFixed(3)} ({(level.meta.actual_difficulty * 100).toFixed(0)}%)
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
@@ -1057,6 +1209,26 @@ function TestTab({
                       </span>
                     </div>
                   </div>
+                  {/* Gimmicks indicator */}
+                  {(() => {
+                    const gimmicks = extractGimmicksFromLevel(level.level_json);
+                    if (gimmicks.length === 0) return null;
+                    return (
+                      <div className="mt-1 flex gap-1">
+                        {gimmicks.slice(0, 3).map(gimmick => (
+                          <span
+                            key={gimmick}
+                            className={`px-1.5 py-0.5 rounded text-[10px] text-white ${GIMMICK_COLORS[gimmick] || 'bg-gray-600'}`}
+                          >
+                            {GIMMICK_NAMES[gimmick] || gimmick}
+                          </span>
+                        ))}
+                        {gimmicks.length > 3 && (
+                          <span className="text-[10px] text-gray-500">+{gimmicks.length - 3}</span>
+                        )}
+                      </div>
+                    );
+                  })()}
                   {level.meta.playtest_results && level.meta.playtest_results.length > 0 && (
                     <div className="mt-1 text-xs text-gray-500">
                       테스트 {level.meta.playtest_results.length}회
@@ -1074,7 +1246,7 @@ function TestTab({
       </div>
 
       {/* Level preview & play */}
-      <div className="flex-1 flex flex-col bg-gray-800 rounded-lg overflow-hidden">
+      <div className="flex-1 flex flex-col bg-gray-800 rounded-lg">
         {selectedLevel ? (
           <>
             {/* Level info */}
@@ -1088,14 +1260,19 @@ function TestTab({
                 </span>
               </div>
 
-              <div className="grid grid-cols-3 gap-4 text-sm">
+              <div className="grid grid-cols-4 gap-4 text-sm">
                 <div>
                   <span className="text-gray-400">목표 난이도:</span>
-                  <span className="text-white ml-2">{(selectedLevel.meta.target_difficulty * 100).toFixed(0)}%</span>
+                  <span className="text-white ml-2">{selectedLevel.meta.target_difficulty.toFixed(3)} ({(selectedLevel.meta.target_difficulty * 100).toFixed(0)}%)</span>
                 </div>
                 <div>
                   <span className="text-gray-400">실제 난이도:</span>
-                  <span className="text-white ml-2">{(selectedLevel.meta.actual_difficulty * 100).toFixed(0)}%</span>
+                  <span className="text-white ml-2">{selectedLevel.meta.actual_difficulty.toFixed(3)} ({(selectedLevel.meta.actual_difficulty * 100).toFixed(0)}%)</span>
+                </div>
+                <div>
+                  <span className="text-gray-400">타일:</span>
+                  <span className="text-white ml-2">{previewTiles.length}개</span>
+                  <span className="text-gray-500 ml-1">({previewTiles.filter(t => t.isSelectable).length} 선택가능)</span>
                 </div>
                 <div>
                   <span className="text-gray-400">상태:</span>
@@ -1104,6 +1281,27 @@ function TestTab({
                   </span>
                 </div>
               </div>
+
+              {/* Gimmicks used in level */}
+              {(() => {
+                const gimmicks = extractGimmicksFromLevel(selectedLevel.level_json);
+                if (gimmicks.length === 0) return null;
+                return (
+                  <div className="mt-3 flex items-center gap-2">
+                    <span className="text-sm text-gray-400">기믹:</span>
+                    <div className="flex flex-wrap gap-1">
+                      {gimmicks.map(gimmick => (
+                        <span
+                          key={gimmick}
+                          className={`px-2 py-0.5 rounded text-xs text-white ${GIMMICK_COLORS[gimmick] || 'bg-gray-600'}`}
+                        >
+                          {GIMMICK_NAMES[gimmick] || gimmick}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* Previous playtest results */}
               {selectedLevel.meta.playtest_results && selectedLevel.meta.playtest_results.length > 0 && (
@@ -1123,11 +1321,35 @@ function TestTab({
               )}
             </div>
 
-            {/* Play button */}
-            <div className="flex-1 flex items-center justify-center">
-              <Button onClick={handlePlayLevel} className="px-8 py-4 text-lg">
-                ▶ 플레이 시작
-              </Button>
+            {/* Level preview with play button overlay */}
+            <div ref={previewContainerRef} className="flex-1 relative min-h-[400px] overflow-hidden">
+              {/* Background preview - dimmed, no animations */}
+              {previewTiles.length > 0 && selectedLevel && (
+                <div
+                  key={`preview-${selectedLevel.meta.level_number}`}
+                  className="absolute inset-0 flex items-center justify-center opacity-50 pointer-events-none [&_*]:!transition-none"
+                  style={{
+                    transform: `scale(${previewScale})`,
+                    transformOrigin: 'center center'
+                  }}
+                >
+                  <GameBoard
+                    key={`board-${selectedLevel.meta.level_number}`}
+                    tiles={previewTiles}
+                    onTileClick={() => {}}
+                    tileSize={48}
+                    showStats={false}
+                    fixedGridSize={7}
+                  />
+                </div>
+              )}
+
+              {/* Play button overlay */}
+              <div className="absolute inset-0 flex items-center justify-center z-10">
+                <Button onClick={handlePlayLevel} className="px-8 py-4 text-lg shadow-2xl bg-indigo-600 hover:bg-indigo-500">
+                  ▶ 플레이 시작
+                </Button>
+              </div>
             </div>
           </>
         ) : (
@@ -1451,7 +1673,7 @@ function ReviewTab({
                 </button>
                 <span className={getGradeColor(level.meta.grade)}>{level.meta.grade}</span>
                 <span className="text-xs text-gray-400">
-                  {(level.meta.actual_difficulty * 100).toFixed(0)}%
+                  {level.meta.actual_difficulty.toFixed(3)}
                 </span>
                 <span className={`text-xs px-2 py-0.5 rounded ${getStatusColor(level.meta.status)}`}>
                   {getStatusLabel(level.meta.status)}

@@ -143,9 +143,18 @@ export function GameBoard({
     };
   };
 
-  // Count remaining tiles
-  const remainingTiles = tiles.filter(t => !t.isMatched).length;
-  const selectableTiles = tiles.filter(t => t.isSelectable && !t.isMatched).length;
+  // Count remaining tiles (exclude craft/stack box tiles from count)
+  const remainingTiles = tiles.filter(t =>
+    !t.isMatched &&
+    !t.type.startsWith('craft_') &&
+    !t.type.startsWith('stack_')
+  ).length;
+  const selectableTiles = tiles.filter(t =>
+    t.isSelectable &&
+    !t.isMatched &&
+    !t.type.startsWith('craft_') &&
+    !t.type.startsWith('stack_')
+  ).length;
 
   return (
     <div className="game-board-container">

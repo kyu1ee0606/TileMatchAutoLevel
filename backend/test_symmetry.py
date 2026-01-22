@@ -12,7 +12,7 @@ def generate_level(pattern_type: str, symmetry_mode: str) -> dict:
         "max_layers": 3,
         "tile_types": ["t0", "t1", "t2"],
         "obstacle_types": [],
-        "goals": [{"type": "craft", "direction": "s", "count": 1}],
+        "goals": [{"type": "craft", "direction": "s", "count": 3}],
         "pattern_type": pattern_type,
         "symmetry_mode": symmetry_mode,
         "target_difficulty": 0.3

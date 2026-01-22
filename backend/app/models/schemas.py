@@ -20,7 +20,7 @@ class GoalConfig(BaseModel):
     """Goal configuration for level generation."""
     type: str = Field(..., description="Goal type (craft, stack) or full type (craft_s, stack_s)")
     direction: Optional[str] = Field(default=None, description="Direction suffix (s/n/e/w) for craft/stack goals")
-    count: int = Field(..., ge=1, description="Required count to collect")
+    count: int = Field(..., ge=3, description="Required count to collect (minimum 3 for match-3 game)")
 
 
 class ObstacleCountConfig(BaseModel):

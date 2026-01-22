@@ -38,6 +38,7 @@ export interface TileEffectData {
   linkedPos?: string;      // link
   isOpen?: boolean;        // curtain
   onFrog?: boolean;        // frog가 위에 있는지
+  currentTileType?: string; // stack/craft box의 현재 스폰된 타일 타입
 }
 
 export interface TileState {
@@ -181,8 +182,13 @@ function getFullKey(tile: TileState): string {
 
 // ==================== 게임 엔진 클래스 ====================
 
+export interface InitializeOptions {
+  previewMode?: boolean;  // true: 맵툴 모드 (첫 타일 스폰 안 함, 원래 카운트 표시)
+}
+
 export class GameEngine {
   private state: GameState;
+  private previewMode: boolean = false;
 
   constructor() {
     this.state = this.createEmptyState();
@@ -401,8 +407,9 @@ export class GameEngine {
    * 1단계: 모든 타일 카운트 및 t0 위치 수집
    * 2단계: t0 타일 타입 분배 후 실제 타일 생성
    */
-  initializeFromLevel(levelJson: Record<string, unknown>): void {
+  initializeFromLevel(levelJson: Record<string, unknown>, options?: InitializeOptions): void {
     this.state = this.createEmptyState();
+    this.previewMode = options?.previewMode || false;
 
     const numLayers = typeof levelJson.layer === 'number'
       ? levelJson.layer
@@ -484,6 +491,78 @@ export class GameEngine {
         } else if (tileType.match(/^t\d+$/)) {
           existingTileCounts.set(tileType, (existingTileCounts.get(tileType) || 0) + 1);
         }
+      }
+    }
+
+    // ========== 1.5단계: 총 타일 수가 3의 배수인지 검증 및 수정 ==========
+    // 총 매칭 가능 타일 = 기존 타일 수 + t0 타일 수
+    // 이 값이 3의 배수가 아니면 클리어 불가능!
+    let totalExisting = 0;
+    for (const count of existingTileCounts.values()) {
+      totalExisting += count;
+    }
+    const totalMatchable = totalExisting + t0Positions.length;
+    const totalRemainder = totalMatchable % 3;
+
+    if (totalRemainder !== 0) {
+      console.warn(`[GameEngine] Total matchable tiles (${totalMatchable}) is not divisible by 3!`);
+      console.warn(`[GameEngine] Existing: ${totalExisting}, t0: ${t0Positions.length}, remainder: ${totalRemainder}`);
+
+      // 수정 전략: craft/stack 내부 타일 수를 조정하여 3의 배수로 맞춤
+      // 우선순위: 가장 많은 내부 타일을 가진 craft/stack에서 조정
+      if (craftStackInfo.length > 0) {
+        // 내부 타일 수가 가장 많은 것부터 정렬
+        craftStackInfo.sort((a, b) => b.totalCount - a.totalCount);
+
+        const tilesToAdjust = totalRemainder; // 1 or 2
+        const targetInfo = craftStackInfo[0];
+
+        // 레벨 JSON에서 해당 타일 데이터 직접 수정
+        const layerKey = `layer_${targetInfo.layerIdx}`;
+        const layerData = levelJson[layerKey] as Record<string, unknown>;
+        if (layerData && layerData.tiles) {
+          const tiles = layerData.tiles as Record<string, unknown[]>;
+          const tileData = tiles[targetInfo.pos];
+          if (Array.isArray(tileData) && tileData.length > 2) {
+            const extra = tileData[2] as number[];
+            if (Array.isArray(extra) && extra.length > 0) {
+              const oldCount = extra[0];
+              const newCount = Math.max(1, oldCount - tilesToAdjust);
+              extra[0] = newCount;
+
+              console.log(`[GameEngine] Adjusted ${targetInfo.tileType} at ${targetInfo.pos}: ${oldCount} -> ${newCount} inner tiles`);
+
+              // t0Positions에서 해당 항목 제거
+              const keysToRemove = new Set<string>();
+              for (let i = newCount; i < targetInfo.totalCount; i++) {
+                keysToRemove.add(`${targetInfo.layerIdx}_${targetInfo.xIdx}_${targetInfo.yIdx}_${i}`);
+              }
+
+              // 해당 키들을 t0Positions에서 제거
+              for (let i = t0Positions.length - 1; i >= 0; i--) {
+                if (keysToRemove.has(t0Positions[i].key)) {
+                  t0Positions.splice(i, 1);
+                }
+              }
+
+              // craftStackInfo도 업데이트
+              targetInfo.totalCount = newCount;
+
+              // goalCount도 업데이트 (매우 중요!)
+              // goalCount는 해당 타입의 총 내부 타일 수를 나타냄
+              const goalCount = levelJson.goalCount as Record<string, number> | undefined;
+              if (goalCount && goalCount[targetInfo.tileType] !== undefined) {
+                const oldGoalCount = goalCount[targetInfo.tileType];
+                goalCount[targetInfo.tileType] = Math.max(0, oldGoalCount - tilesToAdjust);
+                console.log(`[GameEngine] Adjusted goalCount[${targetInfo.tileType}]: ${oldGoalCount} -> ${goalCount[targetInfo.tileType]}`);
+              }
+
+              console.log(`[GameEngine] After adjustment: total t0 = ${t0Positions.length}, total matchable = ${totalExisting + t0Positions.length}`);
+            }
+          }
+        }
+      } else {
+        console.error(`[GameEngine] Cannot fix: no craft/stack tiles to adjust, and ${totalRemainder} extra tiles`);
       }
     }
 
@@ -614,13 +693,24 @@ export class GameEngine {
     // 링크 타일 상태 업데이트
     this.updateLinkTilesStatus();
 
-    // 목표 로드
+    // 목표 로드 (goalCount가 있으면 사용, 없으면 processStackCraftTile에서 설정한 값 유지)
+    // IMPORTANT: goalCount가 있으면 processStackCraftTile에서 설정한 값을 덮어씀
+    // 이렇게 해야 동일 타입의 여러 craft/stack 타일이 있을 때도 정확한 목표 수가 설정됨
     const goalCount = levelJson.goalCount as Record<string, number> | undefined;
+    console.log('[GameEngine] goalCount from level JSON:', goalCount);
+    console.log('[GameEngine] goalsRemaining before goalCount load:', Object.fromEntries(this.state.goalsRemaining));
+
     if (goalCount) {
+      // goalCount가 있으면 전체 교체 (백엔드와 동일하게 처리)
+      // 백엔드: state.goals_remaining = dict(goal_count)
+      this.state.goalsRemaining.clear();
       for (const [key, count] of Object.entries(goalCount)) {
         this.state.goalsRemaining.set(key, count);
       }
     }
+
+    // Debug: log final goals
+    console.log('[GameEngine] Final goalsRemaining:', Object.fromEntries(this.state.goalsRemaining));
   }
 
   /**
@@ -645,17 +735,20 @@ export class GameEngine {
     console.log(`[Craft] Processing ${tileTypeStr} at pos=${pos}, xIdx=${xIdx}, yIdx=${yIdx}, dir=${direction}, extraData=`, extraData);
 
     // 스택 정보 파싱 - extraData는 [count] 형태
+    // 최소 3개 타일 필요 (match-3 게임 규칙)
     const stackInfo = Array.isArray(extraData) ? extraData : null;
-    const totalCount = stackInfo && stackInfo.length >= 1 && typeof stackInfo[0] === 'number' ? stackInfo[0] : 1;
+    const parsedCount = stackInfo && stackInfo.length >= 1 && typeof stackInfo[0] === 'number' ? stackInfo[0] : 3;
+    const totalCount = Math.max(3, parsedCount);  // 최소 3개 보장
     if (totalCount <= 0) return;
 
-    // Craft/Stack 박스 자체를 타일 맵에 추가 (시각적으로 보이게 함)
+    // 레이어 맵 초기화
     if (!this.state.tiles.has(layerIdx)) {
       this.state.tiles.set(layerIdx, new Map());
     }
     const layerTiles = this.state.tiles.get(layerIdx)!;
 
-    // 박스 타일 생성 (선택 불가능, 배경으로만 표시)
+    // 박스 타일 생성 (Craft만 별도 박스 표시, Stack은 스폰 타일이 대체)
+    // Stack은 박스와 동일 위치에 타일이 표시되므로 별도 박스 불필요
     const boxTile = createTileState({
       tileType: tileTypeStr,  // craft_s, stack_e 등
       layerIdx,
@@ -668,14 +761,24 @@ export class GameEngine {
       craftDirection: direction,
       stackMaxIndex: totalCount,
     });
-    layerTiles.set(pos, boxTile);
+
+    // Craft만 박스 타일을 tiles에 추가 (Stack은 스폰 타일이 동일 위치에 표시됨)
+    if (isCraft) {
+      layerTiles.set(pos, boxTile);
+    }
 
     // 방향별 스폰 위치 오프셋
+    // Stack: 동일 위치에 타일 표시 (박스 위에 겹쳐서)
+    // Craft: offset 위치에 타일 스폰
     let spawnOffsetX = 0, spawnOffsetY = 0;
-    if (direction === 'e') spawnOffsetX = 1;
-    else if (direction === 'w') spawnOffsetX = -1;
-    else if (direction === 's') spawnOffsetY = 1;
-    else if (direction === 'n') spawnOffsetY = -1;
+    if (isCraft) {
+      // Craft만 offset 적용
+      if (direction === 'e') spawnOffsetX = 1;
+      else if (direction === 'w') spawnOffsetX = -1;
+      else if (direction === 's') spawnOffsetY = 1;
+      else if (direction === 'n') spawnOffsetY = -1;
+    }
+    // Stack은 offset 없음 (동일 위치)
 
     // 스폰 위치
     const spawnX = xIdx + spawnOffsetX;
@@ -738,23 +841,35 @@ export class GameEngine {
       stackTileKeys.push(fullKey);
 
       // 첫 번째 타일(crafted)만 tiles 맵에 추가
-      if (isCrafted) {
+      // previewMode: 맵툴에서는 첫 타일 스폰 안 함, 원래 카운트(*3) 유지
+      if (isCrafted && !this.previewMode) {
         if (!this.state.tiles.has(layerIdx)) {
           this.state.tiles.set(layerIdx, new Map());
         }
         const layerTiles = this.state.tiles.get(layerIdx)!;
         layerTiles.set(spawnPos, tile);
         console.log(`[Craft] Added crafted tile at spawnPos=${spawnPos}, layer=${layerIdx}, type=${actualTileType}, tileX=${tileX}, tileY=${tileY}`);
+
+        // 박스에 현재 스폰된 타일 타입 저장 (TileBuster style top indicator)
+        boxTile.effectData.currentTileType = actualTileType;
+
+        // 첫 번째 타일 스폰 시 remaining 1 차감 (count는 남은 배출 횟수)
+        // count=3이면 첫 스폰 후 remaining=2 (*2 표시)
+        boxTile.effectData.remaining = (boxTile.effectData.remaining || totalCount) - 1;
+      } else if (isCrafted && this.previewMode) {
+        // previewMode: 스폰 안 함, remaining 유지 (원래 count 표시)
+        console.log(`[Craft] Preview mode - skipping spawn at spawnPos=${spawnPos}, remaining=${boxTile.effectData.remaining}`);
       }
     }
 
     // craftBoxes에 저장
     this.state.craftBoxes.set(`${layerIdx}_${pos}`, stackTileKeys);
 
-    // Craft/Stack 타일은 목표에 추가 (totalCount만큼)
+    // Note: goalCount가 있으면 나중에 덮어씌워짐
+    // goalCount가 없는 경우를 대비해 여기서 누적 (동일 타입 여러 박스 처리)
     if (isCraft || isStack) {
-      const currentGoal = this.state.goalsRemaining.get(tileTypeStr) || 0;
-      this.state.goalsRemaining.set(tileTypeStr, currentGoal + totalCount);
+      const currentCount = this.state.goalsRemaining.get(tileTypeStr) || 0;
+      this.state.goalsRemaining.set(tileTypeStr, currentCount + totalCount);
     }
   }
 
@@ -813,6 +928,22 @@ export class GameEngine {
 
     // tiles 맵에 추가
     layerTiles.set(spawnPos, nextTile);
+
+    // 박스의 현재 스폰 타일 타입 업데이트 (TileBuster style top indicator)
+    if (rootKey) {
+      const parts = rootKey.split('_');
+      if (parts.length >= 3) {
+        const boxLayerIdx = parseInt(parts[0], 10);
+        const boxPos = `${parts[1]}_${parts[2]}`;
+        const boxLayerTiles = this.state.tiles.get(boxLayerIdx);
+        if (boxLayerTiles) {
+          const boxTile = boxLayerTiles.get(boxPos);
+          if (boxTile) {
+            boxTile.effectData.currentTileType = nextTile.tileType;
+          }
+        }
+      }
+    }
   }
 
   /**
@@ -1192,10 +1323,10 @@ export class GameEngine {
           if ((removed.isCraftTile || removed.isStackTile) && removed.originGoalType) {
             const goalKey = removed.originGoalType;
             if (this.state.goalsRemaining.has(goalKey)) {
-              this.state.goalsRemaining.set(
-                goalKey,
-                Math.max(0, this.state.goalsRemaining.get(goalKey)! - 1)
-              );
+              const oldVal = this.state.goalsRemaining.get(goalKey)!;
+              const newVal = Math.max(0, oldVal - 1);
+              this.state.goalsRemaining.set(goalKey, newVal);
+              console.log(`[GameEngine] Goal decreased: ${goalKey} ${oldVal} -> ${newVal}`);
             }
           }
         }
@@ -1312,16 +1443,64 @@ export class GameEngine {
       }
     }
 
-    // 남은 타일 확인
+    // 남은 타일 확인 (craft/stack 박스 타일은 제외 - 내부 타일만 카운트)
     let remainingTiles = 0;
-    for (const layer of this.state.tiles.values()) {
-      for (const tile of layer.values()) {
-        if (!tile.picked) remainingTiles++;
+    const remainingTileInfo: { layer: number; pos: string; type: string; isCraft?: boolean; isStack?: boolean }[] = [];
+
+    // 1. tiles 맵에서 카운트 (현재 보드에 있는 타일)
+    for (const [layerIdx, layer] of this.state.tiles) {
+      for (const [pos, tile] of layer) {
+        // craft/stack 박스 타일은 카운트에서 제외 (tileType이 'craft_' 또는 'stack_'으로 시작)
+        const isBoxTile = tile.tileType.startsWith('craft_') || tile.tileType.startsWith('stack_');
+        if (!tile.picked && !isBoxTile) {
+          remainingTiles++;
+          remainingTileInfo.push({
+            layer: layerIdx,
+            pos,
+            type: tile.tileType,
+            isCraft: tile.isCraftTile,
+            isStack: tile.isStackTile,
+          });
+        }
       }
+    }
+
+    // 2. stackedTiles에서 아직 스폰되지 않은 타일 카운트
+    // (picked가 false이고 아직 tiles 맵에 추가되지 않은 타일들)
+    const tilesInMap = new Set<TileState>();
+    for (const [, layer] of this.state.tiles) {
+      for (const [, tile] of layer) {
+        tilesInMap.add(tile);
+      }
+    }
+
+    for (const [key, tile] of this.state.stackedTiles) {
+      if (!tile.picked && !tilesInMap.has(tile)) {
+        remainingTiles++;
+        remainingTileInfo.push({
+          layer: tile.layerIdx,
+          pos: key,
+          type: tile.tileType,
+          isCraft: tile.isCraftTile,
+          isStack: tile.isStackTile,
+        });
+      }
+    }
+
+    // Debug logging for end-game state
+    if (remainingTiles <= 5 || this.state.dockTiles.length === 0) {
+      console.log('[GameEngine] checkGameState:', {
+        allGoalsCleared,
+        goalsRemaining: Object.fromEntries(this.state.goalsRemaining),
+        remainingTiles,
+        remainingTileInfo,
+        dockTiles: this.state.dockTiles.length,
+      });
     }
 
     // 승리 조건
     if (allGoalsCleared && remainingTiles === 0 && this.state.dockTiles.length === 0) {
+      console.log('[GameEngine] CLEARED!');
       this.state.cleared = true;
       return;
     }
@@ -1679,6 +1858,10 @@ export class GameEngine {
     isHidden: boolean;
     effectData: TileEffectData;
     extra?: number[];
+    isStackTile?: boolean;
+    isCraftTile?: boolean;
+    stackIndex?: number;
+    stackMaxIndex?: number;
   }> {
     const result: Array<{
       id: string;
@@ -1692,6 +1875,10 @@ export class GameEngine {
       isHidden: boolean;
       effectData: TileEffectData;
       extra?: number[];
+      isStackTile?: boolean;
+      isCraftTile?: boolean;
+      stackIndex?: number;
+      stackMaxIndex?: number;
     }> = [];
 
     for (const [layerIdx, layerTiles] of this.state.tiles) {
@@ -1746,6 +1933,11 @@ export class GameEngine {
           isHidden,
           effectData: tile.effectData,
           extra,
+          // Stack/Craft tile visual info
+          isStackTile: tile.isStackTile,  // Only true for actual stack tiles
+          isCraftTile: tile.isCraftTile,  // Only true for craft spawned tiles
+          stackIndex: tile.isStackTile && tile.stackIndex >= 0 ? tile.stackIndex : undefined,
+          stackMaxIndex: tile.isStackTile && tile.stackMaxIndex >= 0 ? tile.stackMaxIndex : undefined,
         });
       }
     }

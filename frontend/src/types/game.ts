@@ -11,6 +11,7 @@ export interface TileEffectData {
   linkedPos?: string;      // link 연결 위치
   isOpen?: boolean;        // curtain 열림 여부
   onFrog?: boolean;        // frog가 위에 있는지
+  currentTileType?: string; // stack/craft box의 현재 스폰된 타일 타입
 }
 
 /** 게임 내 타일 상태 */
@@ -27,6 +28,11 @@ export interface GameTile {
   isHidden: boolean;    // 숨겨진 상태 (unknown, curtain 등)
   extra?: number[];     // 추가 데이터 (craft/stack의 타일 수 등)
   effectData?: TileEffectData; // 기믹 효과 상태
+  // Stack/Craft tile visual info
+  isStackTile?: boolean;   // 스택에서 스폰된 타일인지
+  isCraftTile?: boolean;   // 크래프트에서 스폰된 타일인지
+  stackIndex?: number;     // 현재 스택 인덱스 (0부터)
+  stackMaxIndex?: number;  // 최대 스택 인덱스 (남은 타일 수 계산용)
 }
 
 /** 슬롯 영역의 타일 */

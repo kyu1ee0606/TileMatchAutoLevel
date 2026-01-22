@@ -23,6 +23,11 @@ interface GameTile {
   isHidden: boolean;
   effectData?: TileEffectData;
   extra?: number[];
+  // Stack/Craft visual info
+  isStackTile?: boolean;
+  isCraftTile?: boolean;
+  stackIndex?: number;
+  stackMaxIndex?: number;
 }
 
 interface SlotTile {
@@ -183,6 +188,11 @@ export function GamePlayer({ levelData, levelInfo, onGameEnd, onBack }: GamePlay
       isHidden: t.isHidden,
       effectData: t.effectData,
       extra: t.extra,
+      // Stack/Craft visual info
+      isStackTile: t.isStackTile,
+      isCraftTile: t.isCraftTile,
+      stackIndex: t.stackIndex,
+      stackMaxIndex: t.stackMaxIndex,
     }));
     setTiles(uiTiles);
 

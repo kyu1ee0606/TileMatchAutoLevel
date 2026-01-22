@@ -48,6 +48,139 @@ class LevelGenerator:
     _recent_pattern_categories: List[int] = []
     _PATTERN_HISTORY_SIZE = 5  # Remember last N pattern categories to avoid
 
+    # ============================================================
+    # Tile Creation Helper Methods
+    # ============================================================
+    # All tile data structures should be created through these methods
+    # to ensure consistency and easy modification of tile format.
+
+    @staticmethod
+    def _create_tile(tile_type: str, attribute: str = "", extra: Optional[List] = None) -> List:
+        """Create a tile data structure.
+
+        Args:
+            tile_type: The tile type (t1-t6, craft_s, stack_n, etc.)
+            attribute: The attribute/gimmick (chain, ice_1, frog, etc.)
+            extra: Additional data (goal count, teleport pair id, etc.)
+
+        Returns:
+            Tile data as list: [tile_type, attribute] or [tile_type, attribute, extra]
+        """
+        if extra is not None:
+            return [tile_type, attribute, extra]
+        return [tile_type, attribute]
+
+    @staticmethod
+    def _place_tile(tiles: Dict[str, List], pos: str, tile_type: str,
+                    attribute: str = "", extra: Optional[List] = None) -> None:
+        """Place a tile at the specified position.
+
+        Args:
+            tiles: The tiles dictionary to modify
+            pos: Position string (e.g., "3_4")
+            tile_type: The tile type
+            attribute: The attribute/gimmick
+            extra: Additional data
+        """
+        tiles[pos] = LevelGenerator._create_tile(tile_type, attribute, extra)
+
+    # Minimum count for craft/stack goals (match-3 game rule)
+    MIN_GOAL_COUNT = 3
+
+    @staticmethod
+    def _create_goal_tile(goal_type: str, count: int) -> List:
+        """Create a goal tile (craft/stack) data structure.
+
+        Args:
+            goal_type: Goal type with direction (craft_s, stack_n, etc.)
+            count: Number of tiles the goal produces (minimum 3)
+
+        Returns:
+            Goal tile data as list: [goal_type, "", [count]]
+        """
+        # Enforce minimum count of 3 for match-3 game rule
+        safe_count = max(LevelGenerator.MIN_GOAL_COUNT, count)
+        return [goal_type, "", [safe_count]]
+
+    @staticmethod
+    def _place_goal_tile(tiles: Dict[str, List], pos: str, goal_type: str, count: int) -> None:
+        """Place a goal tile at the specified position.
+
+        Args:
+            tiles: The tiles dictionary to modify
+            pos: Position string
+            goal_type: Goal type with direction
+            count: Number of tiles the goal produces
+        """
+        tiles[pos] = LevelGenerator._create_goal_tile(goal_type, count)
+
+    @staticmethod
+    def _get_tile_type(tile_data: List) -> Optional[str]:
+        """Extract tile type from tile data.
+
+        Args:
+            tile_data: Tile data list
+
+        Returns:
+            Tile type string or None if invalid
+        """
+        if tile_data and isinstance(tile_data, list) and len(tile_data) > 0:
+            return tile_data[0]
+        return None
+
+    @staticmethod
+    def _get_tile_attribute(tile_data: List) -> Optional[str]:
+        """Extract attribute from tile data.
+
+        Args:
+            tile_data: Tile data list
+
+        Returns:
+            Attribute string or None if not present
+        """
+        if tile_data and isinstance(tile_data, list) and len(tile_data) > 1:
+            return tile_data[1]
+        return None
+
+    @staticmethod
+    def _get_tile_extra(tile_data: List) -> Optional[List]:
+        """Extract extra data from tile data.
+
+        Args:
+            tile_data: Tile data list
+
+        Returns:
+            Extra data list or None if not present
+        """
+        if tile_data and isinstance(tile_data, list) and len(tile_data) > 2:
+            return tile_data[2]
+        return None
+
+    @staticmethod
+    def _set_tile_attribute(tile_data: List, attribute: str) -> None:
+        """Set the attribute of a tile in place.
+
+        Args:
+            tile_data: Tile data list to modify
+            attribute: New attribute value
+        """
+        if tile_data and isinstance(tile_data, list) and len(tile_data) > 1:
+            tile_data[1] = attribute
+
+    @staticmethod
+    def _set_tile_extra(tile_data: List, extra: List) -> None:
+        """Set the extra data of a tile in place.
+
+        Args:
+            tile_data: Tile data list to modify
+            extra: New extra data value
+        """
+        if tile_data and isinstance(tile_data, list):
+            if len(tile_data) > 2:
+                tile_data[2] = extra
+            elif len(tile_data) == 2:
+                tile_data.append(extra)
+
     @staticmethod
     def calculate_level_similarity(level1: Dict[str, Any], level2: Dict[str, Any]) -> float:
         """Calculate similarity between two levels based on layout patterns.
@@ -220,6 +353,10 @@ class LevelGenerator:
         # Add goals (in strict mode, replace existing tiles instead of adding)
         level = self._add_goals(level, params, strict_mode=has_strict_tile_config)
 
+        # CRITICAL: Fix any goals with count below MIN_GOAL_COUNT
+        # This ensures all craft/stack goals have at least 3 tiles
+        level = self._fix_goal_counts(level)
+
         # Adjust to target difficulty (only if NOT using strict tile config)
         # When user specifies exact tile counts, don't modify them for difficulty
         if not has_strict_tile_config:
@@ -390,10 +527,7 @@ class LevelGenerator:
                 for pos in all_positions:
                     if pos not in used_positions:
                         used_positions.add(pos)
-                        if extra is not None:
-                            new_tiles[pos] = [tile_type, gimmick, extra]
-                        else:
-                            new_tiles[pos] = [tile_type, gimmick]
+                        self._place_tile(new_tiles, pos, tile_type, gimmick, extra)
                         break
 
             # STEP 2: Place neighbor-dependent gimmick tiles using gimmick-specific neighbor rules
@@ -419,10 +553,7 @@ class LevelGenerator:
                     random.shuffle(candidates)
                     pos = candidates[0]
                     used_positions.add(pos)
-                    if extra is not None:
-                        new_tiles[pos] = [tile_type, gimmick, extra]
-                    else:
-                        new_tiles[pos] = [tile_type, gimmick]
+                    self._place_tile(new_tiles, pos, tile_type, gimmick, extra)
                     placed = True
 
                 # Fallback: place anywhere if no good position found
@@ -430,10 +561,7 @@ class LevelGenerator:
                     for pos in all_positions:
                         if pos not in used_positions:
                             used_positions.add(pos)
-                            if extra is not None:
-                                new_tiles[pos] = [tile_type, gimmick, extra]
-                            else:
-                                new_tiles[pos] = [tile_type, gimmick]
+                            self._place_tile(new_tiles, pos, tile_type, gimmick, extra)
                             break
 
             # STEP 3: Place other gimmick tiles (ice, frog, bomb, etc.)
@@ -442,10 +570,7 @@ class LevelGenerator:
                 for pos in all_positions:
                     if pos not in used_positions:
                         used_positions.add(pos)
-                        if extra is not None:
-                            new_tiles[pos] = [tile_type, gimmick, extra]
-                        else:
-                            new_tiles[pos] = [tile_type, gimmick]
+                        self._place_tile(new_tiles, pos, tile_type, gimmick, extra)
                         break
 
             # STEP 4: Place goal tiles (respecting direction constraints)
@@ -474,20 +599,14 @@ class LevelGenerator:
                     random.shuffle(valid_positions)
                     pos = valid_positions[0]
                     used_positions.add(pos)
-                    if extra is not None:
-                        new_tiles[pos] = [tile_type, gimmick, extra]
-                    else:
-                        new_tiles[pos] = [tile_type, gimmick]
+                    self._place_tile(new_tiles, pos, tile_type, gimmick, extra)
                 else:
                     # FALLBACK: If no valid position found, place in any available position
                     # This ensures goals are never lost during reshuffle
                     for pos in all_positions:
                         if pos not in used_positions:
                             used_positions.add(pos)
-                            if extra is not None:
-                                new_tiles[pos] = [tile_type, gimmick, extra]
-                            else:
-                                new_tiles[pos] = [tile_type, gimmick]
+                            self._place_tile(new_tiles, pos, tile_type, gimmick, extra)
                             break
 
             # Update layer with new tiles
@@ -3124,6 +3243,11 @@ class LevelGenerator:
         Returns:
             Modified level with tutorial gimmicks ensured
         """
+        # craft/stack are goal tile types, not attributes - skip
+        if gimmick_type in ("craft", "stack"):
+            logger.info(f"Tutorial gimmick '{gimmick_type}' is a goal tile type, not an attribute - skipping ensure count")
+            return level
+
         num_layers = level.get("layer", 8)
 
         # Map gimmick types to their attribute format
@@ -3535,7 +3659,7 @@ class LevelGenerator:
                                         tile_types.append(td[0])
                             if tile_types:
                                 new_tile_type = random.choice(tile_types)
-                                upper_tiles[cover_pos] = [new_tile_type, ""]
+                                self._place_tile(upper_tiles, cover_pos, new_tile_type, "")
                                 level[upper_layer_key]["tiles"] = upper_tiles
                                 # Update num count
                                 level[upper_layer_key]["num"] = str(len(upper_tiles))
@@ -3907,7 +4031,7 @@ class LevelGenerator:
             if pos not in upper_tiles:
                 # Create a new blocking tile (random type, no gimmick)
                 blocking_tile_type = random.choice(tile_types_list)
-                upper_tiles[pos] = [blocking_tile_type, None]
+                self._place_tile(upper_tiles, pos, blocking_tile_type, "")
                 blocked_count += 1
             else:
                 # If exact position is occupied, try adjacent positions
@@ -3923,7 +4047,7 @@ class LevelGenerator:
                     for adj_pos in adjacent_positions:
                         if adj_pos not in upper_tiles:
                             blocking_tile_type = random.choice(tile_types_list)
-                            upper_tiles[adj_pos] = [blocking_tile_type, None]
+                            self._place_tile(upper_tiles, adj_pos, blocking_tile_type, "")
                             blocked_count += 1
                             break  # Only add one adjacent blocking tile
                 except (ValueError, AttributeError):
@@ -4382,18 +4506,12 @@ class LevelGenerator:
             pos1 = available_positions[i]
             pos2 = available_positions[i + 1]
 
-            # Set teleport with pair ID
-            tiles[pos1][1] = "teleport"
-            if len(tiles[pos1]) < 3:
-                tiles[pos1].append([pair_id])
-            else:
-                tiles[pos1][2] = [pair_id]
+            # Set teleport with pair ID using helper methods
+            self._set_tile_attribute(tiles[pos1], "teleport")
+            self._set_tile_extra(tiles[pos1], [pair_id])
 
-            tiles[pos2][1] = "teleport"
-            if len(tiles[pos2]) < 3:
-                tiles[pos2].append([pair_id])
-            else:
-                tiles[pos2][2] = [pair_id]
+            self._set_tile_attribute(tiles[pos2], "teleport")
+            self._set_tile_extra(tiles[pos2], [pair_id])
 
             added += 2
             counter["teleport"] += 2
@@ -4893,7 +5011,15 @@ class LevelGenerator:
             return (0, 1)  # default: south
 
         def is_valid_goal_position(col: int, row: int, goal_type: str) -> bool:
-            """Check if position is valid for goal considering output direction."""
+            """Check if position is valid for goal considering output direction.
+
+            Rules for craft/stack goals:
+            1. Output position must be within bounds
+            2. Output position must be empty across ALL layers (both craft and stack)
+
+            NOTE: Goal position having tiles in lower layers is handled by clearing them
+            during placement.
+            """
             col_off, row_off = get_output_direction(goal_type)
             output_col = col + col_off
             output_row = row + row_off
@@ -4904,11 +5030,17 @@ class LevelGenerator:
             if output_row < 0 or output_row >= rows:
                 return False
 
-            # For stack goals, output position must not overlap with existing tiles
-            if goal_type.startswith("stack"):
+            # For BOTH craft AND stack goals, output position must not overlap with existing tiles
+            # CRITICAL: Check ALL layers, not just current layer
+            # Both craft and stack spawn tiles at output position, which would conflict with any existing tile
+            if goal_type.startswith("stack") or goal_type.startswith("craft"):
                 output_pos = f"{output_col}_{output_row}"
-                if output_pos in tiles:
-                    return False
+                # Check ALL layers for existing tiles at output position
+                for i in range(num_layers):
+                    layer_key_i = f"layer_{i}"
+                    layer_tiles = level.get(layer_key_i, {}).get("tiles", {})
+                    if output_pos in layer_tiles:
+                        return False
 
             return True
 
@@ -4968,6 +5100,44 @@ class LevelGenerator:
                 return col == mirror_col and row == mirror_row
             return True  # No symmetry, any position works
 
+        def get_mirror_position(col: int, row: int) -> Tuple[int, int]:
+            """Get the mirror position for symmetry mode."""
+            if symmetry_mode == "horizontal":
+                return (cols - 1 - col, row)
+            elif symmetry_mode == "vertical":
+                return (col, rows - 1 - row)
+            elif symmetry_mode == "both":
+                return (cols - 1 - col, rows - 1 - row)
+            return (col, row)
+
+        def get_mirrored_direction(direction: str) -> str:
+            """Get the mirrored goal direction for symmetry mode.
+
+            horizontal symmetry (left-right): e <-> w, n and s stay same
+            vertical symmetry (top-bottom): n <-> s, e and w stay same
+            """
+            if symmetry_mode == "horizontal":
+                if direction == 'e':
+                    return 'w'
+                elif direction == 'w':
+                    return 'e'
+            elif symmetry_mode == "vertical":
+                if direction == 'n':
+                    return 's'
+                elif direction == 's':
+                    return 'n'
+            elif symmetry_mode == "both":
+                # Mirror both axes
+                if direction == 'e':
+                    return 'w'
+                elif direction == 'w':
+                    return 'e'
+                elif direction == 'n':
+                    return 's'
+                elif direction == 's':
+                    return 'n'
+            return direction
+
         def get_preferred_columns_for_symmetry() -> List[int]:
             """Get column order that respects symmetry."""
             if symmetry_mode in ("horizontal", "both"):
@@ -5018,6 +5188,59 @@ class LevelGenerator:
 
             return False
 
+        def would_craft_stack_conflict(
+            try_pos: str, try_type: str,
+            existing_goals: List[Tuple[str, str]],
+            existing_output_positions: set
+        ) -> bool:
+            """Check if placing a goal would create craft-stack output conflict.
+
+            Rules:
+            - Stack tiles must NOT be placed at craft output positions
+            - Craft tiles must NOT output into stack tile positions
+            """
+            try_col, try_row = map(int, try_pos.split("_"))
+            is_try_stack = try_type.startswith("stack_")
+            is_try_craft = try_type.startswith("craft_")
+
+            # Get output position for the tile being placed
+            try_col_off, try_row_off = get_output_direction(try_type)
+            try_output_pos = f"{try_col + try_col_off}_{try_row + try_row_off}"
+
+            for existing_pos, existing_type in existing_goals:
+                is_existing_stack = existing_type.startswith("stack_")
+                is_existing_craft = existing_type.startswith("craft_")
+
+                existing_col, existing_row = map(int, existing_pos.split("_"))
+                existing_col_off, existing_row_off = get_output_direction(existing_type)
+                existing_output_pos = f"{existing_col + existing_col_off}_{existing_row + existing_row_off}"
+
+                # Rule 1: Stack tile placed at craft output position
+                if is_try_stack and is_existing_craft:
+                    if try_pos == existing_output_pos:
+                        logger.debug(f"Craft-Stack conflict: Stack {try_pos} at Craft {existing_pos} output")
+                        return True
+
+                # Rule 2: Craft tile output into stack position
+                if is_try_craft and is_existing_stack:
+                    if try_output_pos == existing_pos:
+                        logger.debug(f"Craft-Stack conflict: Craft {try_pos} output into Stack {existing_pos}")
+                        return True
+
+                # Rule 3: Stack tile output into craft position (blocks craft)
+                if is_try_stack and is_existing_craft:
+                    if try_output_pos == existing_pos:
+                        logger.debug(f"Craft-Stack conflict: Stack {try_pos} output into Craft {existing_pos}")
+                        return True
+
+                # Rule 4: Craft tile placed at stack output position
+                if is_try_craft and is_existing_stack:
+                    if try_pos == existing_output_pos:
+                        logger.debug(f"Craft-Stack conflict: Craft {try_pos} at Stack {existing_pos} output")
+                        return True
+
+            return False
+
         for i, goal in enumerate(goals):
             # Handle both old format (type="craft_s") and new format (type="craft", direction="s")
             base_type = goal.get("type", "craft")
@@ -5030,7 +5253,7 @@ class LevelGenerator:
                 # Combine type and direction
                 goal_type = f"{base_type}_{goal_direction}"
 
-            goal_count = goal.get("count", 3)
+            goal_count = max(self.MIN_GOAL_COUNT, goal.get("count", self.MIN_GOAL_COUNT))
 
             # Calculate preferred column with more spacing between goals
             # For symmetric modes, prefer center columns
@@ -5082,9 +5305,23 @@ class LevelGenerator:
                         # For symmetry preservation: must be an existing tile position
                         if try_pos not in tiles:
                             continue
-                        # Must be a self-symmetric position (its own mirror)
-                        if not is_self_symmetric_position(try_col, try_row):
-                            continue
+                        # Check if this is a self-symmetric position OR we can place mirrored goal
+                        mirror_col, mirror_row = get_mirror_position(try_col, try_row)
+                        mirror_pos = f"{mirror_col}_{mirror_row}"
+                        is_self_symmetric = is_self_symmetric_position(try_col, try_row)
+
+                        # If not self-symmetric, check if mirror position is also valid
+                        if not is_self_symmetric:
+                            # Mirror position must exist and not be used
+                            if mirror_pos not in tiles or mirror_pos in placed_positions:
+                                continue
+                            # Get mirrored goal type and check validity
+                            goal_dir = goal_type[-1]
+                            mirrored_dir = get_mirrored_direction(goal_dir)
+                            mirrored_goal_type = goal_type[:-1] + mirrored_dir
+                            if not is_valid_goal_position(mirror_col, mirror_row, mirrored_goal_type):
+                                continue
+
                         # Must not be already used by another goal
                         if try_pos in placed_positions:
                             continue
@@ -5128,6 +5365,11 @@ class LevelGenerator:
                     if facing_conflict:
                         continue
 
+                    # Check craft-stack output conflict
+                    # (stack tile at craft output position or craft output into stack position)
+                    if would_craft_stack_conflict(try_pos, goal_type, goal_positions_info, output_positions):
+                        continue
+
                     pos = try_pos
                     break
                 if pos:
@@ -5142,7 +5384,68 @@ class LevelGenerator:
                 output_positions.add(output_pos)
                 goal_positions_info.append((pos, goal_type))
 
-                tiles[pos] = [goal_type, "", [goal_count]]
+                self._place_goal_tile(tiles, pos, goal_type, goal_count)
+
+                # CRITICAL: Clear tiles from lower layers at goal position
+                # This ensures the goal is visible and not visually confusing
+                for i in range(top_layer_idx):
+                    lower_layer_key = f"layer_{i}"
+                    lower_tiles = level.get(lower_layer_key, {}).get("tiles", {})
+                    if pos in lower_tiles:
+                        del lower_tiles[pos]
+                        level[lower_layer_key]["num"] = str(len(lower_tiles))
+                        logger.debug(f"[_add_goals] Cleared tile at {lower_layer_key}:{pos} for goal visibility")
+
+                # In symmetric mode, also place mirrored goal if not self-symmetric position
+                if use_replacement_mode and not is_self_symmetric_position(p_col, p_row):
+                    mirror_col, mirror_row = get_mirror_position(p_col, p_row)
+                    mirror_pos = f"{mirror_col}_{mirror_row}"
+
+                    # Get mirrored goal type
+                    goal_dir = goal_type[-1]
+                    mirrored_dir = get_mirrored_direction(goal_dir)
+                    mirrored_goal_type = goal_type[:-1] + mirrored_dir
+
+                    # Check if mirrored goal would face the original goal or any existing goals
+                    mirror_facing_conflict = False
+                    # Check against original goal
+                    if would_face_each_other(mirror_pos, mirrored_goal_type, pos, goal_type):
+                        mirror_facing_conflict = True
+                    # Check against all existing goals
+                    if not mirror_facing_conflict:
+                        for existing_pos, existing_type in goal_positions_info:
+                            if would_face_each_other(mirror_pos, mirrored_goal_type, existing_pos, existing_type):
+                                mirror_facing_conflict = True
+                                break
+
+                    # Check craft-stack conflict for mirrored goal
+                    mirror_craft_stack_conflict = would_craft_stack_conflict(
+                        mirror_pos, mirrored_goal_type, goal_positions_info, output_positions
+                    )
+
+                    # Only place mirrored goal if no facing conflict and no craft-stack conflict
+                    if not mirror_facing_conflict and not mirror_craft_stack_conflict:
+                        # Calculate mirrored output position
+                        mirror_col_off, mirror_row_off = get_output_direction(mirrored_goal_type)
+                        mirror_output_pos = f"{mirror_col + mirror_col_off}_{mirror_row + mirror_row_off}"
+
+                        # Place mirrored goal
+                        placed_positions.add(mirror_pos)
+                        output_positions.add(mirror_output_pos)
+                        goal_positions_info.append((mirror_pos, mirrored_goal_type))
+
+                        self._place_goal_tile(tiles, mirror_pos, mirrored_goal_type, goal_count)
+
+                        # CRITICAL: Clear tiles from lower layers at mirrored goal position
+                        for i in range(top_layer_idx):
+                            lower_layer_key = f"layer_{i}"
+                            lower_tiles = level.get(lower_layer_key, {}).get("tiles", {})
+                            if mirror_pos in lower_tiles:
+                                del lower_tiles[mirror_pos]
+                                level[lower_layer_key]["num"] = str(len(lower_tiles))
+                                logger.debug(f"[_add_goals] Cleared tile at {lower_layer_key}:{mirror_pos} for mirrored goal visibility")
+            else:
+                logger.warning(f"[_add_goals] Could not find position for {goal_type}")
 
         # Update tile count
         level[layer_key]["num"] = str(len(tiles))
@@ -5156,13 +5459,13 @@ class LevelGenerator:
                 # Check if it's a craft/stack goal tile
                 if isinstance(tile_type, str) and (tile_type.startswith("craft_") or tile_type.startswith("stack_")):
                     # Extract count from tile_data[2]
-                    tile_count = 1
+                    tile_count = self.MIN_GOAL_COUNT  # Default to minimum
                     if len(tile_data) > 2:
                         extra = tile_data[2]
                         if isinstance(extra, list) and len(extra) > 0:
-                            tile_count = int(extra[0]) if extra[0] else 1
+                            tile_count = max(self.MIN_GOAL_COUNT, int(extra[0]) if extra[0] else self.MIN_GOAL_COUNT)
                         elif isinstance(extra, (int, float)):
-                            tile_count = int(extra)
+                            tile_count = max(self.MIN_GOAL_COUNT, int(extra))
                     goalCount[tile_type] = goalCount.get(tile_type, 0) + tile_count
 
         # Warn if not all requested goals were placed
@@ -5691,7 +5994,7 @@ class LevelGenerator:
 
                 if pos not in tiles:
                     tile_type = random.choice(valid_tile_types)
-                    tiles[pos] = [tile_type, ""]
+                    self._place_tile(tiles, pos, tile_type, "")
                     level[layer_key]["num"] = str(len(tiles))
                     return level
 
@@ -5793,8 +6096,73 @@ class LevelGenerator:
             tile_data = level[layer_key]["tiles"][pos]
 
             if len(tile_data) >= 3 and isinstance(tile_data[2], list):
-                new_count = max(1, tile_data[2][0] + delta)
+                # Minimum 3 tiles for craft/stack gimmicks (match-3 game rule)
+                new_count = max(3, tile_data[2][0] + delta)
                 tile_data[2][0] = new_count
+
+        return level
+
+    def _fix_goal_counts(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """Fix any goals with count below MIN_GOAL_COUNT.
+
+        This is a safety net to ensure all craft/stack goals have at least
+        MIN_GOAL_COUNT tiles, regardless of how they were created.
+        """
+        num_layers = level.get("layer", 8)
+        fixed_count = 0
+
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+
+            for pos, tile_data in tiles.items():
+                if not isinstance(tile_data, list) or len(tile_data) < 1:
+                    continue
+
+                tile_type = tile_data[0]
+                if not isinstance(tile_type, str):
+                    continue
+
+                # Check if it's a goal tile
+                if tile_type.startswith("craft_") or tile_type.startswith("stack_"):
+                    # Ensure tile_data has the count array
+                    if len(tile_data) < 3:
+                        # Add count array if missing
+                        while len(tile_data) < 2:
+                            tile_data.append("")
+                        tile_data.append([self.MIN_GOAL_COUNT])
+                        fixed_count += 1
+                        logger.debug(f"[_fix_goal_counts] Added missing count at {layer_key}:{pos}")
+                    elif isinstance(tile_data[2], list) and len(tile_data[2]) > 0:
+                        current_count = int(tile_data[2][0]) if tile_data[2][0] else 0
+                        if current_count < self.MIN_GOAL_COUNT:
+                            tile_data[2][0] = self.MIN_GOAL_COUNT
+                            fixed_count += 1
+                            logger.warning(f"[_fix_goal_counts] Fixed count {current_count} -> {self.MIN_GOAL_COUNT} at {layer_key}:{pos}")
+                    else:
+                        # Count array is empty or invalid
+                        tile_data[2] = [self.MIN_GOAL_COUNT]
+                        fixed_count += 1
+                        logger.debug(f"[_fix_goal_counts] Fixed invalid count array at {layer_key}:{pos}")
+
+        if fixed_count > 0:
+            # Recalculate goalCount
+            goalCount = {}
+            for i in range(num_layers):
+                layer_key = f"layer_{i}"
+                tiles = level.get(layer_key, {}).get("tiles", {})
+                for pos, tile_data in tiles.items():
+                    if isinstance(tile_data, list) and len(tile_data) > 0:
+                        tile_type = tile_data[0]
+                        if isinstance(tile_type, str) and (tile_type.startswith("craft_") or tile_type.startswith("stack_")):
+                            if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
+                                tile_count = int(tile_data[2][0])
+                            else:
+                                tile_count = self.MIN_GOAL_COUNT
+                            goalCount[tile_type] = goalCount.get(tile_type, 0) + tile_count
+
+            level["goalCount"] = goalCount
+            logger.info(f"[_fix_goal_counts] Fixed {fixed_count} goals, updated goalCount: {goalCount}")
 
         return level
 

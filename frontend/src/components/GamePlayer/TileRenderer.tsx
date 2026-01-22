@@ -90,6 +90,19 @@ export function TileRenderer({ tile, size, showDebug }: TileRendererProps) {
   // Teleport gimmick
   const isTeleport = attribute === 'teleport';
 
+  // Stack tile visual info - ONLY for stack tiles, NOT craft tiles
+  // Craft tiles should only show badge on the craft BOX, not on spawned tiles
+  const isStackTile = tile.isStackTile === true;
+  const isCraftTile = tile.isCraftTile === true;
+  const stackIndex = tile.stackIndex ?? -1;
+  const stackMaxIndex = tile.stackMaxIndex ?? -1;
+  // Calculate remaining tiles in stack (including current tile)
+  const stackRemainingCount = isStackTile && !isCraftTile && stackIndex >= 0 && stackMaxIndex >= 0
+    ? stackMaxIndex - stackIndex + 1
+    : 0;
+  // Show stack effect only for STACK tiles (not craft) with more underneath (remaining > 1)
+  const showStackEffect = isStackTile && !isCraftTile && stackRemainingCount > 1;
+
   // Check if any gimmick is active (for border styling)
   const hasActiveGimmick = (isIce && iceLevel > 0) || isChain || (isGrass && grassLevel > 0) ||
     isLink || isBomb || isCurtain || isTeleport;
@@ -207,6 +220,76 @@ export function TileRenderer({ tile, size, showDebug }: TileRendererProps) {
         hasFrog && 'ring-2 ring-green-400'
       )}
     >
+      {/* Stack effect - tile-like shadow copies behind (TileBuster style) */}
+      {showStackEffect && (
+        <>
+          {/* Show up to 3 stacked tile layers based on remaining count */}
+          {stackRemainingCount >= 4 && (
+            <div
+              style={{
+                position: 'absolute',
+                top: 6,
+                left: 6,
+                width: size,
+                height: size,
+                borderRadius: 6,
+                zIndex: -3,
+                overflow: 'hidden',
+                filter: 'brightness(0.5)',
+              }}
+            >
+              <img
+                src="/tiles/skin0/s0_t0.png"
+                alt=""
+                style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+              />
+            </div>
+          )}
+          {stackRemainingCount >= 3 && (
+            <div
+              style={{
+                position: 'absolute',
+                top: 4,
+                left: 4,
+                width: size,
+                height: size,
+                borderRadius: 6,
+                zIndex: -2,
+                overflow: 'hidden',
+                filter: 'brightness(0.65)',
+              }}
+            >
+              <img
+                src="/tiles/skin0/s0_t0.png"
+                alt=""
+                style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+              />
+            </div>
+          )}
+          {stackRemainingCount >= 2 && (
+            <div
+              style={{
+                position: 'absolute',
+                top: 2,
+                left: 2,
+                width: size,
+                height: size,
+                borderRadius: 6,
+                zIndex: -1,
+                overflow: 'hidden',
+                filter: 'brightness(0.8)',
+              }}
+            >
+              <img
+                src="/tiles/skin0/s0_t0.png"
+                alt=""
+                style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+              />
+            </div>
+          )}
+        </>
+      )}
+
       {/* Base tile background (t0) - hidden 타일에도 표시 */}
       <img
         src="/tiles/skin0/s0_t0.png"
@@ -442,8 +525,58 @@ export function TileRenderer({ tile, size, showDebug }: TileRendererProps) {
       {/* Selection ring */}
       {tile.isSelected && <div style={selectionRingStyle} />}
 
-      {/* Craft/Stack indicator */}
-      {isSpecialTile(tile.type) && tile.extra && tile.extra[0] > 1 && (
+      {/* Craft direction arrow indicator */}
+      {tile.type.startsWith('craft_') && (
+        <div
+          style={{
+            position: 'absolute',
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            fontSize: size * 0.35,
+            color: 'white',
+            textShadow: '0 0 3px rgba(0,0,0,0.8), 0 0 6px rgba(0,0,0,0.5)',
+            zIndex: 15,
+            pointerEvents: 'none',
+          }}
+        >
+          {tile.type === 'craft_s' && '↓'}
+          {tile.type === 'craft_n' && '↑'}
+          {tile.type === 'craft_e' && '→'}
+          {tile.type === 'craft_w' && '←'}
+        </div>
+      )}
+
+      {/* Top tile indicator for stack boxes (TileBuster style) */}
+      {tile.type.startsWith('stack_') && effectData.currentTileType && (
+        <div
+          style={{
+            position: 'absolute',
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            width: size * 0.6,
+            height: size * 0.6,
+            borderRadius: 4,
+            overflow: 'hidden',
+            zIndex: 10,
+            boxShadow: '0 2px 4px rgba(0,0,0,0.3)',
+          }}
+        >
+          <img
+            src={getTileImagePath(effectData.currentTileType)}
+            alt={effectData.currentTileType}
+            style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+            onError={(e) => {
+              (e.target as HTMLImageElement).style.display = 'none';
+            }}
+          />
+        </div>
+      )}
+
+      {/* Craft/Stack count indicator (for box tiles) */}
+      {/* remaining: 남은 배출 횟수 (count=3, 첫 스폰 후 remaining=2) */}
+      {isSpecialTile(tile.type) && tile.extra && tile.extra[0] >= 1 && (
         <div
           style={{
             position: 'absolute',
@@ -458,6 +591,27 @@ export function TileRenderer({ tile, size, showDebug }: TileRendererProps) {
           }}
         >
           x{tile.extra[0]}
+        </div>
+      )}
+
+      {/* Stack remaining count indicator (for spawned stack tiles) */}
+      {showStackEffect && (
+        <div
+          style={{
+            position: 'absolute',
+            bottom: 2,
+            right: 2,
+            backgroundColor: 'rgba(139, 92, 246, 0.9)',
+            color: 'white',
+            fontSize: 9,
+            fontWeight: 'bold',
+            padding: '1px 4px',
+            borderRadius: 4,
+            zIndex: 25,
+          }}
+          title={`남은 타일: ${stackRemainingCount}`}
+        >
+          x{stackRemainingCount}
         </div>
       )}
 

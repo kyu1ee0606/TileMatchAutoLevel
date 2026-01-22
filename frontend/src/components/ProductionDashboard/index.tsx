@@ -240,7 +240,11 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             // Let backend handle symmetry randomly (removed fixed 'both')
             // This allows horizontal, vertical, none, or both symmetry for variety
 
-            // Randomize goal directions for variety
+            // Randomize symmetry mode
+            const symmetryModes: Array<'none' | 'horizontal' | 'vertical'> = ['none', 'horizontal', 'vertical'];
+            const symmetryMode = symmetryModes[Math.floor(Math.random() * symmetryModes.length)];
+
+            // All goal directions are now supported - backend handles mirroring for symmetry
             const goalDirections: Array<'s' | 'n' | 'e' | 'w'> = ['s', 'n', 'e', 'w'];
             const goalDirection = goalDirections[Math.floor(Math.random() * goalDirections.length)];
 
@@ -255,7 +259,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
               tile_types: ['t1', 't2', 't3', 't4', 't5', 't6'].slice(0, 3 + Math.floor(targetDifficulty * 3)),
               obstacle_types: [],
               goals: [{ type: goalType, direction: goalDirection, count: Math.max(2, Math.floor(3 + targetDifficulty * 2)) }],
-              // symmetry_mode not specified - let backend choose randomly
+              symmetry_mode: symmetryMode,
               pattern_type: patternType,
             };
 
@@ -747,17 +751,37 @@ function GenerateTab({
 // Helper function to extract gimmicks from level_json
 function extractGimmicksFromLevel(levelJson: LevelJSON): string[] {
   const gimmicks = new Set<string>();
-  const numLayers = levelJson.layer || 8;
 
+  // Handle nested structure: level_json might have .map wrapper
+  let data = levelJson as unknown as Record<string, unknown>;
+  if (data.map && typeof data.map === 'object') {
+    data = data.map as Record<string, unknown>;
+  }
+
+  const numLayers = (data.layer as number) || 8;
+
+  // Extract gimmicks from tile types and attributes
   for (let i = 0; i < numLayers; i++) {
-    const layerKey = `layer_${i}` as `layer_${number}`;
-    const layerData = levelJson[layerKey];
+    const layerKey = `layer_${i}`;
+    const layerData = data[layerKey] as { tiles?: Record<string, unknown[]> } | undefined;
     if (!layerData || !layerData.tiles) continue;
 
     for (const pos in layerData.tiles) {
       const tileData = layerData.tiles[pos];
-      // tileData can be [tileType, attribute] or just [tileType]
-      if (tileData && tileData.length > 1) {
+      if (!tileData || !Array.isArray(tileData) || tileData.length === 0) continue;
+
+      // Check tile type (tileData[0]) for craft/stack goals
+      const tileType = tileData[0];
+      if (typeof tileType === 'string') {
+        if (tileType.startsWith('craft')) {
+          gimmicks.add('craft');
+        } else if (tileType.startsWith('stack')) {
+          gimmicks.add('stack');
+        }
+      }
+
+      // Check attribute (tileData[1]) for other gimmicks
+      if (tileData.length > 1) {
         const attr = tileData[1];
         // Filter out tile types (t0, t1, t2, etc.) - only match exact patterns like t0, t1, t2...
         // Don't filter 'teleport' which also starts with 't'
@@ -796,7 +820,7 @@ const GIMMICK_NAMES: Record<string, string> = {
   curtain: '커튼',
   teleport: '텔레포트',
   unknown: '???',
-  craft: '조합',
+  craft: '생성기',
   stack: '스택',
 };
 
@@ -838,6 +862,7 @@ function TestTab({
 
   // Playtest result state (after game ends)
   const [showResultForm, setShowResultForm] = useState(false);
+  const [showLevelJson, setShowLevelJson] = useState(false);
   const [gameResult, setGameResult] = useState<{ won: boolean; stats: GameStats } | null>(null);
   const [perceivedDifficulty, setPerceivedDifficulty] = useState<1|2|3|4|5>(3);
   const [funRating, setFunRating] = useState<1|2|3|4|5>(3);
@@ -863,8 +888,9 @@ function TestTab({
       }
 
       // Create game engine to extract tiles
+      // previewMode: true - 맵툴에서는 첫 타일 스폰 안 함, 원래 카운트(*3) 표시
       const engine = createGameEngine();
-      engine.initializeFromLevel(levelToUse);
+      engine.initializeFromLevel(levelToUse, { previewMode: true });
       const tiles = engine.getTilesForUI();
 
       // Convert to GameTile format
@@ -881,6 +907,10 @@ function TestTab({
         isHidden: t.isHidden,
         effectData: t.effectData,
         extra: t.extra,
+        // Stack visual info
+        isStackTile: t.isStackTile,
+        stackIndex: t.stackIndex,
+        stackMaxIndex: t.stackMaxIndex,
       }));
 
       // Calculate scale based on fixed 7x7 grid and container size
@@ -1252,9 +1282,17 @@ function TestTab({
             {/* Level info */}
             <div className="p-4 border-b border-gray-700">
               <div className="flex items-center justify-between mb-2">
-                <h3 className="text-lg font-medium text-white">
-                  레벨 {selectedLevel.meta.level_number}
-                </h3>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-lg font-medium text-white">
+                    레벨 {selectedLevel.meta.level_number}
+                  </h3>
+                  <button
+                    onClick={() => setShowLevelJson(!showLevelJson)}
+                    className={`px-2 py-0.5 text-xs rounded ${showLevelJson ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
+                  >
+                    JSON
+                  </button>
+                </div>
                 <span className={`text-xl font-bold ${getGradeColor(selectedLevel.meta.grade)}`}>
                   {selectedLevel.meta.grade}
                 </span>
@@ -1271,8 +1309,8 @@ function TestTab({
                 </div>
                 <div>
                   <span className="text-gray-400">타일:</span>
-                  <span className="text-white ml-2">{previewTiles.length}개</span>
-                  <span className="text-gray-500 ml-1">({previewTiles.filter(t => t.isSelectable).length} 선택가능)</span>
+                  <span className="text-white ml-2">{previewTiles.filter(t => !t.type.startsWith('craft_') && !t.type.startsWith('stack_')).length}개</span>
+                  <span className="text-gray-500 ml-1">({previewTiles.filter(t => t.isSelectable && !t.type.startsWith('craft_') && !t.type.startsWith('stack_')).length} 선택가능)</span>
                 </div>
                 <div>
                   <span className="text-gray-400">상태:</span>
@@ -1317,6 +1355,27 @@ function TestTab({
                       평균 재미: {(selectedLevel.meta.playtest_results.reduce((sum, r) => sum + r.fun_rating, 0) / selectedLevel.meta.playtest_results.length).toFixed(1)}
                     </span>
                   </div>
+                </div>
+              )}
+
+              {/* Level JSON viewer */}
+              {showLevelJson && (
+                <div className="mt-3 p-2 bg-gray-900 rounded border border-gray-700">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs text-gray-400">Level JSON</span>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(JSON.stringify(selectedLevel.level_json, null, 2));
+                        addNotification('success', 'JSON 복사됨');
+                      }}
+                      className="px-2 py-0.5 text-xs bg-gray-700 text-gray-300 rounded hover:bg-gray-600"
+                    >
+                      복사
+                    </button>
+                  </div>
+                  <pre className="text-xs text-gray-300 overflow-auto max-h-[300px] whitespace-pre-wrap font-mono">
+                    {JSON.stringify(selectedLevel.level_json, null, 2)}
+                  </pre>
                 </div>
               )}
             </div>

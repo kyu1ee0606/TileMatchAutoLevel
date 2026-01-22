@@ -6103,13 +6103,17 @@ class LevelGenerator:
         return level
 
     def _fix_goal_counts(self, level: Dict[str, Any]) -> Dict[str, Any]:
-        """Fix any goals with count below MIN_GOAL_COUNT.
+        """Fix any goals with count below MIN_GOAL_COUNT and ensure total is divisible by 3.
 
         This is a safety net to ensure all craft/stack goals have at least
         MIN_GOAL_COUNT tiles, regardless of how they were created.
+        Also ensures total matchable tiles (regular + goal internal) is divisible by 3.
         """
         num_layers = level.get("layer", 8)
         fixed_count = 0
+
+        # Step 1: Fix all goals to minimum count
+        goal_tiles: List[Tuple[int, str, list]] = []  # (layer_idx, pos, tile_data)
 
         for i in range(num_layers):
             layer_key = f"layer_{i}"
@@ -6145,24 +6149,65 @@ class LevelGenerator:
                         fixed_count += 1
                         logger.debug(f"[_fix_goal_counts] Fixed invalid count array at {layer_key}:{pos}")
 
-        if fixed_count > 0:
-            # Recalculate goalCount
-            goalCount = {}
-            for i in range(num_layers):
-                layer_key = f"layer_{i}"
-                tiles = level.get(layer_key, {}).get("tiles", {})
-                for pos, tile_data in tiles.items():
-                    if isinstance(tile_data, list) and len(tile_data) > 0:
-                        tile_type = tile_data[0]
-                        if isinstance(tile_type, str) and (tile_type.startswith("craft_") or tile_type.startswith("stack_")):
-                            if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
-                                tile_count = int(tile_data[2][0])
-                            else:
-                                tile_count = self.MIN_GOAL_COUNT
-                            goalCount[tile_type] = goalCount.get(tile_type, 0) + tile_count
+                    goal_tiles.append((i, pos, tile_data))
 
-            level["goalCount"] = goalCount
-            logger.info(f"[_fix_goal_counts] Fixed {fixed_count} goals, updated goalCount: {goalCount}")
+        # Step 2: Count total matchable tiles
+        total_matchable = 0
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for pos, tile_data in tiles.items():
+                if isinstance(tile_data, list) and len(tile_data) > 0:
+                    tile_type = tile_data[0]
+                    if isinstance(tile_type, str) and (tile_type.startswith("craft_") or tile_type.startswith("stack_")):
+                        # Count internal tiles only, not the box itself
+                        if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
+                            internal_count = int(tile_data[2][0]) if tile_data[2][0] else 0
+                            total_matchable += internal_count
+                    else:
+                        total_matchable += 1
+
+        # Step 3: Adjust goal counts to make total divisible by 3
+        total_remainder = total_matchable % 3
+        if total_remainder != 0 and goal_tiles:
+            # Need to add (3 - remainder) internal tiles to goals
+            tiles_to_add = 3 - total_remainder  # 1 or 2
+
+            # Add to goal counts (prefer spreading across multiple goals)
+            goal_idx = 0
+            while tiles_to_add > 0 and goal_tiles:
+                layer_idx, pos, tile_data = goal_tiles[goal_idx % len(goal_tiles)]
+                if isinstance(tile_data[2], list) and tile_data[2]:
+                    tile_data[2][0] = int(tile_data[2][0]) + 1
+                    tiles_to_add -= 1
+                    total_matchable += 1
+                    logger.info(f"[_fix_goal_counts] Added +1 to goal at layer_{layer_idx}:{pos} for divisibility fix")
+                goal_idx += 1
+                # Safety: prevent infinite loop
+                if goal_idx > len(goal_tiles) * 3:
+                    break
+
+            logger.info(f"[_fix_goal_counts] Adjusted goal counts to make total {total_matchable} divisible by 3")
+
+        # Step 4: Recalculate goalCount
+        goalCount = {}
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for pos, tile_data in tiles.items():
+                if isinstance(tile_data, list) and len(tile_data) > 0:
+                    tile_type = tile_data[0]
+                    if isinstance(tile_type, str) and (tile_type.startswith("craft_") or tile_type.startswith("stack_")):
+                        if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
+                            tile_count = int(tile_data[2][0])
+                        else:
+                            tile_count = self.MIN_GOAL_COUNT
+                        goalCount[tile_type] = goalCount.get(tile_type, 0) + tile_count
+
+        level["goalCount"] = goalCount
+
+        if fixed_count > 0 or total_remainder != 0:
+            logger.info(f"[_fix_goal_counts] Final goalCount: {goalCount}, total matchable: {total_matchable}")
 
         return level
 

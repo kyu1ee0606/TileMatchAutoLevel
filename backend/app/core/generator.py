@@ -392,6 +392,10 @@ class LevelGenerator:
             else:
                 level = self._ensure_tutorial_gimmick_count(level, tutorial_gimmick, tutorial_gimmick_min_count)
 
+        # CRITICAL: Clear tiles from goal (craft/stack) output positions
+        # This must happen AFTER all tile modifications to ensure output positions are clear
+        level = self._clear_goal_output_positions(level)
+
         # FINAL VALIDATION: Ensure level is playable (all tile types divisible by 3)
         validation_result = self._validate_playability(level)
         if not validation_result["is_playable"]:
@@ -5396,6 +5400,16 @@ class LevelGenerator:
                         level[lower_layer_key]["num"] = str(len(lower_tiles))
                         logger.debug(f"[_add_goals] Cleared tile at {lower_layer_key}:{pos} for goal visibility")
 
+                # CRITICAL: Clear tiles from ALL layers at output position
+                # Stack/Craft goals spawn tiles at output position, so existing tiles would block them
+                for i in range(level.get("layer", 8)):
+                    check_layer_key = f"layer_{i}"
+                    check_tiles = level.get(check_layer_key, {}).get("tiles", {})
+                    if output_pos in check_tiles:
+                        del check_tiles[output_pos]
+                        level[check_layer_key]["num"] = str(len(check_tiles))
+                        logger.debug(f"[_add_goals] Cleared tile at {check_layer_key}:{output_pos} for goal output")
+
                 # In symmetric mode, also place mirrored goal if not self-symmetric position
                 if use_replacement_mode and not is_self_symmetric_position(p_col, p_row):
                     mirror_col, mirror_row = get_mirror_position(p_col, p_row)
@@ -5444,6 +5458,15 @@ class LevelGenerator:
                                 del lower_tiles[mirror_pos]
                                 level[lower_layer_key]["num"] = str(len(lower_tiles))
                                 logger.debug(f"[_add_goals] Cleared tile at {lower_layer_key}:{mirror_pos} for mirrored goal visibility")
+
+                        # CRITICAL: Clear tiles from ALL layers at mirrored output position
+                        for i in range(level.get("layer", 8)):
+                            check_layer_key = f"layer_{i}"
+                            check_tiles = level.get(check_layer_key, {}).get("tiles", {})
+                            if mirror_output_pos in check_tiles:
+                                del check_tiles[mirror_output_pos]
+                                level[check_layer_key]["num"] = str(len(check_tiles))
+                                logger.debug(f"[_add_goals] Cleared tile at {check_layer_key}:{mirror_output_pos} for mirrored goal output")
             else:
                 logger.warning(f"[_add_goals] Could not find position for {goal_type}")
 
@@ -6208,6 +6231,70 @@ class LevelGenerator:
 
         if fixed_count > 0 or total_remainder != 0:
             logger.info(f"[_fix_goal_counts] Final goalCount: {goalCount}, total matchable: {total_matchable}")
+
+        return level
+
+    def _clear_goal_output_positions(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Clear tiles from all goal (craft/stack) output positions across all layers.
+
+        CRITICAL: This must be called AFTER all tile modifications to ensure
+        no tiles exist in stack/craft output positions. Stack and craft gimmicks
+        spawn tiles at their output positions, so existing tiles would block them.
+
+        Direction rules:
+        - craft_s / stack_s: outputs to row+1 (south)
+        - craft_n / stack_n: outputs to row-1 (north)
+        - craft_e / stack_e: outputs to col+1 (east)
+        - craft_w / stack_w: outputs to col-1 (west)
+        """
+        num_layers = level.get("layer", 8)
+
+        # Find all goal positions and their output positions
+        goal_output_positions = []
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for pos, tile_data in tiles.items():
+                if not isinstance(tile_data, list) or not tile_data:
+                    continue
+                tile_type = tile_data[0]
+                if not (tile_type.startswith("craft_") or tile_type.startswith("stack_")):
+                    continue
+
+                # Calculate output position based on direction
+                col, row = map(int, pos.split("_"))
+                direction = tile_type[-1]
+                if direction == 's':
+                    output_pos = f"{col}_{row + 1}"
+                elif direction == 'n':
+                    output_pos = f"{col}_{row - 1}"
+                elif direction == 'e':
+                    output_pos = f"{col + 1}_{row}"
+                elif direction == 'w':
+                    output_pos = f"{col - 1}_{row}"
+                else:
+                    continue
+
+                goal_output_positions.append((tile_type, pos, output_pos))
+
+        # Clear tiles from all layers at each output position
+        cleared_count = 0
+        for goal_type, goal_pos, output_pos in goal_output_positions:
+            for i in range(num_layers):
+                layer_key = f"layer_{i}"
+                layer_data = level.get(layer_key)
+                if not layer_data:
+                    continue
+                tiles = layer_data.get("tiles", {})
+                if output_pos in tiles:
+                    del tiles[output_pos]
+                    layer_data["num"] = str(len(tiles))
+                    cleared_count += 1
+                    logger.debug(f"[_clear_goal_output_positions] Cleared {layer_key}:{output_pos} for {goal_type} at {goal_pos}")
+
+        if cleared_count > 0:
+            logger.info(f"[_clear_goal_output_positions] Cleared {cleared_count} tiles from goal output positions")
 
         return level
 

@@ -762,8 +762,10 @@ export class GameEngine {
       stackMaxIndex: totalCount,
     });
 
-    // Craft만 박스 타일을 tiles에 추가 (Stack은 스폰 타일이 동일 위치에 표시됨)
-    if (isCraft) {
+    // Craft: 항상 박스 타일 추가 (스폰 타일은 offset 위치에 별도 표시)
+    // Stack: 플레이 모드에서는 스폰 타일이 동일 위치에 표시되므로 박스 불필요
+    //        프리뷰 모드에서는 스폰하지 않으므로 박스 타일 추가 필요
+    if (isCraft || (isStack && this.previewMode)) {
       layerTiles.set(pos, boxTile);
     }
 

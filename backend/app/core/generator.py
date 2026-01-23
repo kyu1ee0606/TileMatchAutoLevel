@@ -392,9 +392,9 @@ class LevelGenerator:
             else:
                 level = self._ensure_tutorial_gimmick_count(level, tutorial_gimmick, tutorial_gimmick_min_count)
 
-        # CRITICAL: Clear tiles from goal (craft/stack) output positions
-        # This must happen AFTER all tile modifications to ensure output positions are clear
-        level = self._clear_goal_output_positions(level)
+        # NOTE: Craft/Stack boxes wait if output position has a tile.
+        # They output when the position becomes empty (tile selected).
+        # DO NOT delete tiles from output positions.
 
         # FINAL VALIDATION: Ensure level is playable (all tile types divisible by 3)
         validation_result = self._validate_playability(level)
@@ -406,9 +406,8 @@ class LevelGenerator:
                 f"Total tiles: {validation_result['total_tiles']}, "
                 f"Types with bad count: {validation_result['bad_types']}"
             )
-            # Try one more aggressive fix for non-symmetric levels
-            if params.symmetry_mode == "none":
-                level = self._force_fix_tile_counts(level, params)
+            # Try aggressive fix for ALL levels (not just asymmetric)
+            level = self._force_fix_tile_counts(level, params)
 
         # Calculate final metrics
         analyzer = get_analyzer()
@@ -986,29 +985,39 @@ class LevelGenerator:
             # Shuffle which layers get extra tiles for variety
             extra_tile_layers = random.sample(active_layers, min(extra_tiles, len(active_layers)))
 
-            # Create varied distribution patterns (e.g., heavy top, heavy bottom, alternating)
-            distribution_pattern = random.choice(['uniform', 'top_heavy', 'bottom_heavy', 'alternating', 'random'])
+            # CRITICAL: When exact tile count is specified (tutorial levels, etc.),
+            # disable variation to ensure exact tile count
+            exact_tile_mode = params.total_tile_count is not None
 
-            for layer_idx in active_layers:
-                # More aggressive per-layer variation for diversity
-                if distribution_pattern == 'uniform':
-                    layer_variation = random.choice([-6, -3, 0, 3, 6])
-                elif distribution_pattern == 'top_heavy':
-                    # Higher layers get more tiles
-                    layer_variation = (layer_idx - len(active_layers) // 2) * 3
-                elif distribution_pattern == 'bottom_heavy':
-                    # Lower layers get more tiles
-                    layer_variation = -(layer_idx - len(active_layers) // 2) * 3
-                elif distribution_pattern == 'alternating':
-                    # Alternating heavy/light layers
-                    layer_variation = 6 if layer_idx % 2 == 0 else -6
-                else:  # random
-                    layer_variation = random.randint(-3, 3) * 3
+            if exact_tile_mode:
+                # Exact mode: no variation, distribute evenly
+                for layer_idx in active_layers:
+                    base_count = tiles_per_layer + (3 if layer_idx in extra_tile_layers else 0)
+                    layer_tile_counts[layer_idx] = (base_count // 3) * 3
+            else:
+                # Create varied distribution patterns (e.g., heavy top, heavy bottom, alternating)
+                distribution_pattern = random.choice(['uniform', 'top_heavy', 'bottom_heavy', 'alternating', 'random'])
 
-                base_count = tiles_per_layer + (3 if layer_idx in extra_tile_layers else 0)
-                final_count = max(6, base_count + layer_variation)  # Minimum 6 tiles per layer
-                # Ensure divisible by 3
-                layer_tile_counts[layer_idx] = (final_count // 3) * 3
+                for layer_idx in active_layers:
+                    # More aggressive per-layer variation for diversity
+                    if distribution_pattern == 'uniform':
+                        layer_variation = random.choice([-6, -3, 0, 3, 6])
+                    elif distribution_pattern == 'top_heavy':
+                        # Higher layers get more tiles
+                        layer_variation = (layer_idx - len(active_layers) // 2) * 3
+                    elif distribution_pattern == 'bottom_heavy':
+                        # Lower layers get more tiles
+                        layer_variation = -(layer_idx - len(active_layers) // 2) * 3
+                    elif distribution_pattern == 'alternating':
+                        # Alternating heavy/light layers
+                        layer_variation = 6 if layer_idx % 2 == 0 else -6
+                    else:  # random
+                        layer_variation = random.randint(-3, 3) * 3
+
+                    base_count = tiles_per_layer + (3 if layer_idx in extra_tile_layers else 0)
+                    final_count = max(6, base_count + layer_variation)  # Minimum 6 tiles per layer
+                    # Ensure divisible by 3
+                    layer_tile_counts[layer_idx] = (final_count // 3) * 3
 
         # Collect all positions across all layers
         all_layer_positions: List[Tuple[int, str]] = []  # (layer_idx, pos)
@@ -3723,6 +3732,12 @@ class LevelGenerator:
 
         # Helper to get target count for an obstacle type (global)
         # Only used when per-layer configs are NOT provided
+        # [연구 근거] Tile Busters 스타일: 개구리는 레벨당 최대 3개로 제한
+        GIMMICK_MAX_COUNTS = {
+            "frog": 3,  # 개구리는 선택 가능해야 하므로 최대 3개
+            "bomb": 4,  # 폭탄도 과도하면 어려움
+        }
+
         def get_global_target(obstacle_type: str, default_ratio: float) -> int:
             if has_layer_obstacle_configs:
                 # Per-layer configs take priority, don't use global targets for distribution
@@ -3732,9 +3747,27 @@ class LevelGenerator:
                 min_count = config.get("min", 0)
                 max_count = config.get("max", 10)
                 # Apply gimmick_intensity to configured counts
-                return int(random.randint(min_count, max_count) * gimmick_intensity)
-            # Legacy behavior: scale with difficulty AND gimmick_intensity
-            return int(total_tiles * target * default_ratio * gimmick_intensity)
+                result = int(random.randint(min_count, max_count) * gimmick_intensity)
+                # Apply max cap if defined
+                if obstacle_type in GIMMICK_MAX_COUNTS:
+                    result = min(result, GIMMICK_MAX_COUNTS[obstacle_type])
+                return result
+
+            # Calculate based on difficulty
+            calculated = int(total_tiles * target * default_ratio * gimmick_intensity)
+
+            # IMPORTANT: If this gimmick is requested and gimmick_intensity > 0,
+            # ensure minimum 2 instances so players can learn the mechanic
+            # (언락된 기믹은 최소 2개 보장하여 학습 가능하도록)
+            if obstacle_type in obstacle_types and gimmick_intensity > 0:
+                min_for_learning = 2  # Minimum for player to understand the gimmick
+                calculated = max(calculated, min_for_learning)
+
+            # Apply max cap if defined (e.g., frog max 3)
+            if obstacle_type in GIMMICK_MAX_COUNTS:
+                calculated = min(calculated, GIMMICK_MAX_COUNTS[obstacle_type])
+
+            return calculated
 
         # Helper to get per-layer obstacle target
         def get_layer_target(layer_idx: int, obstacle_type: str) -> Optional[int]:
@@ -4066,16 +4099,26 @@ class LevelGenerator:
 
         RULE: Frogs must only be placed on tiles that are NOT covered by upper layers.
         This is because frogs need to be immediately selectable when the level spawns.
+
+        [연구 근거] Tile Busters 스타일: 개구리는 레벨당 최대 3개로 제한
         """
+        # Global max check - ensure we never exceed max frogs per level
+        MAX_FROGS_PER_LEVEL = 3
+        if counter["frog"] >= MAX_FROGS_PER_LEVEL:
+            logger.debug(f"[FROG] Layer {layer_idx}: Skipping - already at max {MAX_FROGS_PER_LEVEL} frogs")
+            return level
+
         layer_key = f"layer_{layer_idx}"
         tiles = level.get(layer_key, {}).get("tiles", {})
         added = 0
+        skipped_covered = 0
 
         positions = list(tiles.keys())
         random.shuffle(positions)
 
         for pos in positions:
-            if added >= target:
+            # Check both per-layer target and global max
+            if added >= target or counter["frog"] >= MAX_FROGS_PER_LEVEL:
                 break
 
             tile_data = tiles[pos]
@@ -4090,20 +4133,33 @@ class LevelGenerator:
             try:
                 col, row = map(int, pos.split('_'))
                 if self._is_position_covered_by_upper(level, layer_idx, col, row):
+                    skipped_covered += 1
                     continue
-            except:
+            except Exception as e:
+                logger.warning(f"[FROG] Layer {layer_idx}: Error parsing position {pos}: {e}")
                 continue
 
             tile_data[1] = "frog"
             added += 1
             counter["frog"] += 1
+            logger.debug(f"[FROG] Layer {layer_idx}: Added frog at {pos} (total: {counter['frog']})")
+
+        if skipped_covered > 0:
+            logger.debug(f"[FROG] Layer {layer_idx}: Skipped {skipped_covered} covered positions")
 
         return level
 
     def _add_chain_obstacles_to_layer(
         self, level: Dict[str, Any], layer_idx: int, target: int, counter: Dict[str, int]
     ) -> Dict[str, Any]:
-        """Add chain obstacles to a specific layer (must have clearable LEFT/RIGHT neighbor)."""
+        """Add chain obstacles to a specific layer.
+
+        RULE: Chain tiles MUST have at least one clearable neighbor on LEFT or RIGHT.
+        The neighbor must:
+        1. Exist in the same layer
+        2. NOT be covered by upper layers (so it can be selected first)
+        3. NOT have a blocking gimmick (chain, ice, grass, link, etc.)
+        """
         layer_key = f"layer_{layer_idx}"
         tiles = level.get(layer_key, {}).get("tiles", {})
         if not tiles:
@@ -4150,6 +4206,10 @@ class LevelGenerator:
                     continue
                 # Neighbor must be clearable (no obstacle or frog only)
                 if ndata[1] and ndata[1] != "frog":
+                    continue
+                # CRITICAL: Neighbor must NOT be covered by upper layers
+                # If covered, the chain cannot be unlocked because neighbor can't be selected first
+                if self._is_position_covered_by_upper(level, layer_idx, ncol, nrow):
                     continue
                 valid_chain = True
                 break
@@ -4269,6 +4329,14 @@ class LevelGenerator:
                 # This prevents both tiles in a pair from having link attributes
                 # (which would count as 2 links instead of 1)
                 if target_tile[1]:
+                    logger.debug(f"[LINK] Skipping {pos} -> {target_pos}: target has attribute '{target_tile[1]}'")
+                    continue
+
+                # CRITICAL: Explicitly reject chain, ice, grass on target (blocking gimmicks)
+                # This is a defensive double-check in case the generic check above fails
+                BLOCKING_GIMMICKS = {"chain", "ice", "ice_1", "ice_2", "ice_3", "grass"}
+                if target_tile[1] in BLOCKING_GIMMICKS:
+                    logger.warning(f"[LINK] BLOCKED: {pos} -> {target_pos} would create link->chain/ice/grass")
                     continue
 
                 # Valid link found - assign the link type
@@ -4578,18 +4646,22 @@ class LevelGenerator:
 
         RULE: Frogs must only be placed on tiles that are NOT covered by upper layers.
         This is because frogs need to be immediately selectable when the level spawns.
+
+        [연구 근거] Tile Busters 스타일: 개구리는 레벨당 최대 3개로 제한
         """
+        MAX_FROGS_PER_LEVEL = 3
         num_layers = level.get("layer", 8)
 
         for i in range(num_layers - 1, -1, -1):
-            if counter["frog"] >= target:
+            # Check both target and global max
+            if counter["frog"] >= target or counter["frog"] >= MAX_FROGS_PER_LEVEL:
                 break
 
             layer_key = f"layer_{i}"
             tiles = level.get(layer_key, {}).get("tiles", {})
 
             for pos, tile_data in list(tiles.items()):
-                if counter["frog"] >= target:
+                if counter["frog"] >= target or counter["frog"] >= MAX_FROGS_PER_LEVEL:
                     break
 
                 if not isinstance(tile_data, list) or len(tile_data) < 2:
@@ -4693,6 +4765,11 @@ class LevelGenerator:
 
                 # RULE: Neighbor must be clearable (no obstacle or frog only)
                 if neighbor_data[1] and neighbor_data[1] != "frog":
+                    continue
+
+                # CRITICAL: Neighbor must NOT be covered by upper layers
+                # If covered, the chain cannot be unlocked because neighbor can't be selected first
+                if self._is_position_covered_by_upper(level, layer_idx, ncol, nrow):
                     continue
 
                 # Valid chain position found!
@@ -4898,6 +4975,14 @@ class LevelGenerator:
                 # CRITICAL: Target tile must NOT have any attribute
                 # This ensures only one tile in the pair has link attribute
                 if tile_data2[1]:
+                    logger.debug(f"[LINK] Skipping {pos1} -> {pos2}: target has attribute '{tile_data2[1]}'")
+                    continue
+
+                # CRITICAL: Explicitly reject chain, ice, grass on target (blocking gimmicks)
+                # Defensive double-check
+                BLOCKING_GIMMICKS = {"chain", "ice", "ice_1", "ice_2", "ice_3", "grass"}
+                if tile_data2[1] in BLOCKING_GIMMICKS:
+                    logger.warning(f"[LINK] BLOCKED: {pos1} -> {pos2} would create link->blocking gimmick")
                     continue
 
                 # Valid link found - assign the link type to ONLY the source tile
@@ -5410,6 +5495,58 @@ class LevelGenerator:
                         level[check_layer_key]["num"] = str(len(check_tiles))
                         logger.debug(f"[_add_goals] Cleared tile at {check_layer_key}:{output_pos} for goal output")
 
+                # CRITICAL: For stack goals, clear additional positions in stack direction
+                # Stack tiles are offset by 0.1 per stacked tile in the output direction
+                # [연구 근거] townpop sp_template: interval_stackOffSetY = 0.1f
+                # Example: stack_e with count=6 extends 5*0.1=0.5 units east (half tile)
+                # Example: stack_e with count=11 extends 10*0.1=1.0 unit east (exactly 1 tile)
+                # Example: stack_e with count=12 extends 11*0.1=1.1 units east (need to block 2nd tile)
+                #
+                # Stacked tiles extend from stack position by (count-1) * 0.1 tiles
+                # Output position is 1 tile from stack (already cleared)
+                # Need to clear positions BEYOND output if extension > 1.0
+                #
+                # Formula: additional_positions_to_clear = ceil(max_offset) - 1
+                # - count <= 11: max_offset <= 1.0, ceil=1, 1-1=0 → no extra clearing
+                # - count 12-21: max_offset 1.1-2.0, ceil=2, 2-1=1 → clear 1 extra
+                # - count 22+: max_offset > 2.0, ceil >= 3, 3-1=2 → clear 2 extra
+                if goal_type.startswith("stack_"):
+                    import math
+                    STACK_OFFSET = 0.1  # 타일당 오프셋 (타운팝 기준)
+                    # Calculate how far stacked tiles extend from stack position
+                    max_offset = (goal_count - 1) * STACK_OFFSET
+
+                    # Positions beyond output to clear = ceil(max_offset) - 1
+                    # Output position (1 tile from stack) is already cleared
+                    additional_blocked = max(0, math.ceil(max_offset) - 1)
+
+                    if additional_blocked > 0:
+                        logger.debug(f"[_add_goals] Stack {goal_type} count={goal_count}, offset={max_offset:.1f}: blocking {additional_blocked} additional positions beyond output")
+
+                        # Clear tiles in the extended stack direction (positions beyond output)
+                        for ext_idx in range(1, additional_blocked + 1):
+                            # ext_idx=1: 2 tiles from stack (1 beyond output)
+                            # ext_idx=2: 3 tiles from stack (2 beyond output)
+                            ext_col = p_col + col_off * (ext_idx + 1)
+                            ext_row = p_row + row_off * (ext_idx + 1)
+                            ext_pos = f"{ext_col}_{ext_row}"
+
+                            # Check bounds
+                            if ext_col < 0 or ext_col >= cols or ext_row < 0 or ext_row >= rows:
+                                continue
+
+                            # Clear from all layers
+                            for i in range(level.get("layer", 8)):
+                                check_layer_key = f"layer_{i}"
+                                check_tiles = level.get(check_layer_key, {}).get("tiles", {})
+                                if ext_pos in check_tiles:
+                                    del check_tiles[ext_pos]
+                                    level[check_layer_key]["num"] = str(len(check_tiles))
+                                    logger.debug(f"[_add_goals] Cleared tile at {check_layer_key}:{ext_pos} for stack extension")
+
+                            # Also add to output_positions to prevent other goals from using it
+                            output_positions.add(ext_pos)
+
                 # In symmetric mode, also place mirrored goal if not self-symmetric position
                 if use_replacement_mode and not is_self_symmetric_position(p_col, p_row):
                     mirror_col, mirror_row = get_mirror_position(p_col, p_row)
@@ -5774,6 +5911,7 @@ class LevelGenerator:
         """
         Add chain attribute to a random tile.
         RULE: Chain tiles MUST have at least one clearable neighbor on LEFT or RIGHT (same row).
+        The neighbor must NOT be covered by upper layers (so it can be selected first).
         Chain is released by clearing adjacent tiles on the left or right side.
         """
         num_layers = level.get("layer", 8)
@@ -5813,8 +5951,10 @@ class LevelGenerator:
                         if (isinstance(ndata, list) and len(ndata) >= 2 and
                             (not ndata[1] or ndata[1] == "frog") and
                             ndata[0] not in self.GOAL_TYPES):
-                            has_clearable_neighbor = True
-                            break
+                            # CRITICAL: Neighbor must NOT be covered by upper layers
+                            if not self._is_position_covered_by_upper(level, i, ncol, nrow):
+                                has_clearable_neighbor = True
+                                break
 
                 if has_clearable_neighbor:
                     candidates.append((layer_key, pos))
@@ -5830,8 +5970,25 @@ class LevelGenerator:
 
         RULE: Frogs must only be placed on tiles that are NOT covered by upper layers.
         This is because frogs need to be immediately selectable when the level spawns.
+
+        [연구 근거] Tile Busters 스타일: 개구리는 레벨당 최대 3개로 제한
         """
+        MAX_FROGS_PER_LEVEL = 3
+
+        # Count existing frogs
         num_layers = level.get("layer", 8)
+        current_frog_count = 0
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for tile_data in tiles.values():
+                if isinstance(tile_data, list) and len(tile_data) >= 2 and tile_data[1] == "frog":
+                    current_frog_count += 1
+
+        # Don't add if already at max
+        if current_frog_count >= MAX_FROGS_PER_LEVEL:
+            logger.debug(f"[FROG] _add_frog_to_tile: Skipping - already at max {MAX_FROGS_PER_LEVEL} frogs")
+            return level
 
         # Collect all tiles without attributes that are NOT covered by upper layers
         candidates = []
@@ -5856,6 +6013,7 @@ class LevelGenerator:
         if candidates:
             layer_key, pos = random.choice(candidates)
             level[layer_key]["tiles"][pos][1] = "frog"
+            logger.debug(f"[FROG] _add_frog_to_tile: Added frog at {layer_key}/{pos}")
 
         return level
 
@@ -6190,27 +6348,38 @@ class LevelGenerator:
                     else:
                         total_matchable += 1
 
-        # Step 3: Adjust goal counts to make total divisible by 3
-        total_remainder = total_matchable % 3
-        if total_remainder != 0 and goal_tiles:
-            # Need to add (3 - remainder) internal tiles to goals
-            tiles_to_add = 3 - total_remainder  # 1 or 2
+        # Step 3: Ensure goal internal tiles (t0) are divisible by 3
+        # CRITICAL: Goal internal tiles become t0 when output, so t0 must be divisible by 3
+        t0_count = 0
+        for layer_idx, pos, tile_data in goal_tiles:
+            if isinstance(tile_data[2], list) and tile_data[2]:
+                t0_count += int(tile_data[2][0])
+
+        t0_remainder = t0_count % 3
+        if t0_remainder != 0 and goal_tiles:
+            # Need to add (3 - remainder) internal tiles to make t0 divisible by 3
+            tiles_to_add_t0 = 3 - t0_remainder  # 1 or 2
 
             # Add to goal counts (prefer spreading across multiple goals)
             goal_idx = 0
-            while tiles_to_add > 0 and goal_tiles:
+            while tiles_to_add_t0 > 0 and goal_tiles:
                 layer_idx, pos, tile_data = goal_tiles[goal_idx % len(goal_tiles)]
                 if isinstance(tile_data[2], list) and tile_data[2]:
                     tile_data[2][0] = int(tile_data[2][0]) + 1
-                    tiles_to_add -= 1
+                    tiles_to_add_t0 -= 1
                     total_matchable += 1
-                    logger.info(f"[_fix_goal_counts] Added +1 to goal at layer_{layer_idx}:{pos} for divisibility fix")
+                    t0_count += 1
+                    logger.info(f"[_fix_goal_counts] Added +1 to goal at layer_{layer_idx}:{pos} for t0 divisibility")
                 goal_idx += 1
                 # Safety: prevent infinite loop
                 if goal_idx > len(goal_tiles) * 3:
                     break
 
-            logger.info(f"[_fix_goal_counts] Adjusted goal counts to make total {total_matchable} divisible by 3")
+            logger.info(f"[_fix_goal_counts] Adjusted goal internals (t0) to {t0_count} (divisible by 3)")
+
+        # Step 4: Total divisibility will be handled by _ensure_tile_count_divisible_by_3
+        # DO NOT add more to goals here - that would break t0 divisibility
+        # If t0 is divisible by 3 and regular tiles are divisible by 3, total will also be divisible by 3
 
         # Step 4: Recalculate goalCount
         goalCount = {}
@@ -6229,7 +6398,7 @@ class LevelGenerator:
 
         level["goalCount"] = goalCount
 
-        if fixed_count > 0 or total_remainder != 0:
+        if fixed_count > 0 or t0_remainder != 0:
             logger.info(f"[_fix_goal_counts] Final goalCount: {goalCount}, total matchable: {total_matchable}")
 
         return level
@@ -6387,11 +6556,47 @@ class LevelGenerator:
             tiles_to_add = 3 - total_remainder
             added_count = 0
 
-            # For symmetric patterns, add tiles symmetrically
+            # For symmetric patterns, we need to add/remove tiles to reach divisible by 3
+            # Strategy: Since symmetric addition is complex, use tile type redistribution
+            # If redistribution fails, we'll use _force_fix_tile_counts later
             if symmetry_mode in ("horizontal", "vertical", "both"):
-                # For symmetry, we need to add tiles in pairs/quads
-                # Just skip adding for now - the tile type redistribution will handle it
-                pass
+                # For symmetric patterns, try to remove tiles to make total divisible
+                # Remove remainder tiles (1 or 2) from center positions or paired positions
+                cols, rows = params.grid_size
+
+                # Find removable tiles (regular tiles without special attributes)
+                removable: List[Tuple[int, str, str]] = []  # (layer_idx, pos, tile_type)
+                for i in range(num_layers):
+                    layer_key = f"layer_{i}"
+                    tiles = level.get(layer_key, {}).get("tiles", {})
+                    for pos, tile_data in tiles.items():
+                        if isinstance(tile_data, list) and len(tile_data) >= 2:
+                            tile_type = tile_data[0]
+                            attribute = tile_data[1] if len(tile_data) > 1 else ""
+                            if (tile_type not in self.GOAL_TYPES and
+                                not tile_type.startswith("craft_") and
+                                not tile_type.startswith("stack_") and
+                                not attribute):
+                                removable.append((i, pos, tile_type))
+
+                # Sort by position to prefer edge tiles (less impactful)
+                random.shuffle(removable)
+
+                # Remove tiles to make total divisible by 3
+                tiles_to_remove = total_remainder  # 1 or 2
+                removed_count = 0
+                for layer_idx, pos, _ in removable[:tiles_to_remove]:
+                    layer_key = f"layer_{layer_idx}"
+                    if pos in level[layer_key]["tiles"]:
+                        del level[layer_key]["tiles"][pos]
+                        level[layer_key]["num"] = str(len(level[layer_key]["tiles"]))
+                        removed_count += 1
+                        if removed_count >= tiles_to_remove:
+                            break
+
+                if removed_count > 0:
+                    tiles_were_removed = True
+                    logger.debug(f"[_ensure_tile_count_divisible_by_3] Removed {removed_count} tiles for symmetric level divisibility")
             else:
                 for i in range(num_layers):
                     if added_count >= tiles_to_add:
@@ -6442,7 +6647,6 @@ class LevelGenerator:
                                 removable_tiles.append((i, pos))
 
                 # Remove tiles from the end of the list (less impactful positions)
-                import random
                 random.shuffle(removable_tiles)
                 for layer_idx, pos in removable_tiles[:tiles_to_remove]:
                     layer_key = f"layer_{layer_idx}"
@@ -6663,8 +6867,8 @@ class LevelGenerator:
         # FINAL STEP: FORCE divisibility by 3
         # If still_broken has any types, it means the total is not divisible by 3
         # or the reassignment strategies failed. Force fix by removing tiles.
-        # CRITICAL: For symmetric patterns, skip tile removal to preserve symmetry!
-        if still_broken and symmetry_mode == "none":
+        # NOTE: Even for symmetric patterns, we must force fix if redistribution failed
+        if still_broken:
             # Recount everything one more time
             total_matchable = 0
             removable_tiles_final: List[Tuple[int, str, str]] = []  # (layer_idx, pos, tile_type)
@@ -6811,10 +7015,48 @@ class LevelGenerator:
         Aggressively fix tile counts to ensure playability.
         This is a last-resort function that will force-fix any remaining issues.
         """
-        import random
         num_layers = level.get("layer", 8)
 
-        # Count current tiles
+        # CRITICAL: First fix t0 (goal internals) to be divisible by 3
+        # This must happen BEFORE removing regular tiles, because t0 affects total
+        goal_tiles = []
+        t0_count = 0
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for pos, tile_data in tiles.items():
+                if isinstance(tile_data, list) and len(tile_data) > 0:
+                    tile_type = tile_data[0]
+                    if tile_type.startswith("craft_") or tile_type.startswith("stack_"):
+                        if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
+                            internal_count = int(tile_data[2][0]) if tile_data[2][0] else 0
+                            t0_count += internal_count
+                            goal_tiles.append((i, pos, tile_data))
+
+        t0_remainder = t0_count % 3
+        if t0_remainder != 0 and goal_tiles:
+            # Add (3 - remainder) to goal internal counts to make t0 divisible by 3
+            tiles_to_add = 3 - t0_remainder
+            goal_idx = 0
+            while tiles_to_add > 0:
+                _, _, tile_data = goal_tiles[goal_idx % len(goal_tiles)]
+                if isinstance(tile_data[2], list) and tile_data[2]:
+                    tile_data[2][0] = int(tile_data[2][0]) + 1
+                    tiles_to_add -= 1
+                    t0_count += 1
+                goal_idx += 1
+                if goal_idx > len(goal_tiles) * 3:
+                    break
+
+            # Update goalCount
+            goalCount = {}
+            for _, _, tile_data in goal_tiles:
+                tile_type = tile_data[0]
+                internal_count = int(tile_data[2][0]) if isinstance(tile_data[2], list) and tile_data[2] else 0
+                goalCount[tile_type] = goalCount.get(tile_type, 0) + internal_count
+            level["goalCount"] = goalCount
+
+        # Now count all tiles including updated t0
         type_counts: Dict[str, int] = {}
         type_positions: Dict[str, List[Tuple[int, str]]] = {}
         total_matchable = 0
@@ -6842,8 +7084,9 @@ class LevelGenerator:
         if total_remainder != 0:
             tiles_to_remove = total_remainder
 
-            # Find removable tiles (no attributes)
-            removable = []
+            # Find removable tiles - prefer tiles without attributes, but allow any regular tile
+            removable_no_attr = []
+            removable_with_attr = []
             for i in range(num_layers):
                 layer_key = f"layer_{i}"
                 tiles = level.get(layer_key, {}).get("tiles", {})
@@ -6851,8 +7094,14 @@ class LevelGenerator:
                     if isinstance(tile_data, list) and len(tile_data) >= 2:
                         tile_type = tile_data[0]
                         attr = tile_data[1] if len(tile_data) > 1 else ""
-                        if not attr and tile_type not in self.GOAL_TYPES:
-                            removable.append((i, pos, tile_type))
+                        if tile_type not in self.GOAL_TYPES and not tile_type.startswith("craft_") and not tile_type.startswith("stack_"):
+                            if not attr:
+                                removable_no_attr.append((i, pos, tile_type))
+                            else:
+                                removable_with_attr.append((i, pos, tile_type))
+
+            # Combine: prefer no-attr tiles, but use attr tiles if needed
+            removable = removable_no_attr + removable_with_attr
 
             random.shuffle(removable)
             for layer_idx, pos, _ in removable[:tiles_to_remove]:
@@ -6946,11 +7195,19 @@ class LevelGenerator:
                             # Check if neighbor is clearable (no obstacle or frog only)
                             if (isinstance(ndata, list) and len(ndata) >= 2 and
                                 (not ndata[1] or ndata[1] == "frog")):
-                                has_clearable_neighbor = True
-                                break
+                                # CRITICAL: Neighbor must NOT be a goal tile (stack_*/craft_* boxes)
+                                # Goal boxes can't be picked directly, so they're not clearable neighbors
+                                if ndata[0] in self.GOAL_TYPES:
+                                    continue
+                                # CRITICAL: Neighbor must NOT be covered by upper layers
+                                # If covered, the chain cannot be unlocked
+                                if not self._is_position_covered_by_upper(level, i, ncol, nrow):
+                                    has_clearable_neighbor = True
+                                    break
 
                     if not has_clearable_neighbor:
                         invalid_obstacles.append(pos)
+                        logger.debug(f"[VALIDATE] Invalid chain at layer {i}/{pos}: no clearable uncovered horizontal neighbor")
 
                 # Validate link tiles - connected direction MUST have a tile
                 # Position format is "col_row" (x_y)
@@ -6974,18 +7231,35 @@ class LevelGenerator:
                         continue
 
                     # CRITICAL: The linked direction MUST have a tile
+                    # CRITICAL: Target must NOT have blocking gimmicks (chain, ice, grass)
+                    BLOCKING_GIMMICKS = {"chain", "ice", "ice_1", "ice_2", "ice_3", "grass"}
                     valid_link = False
+                    invalid_reason = ""
+
                     if target_pos in tiles:
                         target_data = tiles[target_pos]
                         if isinstance(target_data, list) and len(target_data) >= 2:
                             # Target must not be a goal tile (craft/stack)
                             target_type = target_data[0]
+                            target_attr = target_data[1] if len(target_data) > 1 else ""
+
                             if (target_type not in self.GOAL_TYPES and
                                 not target_type.startswith("craft_") and
                                 not target_type.startswith("stack_")):
-                                valid_link = True
+                                # NEW: Check if target has blocking gimmick
+                                if target_attr in BLOCKING_GIMMICKS:
+                                    invalid_reason = f"target has blocking gimmick '{target_attr}'"
+                                else:
+                                    valid_link = True
+                            else:
+                                invalid_reason = "target is a goal tile"
+                        else:
+                            invalid_reason = "invalid target data"
+                    else:
+                        invalid_reason = "target tile does not exist"
 
                     if not valid_link:
+                        logger.debug(f"[VALIDATE] Invalid link at {layer_key}/{pos} ({attr}): {invalid_reason}")
                         invalid_obstacles.append(pos)
 
                 # Validate grass tiles - must have at least 2 clearable neighbors in 4 directions
@@ -7006,6 +7280,9 @@ class LevelGenerator:
                             ndata = tiles[npos]
                             if (isinstance(ndata, list) and len(ndata) >= 2 and
                                 (not ndata[1] or ndata[1] == "frog")):
+                                # CRITICAL: Neighbor must NOT be a goal tile (stack_*/craft_* boxes)
+                                if ndata[0] in self.GOAL_TYPES:
+                                    continue
                                 clearable_count += 1
 
                     # RULE: Must have at least 2 clearable neighbors

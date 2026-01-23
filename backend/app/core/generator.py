@@ -392,9 +392,10 @@ class LevelGenerator:
             else:
                 level = self._ensure_tutorial_gimmick_count(level, tutorial_gimmick, tutorial_gimmick_min_count)
 
-        # NOTE: Craft/Stack boxes wait if output position has a tile.
-        # They output when the position becomes empty (tile selected).
-        # DO NOT delete tiles from output positions.
+        # NOTE: Craft/Stack boxes wait if output position has a tile (during GAMEPLAY).
+        # But during GENERATION, we should ensure no tiles exist in output positions.
+        # Relocate (not delete) tiles to maintain counts.
+        level = self._relocate_tiles_from_goal_outputs(level)
 
         # FINAL VALIDATION: Ensure level is playable (all tile types divisible by 3)
         validation_result = self._validate_playability(level)
@@ -6403,13 +6404,15 @@ class LevelGenerator:
 
         return level
 
-    def _clear_goal_output_positions(self, level: Dict[str, Any]) -> Dict[str, Any]:
+    def _relocate_tiles_from_goal_outputs(self, level: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Clear tiles from all goal (craft/stack) output positions across all layers.
+        Relocate tiles from goal (craft/stack) output positions to other valid positions.
 
         CRITICAL: This must be called AFTER all tile modifications to ensure
         no tiles exist in stack/craft output positions. Stack and craft gimmicks
         spawn tiles at their output positions, so existing tiles would block them.
+
+        Unlike deletion, this function RELOCATES tiles to maintain tile counts.
 
         Direction rules:
         - craft_s / stack_s: outputs to row+1 (south)
@@ -6418,9 +6421,12 @@ class LevelGenerator:
         - craft_w / stack_w: outputs to col-1 (west)
         """
         num_layers = level.get("layer", 8)
+        grid_width = level.get("gridWidth", 7)
+        grid_height = level.get("gridHeight", 7)
 
-        # Find all goal positions and their output positions
-        goal_output_positions = []
+        # Collect all goal output positions (positions that must be clear)
+        goal_output_positions = set()
+        goal_positions = set()
         for i in range(num_layers):
             layer_key = f"layer_{i}"
             tiles = level.get(layer_key, {}).get("tiles", {})
@@ -6430,6 +6436,8 @@ class LevelGenerator:
                 tile_type = tile_data[0]
                 if not (tile_type.startswith("craft_") or tile_type.startswith("stack_")):
                     continue
+
+                goal_positions.add(pos)
 
                 # Calculate output position based on direction
                 col, row = map(int, pos.split("_"))
@@ -6445,25 +6453,96 @@ class LevelGenerator:
                 else:
                     continue
 
-                goal_output_positions.append((tile_type, pos, output_pos))
+                goal_output_positions.add(output_pos)
 
-        # Clear tiles from all layers at each output position
-        cleared_count = 0
-        for goal_type, goal_pos, output_pos in goal_output_positions:
-            for i in range(num_layers):
-                layer_key = f"layer_{i}"
-                layer_data = level.get(layer_key)
-                if not layer_data:
-                    continue
-                tiles = layer_data.get("tiles", {})
-                if output_pos in tiles:
-                    del tiles[output_pos]
-                    layer_data["num"] = str(len(tiles))
-                    cleared_count += 1
-                    logger.debug(f"[_clear_goal_output_positions] Cleared {layer_key}:{output_pos} for {goal_type} at {goal_pos}")
+        if not goal_output_positions:
+            return level
 
-        if cleared_count > 0:
-            logger.info(f"[_clear_goal_output_positions] Cleared {cleared_count} tiles from goal output positions")
+        # Collect tiles that need to be relocated
+        tiles_to_relocate = []  # [(layer_idx, pos, tile_data)]
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for pos in list(tiles.keys()):
+                if pos in goal_output_positions:
+                    tile_data = tiles[pos]
+                    # Only relocate regular tiles, not goals themselves
+                    if isinstance(tile_data, list) and tile_data:
+                        tile_type = tile_data[0]
+                        if not (tile_type.startswith("craft_") or tile_type.startswith("stack_")):
+                            tiles_to_relocate.append((i, pos, tile_data))
+
+        if not tiles_to_relocate:
+            return level
+
+        # Remove tiles from their current positions
+        for layer_idx, pos, _ in tiles_to_relocate:
+            layer_key = f"layer_{layer_idx}"
+            del level[layer_key]["tiles"][pos]
+            level[layer_key]["num"] = str(len(level[layer_key]["tiles"]))
+
+        # Find valid positions for relocation
+        relocated_count = 0
+        for layer_idx, old_pos, tile_data in tiles_to_relocate:
+            layer_key = f"layer_{layer_idx}"
+            tiles = level[layer_key]["tiles"]
+
+            # Collect occupied positions in this layer
+            occupied_positions = set(tiles.keys())
+
+            # Find a valid new position
+            new_pos = None
+            for row in range(grid_height):
+                for col in range(grid_width):
+                    candidate_pos = f"{col}_{row}"
+                    # Must not be occupied, must not be goal output position, must not be goal position
+                    if (candidate_pos not in occupied_positions and
+                        candidate_pos not in goal_output_positions and
+                        candidate_pos not in goal_positions):
+                        new_pos = candidate_pos
+                        break
+                if new_pos:
+                    break
+
+            if new_pos:
+                # Place tile at new position
+                tiles[new_pos] = tile_data
+                level[layer_key]["num"] = str(len(tiles))
+                relocated_count += 1
+                logger.debug(f"[_relocate_tiles_from_goal_outputs] Relocated {layer_key}:{old_pos} → {new_pos}")
+            else:
+                # If no valid position found, try another layer
+                for alt_layer_idx in range(num_layers):
+                    if alt_layer_idx == layer_idx:
+                        continue
+                    alt_layer_key = f"layer_{alt_layer_idx}"
+                    alt_tiles = level.get(alt_layer_key, {}).get("tiles", {})
+                    alt_occupied = set(alt_tiles.keys())
+
+                    for row in range(grid_height):
+                        for col in range(grid_width):
+                            candidate_pos = f"{col}_{row}"
+                            if (candidate_pos not in alt_occupied and
+                                candidate_pos not in goal_output_positions and
+                                candidate_pos not in goal_positions):
+                                new_pos = candidate_pos
+                                break
+                        if new_pos:
+                            break
+
+                    if new_pos:
+                        alt_tiles[new_pos] = tile_data
+                        level[alt_layer_key]["num"] = str(len(alt_tiles))
+                        relocated_count += 1
+                        logger.debug(f"[_relocate_tiles_from_goal_outputs] Relocated {layer_key}:{old_pos} → {alt_layer_key}:{new_pos}")
+                        break
+
+                if not new_pos:
+                    # Last resort: log warning (tile count will be off)
+                    logger.warning(f"[_relocate_tiles_from_goal_outputs] Could not relocate tile from {layer_key}:{old_pos}")
+
+        if relocated_count > 0:
+            logger.info(f"[_relocate_tiles_from_goal_outputs] Relocated {relocated_count} tiles from goal output positions")
 
         return level
 

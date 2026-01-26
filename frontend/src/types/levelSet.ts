@@ -124,26 +124,32 @@ export const SIMPLE_GIMMICK_UNLOCK_LEVELS: GimmickUnlockLevels = {
 };
 
 /**
- * 프로페셔널 기믹 언락 레벨 (10레벨 간격)
+ * 프로페셔널 기믹 언락 레벨 (시장 조사 기반)
+ *
+ * [연구 근거]
+ * - Tile Busters: 레벨 5-10에서 첫 장애물 등장
+ * - Room 8 Studio: "50레벨 동안 메카닉 반복 금지"
+ * - Room 8 Studio: 히든 타일(unknown)은 레벨 175+ 본격 도입
+ * - 튜토리얼 원칙: 1-3개 메카닉만 사용, 3회 이하 움직임으로 해제
  *
  * 특징:
- * - 첫 10레벨은 기믹 없이 순수 매칭 학습
- * - 11, 21, 31, 41... 레벨에서 새 기믹 튜토리얼
- * - 새 기믹 도입 후 충분한 연습 기간 (9레벨)
+ * - 레벨 1-5: 순수 매칭 학습
+ * - 레벨 6: 첫 기믹(chain) 도입 (Tile Busters 참고)
+ * - 이후 ~20레벨 간격으로 새 기믹 언락
  * - 백엔드 DEFAULT_GIMMICK_UNLOCK_LEVELS와 동기화됨
  */
 export const PROFESSIONAL_GIMMICK_UNLOCK_LEVELS: GimmickUnlockLevels = {
-  chain: 11,      // 11-20: chain 연습
-  ice: 21,        // 21-30: ice 연습
-  frog: 31,       // 31-40: frog 연습
-  grass: 41,      // 41-50: grass 연습
-  link: 51,       // 51-60: link 연습
-  bomb: 61,       // 61-70: bomb 연습
-  curtain: 71,    // 71-80: curtain 연습
-  teleport: 81,   // 81-90: teleport 연습
-  unknown: 91,    // 91-100: unknown 연습
-  craft: 101,     // 101-110: craft 연습
-  stack: 111,     // 111-120: stack 연습
+  chain: 6,       // 6-24: chain 연습 (Tile Busters: 5-10에서 첫 장애물)
+  ice: 25,        // 25-44: ice 연습
+  grass: 45,      // 45-64: grass 연습
+  frog: 65,       // 65-84: frog 연습
+  bomb: 85,       // 85-104: bomb 연습
+  curtain: 105,   // 105-124: curtain 연습
+  teleport: 125,  // 125-144: teleport 연습
+  link: 145,      // 145-174: link 연습
+  unknown: 175,   // 175-194: unknown 연습 (Room 8 Studio 연구)
+  craft: 195,     // 195-214: craft 연습
+  stack: 215,     // 215+: stack 연습
 };
 
 /**

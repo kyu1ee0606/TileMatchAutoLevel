@@ -34,6 +34,93 @@ export interface PlaytestResult {
 }
 
 /**
+ * 자동 테스트 (봇 시뮬레이션) 결과
+ */
+export interface AutoTestResult {
+  tested_at: string;
+  iterations: number;
+  bot_clear_rates: {
+    novice: number;
+    casual: number;
+    average: number;
+    expert: number;
+    optimal: number;
+  };
+  bot_target_rates: {
+    novice: number;
+    casual: number;
+    average: number;
+    expert: number;
+    optimal: number;
+  };
+  match_score: number;  // 0-100
+  autoplay_score: number;
+  autoplay_grade: string;
+  static_score: number;
+  static_grade: string;
+  balance_status: 'balanced' | 'too_easy' | 'too_hard' | 'unbalanced';
+  execution_time_ms: number;
+}
+
+/**
+ * 테스트 모드
+ */
+export type TestMode = 'manual' | 'auto_single' | 'auto_batch';
+
+/**
+ * 자동 테스트 필터 타입
+ */
+export type AutoTestFilter =
+  | 'all'              // 전체 레벨
+  | 'untested'         // 미테스트 레벨만
+  | 'boss'             // 보스 레벨 (10의 배수)
+  | 'tutorial'         // 튜토리얼 레벨
+  | 'low_match'        // 매치 점수 낮은 레벨
+  | 'by_grade'         // 특정 등급
+  | 'by_range'         // 레벨 범위
+  | 'custom';          // 커스텀 필터
+
+/**
+ * 일괄 자동 테스트 설정
+ */
+export interface BatchAutoTestConfig {
+  filter: AutoTestFilter;
+  iterations: number;  // 봇 시뮬레이션 반복 횟수
+  grades?: string[];   // by_grade 필터용
+  level_range?: { min: number; max: number };  // by_range 필터용
+  max_levels?: number; // 최대 테스트 레벨 수
+  save_results?: boolean;  // 결과를 레벨 메타에 저장
+}
+
+/**
+ * 일괄 자동 테스트 진행 상태
+ */
+export interface BatchAutoTestProgress {
+  status: 'idle' | 'running' | 'paused' | 'completed' | 'error';
+  total_levels: number;
+  completed_levels: number;
+  current_level_number: number;
+  started_at?: string;
+  elapsed_ms: number;
+  estimated_remaining_ms: number;
+  results: {
+    level_number: number;
+    match_score: number;
+    autoplay_grade: string;
+    balance_status: string;
+  }[];
+  failed_levels: number[];
+  last_error?: string;
+  // 통계 요약
+  summary?: {
+    avg_match_score: number;
+    grade_distribution: Record<string, number>;
+    balance_distribution: Record<string, number>;
+    pass_rate: number;  // match_score >= 70 비율
+  };
+}
+
+/**
  * 프로덕션 레벨 메타데이터
  */
 export interface ProductionLevelMeta {

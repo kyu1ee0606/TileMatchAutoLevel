@@ -432,7 +432,7 @@ export function TileRenderer({ tile, size, showDebug }: TileRendererProps) {
         </div>
       )}
 
-      {/* Link gimmick badge (hidden when unlocked) */}
+      {/* Link gimmick badge with direction (hidden when unlocked) */}
       {isLink && !canPickLink && (
         <div
           style={{
@@ -440,9 +440,33 @@ export function TileRenderer({ tile, size, showDebug }: TileRendererProps) {
             backgroundColor: 'rgba(234, 179, 8, 0.8)',
             color: 'white',
           }}
-          title="링크 잠김"
+          title={`링크 잠김 (${attribute === 'link_n' ? '위' : attribute === 'link_s' ? '아래' : attribute === 'link_e' ? '오른쪽' : '왼쪽'})`}
         >
           🔗
+        </div>
+      )}
+
+      {/* Link direction arrow indicator (always visible for link tiles) */}
+      {isLink && (
+        <div
+          style={{
+            position: 'absolute',
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            fontSize: size * 0.4,
+            color: canPickLink ? 'rgba(74, 222, 128, 0.9)' : 'rgba(234, 179, 8, 0.9)',
+            textShadow: '0 0 4px rgba(0,0,0,0.9), 0 0 8px rgba(0,0,0,0.6)',
+            fontWeight: 'bold',
+            zIndex: 15,
+            pointerEvents: 'none',
+          }}
+          title={`연결 방향: ${attribute === 'link_n' ? '위' : attribute === 'link_s' ? '아래' : attribute === 'link_e' ? '오른쪽' : '왼쪽'}`}
+        >
+          {attribute === 'link_s' && '↓'}
+          {attribute === 'link_n' && '↑'}
+          {attribute === 'link_e' && '→'}
+          {attribute === 'link_w' && '←'}
         </div>
       )}
 

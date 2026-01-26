@@ -120,6 +120,9 @@ const RANDOM_TILE_POOL = ['t1', 't2', 't3', 't4', 't5', 't6', 't7', 't8', 't9', 
 
 const EFFECT_MAPPING: Record<string, TileEffectType> = {
   'ice': TileEffectType.ICE,
+  'ice_1': TileEffectType.ICE,
+  'ice_2': TileEffectType.ICE,
+  'ice_3': TileEffectType.ICE,
   'chain': TileEffectType.CHAIN,
   'grass': TileEffectType.GRASS,
   'link_e': TileEffectType.LINK_EAST,
@@ -621,6 +624,7 @@ export class GameEngine {
 
           switch (effectType) {
             case TileEffectType.ICE:
+              // ice_1, ice_2, ice_3 모두 남은 횟수는 3으로 고정
               effectData.remaining = 3;
               this.state.iceTiles.set(`${layerIdx}_${pos}`, 3);
               break;
@@ -1589,7 +1593,11 @@ export class GameEngine {
           const adjPosKey = getPositionKey(adjX, adjY);
           const adjTile = layerTiles.get(adjPosKey);
           if (adjTile && !adjTile.picked) {
-            adjacentUnpickedCount++;
+            // CRITICAL: stack_*/craft_* 박스는 직접 선택할 수 없으므로 clearable neighbor가 아님
+            const isGoalBox = adjTile.tileType.startsWith('stack_') || adjTile.tileType.startsWith('craft_');
+            if (!isGoalBox) {
+              adjacentUnpickedCount++;
+            }
           }
         }
 
@@ -1626,6 +1634,13 @@ export class GameEngine {
           const adjTile = layerTiles.get(adjPosKey);
           // 인접 타일이 있고, 선택 안됐고, 장애물이 없거나 frog만 있으면 clearable
           if (adjTile && !adjTile.picked) {
+            // CRITICAL: stack_*/craft_* 박스는 직접 선택할 수 없으므로 clearable neighbor가 아님
+            // 박스에서 스폰된 타일(isStackTile/isCraftTile)은 선택 가능하므로 제외하지 않음
+            const isGoalBox = adjTile.tileType.startsWith('stack_') || adjTile.tileType.startsWith('craft_');
+            if (isGoalBox) {
+              continue; // 박스는 clearable neighbor로 간주하지 않음
+            }
+
             const adjAttr = adjTile.effectType;
             if (adjAttr === TileEffectType.NONE || adjAttr === TileEffectType.FROG) {
               hasClearableNeighbor = true;

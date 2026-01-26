@@ -440,9 +440,9 @@ export async function rejectLevel(
 }
 
 /**
- * 배치 카운트 재계산
+ * 배치 카운트 재계산 (레벨 저장 후 호출해야 함)
  */
-async function recalculateBatchCounts(batchId: string): Promise<void> {
+export async function recalculateBatchCounts(batchId: string): Promise<void> {
   const levels = await getProductionLevelsByBatch(batchId);
 
   const counts = {

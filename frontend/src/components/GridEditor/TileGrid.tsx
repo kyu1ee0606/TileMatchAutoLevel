@@ -24,6 +24,13 @@ function getDirectionFromTileType(tileType: string): { rotation: number; label: 
   return DIRECTION_SUFFIX_MAP[suffix] || null;
 }
 
+// Get direction from attribute (for link tiles)
+function getDirectionFromAttribute(attribute: string): { rotation: number; label: string; direction: string } | null {
+  if (!attribute.startsWith('link_')) return null;
+  const suffix = '_' + attribute.split('_')[1];
+  return DIRECTION_SUFFIX_MAP[suffix] || null;
+}
+
 function DirectionArrow({ tileType, tileSize }: { tileType: string; tileSize: number }) {
   const dirInfo = getDirectionFromTileType(tileType);
   if (!dirInfo) return null;
@@ -50,6 +57,39 @@ function DirectionArrow({ tileType, tileSize }: { tileType: string; tileSize: nu
           fill="#FFD700"
           stroke="#000"
           strokeWidth="1"
+        />
+      </svg>
+    </div>
+  );
+}
+
+// Link direction arrow component (shows connection direction)
+function LinkDirectionArrow({ attribute, tileSize }: { attribute: string; tileSize: number }) {
+  const dirInfo = getDirectionFromAttribute(attribute);
+  if (!dirInfo) return null;
+
+  const arrowSize = Math.max(14, tileSize * 0.45);
+
+  return (
+    <div
+      className="absolute inset-0 flex items-center justify-center pointer-events-none z-30"
+      title={`연결 방향: ${dirInfo.direction} ${dirInfo.label}`}
+    >
+      <svg
+        width={arrowSize}
+        height={arrowSize}
+        viewBox="0 0 24 24"
+        style={{
+          transform: `rotate(${dirInfo.rotation}deg)`,
+          filter: 'drop-shadow(0 0 3px rgba(0,0,0,0.9))',
+        }}
+      >
+        {/* Simple arrow for link direction */}
+        <path
+          d="M12 4L4 14h5v6h6v-6h5L12 4z"
+          fill="#f59e0b"
+          stroke="#000"
+          strokeWidth="1.5"
         />
       </svg>
     </div>
@@ -160,21 +200,10 @@ export function TileGrid({ className }: TileGridProps) {
     }
   }, [level]);
 
-  if (!layerData) {
-    return (
-      <div className={clsx('flex items-center justify-center p-8 text-gray-400 bg-gray-900 rounded-lg', className)}>
-        <div className="text-center">
-          <span className="text-2xl block mb-2">📭</span>
-          <span>레이어 {selectedLayer} 데이터가 없습니다</span>
-          <p className="text-xs mt-1 text-gray-500">다른 레이어를 선택하세요</p>
-        </div>
-      </div>
-    );
-  }
-
-  const currentCols = parseInt(layerData.col) || 8;
-  const currentRows = parseInt(layerData.row) || 8;
-  const tiles = layerData.tiles || {};
+  // Parse layer data (moved before early return to satisfy hook rules)
+  const currentCols = layerData ? parseInt(layerData.col) || 8 : 8;
+  const currentRows = layerData ? parseInt(layerData.row) || 8 : 8;
+  const tiles = layerData?.tiles || {};
 
   // Calculate max grid size for container (considering all visible layers)
   const { maxCols, maxRows } = useMemo(() => {
@@ -226,6 +255,19 @@ export function TileGrid({ className }: TileGridProps) {
     },
     [activeTool, selectedLayer, selectedTileType, selectedAttribute, setTile, removeTile, addNotification]
   );
+
+  // Early return for missing layer data (after all hooks are called)
+  if (!layerData) {
+    return (
+      <div className={clsx('flex items-center justify-center p-8 text-gray-400 bg-gray-900 rounded-lg', className)}>
+        <div className="text-center">
+          <span className="text-2xl block mb-2">📭</span>
+          <span>레이어 {selectedLayer} 데이터가 없습니다</span>
+          <p className="text-xs mt-1 text-gray-500">다른 레이어를 선택하세요</p>
+        </div>
+      </div>
+    );
+  }
 
   const handleMouseDown = (x: number, y: number) => {
     setIsDragging(true);
@@ -498,6 +540,10 @@ export function TileGrid({ className }: TileGridProps) {
             {/* Direction arrow overlay for craft tiles */}
             {tileType.startsWith('craft_') && (
               <DirectionArrow tileType={tileType} tileSize={TILE_SIZE} />
+            )}
+            {/* Direction arrow overlay for link tiles */}
+            {attribute?.startsWith('link_') && (
+              <LinkDirectionArrow attribute={attribute} tileSize={TILE_SIZE} />
             )}
           </>
         )}

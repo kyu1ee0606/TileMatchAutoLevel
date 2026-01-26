@@ -40,9 +40,10 @@ function calculateMatchScore(botStats: BotClearStats[]): { score: number; avgGap
   const avgGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
   const maxGap = Math.max(...gaps);
 
-  // Score: 100 - weighted average gap (max gap has more weight)
-  const weightedGap = (avgGap * 0.6 + maxGap * 0.4);
-  const score = Math.max(0, 100 - weightedGap * 2);
+  // Score: 100 - weighted average gap
+  // Improved formula: reduced maxGap weight (0.25 vs 0.4) and gentler penalty (1.5x vs 2x)
+  const weightedGap = (avgGap * 0.75 + maxGap * 0.25);
+  const score = Math.max(0, 100 - weightedGap * 1.5);
 
   return { score, avgGap, maxGap };
 }

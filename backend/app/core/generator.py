@@ -397,6 +397,11 @@ class LevelGenerator:
         # Relocate (not delete) tiles to maintain counts.
         level = self._relocate_tiles_from_goal_outputs(level)
 
+        # CRITICAL: Validate frog positions after ALL tile modifications
+        # Frogs must be selectable at spawn (not covered by upper layers)
+        # This fixes frogs that became covered due to tiles added in later steps
+        level = self._validate_and_fix_frog_positions(level)
+
         # FINAL VALIDATION: Ensure level is playable (all tile types divisible by 3)
         validation_result = self._validate_playability(level)
         if not validation_result["is_playable"]:
@@ -4451,7 +4456,10 @@ class LevelGenerator:
         self, level: Dict[str, Any], layer_idx: int, target: int, counter: Dict[str, int]
     ) -> Dict[str, Any]:
         """Add bomb obstacles to a specific layer.
+
         Bombs have a countdown and explode if not cleared in time.
+        NOTE: Bombs CAN be placed on covered tiles. The countdown only starts
+        when the bomb becomes selectable (exposed/not covered by upper layers).
         """
         layer_key = f"layer_{layer_idx}"
         tiles = level.get(layer_key, {}).get("tiles", {})
@@ -6094,6 +6102,50 @@ class LevelGenerator:
     def _remove_frog_from_tile(self, level: Dict[str, Any]) -> Dict[str, Any]:
         """Remove frog attribute from a random tile."""
         return self._remove_attribute_from_tile(level, "frog")
+
+    def _validate_and_fix_frog_positions(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate and fix frog positions to ensure they are not covered by upper layers.
+
+        RULE: Frogs must be immediately selectable when the level spawns.
+        This function should be called AFTER all tile modifications to ensure no frog
+        is covered by tiles added in later generation steps.
+
+        Covered frogs are removed (attribute cleared) as there's no safe place to move them
+        that wouldn't violate placement rules or break tile count divisibility.
+        """
+        num_layers = level.get("layer", 8)
+        removed_count = 0
+
+        for layer_idx in range(num_layers):
+            layer_key = f"layer_{layer_idx}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+
+            for pos, tile_data in tiles.items():
+                if not isinstance(tile_data, list) or len(tile_data) < 2:
+                    continue
+
+                # Check if this is a frog tile
+                if tile_data[1] != "frog":
+                    continue
+
+                # Check if covered by upper layers
+                try:
+                    col, row = map(int, pos.split('_'))
+                    if self._is_position_covered_by_upper(level, layer_idx, col, row):
+                        # Remove frog attribute from covered tile
+                        tile_data[1] = ""
+                        removed_count += 1
+                        logger.warning(
+                            f"[FROG FIX] Removed frog at {layer_key}/{pos} - covered by upper layer"
+                        )
+                except Exception as e:
+                    logger.warning(f"[FROG FIX] Error checking position {pos}: {e}")
+                    continue
+
+        if removed_count > 0:
+            logger.info(f"[FROG FIX] Removed {removed_count} covered frogs from level")
+
+        return level
 
     def _remove_attribute_from_tile(
         self, level: Dict[str, Any], attribute: str

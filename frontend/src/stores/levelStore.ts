@@ -410,7 +410,18 @@ export const useLevelStore = create<LevelState>((set, get) => ({
         return false;
       }
 
-      set({ level: parsed as LevelJSON, analysisResult: null });
+      // Find the topmost layer with tiles (same logic as setLevel)
+      let topLayerWithTiles = 0;
+      for (let i = parsed.layer - 1; i >= 0; i--) {
+        const layerKey = `layer_${i}` as `layer_${number}`;
+        const layerData = parsed[layerKey];
+        if (layerData?.tiles && Object.keys(layerData.tiles).length > 0) {
+          topLayerWithTiles = i;
+          break;
+        }
+      }
+
+      set({ level: parsed as LevelJSON, analysisResult: null, selectedLayer: topLayerWithTiles });
       return true;
     } catch (e) {
       console.error('Failed to parse JSON:', e);

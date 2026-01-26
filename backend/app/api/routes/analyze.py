@@ -373,12 +373,19 @@ async def analyze_autoplay(
         static_score = static_report.score
         static_grade = static_report.grade.value
 
-        # Calculate target clear rates based on STATIC ANALYSIS difficulty score
-        # Convert static_score (0-100) to difficulty (0.0-1.0)
-        # score 0 = easiest (S grade) → difficulty 0.0
-        # score 100 = hardest (D grade) → difficulty 1.0
-        difficulty_from_score = static_score / 100.0
-        target_rates = calculate_target_clear_rates(difficulty_from_score)
+        # Determine target difficulty for calculating expected clear rates
+        # Priority: 1) request.target_difficulty (from Production generation)
+        #           2) Fallback to static analysis score
+        if request.target_difficulty is not None:
+            # Use the target difficulty that was used when generating the level
+            difficulty_for_targets = request.target_difficulty
+        else:
+            # Fallback: Convert static_score (0-100) to difficulty (0.0-1.0)
+            # score 0 = easiest (S grade) → difficulty 0.0
+            # score 100 = hardest (D grade) → difficulty 1.0
+            difficulty_for_targets = static_score / 100.0
+
+        target_rates = calculate_target_clear_rates(difficulty_for_targets)
 
         # Determine which bot profiles to use
         if request.bot_profiles:

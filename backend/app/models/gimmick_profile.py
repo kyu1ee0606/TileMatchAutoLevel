@@ -45,23 +45,27 @@ class GimmickProfile:
 # - 튜토리얼 레벨: 1-3개 메커닉
 # - 기믹은 "3회 이하 움직임으로 해제"가 기본 설계
 GIMMICK_PROFILES: Dict[str, GimmickProfile] = {
+    # S등급: 튜토리얼 단계 (레벨 1-225)
+    # - 레벨 1-20: 기믹 없음 (순수 매칭 학습)
+    # - 레벨 21+: 기믹 순차 언락 시작
+    # - 언락된 기믹은 반드시 사용되어야 학습 가능
     "S": GimmickProfile(
         grade="S",
         difficulty_range=(0.0, 0.2),
-        recommended_gimmicks=[],  # S등급은 기믹 없음 권장 (순수 매칭 학습)
-        max_gimmick_types=0,
-        gimmick_density=0.0,
-        min_gimmick_count=0,
-        max_gimmick_count=0,
+        recommended_gimmicks=["chain", "grass"],  # 기본 기믹 (레벨 21, 61에서 언락)
+        max_gimmick_types=2,  # 언락된 기믹 사용 허용 (기존 0 → 2)
+        gimmick_density=0.05,  # 낮은 밀도 (기존 0.0 → 0.05)
+        min_gimmick_count=0,   # 레벨 1-20은 기믹 없음
+        max_gimmick_count=3,   # 최대 3개 (기존 0 → 3)
     ),
     "A": GimmickProfile(
         grade="A",
         difficulty_range=(0.2, 0.4),
-        recommended_gimmicks=["chain", "grass"],  # 기본적인 기믹 (해제 용이)
-        max_gimmick_types=1,
-        gimmick_density=0.05,
+        recommended_gimmicks=["chain", "grass", "ice", "frog"],  # 기본 + 중간 기믹
+        max_gimmick_types=2,  # 기존 1 → 2 (다양한 기믹 학습)
+        gimmick_density=0.08,  # 기존 0.05 → 0.08
         min_gimmick_count=0,
-        max_gimmick_count=4,  # 기존 3 → 4 (기믹 존재감 확보)
+        max_gimmick_count=5,  # 기존 4 → 5
     ),
     "B": GimmickProfile(
         grade="B",

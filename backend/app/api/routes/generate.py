@@ -127,6 +127,7 @@ def get_special_shape_pattern_index() -> int:
 
 # Tutorial level configurations (levels 1-3)
 # These are special introductory levels with minimal complexity
+# NOTE: symmetry_mode="none" ensures exact tile counts (symmetry can cause count variations)
 TUTORIAL_LEVEL_CONFIGS = {
     1: {
         "description": "첫 번째 레벨: 3종류 타일 × 3개 = 9타일 기본 매칭",
@@ -136,7 +137,7 @@ TUTORIAL_LEVEL_CONFIGS = {
         "max_layers": 1,
         "goals": [],  # No craft/stack goals
         "obstacle_types": [],
-        "symmetry_mode": "both",
+        "symmetry_mode": "none",  # Exact tile count required
         "target_difficulty": 0.05,
     },
     2: {
@@ -147,7 +148,7 @@ TUTORIAL_LEVEL_CONFIGS = {
         "max_layers": 2,
         "goals": [],
         "obstacle_types": [],
-        "symmetry_mode": "both",
+        "symmetry_mode": "none",  # Exact tile count required
         "target_difficulty": 0.08,
     },
     3: {
@@ -158,7 +159,7 @@ TUTORIAL_LEVEL_CONFIGS = {
         "max_layers": 3,
         "goals": [],
         "obstacle_types": [],
-        "symmetry_mode": "both",
+        "symmetry_mode": "none",  # Exact tile count required
         "target_difficulty": 0.10,
     },
 }
@@ -177,38 +178,40 @@ def get_tutorial_config(level_number: int | None) -> dict | None:
 # =========================================================
 # 10레벨 단위 기믹 언락 스케줄 (leveling_config.py와 동기화)
 # =========================================================
-# [연구 근거] Tile Explorer/Triple Tile 분석 결과:
-# - 10레벨 단위로 새 기믹 도입 (학습 곡선 최적화)
-# - 각 기믹당 9레벨 연습 후 다음 기믹 언락
-# - 레벨 112부터 모든 기믹 사용 가능 (자유 조합)
+# [연구 근거] Tile Busters/Triple Tile/Room 8 Studio 분석 결과:
+# - Tile Busters: 레벨 5-10에서 첫 장애물 등장
+# - Room 8 Studio: "50레벨 동안 메카닉 반복 금지"
+# - Room 8 Studio: 히든 타일(unknown)은 레벨 175+ 본격 도입
+# - 업계 공통: 장애물은 3무브 이하로 해제 가능해야 함
+# - 튜토리얼 원칙: 1-3개 메카닉만 사용
 #
-# 언락 스케줄:
-# - Level 1-10: 기믹 없음 (순수 매칭 학습)
-# - Level 11: chain 언락
-# - Level 21: ice 언락
-# - Level 31: frog 언락
-# - Level 41: grass 언락
-# - Level 51: link 언락
-# - Level 61: bomb 언락
-# - Level 71: curtain 언락
-# - Level 81: teleport 언락
-# - Level 91: unknown 언락 (히든 타일, 175+ 본격 활용)
-# - Level 101: craft 언락
-# - Level 111: stack 언락
-# - Level 112+: 모든 기믹 자유 조합
+# 언락 스케줄 (시장 조사 기반, ~20레벨 간격):
+# - Level 1-5: 기믹 없음 (순수 매칭 학습)
+# - Level 6: chain 언락 (Tile Busters 참고)
+# - Level 25: ice 언락
+# - Level 45: grass 언락
+# - Level 65: frog 언락
+# - Level 85: bomb 언락
+# - Level 105: curtain 언락
+# - Level 125: teleport 언락
+# - Level 145: link 언락
+# - Level 175: unknown 언락 (히든 타일 - Room 8 Studio 연구)
+# - Level 195: craft 언락
+# - Level 215: stack 언락
+# - Level 216+: 모든 기믹 자유 조합
 # =========================================================
 DEFAULT_GIMMICK_UNLOCK_LEVELS = {
-    "chain": 11,       # 첫 번째 기믹 - 기본 체인
-    "ice": 21,         # 두 번째 기믹 - 얼음
-    "frog": 31,        # 세 번째 기믹 - 개구리 (이동)
-    "grass": 41,       # 네 번째 기믹 - 풀
-    "link": 51,        # 다섯 번째 기믹 - 링크 (연결)
-    "bomb": 61,        # 여섯 번째 기믹 - 폭탄 (시간 압박)
-    "curtain": 71,     # 일곱 번째 기믹 - 커튼 (기억력)
-    "teleport": 81,    # 여덟 번째 기믹 - 텔레포트
-    "unknown": 91,     # 아홉 번째 기믹 - 히든 타일 (175+ 본격 활용)
-    "craft": 101,      # 열 번째 기믹 - 크래프트 목표
-    "stack": 111,      # 열한 번째 기믹 - 스택 목표
+    "chain": 6,        # 첫 번째 기믹 - 기본 체인 (Tile Busters: 5-10)
+    "ice": 25,         # 두 번째 기믹 - 얼음
+    "grass": 45,       # 세 번째 기믹 - 풀
+    "frog": 65,        # 네 번째 기믹 - 개구리 (이동)
+    "bomb": 85,        # 다섯 번째 기믹 - 폭탄 (시간 압박)
+    "curtain": 105,    # 여섯 번째 기믹 - 커튼 (기억력)
+    "teleport": 125,   # 일곱 번째 기믹 - 텔레포트
+    "link": 145,       # 여덟 번째 기믹 - 링크 (연결)
+    "unknown": 175,    # 아홉 번째 기믹 - 히든 타일 (Room 8 Studio 연구)
+    "craft": 195,      # 열 번째 기믹 - 크래프트 목표
+    "stack": 215,      # 열한 번째 기믹 - 스택 목표
 }
 
 # Legacy simple unlock levels (5-stage intervals)
@@ -415,10 +418,12 @@ def select_gimmicks_with_unlock_probability(
         selected.append(tutorial_gimmick)
 
     # If still no gimmicks and we have unlocked ones, select at least one randomly
-    # (ensures some gimmick presence in non-tutorial levels)
+    # (ensures gimmick presence after unlock - 언락된 기믹은 반드시 학습되어야 함)
     if not selected and unlocked_gimmicks and max_types > 0:
-        # For non-tutorial levels, use probability-based selection result (may be empty)
-        pass  # Keep empty if probability didn't select any
+        # Select one random gimmick from unlocked pool
+        random_gimmick = random.choice(unlocked_gimmicks)
+        selected.append(random_gimmick)
+        logger.info(f"[GIMMICK_SELECT] Level {level_number}: '{random_gimmick}' selected as fallback (ensures gimmick presence)")
 
     logger.info(f"[GIMMICK_SELECT] Level {level_number}: Final selection = {selected} "
                f"(max_types={max_types}, unlocked={len(unlocked_gimmicks)})")
@@ -660,7 +665,57 @@ async def generate_level(
     if tutorial_config:
         logger.info(f"[TUTORIAL_LEVEL] Generating level {request.level_number}: {tutorial_config['description']}")
 
-        # Generate tutorial level with fixed parameters
+        # Level 1: Use fixed 3x3 grid with horizontal tile rows
+        # Layout:
+        #   t1 t1 t1
+        #   t2 t2 t2
+        #   t3 t3 t3
+        if request.level_number == 1:
+            import time
+            import random
+            start_time = time.time()
+
+            # Fixed 3x3 layout centered in 5x5 grid (positions 1-3 in both axes)
+            level_json = {
+                "layer": 1,
+                "useTileCount": 3,
+                "randSeed": random.randint(1, 999999),
+                "layer_0": {
+                    "col": "5",
+                    "row": "5",
+                    "tiles": {
+                        # Row 1: t1 t1 t1
+                        "1_1": ["t1", ""],
+                        "2_1": ["t1", ""],
+                        "3_1": ["t1", ""],
+                        # Row 2: t2 t2 t2
+                        "1_2": ["t2", ""],
+                        "2_2": ["t2", ""],
+                        "3_2": ["t2", ""],
+                        # Row 3: t3 t3 t3
+                        "1_3": ["t3", ""],
+                        "2_3": ["t3", ""],
+                        "3_3": ["t3", ""],
+                    },
+                    "num": "9"
+                },
+                "goalCount": {},
+                "max_moves": 19,  # 9 tiles + 10 generous
+                "target_difficulty": 0.05,
+                "is_tutorial": True,
+                "tutorial_level": 1
+            }
+
+            generation_time_ms = int((time.time() - start_time) * 1000)
+
+            return GenerateResponse(
+                level_json=level_json,
+                actual_difficulty=0.05,
+                grade="S",
+                generation_time_ms=generation_time_ms,
+            )
+
+        # Other tutorial levels (2, 3): use generator with fixed parameters
         params = GenerationParams(
             target_difficulty=tutorial_config["target_difficulty"],
             grid_size=tuple(tutorial_config["grid_size"]),
@@ -1093,6 +1148,9 @@ async def generate_validated_level(
     # - 대부분의 타일 매칭 게임은 4-8개 타일 타입 사용
     # - 9개 이상은 인지 부하가 과도하여 플레이 경험 저하
     # - 최대 난이도에서도 8개로 제한 (기믹과 무브 제한으로 난이도 조절)
+    # - 3개 타일은 레벨 1 튜토리얼에서만 사용, 이후 최소 4개
+    is_tutorial_level_1 = request.level_number == 1
+
     if request.target_difficulty >= 0.85:
         default_tile_types = ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"]  # 8 types for extreme (85%+)
     elif request.target_difficulty >= 0.75:
@@ -1105,10 +1163,10 @@ async def generate_validated_level(
         default_tile_types = ["t1", "t2", "t3", "t4", "t5"]  # 5 types for medium (45-55%)
     elif request.target_difficulty >= 0.35:
         default_tile_types = ["t1", "t2", "t3", "t4", "t5"]  # 5 types for medium-easy (35-45%)
-    elif request.target_difficulty >= 0.25:
-        default_tile_types = ["t1", "t2", "t3", "t4"]  # 4 types for easy (25-35%)
+    elif is_tutorial_level_1 and request.target_difficulty < 0.25:
+        default_tile_types = ["t1", "t2", "t3"]  # 3 types ONLY for level 1 tutorial (<25%)
     else:
-        default_tile_types = ["t1", "t2", "t3"]  # 3 types for very easy (<25%)
+        default_tile_types = ["t1", "t2", "t3", "t4"]  # 4 types minimum for all other levels
 
     base_tile_types = list(request.tile_types) if request.tile_types else default_tile_types
     all_tile_types = ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"]  # Extended tile types (t0 excluded, max 8)
@@ -1166,33 +1224,28 @@ async def generate_validated_level(
     current_obstacle_types = base_obstacle_types.copy()
 
     # CALIBRATED grid size based on target difficulty
-    # Smaller grids = harder (less space for strategic moves)
-    # Larger grids = easier (more moves available)
-    # IMPROVED v2: More granular calibration for 40-60% range
-    base_grid_size = list(request.grid_size)
-    if request.target_difficulty >= 0.85:
-        # Extreme: prefer smaller grid
-        calibrated_grid = [min(base_grid_size[0], 5), min(base_grid_size[1], 5)]
-    elif request.target_difficulty >= 0.75:
-        # Very hard: small grid
-        calibrated_grid = [min(base_grid_size[0], 6), min(base_grid_size[1], 6)]
-    elif request.target_difficulty >= 0.6:
-        # Hard: medium-small grid
-        calibrated_grid = [min(base_grid_size[0], 6), min(base_grid_size[1], 6)]
-    elif request.target_difficulty >= 0.5:
-        # Medium-hard: larger grid than 60% to avoid overshoot
-        calibrated_grid = [min(base_grid_size[0], 7), min(base_grid_size[1], 7)]
-    elif request.target_difficulty >= 0.4:
-        # Medium: normal grid
-        calibrated_grid = [min(base_grid_size[0], 7), min(base_grid_size[1], 7)]
-    elif request.target_difficulty <= 0.2:
-        # Very easy: prefer larger grid
-        calibrated_grid = [max(base_grid_size[0], 8), max(base_grid_size[1], 8)]
-    elif request.target_difficulty <= 0.3:
-        # Easy: slightly larger grid
-        calibrated_grid = [max(base_grid_size[0], 7), max(base_grid_size[1], 7)]
+    # 타일 매칭 게임 기준:
+    # - 작은 그리드 = 적은 타일 = 쉬움 (S등급)
+    # - 큰 그리드 = 많은 타일 = 어려움 (D등급)
+    # 각 난이도는 연속된 2개 사이즈 중 랜덤 선택 (다양성 제공)
+    import random
+    if request.target_difficulty <= 0.2:
+        # S등급 (매우 쉬움): 5x5 또는 6x6
+        grid_choice = random.choice([5, 6])
+    elif request.target_difficulty <= 0.4:
+        # A등급 (쉬움): 5x5 또는 6x6
+        grid_choice = random.choice([5, 6])
+    elif request.target_difficulty <= 0.6:
+        # B등급 (보통): 6x6 또는 7x7
+        grid_choice = random.choice([6, 7])
+    elif request.target_difficulty <= 0.8:
+        # C등급 (어려움): 7x7 또는 8x8
+        grid_choice = random.choice([7, 8])
     else:
-        calibrated_grid = base_grid_size
+        # D등급 (매우 어려움): 7x7 또는 8x8
+        grid_choice = random.choice([7, 8])
+
+    calibrated_grid = [grid_choice, grid_choice]
 
     current_grid_size = calibrated_grid.copy()
     min_grid_size = 5  # Minimum grid dimension

@@ -54,118 +54,118 @@ class GimmickUnlockConfig:
 
 
 # =========================================================
-# 프로급 기믹 언락 스케줄
+# 프로급 기믹 언락 스케줄 (v3 - 시장 조사 기반)
 # =========================================================
-# 10레벨 단위 언락 시스템:
-# - 첫 10레벨: 기믹 없이 순수 매칭 학습
-# - 11, 21, 31... 레벨에서 새 기믹 언락
-# - 언락된 기믹은 이후 모든 레벨에서 난이도 조절에 활용
+# [시장 조사 기반 개선]
+# - Tile Busters: 레벨 5-10에서 첫 장애물 등장
+# - Room 8 Studio: "50레벨 동안 메카닉 반복 금지"
+# - Room 8 Studio: 히든 타일(unknown)은 레벨 175+ 본격 도입
+# - 업계 공통: 장애물은 3무브 이하로 해제 가능해야 함
+# - 튜토리얼 원칙: 1-3개 메카닉만 사용
+#
+# 개선된 스케줄 (~20레벨 간격, 레벨 6부터 시작):
+# - Level 1-5: 순수 매칭 학습 (기믹 없음)
+# - Level 6: chain 언락 (Tile Busters 참고)
+# - Level 25: ice 언락
+# - Level 45: grass 언락
+# - Level 65: frog 언락
+# - Level 85: bomb 언락
+# - Level 105: curtain 언락
+# - Level 125: teleport 언락
+# - Level 145: link 언락
+# - Level 175: unknown 언락 (히든 타일 - Room 8 Studio 연구)
+# - Level 195: craft 언락
+# - Level 215: stack 언락
+# - Level 216+: 모든 기믹 언락 완료
 # =========================================================
 
 PROFESSIONAL_GIMMICK_UNLOCK: Dict[str, GimmickUnlockConfig] = {
-    # =========================================================
-    # 10레벨 단위 기믹 언락 스케줄
-    # =========================================================
-    # Level 1-10: 순수 매칭 학습 (기믹 없음)
-    # Level 11: chain 언락 → 이후 모든 레벨에서 사용 가능
-    # Level 21: ice 언락
-    # Level 31: frog 언락
-    # Level 41: grass 언락
-    # Level 51: link 언락
-    # Level 61: bomb 언락
-    # Level 71: curtain 언락
-    # Level 81: teleport 언락
-    # Level 91: unknown 언락
-    # Level 101: craft 언락
-    # Level 111: stack 언락
-    # Level 112+: 모든 기믹 언락 완료, 자유 조합으로 난이도 조절
-    # =========================================================
-
     "chain": GimmickUnlockConfig(
         gimmick="chain",
-        unlock_level=11,  # 첫 번째 기믹
-        practice_levels=9,  # 11-19: 연습, 20: 보스
-        integration_start=21,
+        unlock_level=6,  # 첫 번째 기믹 (Tile Busters: 5-10에서 첫 장애물)
+        practice_levels=18,  # 6-24: 연습
+        integration_start=25,
         difficulty_weight=1.0,
         description="체인 - 가장 기본적인 기믹, 인접 타일로 해제"
     ),
     "ice": GimmickUnlockConfig(
         gimmick="ice",
-        unlock_level=21,
-        practice_levels=9,
-        integration_start=31,
-        difficulty_weight=1.2,
+        unlock_level=25,
+        practice_levels=19,  # 25-44: 연습
+        integration_start=45,
+        difficulty_weight=1.1,
         description="얼음 - 인접 타일 클리어로 녹임"
-    ),
-    "frog": GimmickUnlockConfig(
-        gimmick="frog",
-        unlock_level=31,
-        practice_levels=9,
-        integration_start=41,
-        difficulty_weight=1.3,
-        description="개구리 - 매 턴 이동, 전략적 배치 필요"
     ),
     "grass": GimmickUnlockConfig(
         gimmick="grass",
-        unlock_level=41,
-        practice_levels=9,
-        integration_start=51,
+        unlock_level=45,
+        practice_levels=19,  # 45-64: 연습
+        integration_start=65,
         difficulty_weight=1.1,
         description="풀 - 인접 타일 클리어로 제거"
     ),
-    "link": GimmickUnlockConfig(
-        gimmick="link",
-        unlock_level=51,
-        practice_levels=9,
-        integration_start=61,
-        difficulty_weight=1.4,
-        description="링크 - 연결된 타일 동시 선택"
+    "frog": GimmickUnlockConfig(
+        gimmick="frog",
+        unlock_level=65,
+        practice_levels=19,  # 65-84: 연습
+        integration_start=85,
+        difficulty_weight=1.2,
+        description="개구리 - 매 턴 이동, 전략적 배치 필요"
     ),
     "bomb": GimmickUnlockConfig(
         gimmick="bomb",
-        unlock_level=61,
-        practice_levels=9,
-        integration_start=71,
-        difficulty_weight=1.5,
+        unlock_level=85,
+        practice_levels=19,  # 85-104: 연습
+        integration_start=105,
+        difficulty_weight=1.3,
         description="폭탄 - 카운트다운 후 폭발, 시간 압박"
     ),
     "curtain": GimmickUnlockConfig(
         gimmick="curtain",
-        unlock_level=71,
-        practice_levels=9,
-        integration_start=81,
-        difficulty_weight=1.3,
+        unlock_level=105,
+        practice_levels=19,  # 105-124: 연습
+        integration_start=125,
+        difficulty_weight=1.2,
         description="커튼 - 가려진 타일, 기억력 테스트"
     ),
     "teleport": GimmickUnlockConfig(
         gimmick="teleport",
-        unlock_level=81,
-        practice_levels=9,
-        integration_start=91,
+        unlock_level=125,
+        practice_levels=19,  # 125-144: 연습
+        integration_start=145,
         difficulty_weight=1.2,
         description="텔레포트 - 타일 위치 변경"
     ),
+    "link": GimmickUnlockConfig(
+        gimmick="link",
+        unlock_level=145,
+        practice_levels=29,  # 145-174: 연습
+        integration_start=175,
+        difficulty_weight=1.3,
+        description="링크 - 연결된 타일 동시 선택"
+    ),
+    # [Room 8 Studio 연구] 히든 타일은 레벨 175+ 본격 도입
     "unknown": GimmickUnlockConfig(
         gimmick="unknown",
-        unlock_level=91,
-        practice_levels=9,
-        integration_start=101,
-        difficulty_weight=1.3,
-        description="미스터리 - 상위 타일 제거 전까지 숨겨짐"
+        unlock_level=175,
+        practice_levels=19,  # 175-194: 연습
+        integration_start=195,
+        difficulty_weight=1.4,
+        description="미스터리 - 상위 타일 제거 전까지 숨겨짐 (레벨 175+)"
     ),
     "craft": GimmickUnlockConfig(
         gimmick="craft",
-        unlock_level=101,
-        practice_levels=9,
-        integration_start=111,
+        unlock_level=195,
+        practice_levels=19,  # 195-214: 연습
+        integration_start=215,
         difficulty_weight=1.4,
         description="크래프트 목표 - 특정 방향으로 타일 수집"
     ),
     "stack": GimmickUnlockConfig(
         gimmick="stack",
-        unlock_level=111,
-        practice_levels=9,
-        integration_start=121,
+        unlock_level=215,
+        practice_levels=19,  # 215+: 연습
+        integration_start=235,
         difficulty_weight=1.5,
         description="스택 목표 - 겹쳐진 타일 수집"
     ),
@@ -228,23 +228,23 @@ class PhaseConfig:
 
 PHASE_CONFIGS: Dict[LevelPhase, PhaseConfig] = {
     # =========================================================
-    # 1,500레벨 난이도 분포 (연구 데이터 기반 Progression Curve)
+    # 1,500레벨 난이도 분포 (v2 - 업계 표준 반영)
     # =========================================================
-    # [연구 근거]
-    # - Triple Tile: 초반 "거의 너무 쉬움"으로 성취감 제공
+    # [시장 조사 기반 개선]
+    # - Triple Tile: 초반 20-25레벨을 30분 내 클리어 가능하게
     # - Tile Master 3D: 100레벨 단위 마일스톤 보상
     # - Room 8 Studio: 레벨 175+ 히든 타일 본격 도입
-    # - 업계 표준: 타일 20-40개(초반) → 80-120개(후반)
+    # - 업계 표준: 타일 종류 4-8개 (3개는 레벨1 튜토리얼만)
     #
     # 권장 분포: S(15%) → A(25%) → B(35%) → C(20%) → D(5%)
-    # 기믹 언락: 11, 21, 31... 111 (레벨 112부터 모든 기믹 사용 가능)
+    # 기믹 언락 (v2): 21, 41, 61... 221 (레벨 222부터 모든 기믹)
     #
     # S등급 (1-225, 15%): 입문/기초 - 난이도 0.02-0.18
-    #   - 1-10: 기믹 없음 (순수 매칭, 거의 너무 쉬움)
-    #   - 11-111: 기믹 순차 언락 (1개씩 사용)
-    #   - 112-225: 모든 기믹 언락, 1-2개 조합
+    #   - 1-20: 기믹 없음 (순수 매칭, 거의 너무 쉬움)
+    #   - 21-175: 기믹 순차 언락 (20레벨 간격)
+    #   - 175+: 히든 타일(unknown) 언락
     # A등급 (226-600, 25%): 쉬움/익숙 - 난이도 0.18-0.38
-    # B등급 (601-1125, 35%): 보통/주력 - 난이도 0.38-0.58 ★핵심 재미 구간
+    # B등급 (601-1125, 35%): 보통/주력 - 난이도 0.38-0.58 ★핵심 재미
     # C등급 (1126-1425, 20%): 어려움/도전 - 난이도 0.58-0.78
     # D등급 (1426-1500, 5%): 심화/고수 - 난이도 0.78-0.92
     # =========================================================
@@ -252,101 +252,101 @@ PHASE_CONFIGS: Dict[LevelPhase, PhaseConfig] = {
     LevelPhase.TUTORIAL: PhaseConfig(
         phase=LevelPhase.TUTORIAL,
         level_range=(1, 225),  # S등급 15% (225개)
-        min_tile_types=3,
-        max_tile_types=4,
+        min_tile_types=4,      # 최소 4종류 (레벨1은 generate.py에서 3종류)
+        max_tile_types=5,
         # [연구 근거] Triple Tile: 초반 레이어 1-3개 (가시 레이어 중심)
-        min_layers=1,         # 초반 1레이어부터 시작 (매우 쉬움)
-        max_layers=3,         # 최대 3레이어 (3-layer 시스템 기준)
-        max_gimmick_types=2,  # 언락된 기믹 중 최대 2개 사용
+        min_layers=1,          # 초반 1레이어부터 시작 (매우 쉬움)
+        max_layers=3,          # 최대 3레이어 (3-layer 시스템 기준)
+        max_gimmick_types=2,   # 언락된 기믹 중 최대 2개 사용
         # [연구 근거] Triple Tile: 초반 "거의 너무 쉬움"
-        base_difficulty=0.02,  # 더 쉽게 시작 (0.05 → 0.02)
+        base_difficulty=0.02,
         difficulty_increment=0.00071,  # 0.02 + 224*0.00071 ≈ 0.18
-        # [연구 근거] 초반 타일 20-40개 (Triple Tile 패턴)
+        # [연구 근거] 초반 타일 18-45개 (Triple Tile 패턴)
         min_tiles=18,
         max_tiles=45,
-        has_milestone=True,   # 100, 200레벨 마일스톤 포함
+        has_milestone=True,    # 100, 200레벨 마일스톤 포함
     ),
 
     LevelPhase.BASIC: PhaseConfig(
         phase=LevelPhase.BASIC,
         level_range=(226, 600),  # A등급 25% (375개)
         min_tile_types=4,
-        max_tile_types=5,
+        max_tile_types=6,
         # [연구 근거] 중간 단계에서 레이어 확장 (2-4레이어)
         min_layers=2,
         max_layers=4,
-        max_gimmick_types=3,  # 언락된 기믹 중 최대 3개 사용
+        max_gimmick_types=3,   # 언락된 기믹 중 최대 3개 사용
         base_difficulty=0.18,
         difficulty_increment=0.00053,  # 0.18 + 374*0.00053 ≈ 0.38
         # [연구 근거] 타일 수 점진적 증가
         min_tiles=36,
         max_tiles=60,
-        has_milestone=True,   # 300, 400, 500, 600레벨 마일스톤 포함
+        has_milestone=True,    # 300, 400, 500, 600레벨 마일스톤
     ),
 
     LevelPhase.INTERMEDIATE: PhaseConfig(
         phase=LevelPhase.INTERMEDIATE,
         level_range=(601, 1125),  # B등급 35% (525개) ★핵심 재미 구간
         min_tile_types=5,
-        max_tile_types=6,
-        # [연구 근거] 업계 표준 3-레이어 + 히든 타일 도입
+        max_tile_types=7,
+        # [연구 근거] 업계 표준 3-5레이어 + 히든 타일 본격 활용
         min_layers=3,
         max_layers=5,
-        max_gimmick_types=4,  # 언락된 기믹 중 최대 4개 사용
+        max_gimmick_types=4,   # 언락된 기믹 중 최대 4개 사용
         base_difficulty=0.38,
         difficulty_increment=0.00038,  # 0.38 + 524*0.00038 ≈ 0.58
-        # [연구 근거] 타일 50-80개 (중급 구간)
+        # [연구 근거] 타일 48-84개 (중급 구간)
         min_tiles=48,
         max_tiles=84,
-        has_milestone=True,   # 700, 800, 900, 1000, 1100레벨 마일스톤
+        has_milestone=True,    # 700, 800, 900, 1000, 1100레벨 마일스톤
     ),
 
     LevelPhase.ADVANCED: PhaseConfig(
         phase=LevelPhase.ADVANCED,
         level_range=(1126, 1425),  # C등급 20% (300개)
-        min_tile_types=5,
-        max_tile_types=7,
+        min_tile_types=6,
+        max_tile_types=8,
         # [연구 근거] 후반 레이어 4-6 (히든 타일 비중 증가)
         min_layers=4,
         max_layers=6,
-        max_gimmick_types=5,  # 언락된 기믹 중 최대 5개 사용
+        max_gimmick_types=5,   # 언락된 기믹 중 최대 5개 사용
         base_difficulty=0.58,
         difficulty_increment=0.00067,  # 0.58 + 299*0.00067 ≈ 0.78
-        # [연구 근거] 타일 70-100개 (도전 구간)
+        # [연구 근거] 타일 66-105개 (도전 구간)
         min_tiles=66,
         max_tiles=105,
-        has_milestone=True,   # 1200, 1300, 1400레벨 마일스톤
+        has_milestone=True,    # 1200, 1300, 1400레벨 마일스톤
     ),
 
     LevelPhase.EXPERT: PhaseConfig(
         phase=LevelPhase.EXPERT,
         level_range=(1426, 1500),  # D등급 5% (75개)
-        min_tile_types=5,
+        min_tile_types=6,
         max_tile_types=8,
         # [연구 근거] 최대 6레이어 (업계 표준상 6레이어 초과는 과도)
         min_layers=5,
-        max_layers=6,         # 8 → 6 (연구 기반 조정)
-        max_gimmick_types=6,  # 모든 기믹 자유 조합 (최대 6개)
+        max_layers=6,
+        max_gimmick_types=6,   # 모든 기믹 자유 조합 (최대 6개)
         base_difficulty=0.78,
         difficulty_increment=0.00187,  # 0.78 + 74*0.00187 ≈ 0.92
-        # [연구 근거] 타일 90-120개 (고난이도 구간)
+        # [연구 근거] 타일 84-120개 (고난이도 구간)
         min_tiles=84,
         max_tiles=120,
-        has_milestone=True,   # 1500레벨 마일스톤
+        has_milestone=True,    # 1500레벨 마일스톤
     ),
 
     LevelPhase.MASTER: PhaseConfig(
         phase=LevelPhase.MASTER,
         level_range=(1501, 9999),  # 엔드게임 (무한 확장)
-        min_tile_types=5,
-        max_tile_types=9,
+        min_tile_types=6,
+        max_tile_types=8,
         # [연구 근거] 엔드게임도 6레이어 유지 (과도한 복잡성 방지)
         min_layers=5,
-        max_layers=6,         # 8 → 6 (연구 기반 조정)
-        max_gimmick_types=6,  # 모든 기믹 자유 조합 (최대 6개)
+        max_layers=6,
+        max_gimmick_types=6,   # 모든 기믹 자유 조합 (최대 6개)
         base_difficulty=0.92,  # 최고 난이도 유지
         difficulty_increment=0.0,  # 로그 곡선으로 0.96 수렴
-        # [연구 근거] 타일 100-120개 (엔드게임 일정 유지)
+        # [연구 근거] 타일 96-120개 (엔드게임 일정 유지)
         min_tiles=96,
         max_tiles=120,
         has_milestone=True,

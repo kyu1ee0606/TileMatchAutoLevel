@@ -234,20 +234,117 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
           }));
 
           try {
-            // Generate level with randomized variety
-            // Randomize pattern type for visual diversity
-            const patternTypes: Array<'aesthetic' | 'geometric' | 'clustered'> = ['aesthetic', 'geometric', 'clustered'];
-            const patternType = patternTypes[Math.floor(Math.random() * patternTypes.length)];
+            // Generate level with optimized aesthetic variety
+            // Level characteristics affect pattern selection
+            const isEarlyLevel = levelNumber <= 30;
+            const isSpecialShape = levelNumber % 10 === 9;  // 9, 19, 29, ...
+            const isBossLevel = levelNumber % 10 === 0 && levelNumber > 0;  // 10, 20, 30, ...
 
-            // Let backend handle symmetry randomly (removed fixed 'both')
-            // This allows horizontal, vertical, none, or both symmetry for variety
+            // Pattern type selection based on level characteristics
+            // - Early levels: Prefer geometric for clean, predictable look (50% geometric, 40% aesthetic, 10% clustered)
+            // - Boss levels: Prefer aesthetic for impressive visuals (75% aesthetic, 20% geometric, 5% clustered)
+            // - Special shapes: Allow more clustered for variety (50% aesthetic, 25% geometric, 25% clustered)
+            // - Regular levels: Balanced aesthetic-focused (60% aesthetic, 25% geometric, 15% clustered)
+            const patternRoll = Math.random();
+            let patternType: 'aesthetic' | 'geometric' | 'clustered';
 
-            // Randomize symmetry mode
-            const symmetryModes: Array<'none' | 'horizontal' | 'vertical'> = ['none', 'horizontal', 'vertical'];
-            const symmetryMode = symmetryModes[Math.floor(Math.random() * symmetryModes.length)];
+            if (isEarlyLevel) {
+              // Early levels: Clean, predictable patterns
+              if (patternRoll < 0.50) {
+                patternType = 'geometric';
+              } else if (patternRoll < 0.90) {
+                patternType = 'aesthetic';
+              } else {
+                patternType = 'clustered';
+              }
+            } else if (isBossLevel) {
+              // Boss levels: Impressive aesthetic patterns
+              if (patternRoll < 0.75) {
+                patternType = 'aesthetic';
+              } else if (patternRoll < 0.95) {
+                patternType = 'geometric';
+              } else {
+                patternType = 'clustered';
+              }
+            } else if (isSpecialShape) {
+              // Special shapes: More variety
+              if (patternRoll < 0.50) {
+                patternType = 'aesthetic';
+              } else if (patternRoll < 0.75) {
+                patternType = 'geometric';
+              } else {
+                patternType = 'clustered';
+              }
+            } else {
+              // Regular levels: Balanced aesthetic-focused
+              if (patternRoll < 0.60) {
+                patternType = 'aesthetic';
+              } else if (patternRoll < 0.85) {
+                patternType = 'geometric';
+              } else {
+                patternType = 'clustered';
+              }
+            }
 
-            // All goal directions are now supported - backend handles mirroring for symmetry
-            const goalDirections: Array<'s' | 'n' | 'e' | 'w'> = ['s', 'n', 'e', 'w'];
+            // Symmetry mode selection based on level characteristics (reusing level type flags from above)
+            const symmetryRoll = Math.random();
+            let symmetryMode: 'none' | 'horizontal' | 'vertical' | 'both';
+
+            if (isEarlyLevel) {
+              // Early levels: Clean, symmetric patterns (0% none, 25% h, 25% v, 50% both)
+              if (symmetryRoll < 0.25) {
+                symmetryMode = 'horizontal';
+              } else if (symmetryRoll < 0.50) {
+                symmetryMode = 'vertical';
+              } else {
+                symmetryMode = 'both';
+              }
+            } else if (isSpecialShape) {
+              // Special shape levels: Allow asymmetry for distinctive patterns (30% none, 35% h, 35% v)
+              if (symmetryRoll < 0.30) {
+                symmetryMode = 'none';
+              } else if (symmetryRoll < 0.65) {
+                symmetryMode = 'horizontal';
+              } else {
+                symmetryMode = 'vertical';
+              }
+            } else if (isBossLevel) {
+              // Boss levels: Strong symmetry for impressive visuals (0% none, 20% h, 20% v, 60% both)
+              if (symmetryRoll < 0.20) {
+                symmetryMode = 'horizontal';
+              } else if (symmetryRoll < 0.40) {
+                symmetryMode = 'vertical';
+              } else {
+                symmetryMode = 'both';
+              }
+            } else {
+              // Regular levels: Balanced selection (5% none, 35% h, 35% v, 25% both)
+              if (symmetryRoll < 0.05) {
+                symmetryMode = 'none';
+              } else if (symmetryRoll < 0.40) {
+                symmetryMode = 'horizontal';
+              } else if (symmetryRoll < 0.75) {
+                symmetryMode = 'vertical';
+              } else {
+                symmetryMode = 'both';
+              }
+            }
+
+            // Goal direction selection - align with symmetry for better aesthetics
+            // For 'both' symmetry: prefer center-aligned directions (s, n)
+            // For 'horizontal': prefer horizontal directions (e, w)
+            // For 'vertical': prefer vertical directions (s, n)
+            let goalDirections: Array<'s' | 'n' | 'e' | 'w'>;
+            if (symmetryMode === 'both' || symmetryMode === 'vertical') {
+              // Prefer vertical-aligned goals (s, n) with 70% probability
+              goalDirections = Math.random() < 0.7 ? ['s', 'n'] : ['e', 'w'];
+            } else if (symmetryMode === 'horizontal') {
+              // Prefer horizontal-aligned goals (e, w) with 70% probability
+              goalDirections = Math.random() < 0.7 ? ['e', 'w'] : ['s', 'n'];
+            } else {
+              // None symmetry: any direction
+              goalDirections = ['s', 'n', 'e', 'w'];
+            }
             const goalDirection = goalDirections[Math.floor(Math.random() * goalDirections.length)];
 
             // Randomize goal types between craft and stack

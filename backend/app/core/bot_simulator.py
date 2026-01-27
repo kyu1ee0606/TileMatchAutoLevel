@@ -2544,7 +2544,56 @@ class BotSimulator:
                 else:
                     base_score += profile.blocking_awareness * 2.0
 
-            # 5. General effect tile deadlock detection
+            # 5. BOMB tiles: CRITICAL - Must pick before explosion!
+            # Bombs explode when their countdown reaches 0
+            # Countdown decreases each move while bomb is exposed
+            if state.bomb_tiles:
+                # Find exposed bombs and their urgency
+                critical_bomb_move = False
+                min_bomb_remaining = float('inf')
+
+                for bomb_key, remaining in state.bomb_tiles.items():
+                    # Parse bomb key: layerIdx_x_y
+                    parts = bomb_key.split('_')
+                    if len(parts) >= 3:
+                        layer_idx = int(parts[0])
+                        pos = f"{parts[1]}_{parts[2]}"
+                        layer = state.tiles.get(layer_idx, {})
+                        if pos in layer and not layer[pos].picked:
+                            bomb_tile = layer[pos]
+                            # Check if bomb is exposed (not blocked by upper layer)
+                            if not self._is_blocked_by_upper(state, bomb_tile):
+                                min_bomb_remaining = min(min_bomb_remaining, remaining)
+
+                                # Check if THIS move is picking this bomb tile
+                                if (tile_state and
+                                    tile_state.layer_idx == layer_idx and
+                                    tile_state.position_key == pos):
+                                    critical_bomb_move = True
+
+                # Score adjustment based on bomb urgency
+                if min_bomb_remaining != float('inf'):
+                    if critical_bomb_move:
+                        # THIS move picks a bomb - MASSIVE BONUS
+                        if min_bomb_remaining <= 1:
+                            base_score += 500.0  # About to explode - MUST pick
+                        elif min_bomb_remaining <= 2:
+                            base_score += 200.0  # Very urgent
+                        elif min_bomb_remaining <= 3:
+                            base_score += 100.0  # Urgent
+                        else:
+                            base_score += 50.0   # Moderate priority
+                    else:
+                        # This move does NOT pick a bomb - penalize if bomb is critical
+                        if min_bomb_remaining <= 1:
+                            # Bomb explodes next move if not picked NOW!
+                            base_score -= 300.0  # Severe penalty - almost game over
+                        elif min_bomb_remaining <= 2:
+                            base_score -= 100.0  # High penalty
+                        elif min_bomb_remaining <= 3:
+                            base_score -= 30.0   # Moderate penalty
+
+            # 6. General effect tile deadlock detection
             # If many effect tiles remain and accessible tiles are limited
             accessible = self._get_accessible_tiles(state)
             effect_tiles = sum(
@@ -2796,9 +2845,28 @@ class BotSimulator:
             if sim_info.get("dock_full", False):
                 return -10000.0  # Catastrophic - leads to dock overflow
 
+            # Check for bomb explosion (game over)
+            if sim_info.get("bomb_will_explode", False):
+                return -10000.0  # Catastrophic - bomb explodes
+
             # Check for deadlock patterns using the simulation info
             if self._is_deadlock_likely_from_sim(state, sim_info):
                 return -5000.0  # High risk of deadlock
+
+            # Bomb urgency bonus/penalty in lookahead
+            min_bomb = sim_info.get("min_bomb_remaining")
+            is_picking_bomb = sim_info.get("is_picking_bomb", False)
+
+            if min_bomb is not None:
+                if is_picking_bomb:
+                    # Picking a bomb is excellent when bombs are present
+                    return self._estimate_future_score(state, move, depth) + 200.0
+                elif min_bomb <= 1:
+                    # Bomb will explode soon but we're not picking it
+                    return -3000.0  # Very bad - need to pick bomb instead
+                elif min_bomb <= 2:
+                    # Bomb countdown is critical
+                    return self._estimate_future_score(state, move, depth) - 100.0
 
         # Use standard future score estimation
         return self._estimate_future_score(state, move, depth)
@@ -2814,6 +2882,10 @@ class BotSimulator:
             state: Current game state
             sim_info: Simulated move result from _simulate_move
         """
+        # Check 0: CRITICAL - Bomb will explode after this move
+        if sim_info.get("bomb_will_explode", False):
+            return True  # Immediate game over from bomb explosion
+
         dock_size = sim_info.get("dock_size", 0)
         dock_types = sim_info.get("dock_types", {})
 
@@ -3249,6 +3321,36 @@ class BotSimulator:
         if matches > 0 and move_type in all_tile_counts:
             all_tile_counts[move_type] = max(0, all_tile_counts[move_type] - (matches * 3 - 1))
 
+        # Track bomb explosion risk
+        # After this move, exposed bombs will have their countdown decreased by 1
+        min_bomb_after_move = float('inf')
+        bomb_will_explode = False
+        is_picking_bomb = False
+
+        for bomb_key, remaining in state.bomb_tiles.items():
+            parts = bomb_key.split('_')
+            if len(parts) >= 3:
+                layer_idx = int(parts[0])
+                pos = f"{parts[1]}_{parts[2]}"
+                layer = state.tiles.get(layer_idx, {})
+                if pos in layer and not layer[pos].picked:
+                    bomb_tile = layer[pos]
+
+                    # Check if this move is picking this bomb tile
+                    if (move.tile_state and
+                        move.tile_state.layer_idx == layer_idx and
+                        move.tile_state.position_key == pos):
+                        is_picking_bomb = True
+                        continue  # This bomb will be defused
+
+                    # Check if bomb is exposed (will countdown after move)
+                    if not self._is_blocked_by_upper(state, bomb_tile):
+                        # Bomb countdown decreases after this move
+                        new_remaining = remaining - 1
+                        min_bomb_after_move = min(min_bomb_after_move, new_remaining)
+                        if new_remaining <= 0:
+                            bomb_will_explode = True
+
         return {
             'dock_types': dock_types,
             'dock_size': dock_size,
@@ -3258,6 +3360,9 @@ class BotSimulator:
             'pickable_tiles': pickable_tiles,
             'all_tile_counts': all_tile_counts,
             'picked_type': move_type,
+            'min_bomb_remaining': min_bomb_after_move if min_bomb_after_move != float('inf') else None,
+            'bomb_will_explode': bomb_will_explode,
+            'is_picking_bomb': is_picking_bomb,
         }
 
     def _get_simulated_moves(self, sim_state: Dict) -> List[Dict]:

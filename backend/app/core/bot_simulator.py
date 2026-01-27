@@ -2330,6 +2330,65 @@ class BotSimulator:
         elif dock_count >= 4 and not move.will_match:
             base_score -= profile.blocking_awareness * 5.0
 
+        # ENDGAME DOCK MANAGEMENT (for Optimal bot)
+        # When dock is filling and we're not matching, prefer tiles that can SET UP matches
+        if profile.pattern_recognition >= 1.0 and dock_count >= 4 and not move.will_match:
+            in_dock = sum(1 for t in state.dock_tiles if t.tile_type == move.tile_type)
+
+            # IMPORTANT: For LINK tiles, also check the linked partner's type
+            linked_in_dock = 0
+            linked_new_type = False
+            if move.linked_tiles:
+                for linked_layer_idx, linked_pos in move.linked_tiles:
+                    linked_layer = state.tiles.get(linked_layer_idx, {})
+                    linked_tile = linked_layer.get(linked_pos)
+                    if linked_tile and not linked_tile.picked:
+                        linked_type = linked_tile.tile_type
+                        linked_count = sum(1 for t in state.dock_tiles if t.tile_type == linked_type)
+                        linked_in_dock += linked_count
+                        if linked_count == 0:
+                            linked_new_type = True
+
+            # Calculate remaining tiles for endgame detection
+            remaining_tiles = sum(
+                1 for layer in state.tiles.values()
+                for tile in layer.values()
+                if not tile.picked
+            )
+
+            # Endgame: few tiles remaining and goals mostly complete
+            goals_total = sum(state.goals_remaining.values()) if state.goals_remaining else 0
+            is_endgame = remaining_tiles <= 20 or goals_total == 0
+
+            # For link tiles: both types must have tiles in dock to be safe
+            is_link_move = bool(move.linked_tiles)
+            both_have_dock = in_dock >= 1 and (not is_link_move or linked_in_dock >= 1)
+
+            if both_have_dock:
+                # Has 1+ tiles of same type in dock - this can set up a match!
+                # Much safer than picking a new type
+                if dock_count >= 6:
+                    base_score += 80.0  # CRITICAL: strongly prefer match setup
+                elif dock_count >= 5:
+                    base_score += 50.0  # HIGH: prefer match setup
+                elif is_endgame:
+                    base_score += 30.0  # Endgame: prefer match setup
+            else:
+                # No tiles of this type (or linked type) in dock - risky
+                # Link tiles are EXTRA risky because they add 2 tiles at once
+                if is_link_move and linked_new_type:
+                    # Link tile adding NEW type to dock - very risky
+                    if dock_count >= 5:
+                        base_score -= 100.0  # CRITICAL: link adds 2 tiles!
+                    elif dock_count >= 4 and is_endgame:
+                        base_score -= 50.0
+                elif in_dock == 0:
+                    # Regular tile adding new type
+                    if dock_count >= 6:
+                        base_score -= 60.0  # CRITICAL: avoid adding new type
+                    elif dock_count >= 5 and is_endgame:
+                        base_score -= 30.0  # HIGH: avoid in endgame
+
         # Prefer tiles that exist multiple times on the board
         # For optimal bot, also consider hidden tiles in stack/craft
         accessible = self._get_accessible_tiles(state)
@@ -3282,6 +3341,17 @@ class BotSimulator:
         # Add the moved tile to dock
         move_type = move.tile_type
         dock_types[move_type] = dock_types.get(move_type, 0) + 1
+
+        # IMPORTANT: Handle LINK tiles - they bring their linked partner to dock too
+        linked_types = []
+        if move.linked_tiles:
+            for linked_layer_idx, linked_pos in move.linked_tiles:
+                linked_layer = state.tiles.get(linked_layer_idx, {})
+                linked_tile = linked_layer.get(linked_pos)
+                if linked_tile and not linked_tile.picked:
+                    linked_type = linked_tile.tile_type
+                    dock_types[linked_type] = dock_types.get(linked_type, 0) + 1
+                    linked_types.append(linked_type)
 
         # Calculate matches
         matches = 0

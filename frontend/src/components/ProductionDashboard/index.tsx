@@ -62,6 +62,12 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
 
   // Generation state
   const [isGenerating, setIsGenerating] = useState(false);
+  const [useValidatedGeneration, setUseValidatedGeneration] = useState(true); // 검증 기반 생성 활성화
+  const [validationConfig, setValidationConfig] = useState({
+    max_retries: 3,           // 최대 재시도 횟수
+    tolerance: 20.0,          // 허용 오차 (%)
+    simulation_iterations: 20, // 시뮬레이션 반복 횟수 (가볍게)
+  });
   const [generationProgress, setGenerationProgress] = useState<ProductionGenerationProgress>({
     status: 'idle',
     total_sets: 0,
@@ -421,13 +427,45 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
               pattern_index: patternIndex,
             };
 
-            const result = await generateLevel(params, {
+            const gimmickOptions = {
               auto_select_gimmicks: true,
               available_gimmicks: ['chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport', 'unknown'],
               gimmick_unlock_levels: batch.gimmick_unlock_levels,
               level_number: levelNumber,
-              gimmick_intensity: Math.min(1, levelNumber / 500),
-            });
+            };
+
+            let result;
+            let validationPassed = true;
+            let validationAttempts = 1;
+            let matchScore = 100;
+
+            if (useValidatedGeneration) {
+              // 검증 기반 생성 사용
+              const validatedResult = await generateValidatedLevel(
+                { ...params, gimmick_intensity: Math.min(1, levelNumber / 500) },
+                {
+                  max_retries: validationConfig.max_retries,
+                  tolerance: validationConfig.tolerance,
+                  simulation_iterations: validationConfig.simulation_iterations,
+                  use_best_match: true,
+                },
+                gimmickOptions
+              );
+              result = {
+                level_json: validatedResult.level_json,
+                actual_difficulty: validatedResult.actual_difficulty,
+                grade: validatedResult.grade,
+              };
+              validationPassed = validatedResult.validation_passed;
+              validationAttempts = validatedResult.attempts;
+              matchScore = validatedResult.match_score;
+            } else {
+              // 기본 생성 (검증 없음)
+              result = await generateLevel(params, {
+                ...gimmickOptions,
+                gimmick_intensity: Math.min(1, levelNumber / 500),
+              });
+            }
 
             // Create production level
             const meta: ProductionLevelMeta = {
@@ -438,14 +476,16 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
               target_difficulty: targetDifficulty,
               actual_difficulty: result.actual_difficulty,
               grade: result.grade as DifficultyGrade,
-              status: 'generated',
+              status: validationPassed ? 'generated' : 'playtest_queue', // 검증 실패시 플레이테스트 필요
               status_updated_at: new Date().toISOString(),
-              playtest_required: shouldRequirePlaytest(
-                { level_number: levelNumber, grade: result.grade as DifficultyGrade, match_score: 80, target_difficulty: targetDifficulty },
+              playtest_required: !validationPassed || shouldRequirePlaytest(
+                { level_number: levelNumber, grade: result.grade as DifficultyGrade, match_score: matchScore, target_difficulty: targetDifficulty },
                 playtestConfig
               ),
-              playtest_priority: levelNumber,  // Lower = higher priority
+              playtest_priority: validationPassed ? levelNumber : levelNumber - 10000,  // 검증 실패 레벨 우선
               playtest_results: [],
+              match_score: matchScore,
+              validation_attempts: validationAttempts,
             };
 
             if (meta.playtest_required) {
@@ -660,6 +700,10 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             isGenerating={isGenerating}
             onStart={handleStartGeneration}
             onCancel={handleCancelGeneration}
+            useValidation={useValidatedGeneration}
+            onUseValidationChange={setUseValidatedGeneration}
+            validationConfig={validationConfig}
+            onValidationConfigChange={setValidationConfig}
           />
         )}
 
@@ -780,12 +824,20 @@ function GenerateTab({
   isGenerating,
   onStart,
   onCancel,
+  useValidation,
+  onUseValidationChange,
+  validationConfig,
+  onValidationConfigChange,
 }: {
   batch: ProductionBatch;
   progress: ProductionGenerationProgress;
   isGenerating: boolean;
   onStart: (config: PlaytestQueueConfig) => void;
   onCancel: () => void;
+  useValidation: boolean;
+  onUseValidationChange: (value: boolean) => void;
+  validationConfig: { max_retries: number; tolerance: number; simulation_iterations: number };
+  onValidationConfigChange: (config: { max_retries: number; tolerance: number; simulation_iterations: number }) => void;
 }) {
   const [playtestStrategy, setPlaytestStrategy] = useState<PlaytestStrategy>('sample_boss');
 
@@ -827,18 +879,75 @@ function GenerateTab({
             </select>
           </div>
 
+          {/* Validation Settings */}
+          <div className="p-3 bg-gray-700/50 rounded-lg space-y-3">
+            <div className="flex items-center justify-between">
+              <label className="text-sm text-white">난이도 검증 기반 생성</label>
+              <button
+                onClick={() => onUseValidationChange(!useValidation)}
+                className={`w-12 h-6 rounded-full transition-colors ${
+                  useValidation ? 'bg-green-500' : 'bg-gray-600'
+                }`}
+              >
+                <div className={`w-5 h-5 bg-white rounded-full transition-transform ${
+                  useValidation ? 'translate-x-6' : 'translate-x-0.5'
+                }`} />
+              </button>
+            </div>
+            {useValidation && (
+              <div className="space-y-2 text-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-400">최대 재시도</span>
+                  <select
+                    value={validationConfig.max_retries}
+                    onChange={(e) => onValidationConfigChange({
+                      ...validationConfig,
+                      max_retries: parseInt(e.target.value)
+                    })}
+                    className="px-2 py-1 bg-gray-600 border border-gray-500 rounded text-white text-xs"
+                  >
+                    <option value={2}>2회</option>
+                    <option value={3}>3회</option>
+                    <option value={5}>5회</option>
+                  </select>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-400">시뮬레이션 횟수</span>
+                  <select
+                    value={validationConfig.simulation_iterations}
+                    onChange={(e) => onValidationConfigChange({
+                      ...validationConfig,
+                      simulation_iterations: parseInt(e.target.value)
+                    })}
+                    className="px-2 py-1 bg-gray-600 border border-gray-500 rounded text-white text-xs"
+                  >
+                    <option value={10}>10회 (빠름)</option>
+                    <option value={20}>20회 (기본)</option>
+                    <option value={30}>30회 (정확)</option>
+                  </select>
+                </div>
+                <p className="text-xs text-gray-500 mt-1">
+                  검증 실패시 자동 재생성하여 클리어 가능한 레벨만 생성합니다.
+                </p>
+              </div>
+            )}
+          </div>
+
           {/* Summary */}
           <div className="text-sm text-gray-400">
             <div>총 {batch.total_levels}개 레벨 생성</div>
             <div>난이도 범위: {(batch.difficulty_start * 100).toFixed(0)}% ~ {(batch.difficulty_end * 100).toFixed(0)}%</div>
             <div>패턴: {batch.use_sawtooth ? '톱니바퀴 (보스/휴식 사이클)' : '선형 증가'}</div>
+            {useValidation && (
+              <div className="text-green-400">✓ 난이도 검증 활성화 (최대 {validationConfig.max_retries}회 재시도)</div>
+            )}
           </div>
 
           <Button
             onClick={() => onStart({ strategy: playtestStrategy })}
             className="w-full"
           >
-            생성 시작 ({batch.total_levels}개)
+            {useValidation ? '검증 기반 생성 시작' : '생성 시작'} ({batch.total_levels}개)
           </Button>
         </div>
       )}

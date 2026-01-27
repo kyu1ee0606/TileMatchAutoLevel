@@ -144,6 +144,7 @@ export interface ProductionLevelMeta {
     optimal: number;
   };
   match_score?: number;
+  validation_attempts?: number;  // 검증 기반 생성시 재시도 횟수
 
   // 상태 관리
   status: LevelStatus;

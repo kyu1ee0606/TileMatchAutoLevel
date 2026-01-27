@@ -87,6 +87,12 @@ class LevelGenerator:
     # Minimum count for craft/stack goals (match-3 game rule)
     MIN_GOAL_COUNT = 3
 
+    # Minimum total tile count for playable levels (industry standard: 18-30 for tutorial)
+    # Based on Tile Buster, Triple Tile research: minimum 18 tiles (6 sets of 3)
+    # Exception: Level 1-5 tutorial levels can have fewer tiles
+    MIN_TILE_COUNT = 18
+    TUTORIAL_MIN_TILE_COUNT = 9  # Level 1-5 tutorial: minimum 3 sets (9 tiles)
+
     @staticmethod
     def _create_goal_tile(goal_type: str, count: int) -> List:
         """Create a goal tile (craft/stack) data structure.
@@ -402,18 +408,26 @@ class LevelGenerator:
         # This fixes frogs that became covered due to tiles added in later steps
         level = self._validate_and_fix_frog_positions(level)
 
-        # FINAL VALIDATION: Ensure level is playable (all tile types divisible by 3)
-        validation_result = self._validate_playability(level)
+        # FINAL VALIDATION: Ensure level is playable (all tile types divisible by 3, minimum tiles)
+        validation_result = self._validate_playability(level, params.level_number)
         if not validation_result["is_playable"]:
-            import logging
-            logger = logging.getLogger(__name__)
             logger.warning(
                 f"Generated level may not be playable! "
                 f"Total tiles: {validation_result['total_tiles']}, "
+                f"Min required: {validation_result.get('min_required', 'N/A')}, "
+                f"Below minimum: {validation_result.get('below_minimum', False)}, "
                 f"Types with bad count: {validation_result['bad_types']}"
             )
-            # Try aggressive fix for ALL levels (not just asymmetric)
-            level = self._force_fix_tile_counts(level, params)
+
+            # If below minimum tile count, add more tiles
+            if validation_result.get("below_minimum", False):
+                level = self._ensure_minimum_tiles(level, params, validation_result.get("min_required", self.MIN_TILE_COUNT))
+                # Re-validate after adding tiles
+                validation_result = self._validate_playability(level, params.level_number)
+
+            # Try aggressive fix for remaining issues (not divisible by 3, etc.)
+            if not validation_result["is_playable"]:
+                level = self._force_fix_tile_counts(level, params)
 
         # Calculate final metrics
         analyzer = get_analyzer()
@@ -7099,16 +7113,23 @@ class LevelGenerator:
 
         return level
 
-    def _validate_playability(self, level: Dict[str, Any]) -> Dict[str, Any]:
+    def _validate_playability(self, level: Dict[str, Any], level_number: Optional[int] = None) -> Dict[str, Any]:
         """
         Validate that a level is playable (can be cleared).
 
         Rules for playability:
         1. Total matchable tiles must be divisible by 3
         2. Each tile type count must be divisible by 3
+        3. Total tiles must meet minimum count (industry standard)
+           - Level 1-5 (tutorial): minimum 9 tiles (3 sets)
+           - Level 6+: minimum 18 tiles (6 sets)
+
+        Args:
+            level: The level data to validate
+            level_number: Optional level number for tutorial exception
 
         Returns:
-            Dict with is_playable (bool), total_tiles (int), bad_types (list)
+            Dict with is_playable (bool), total_tiles (int), bad_types (list), below_minimum (bool)
         """
         num_layers = level.get("layer", 8)
         type_counts: Dict[str, int] = {}
@@ -7132,14 +7153,111 @@ class LevelGenerator:
 
         # Check for types with count not divisible by 3
         bad_types = [(t, c) for t, c in type_counts.items() if c % 3 != 0]
-        is_playable = len(bad_types) == 0 and total_matchable % 3 == 0
+
+        # Check minimum tile count based on level number
+        # Tutorial levels (1-5) have lower minimum, regular levels (6+) need more tiles
+        is_tutorial = level_number is not None and level_number <= 5
+        min_tiles = self.TUTORIAL_MIN_TILE_COUNT if is_tutorial else self.MIN_TILE_COUNT
+        below_minimum = total_matchable < min_tiles
+
+        # Level is playable if: no bad types, divisible by 3, and meets minimum
+        is_playable = len(bad_types) == 0 and total_matchable % 3 == 0 and not below_minimum
 
         return {
             "is_playable": is_playable,
             "total_tiles": total_matchable,
             "bad_types": bad_types,
-            "type_counts": type_counts
+            "type_counts": type_counts,
+            "below_minimum": below_minimum,
+            "min_required": min_tiles
         }
+
+    def _ensure_minimum_tiles(
+        self,
+        level: Dict[str, Any],
+        params: GenerationParams,
+        min_required: int
+    ) -> Dict[str, Any]:
+        """
+        Ensure level has at least the minimum required number of tiles.
+
+        If the level has fewer tiles than required, add tiles to meet minimum.
+        Tiles are added in sets of 3 to maintain match-3 game rules.
+
+        Args:
+            level: The level data
+            params: Generation parameters
+            min_required: Minimum number of tiles required
+
+        Returns:
+            Updated level with minimum tiles ensured
+        """
+        num_layers = level.get("layer", 8)
+        use_tile_count = level.get("useTileCount", 5)
+
+        # Count current tiles
+        current_tiles = 0
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for pos, tile_data in tiles.items():
+                if isinstance(tile_data, list) and len(tile_data) > 0:
+                    tile_type = tile_data[0]
+                    if tile_type.startswith("craft_") or tile_type.startswith("stack_"):
+                        if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
+                            current_tiles += int(tile_data[2][0]) if tile_data[2][0] else 0
+                    elif tile_type.startswith("t"):
+                        current_tiles += 1
+
+        if current_tiles >= min_required:
+            return level
+
+        # Calculate tiles needed (in sets of 3)
+        tiles_needed = min_required - current_tiles
+        sets_needed = (tiles_needed + 2) // 3  # Round up to sets of 3
+        tiles_to_add = sets_needed * 3
+
+        logger.info(f"[_ensure_minimum_tiles] Current: {current_tiles}, Min: {min_required}, Adding: {tiles_to_add}")
+
+        # Get available tile types
+        valid_tile_types = [f"t{i}" for i in range(1, use_tile_count + 1)]
+
+        # Find positions to add tiles (prefer upper layers, avoid existing tiles)
+        added = 0
+        for layer_idx in range(num_layers - 1, -1, -1):  # Start from top layer
+            layer_key = f"layer_{layer_idx}"
+            if layer_key not in level:
+                level[layer_key] = {"tiles": {}, "col": "8", "row": "8", "num": "0"}
+
+            layer_tiles = level[layer_key].get("tiles", {})
+            col = int(level[layer_key].get("col", 8))
+            row = int(level[layer_key].get("row", 8))
+
+            # Find empty positions
+            for y in range(row):
+                for x in range(col):
+                    if added >= tiles_to_add:
+                        break
+                    pos = f"{x}_{y}"
+                    if pos not in layer_tiles:
+                        # Add tile - distribute types evenly in sets of 3
+                        tile_type_idx = (added // 3) % len(valid_tile_types)
+                        tile_type = valid_tile_types[tile_type_idx]
+                        layer_tiles[pos] = [tile_type, ""]
+                        added += 1
+
+                if added >= tiles_to_add:
+                    break
+
+            level[layer_key]["tiles"] = layer_tiles
+            level[layer_key]["num"] = str(len(layer_tiles))
+
+            if added >= tiles_to_add:
+                break
+
+        logger.info(f"[_ensure_minimum_tiles] Added {added} tiles to meet minimum")
+
+        return level
 
     def _force_fix_tile_counts(self, level: Dict[str, Any], params: GenerationParams) -> Dict[str, Any]:
         """

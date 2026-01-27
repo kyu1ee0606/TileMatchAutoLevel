@@ -351,15 +351,74 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             const goalTypes: Array<'craft' | 'stack'> = ['craft', 'stack'];
             const goalType = goalTypes[Math.floor(Math.random() * goalTypes.length)];
 
+            // Pattern index selection for aesthetic mode
+            // Boss levels use impressive patterns: heart(8), stars(15,16), butterfly(45), flower(46)
+            // Special shape levels use distinctive patterns
+            // Regular levels: auto-select (undefined)
+            let patternIndex: number | undefined = undefined;
+            if (patternType === 'aesthetic') {
+              if (isBossLevel) {
+                // Impressive patterns for boss levels
+                const bossPatterns = [8, 15, 16, 45, 46, 17, 18];  // heart, 5-star, 6-star, butterfly, flower, scattered stars, crescent
+                patternIndex = bossPatterns[Math.floor(Math.random() * bossPatterns.length)];
+              } else if (isSpecialShape) {
+                // Distinctive patterns for special shape levels
+                const specialPatterns = [3, 4, 20, 23, 24, 30, 33];  // cross, donut, H, U, X, triangle, stairs
+                patternIndex = specialPatterns[Math.floor(Math.random() * specialPatterns.length)];
+              }
+              // Regular levels: leave undefined for auto-selection with diversity
+            }
+
+            // Grid size optimization
+            // - Early levels: Standard 7x7 for simplicity
+            // - Boss levels: Slightly larger 8x8 for more impressive layouts
+            // - Regular levels: Vary between 7x7 and 8x8 for diversity
+            let gridSize: [number, number] = [7, 7];
+            if (isBossLevel && targetDifficulty > 0.3) {
+              gridSize = [8, 8];
+            } else if (!isEarlyLevel && Math.random() < 0.3) {
+              gridSize = [8, 8];
+            }
+
+            // Layer optimization based on difficulty and level type
+            // - Early levels: Fewer layers (2-4) for easier learning
+            // - Boss levels: More layers (4-7) for challenge
+            // - Regular: Scale with difficulty
+            let minLayers = 2;
+            let maxLayers = Math.min(7, 3 + Math.floor(targetDifficulty * 4));
+            if (isEarlyLevel) {
+              minLayers = 2;
+              maxLayers = Math.min(4, maxLayers);
+            } else if (isBossLevel) {
+              minLayers = Math.max(3, Math.floor(2 + targetDifficulty * 2));
+              maxLayers = Math.min(7, 4 + Math.floor(targetDifficulty * 3));
+            }
+
+            // Tile type count optimization
+            // - Early levels (1-30): Fewer types (3-4) for cleaner, easier gameplay
+            // - Boss levels: More types (4-6) for variety and challenge
+            // - Regular: Scale with difficulty (3-6)
+            let tileTypeCount: number;
+            if (isEarlyLevel) {
+              tileTypeCount = Math.min(4, 3 + Math.floor(targetDifficulty * 2));
+            } else if (isBossLevel) {
+              tileTypeCount = Math.max(4, Math.min(6, 4 + Math.floor(targetDifficulty * 2)));
+            } else {
+              tileTypeCount = 3 + Math.floor(targetDifficulty * 3);
+            }
+            const tileTypes = ['t1', 't2', 't3', 't4', 't5', 't6'].slice(0, tileTypeCount);
+
             const params: GenerationParams = {
               target_difficulty: targetDifficulty,
-              grid_size: [7, 7],
-              max_layers: Math.min(7, 3 + Math.floor(targetDifficulty * 4)),
-              tile_types: ['t1', 't2', 't3', 't4', 't5', 't6'].slice(0, 3 + Math.floor(targetDifficulty * 3)),
+              grid_size: gridSize,
+              min_layers: minLayers,
+              max_layers: maxLayers,
+              tile_types: tileTypes,
               obstacle_types: [],
               goals: [{ type: goalType, direction: goalDirection, count: Math.max(2, Math.floor(3 + targetDifficulty * 2)) }],
               symmetry_mode: symmetryMode,
               pattern_type: patternType,
+              pattern_index: patternIndex,
             };
 
             const result = await generateLevel(params, {

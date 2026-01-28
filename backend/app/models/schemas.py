@@ -44,6 +44,21 @@ class LayerObstacleConfig(BaseModel):
     )
 
 
+class LayerPatternConfig(BaseModel):
+    """Configuration for pattern placement on a specific layer."""
+    layer: int = Field(..., ge=0, description="Layer index (0-based)")
+    pattern_type: str = Field(
+        ...,
+        description="Pattern type: 'random', 'geometric', 'clustered', 'aesthetic'"
+    )
+    pattern_index: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=49,
+        description="Specific pattern index (0-49) for aesthetic mode. None = auto-select"
+    )
+
+
 class GenerateRequest(BaseModel):
     """Request schema for level generation."""
     target_difficulty: float = Field(..., ge=0.0, le=1.0, description="Target difficulty (0.0-1.0)")
@@ -72,6 +87,10 @@ class GenerateRequest(BaseModel):
     layer_obstacle_configs: Optional[List[LayerObstacleConfig]] = Field(
         default=None,
         description="Per-layer obstacle count settings. Unspecified layers auto-distribute."
+    )
+    layer_pattern_configs: Optional[List[LayerPatternConfig]] = Field(
+        default=None,
+        description="Per-layer pattern settings. Unspecified layers use level-wide pattern_type with auto-selected pattern_index."
     )
     # Symmetry and pattern options
     symmetry_mode: Optional[str] = Field(
@@ -472,6 +491,10 @@ class ValidatedGenerateRequest(BaseModel):
     symmetry_mode: Optional[str] = Field(default=None, description="Symmetry mode")
     pattern_type: Optional[str] = Field(default=None, description="Pattern type")
     pattern_index: Optional[int] = Field(default=None, ge=0, le=49, description="Specific pattern index (0-49) for aesthetic mode")
+    layer_pattern_configs: Optional[List[LayerPatternConfig]] = Field(
+        default=None,
+        description="Per-layer pattern settings for aesthetic variety"
+    )
 
     # Auto gimmick selection parameters
     auto_select_gimmicks: bool = Field(default=False, description="Auto-select gimmicks based on difficulty")

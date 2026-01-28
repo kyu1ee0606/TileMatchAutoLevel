@@ -97,6 +97,14 @@ class LayerObstacleConfig:
 
 
 @dataclass
+class LayerPatternConfig:
+    """Configuration for pattern placement on a specific layer."""
+    layer: int
+    pattern_type: str  # 'random', 'geometric', 'clustered', 'aesthetic'
+    pattern_index: Optional[int] = None  # 0-49 for aesthetic mode
+
+
+@dataclass
 class GenerationParams:
     """Parameters for level generation."""
     target_difficulty: float  # 0.0 ~ 1.0
@@ -113,6 +121,7 @@ class GenerationParams:
     active_layer_count: Optional[int] = None  # Number of active layers
     layer_tile_configs: Optional[List[LayerTileConfig]] = None  # Per-layer tile counts
     layer_obstacle_configs: Optional[List[LayerObstacleConfig]] = None  # Per-layer obstacle counts
+    layer_pattern_configs: Optional[List[LayerPatternConfig]] = None  # Per-layer pattern settings
     # Symmetry and pattern options
     symmetry_mode: Optional[str] = None  # 'none', 'horizontal', 'vertical', 'both'
     pattern_type: Optional[str] = None  # 'random', 'geometric', 'clustered', 'aesthetic'
@@ -164,6 +173,19 @@ class GenerationParams:
             if config.layer == layer_idx and obstacle_type in config.counts:
                 obs_config = config.counts[obstacle_type]
                 return obs_config.get("min", 0), obs_config.get("max", 10)
+        return None
+
+    def get_layer_pattern_config(self, layer_idx: int) -> Optional[Tuple[str, Optional[int]]]:
+        """Get configured pattern (pattern_type, pattern_index) for a specific layer.
+
+        Returns:
+            Tuple of (pattern_type, pattern_index) or None if not configured
+        """
+        if not self.layer_pattern_configs:
+            return None
+        for config in self.layer_pattern_configs:
+            if config.layer == layer_idx:
+                return (config.pattern_type, config.pattern_index)
         return None
 
 

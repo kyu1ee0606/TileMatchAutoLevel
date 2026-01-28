@@ -856,6 +856,158 @@ class LevelGenerator:
 
         return layer_patterns
 
+    def _generate_auto_layer_pattern_configs(
+        self,
+        active_layers: List[int],
+        target_difficulty: float,
+        total_tile_count: int,
+        is_boss_level: bool = False,
+    ) -> List["LayerPatternConfig"]:
+        """Generate intelligent layer pattern configurations for aesthetic variety.
+
+        This method creates visually appealing multi-layer compositions by mixing
+        different pattern types across layers. The mixing strategy adapts to:
+        - Level difficulty (easy levels use simpler patterns)
+        - Number of active layers (more layers = more variety)
+        - Boss level status (uses more impressive patterns)
+
+        Pattern Type Characteristics:
+        - 'aesthetic': Artistic, visually impressive (best for top/visible layers)
+        - 'geometric': Structured, regular shapes (good for base layers)
+        - 'clustered': Grouped tiles (creates interesting visual clusters)
+        - 'random': Natural, organic feel (good for middle layers)
+
+        Args:
+            active_layers: List of layer indices that will be populated
+            target_difficulty: Target difficulty (0.0-1.0)
+            total_tile_count: Total tiles across all layers
+            is_boss_level: Whether this is a boss level
+
+        Returns:
+            List of LayerPatternConfig for each layer
+        """
+        from app.models.level import LayerPatternConfig
+
+        configs: List[LayerPatternConfig] = []
+        num_layers = len(active_layers)
+        sorted_layers = sorted(active_layers, reverse=True)  # Top to bottom
+
+        # Boss level pattern sets (visually impressive)
+        boss_aesthetic_patterns = [8, 15, 16, 45, 46, 17, 18, 47]  # Stars, butterflies, etc.
+
+        # Easy level patterns (simple, clean)
+        easy_patterns = [0, 1, 2, 3, 20, 21]  # Basic shapes, simple letters
+
+        # Medium level patterns (balanced variety)
+        medium_patterns = [4, 5, 10, 11, 30, 31, 40, 41]  # Crosses, arrows, triangles
+
+        # Hard level patterns (complex, challenging visuals)
+        hard_patterns = [33, 34, 35, 45, 46, 47, 48, 49]  # Stairs, zigzag, artistic
+
+        # Determine pattern strategy based on level characteristics
+        if is_boss_level:
+            # Boss levels: Impressive aesthetic on top, structured base
+            for i, layer_idx in enumerate(sorted_layers):
+                if i == 0:  # Top layer - most visible
+                    pattern_idx = random.choice(boss_aesthetic_patterns)
+                    configs.append(LayerPatternConfig(
+                        layer=layer_idx,
+                        pattern_type="aesthetic",
+                        pattern_index=pattern_idx
+                    ))
+                elif i == len(sorted_layers) - 1:  # Bottom layer - structural base
+                    configs.append(LayerPatternConfig(
+                        layer=layer_idx,
+                        pattern_type="geometric",
+                        pattern_index=random.choice([0, 1, 2, 3, 4])
+                    ))
+                else:  # Middle layers - mix for variety
+                    if i % 2 == 0:
+                        configs.append(LayerPatternConfig(
+                            layer=layer_idx,
+                            pattern_type="clustered",
+                            pattern_index=None
+                        ))
+                    else:
+                        configs.append(LayerPatternConfig(
+                            layer=layer_idx,
+                            pattern_type="aesthetic",
+                            pattern_index=random.choice(medium_patterns)
+                        ))
+        elif target_difficulty < 0.3:
+            # Easy levels: Simple, clean patterns
+            for i, layer_idx in enumerate(sorted_layers):
+                if i == 0:  # Top layer
+                    configs.append(LayerPatternConfig(
+                        layer=layer_idx,
+                        pattern_type="geometric",
+                        pattern_index=random.choice(easy_patterns)
+                    ))
+                else:
+                    configs.append(LayerPatternConfig(
+                        layer=layer_idx,
+                        pattern_type="geometric",
+                        pattern_index=random.choice([0, 1, 2, 3])
+                    ))
+        elif target_difficulty < 0.6:
+            # Medium difficulty: Balanced variety
+            for i, layer_idx in enumerate(sorted_layers):
+                if i == 0:  # Top layer - aesthetic
+                    configs.append(LayerPatternConfig(
+                        layer=layer_idx,
+                        pattern_type="aesthetic",
+                        pattern_index=random.choice(medium_patterns)
+                    ))
+                elif i == len(sorted_layers) - 1:  # Bottom - geometric
+                    configs.append(LayerPatternConfig(
+                        layer=layer_idx,
+                        pattern_type="geometric",
+                        pattern_index=random.choice([0, 1, 2, 4, 5])
+                    ))
+                else:  # Middle - alternate
+                    pattern_type = "clustered" if i % 2 == 0 else "random"
+                    configs.append(LayerPatternConfig(
+                        layer=layer_idx,
+                        pattern_type=pattern_type,
+                        pattern_index=None
+                    ))
+        else:
+            # Hard levels: Complex, varied patterns
+            for i, layer_idx in enumerate(sorted_layers):
+                if i == 0:  # Top layer - impressive aesthetic
+                    configs.append(LayerPatternConfig(
+                        layer=layer_idx,
+                        pattern_type="aesthetic",
+                        pattern_index=random.choice(hard_patterns)
+                    ))
+                elif i == 1 and num_layers > 2:  # Second layer - clustered
+                    configs.append(LayerPatternConfig(
+                        layer=layer_idx,
+                        pattern_type="clustered",
+                        pattern_index=None
+                    ))
+                elif i == len(sorted_layers) - 1:  # Bottom - geometric base
+                    configs.append(LayerPatternConfig(
+                        layer=layer_idx,
+                        pattern_type="geometric",
+                        pattern_index=random.choice([3, 4, 5, 30, 31])
+                    ))
+                else:  # Other middle layers - mix aesthetic and random
+                    if i % 2 == 0:
+                        configs.append(LayerPatternConfig(
+                            layer=layer_idx,
+                            pattern_type="aesthetic",
+                            pattern_index=random.choice(medium_patterns + hard_patterns)
+                        ))
+                    else:
+                        configs.append(LayerPatternConfig(
+                            layer=layer_idx,
+                            pattern_type="random",
+                            pattern_index=None
+                        ))
+
+        return configs
+
     def _populate_layers(
         self, level: Dict[str, Any], params: GenerationParams
     ) -> Dict[str, Any]:
@@ -1063,6 +1215,44 @@ class LevelGenerator:
                      f"effective_symmetry_mode={effective_symmetry_mode}, "
                      f"pattern_type={params.pattern_type}")
 
+        # Auto-mixing: Generate intelligent layer pattern configs for aesthetic variety
+        # Conditions for auto-mixing:
+        # 1. No explicit layer_pattern_configs provided
+        # 2. Multiple active layers (>= 3 for meaningful variety)
+        # 3. pattern_type is 'aesthetic' or None (default)
+        enable_auto_mixing = (
+            params.layer_pattern_configs is None and
+            len(active_layers) >= 3 and
+            params.pattern_type in (None, "aesthetic")
+        )
+
+        effective_layer_pattern_configs = None
+        if enable_auto_mixing:
+            # Calculate total tile count for auto-mixing strategy
+            total_tiles = sum(layer_tile_counts.values())
+            # Detect boss level: high tile count (>100) or multiple goals
+            is_boss_level = total_tiles > 100 or (
+                params.goals and len(params.goals) > 1
+            )
+            effective_layer_pattern_configs = self._generate_auto_layer_pattern_configs(
+                active_layers=active_layers,
+                target_difficulty=params.target_difficulty,
+                total_tile_count=total_tiles,
+                is_boss_level=is_boss_level,
+            )
+            _logger.info(f"[GENERATOR_DEBUG] Auto-mixing enabled: {len(effective_layer_pattern_configs)} layer configs generated, is_boss={is_boss_level}")
+        elif params.layer_pattern_configs:
+            effective_layer_pattern_configs = params.layer_pattern_configs
+
+        # Helper function to get pattern config for a layer
+        def get_effective_layer_pattern(layer_idx: int):
+            """Get effective pattern config for a layer from auto or explicit configs."""
+            if effective_layer_pattern_configs:
+                for config in effective_layer_pattern_configs:
+                    if config.layer == layer_idx:
+                        return (config.pattern_type, config.pattern_index)
+            return None
+
         for layer_idx in active_layers:
             layer_key = f"layer_{layer_idx}"
             is_odd_layer = layer_idx % 2 == 1
@@ -1076,14 +1266,24 @@ class LevelGenerator:
             if target_count <= 0:
                 continue
 
-            # Use layer-specific pattern index for geometric diversity
-            layer_pattern_index = layer_pattern_indices.get(layer_idx, params.pattern_index)
+            # Determine pattern type and index for this layer
+            # Priority: 1) Explicit/Auto layer config, 2) Level-wide default
+            layer_pattern_config = get_effective_layer_pattern(layer_idx)
+
+            if layer_pattern_config:
+                # Use per-layer configuration (explicit or auto-generated)
+                layer_pattern_type = layer_pattern_config[0]
+                layer_pattern_index = layer_pattern_config[1] if layer_pattern_config[1] is not None else layer_pattern_indices.get(layer_idx, params.pattern_index)
+            else:
+                # Use level-wide pattern_type with varied pattern_index per layer
+                layer_pattern_type = params.pattern_type
+                layer_pattern_index = layer_pattern_indices.get(layer_idx, params.pattern_index)
 
             # Generate positions for this layer with symmetry and pattern options
             positions = self._generate_layer_positions_for_count(
                 layer_cols, layer_rows, target_count,
                 symmetry_mode=effective_symmetry_mode,
-                pattern_type=params.pattern_type,
+                pattern_type=layer_pattern_type,
                 pattern_index=layer_pattern_index  # Use varied pattern per layer
             )
 
@@ -2856,14 +3056,13 @@ class LevelGenerator:
                 sampled = random.sample(cluster_positions, sample_count)
                 positions.update(sampled)
 
-        # Fill remaining if needed
-        all_positions = [f"{x}_{y}" for x in range(cols) for y in range(rows)]
-        remaining = [p for p in all_positions if p not in positions]
-
-        while len(positions) < target_count and remaining:
-            pos = random.choice(remaining)
-            remaining.remove(pos)
-            positions.add(pos)
+        # Fill remaining if needed - O(n) using random.sample instead of O(n²) loop
+        if len(positions) < target_count:
+            all_positions = [f"{x}_{y}" for x in range(cols) for y in range(rows)]
+            remaining = [p for p in all_positions if p not in positions]
+            need_count = min(target_count - len(positions), len(remaining))
+            if need_count > 0:
+                positions.update(random.sample(remaining, need_count))
 
         return list(positions)[:target_count]
 
@@ -5425,7 +5624,8 @@ class LevelGenerator:
                         # If not self-symmetric, check if mirror position is also valid
                         if not is_self_symmetric:
                             # Mirror position must exist and not be used
-                            if mirror_pos not in tiles or mirror_pos in placed_positions:
+                            # Also check if mirror position is another goal's output position
+                            if mirror_pos not in tiles or mirror_pos in placed_positions or mirror_pos in output_positions:
                                 continue
                             # Get mirrored goal type and check validity
                             goal_dir = goal_type[-1]
@@ -5441,6 +5641,12 @@ class LevelGenerator:
                         # Original behavior: add at new positions
                         if try_pos in tiles or try_pos in placed_positions:
                             continue
+
+                    # CRITICAL: Position must not be another goal's output position
+                    # This prevents goals from being placed where other goals output tiles
+                    # which would cause facing/collision issues
+                    if try_pos in output_positions:
+                        continue
 
                     # Check if this position is valid for the goal direction
                     if not is_valid_goal_position(try_col, try_row, goal_type):

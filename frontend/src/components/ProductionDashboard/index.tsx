@@ -451,6 +451,10 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
                 },
                 gimmickOptions
               );
+
+              // 즉시 abort 체크 - API 호출 직후 빠른 중단
+              if (signal.aborted) throw new Error('cancelled');
+
               result = {
                 level_json: validatedResult.level_json,
                 actual_difficulty: validatedResult.actual_difficulty,
@@ -465,6 +469,9 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
                 ...gimmickOptions,
                 gimmick_intensity: Math.min(1, levelNumber / 500),
               });
+
+              // 즉시 abort 체크 - API 호출 직후 빠른 중단
+              if (signal.aborted) throw new Error('cancelled');
             }
 
             // Create production level
@@ -500,8 +507,8 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             pendingLevels.push(prodLevel);
             completedCount++;
 
-            // Checkpoint save every N levels
-            if (pendingLevels.length >= 50) {
+            // Checkpoint save every N levels (또는 abort 직전에 저장)
+            if (pendingLevels.length >= 50 || signal.aborted) {
               await saveProductionLevels(selectedBatchId, pendingLevels);
               await recalculateBatchCounts(selectedBatchId);  // Update batch counts
               pendingLevels.length = 0;
@@ -912,7 +919,7 @@ function GenerateTab({
                   </select>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-gray-400">시뮬레이션 횟수</span>
+                  <span className="text-gray-400">검증 속도</span>
                   <select
                     value={validationConfig.simulation_iterations}
                     onChange={(e) => onValidationConfigChange({
@@ -921,9 +928,10 @@ function GenerateTab({
                     })}
                     className="px-2 py-1 bg-gray-600 border border-gray-500 rounded text-white text-xs"
                   >
-                    <option value={10}>10회 (빠름)</option>
-                    <option value={20}>20회 (기본)</option>
-                    <option value={30}>30회 (정확)</option>
+                    <option value={0}>🚫 안함 (즉시 생성)</option>
+                    <option value={10}>⚡ 빠름 (10회)</option>
+                    <option value={20}>⚖️ 보통 (20회)</option>
+                    <option value={50}>🎯 정밀 (50회)</option>
                   </select>
                 </div>
                 <p className="text-xs text-gray-500 mt-1">
@@ -1951,16 +1959,16 @@ function TestTab({
             </div>
 
             <div>
-              <label className="block text-xs text-gray-400 mb-1">반복 횟수</label>
+              <label className="block text-xs text-gray-400 mb-1">검증 속도</label>
               <select
                 value={autoTestIterations}
                 onChange={(e) => setAutoTestIterations(Number(e.target.value))}
                 className="w-full px-2 py-1.5 text-sm bg-gray-700 border border-gray-600 rounded"
                 disabled={batchTestProgress.status === 'running'}
               >
-                <option value={50}>50회 (빠름)</option>
-                <option value={100}>100회 (기본)</option>
-                <option value={200}>200회 (정밀)</option>
+                <option value={30}>⚡ 빠름 (30회)</option>
+                <option value={100}>⚖️ 보통 (100회)</option>
+                <option value={200}>🎯 정밀 (200회)</option>
               </select>
             </div>
           </div>
@@ -2565,16 +2573,16 @@ function TestTab({
                     </div>
 
                     <div className="flex items-center gap-2">
-                      <label className="text-sm text-gray-400">반복:</label>
+                      <label className="text-sm text-gray-400">검증:</label>
                       <select
                         value={autoTestIterations}
                         onChange={(e) => setAutoTestIterations(Number(e.target.value))}
                         className="px-2 py-1 bg-gray-700 border border-gray-600 rounded text-sm"
                         disabled={isAutoTesting}
                       >
-                        <option value={50}>50회</option>
-                        <option value={100}>100회</option>
-                        <option value={200}>200회</option>
+                        <option value={30}>⚡ 빠름</option>
+                        <option value={100}>⚖️ 보통</option>
+                        <option value={200}>🎯 정밀</option>
                       </select>
                     </div>
 
@@ -3045,6 +3053,14 @@ function ExportTab({
   const [includeMeta, setIncludeMeta] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
 
+  // Local copy state
+  const [copyMode, setCopyMode] = useState<'all' | 'range' | 'boss' | 'grade'>('all');
+  const [rangeStart, setRangeStart] = useState(1);
+  const [rangeEnd, setRangeEnd] = useState(100);
+  const [selectedGrade, setSelectedGrade] = useState<DifficultyGrade>('A');
+  const [isCopying, setIsCopying] = useState(false);
+  const [copyProgress, setCopyProgress] = useState({ current: 0, total: 0 });
+
   const handleExport = async () => {
     setIsExporting(true);
     try {
@@ -3075,12 +3091,121 @@ function ExportTab({
     }
   };
 
+  // Copy to local levels
+  const handleCopyToLocal = async () => {
+    setIsCopying(true);
+    setCopyProgress({ current: 0, total: 0 });
+
+    try {
+      // Load all production levels
+      const allLevels = await getProductionLevelsByBatch(batchId, { limit: 1500 });
+
+      // Filter levels based on mode
+      let targetLevels: ProductionLevel[] = [];
+      switch (copyMode) {
+        case 'all':
+          targetLevels = allLevels.filter(l => l.level_json);
+          break;
+        case 'range':
+          targetLevels = allLevels.filter(l =>
+            l.meta.level_number >= rangeStart &&
+            l.meta.level_number <= rangeEnd &&
+            l.level_json
+          );
+          break;
+        case 'boss':
+          targetLevels = allLevels.filter(l =>
+            l.meta.level_number % 10 === 0 &&
+            l.level_json
+          );
+          break;
+        case 'grade':
+          targetLevels = allLevels.filter(l =>
+            l.meta.grade === selectedGrade &&
+            l.level_json
+          );
+          break;
+      }
+
+      if (targetLevels.length === 0) {
+        addNotification('warning', '복사할 레벨이 없습니다');
+        setIsCopying(false);
+        return;
+      }
+
+      setCopyProgress({ current: 0, total: targetLevels.length });
+
+      // Import saveLocalLevelToStorage dynamically
+      const { saveLocalLevelToStorage } = await import('../../storage/levelStorage');
+
+      let successCount = 0;
+      let failCount = 0;
+
+      for (let i = 0; i < targetLevels.length; i++) {
+        const level = targetLevels[i];
+        try {
+          const result = saveLocalLevelToStorage({
+            id: `prod_${batchId}_${level.meta.level_number}`,
+            name: `Production Level ${level.meta.level_number}`,
+            description: `배치: ${batchId}, 등급: ${level.meta.grade}, 난이도: ${level.meta.actual_difficulty.toFixed(3)}`,
+            tags: ['production', `grade_${level.meta.grade}`, level.meta.level_number % 10 === 0 ? 'boss' : 'normal'],
+            difficulty: level.meta.actual_difficulty,
+            grade: level.meta.grade,
+            source: 'production',
+            level_data: level.level_json!,
+            validation_status: level.meta.status === 'approved' ? 'pass' : 'unknown',
+          });
+
+          if (result.success) {
+            successCount++;
+          } else {
+            failCount++;
+          }
+        } catch {
+          failCount++;
+        }
+
+        setCopyProgress({ current: i + 1, total: targetLevels.length });
+      }
+
+      if (successCount > 0) {
+        addNotification('success', `${successCount}개 레벨이 로컬에 복사되었습니다`);
+      }
+      if (failCount > 0) {
+        addNotification('warning', `${failCount}개 레벨 복사 실패`);
+      }
+    } catch (err) {
+      console.error('Failed to copy levels:', err);
+      addNotification('error', '레벨 복사 실패');
+    } finally {
+      setIsCopying(false);
+      setCopyProgress({ current: 0, total: 0 });
+    }
+  };
+
+  // Calculate expected copy count
+  const getExpectedCopyCount = () => {
+    switch (copyMode) {
+      case 'all':
+        return stats.by_status.generated + stats.by_status.approved + stats.by_status.playtest_queue;
+      case 'range':
+        return Math.max(0, Math.min(rangeEnd, stats.total_levels) - rangeStart + 1);
+      case 'boss':
+        return Math.floor(stats.total_levels / 10);
+      case 'grade':
+        return stats.by_grade[selectedGrade] || 0;
+      default:
+        return 0;
+    }
+  };
+
   const readyCount = stats.by_status.approved;
 
   return (
     <div className="space-y-4">
+      {/* File Export Section */}
       <div className="p-4 bg-gray-800 rounded-lg">
-        <h3 className="text-sm font-medium text-white mb-4">내보내기 설정</h3>
+        <h3 className="text-sm font-medium text-white mb-4">파일 내보내기</h3>
 
         <div className="space-y-4">
           <div>
@@ -3116,6 +3241,116 @@ function ExportTab({
           >
             {isExporting ? '내보내는 중...' : `내보내기 (${readyCount}개)`}
           </Button>
+        </div>
+      </div>
+
+      {/* Copy to Local Levels Section */}
+      <div className="p-4 bg-gray-800 rounded-lg">
+        <h3 className="text-sm font-medium text-white mb-4">로컬 레벨로 복사</h3>
+
+        <div className="space-y-4">
+          {/* Copy Mode Selection */}
+          <div>
+            <label className="block text-sm text-gray-400 mb-2">복사 범위</label>
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                { value: 'all', label: '전체 레벨' },
+                { value: 'range', label: '범위 지정' },
+                { value: 'boss', label: '보스 레벨 (10배수)' },
+                { value: 'grade', label: '등급별' },
+              ].map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={() => setCopyMode(opt.value as typeof copyMode)}
+                  className={`px-3 py-2 rounded text-sm transition-colors ${
+                    copyMode === opt.value
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Range Input */}
+          {copyMode === 'range' && (
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                value={rangeStart}
+                onChange={(e) => setRangeStart(Math.max(1, parseInt(e.target.value) || 1))}
+                min={1}
+                max={1500}
+                className="w-24 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm"
+              />
+              <span className="text-gray-400">~</span>
+              <input
+                type="number"
+                value={rangeEnd}
+                onChange={(e) => setRangeEnd(Math.min(1500, parseInt(e.target.value) || 1500))}
+                min={1}
+                max={1500}
+                className="w-24 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm"
+              />
+              <span className="text-gray-500 text-sm">레벨</span>
+            </div>
+          )}
+
+          {/* Grade Selection */}
+          {copyMode === 'grade' && (
+            <div>
+              <select
+                value={selectedGrade}
+                onChange={(e) => setSelectedGrade(e.target.value as DifficultyGrade)}
+                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm"
+              >
+                <option value="S">S등급 ({stats.by_grade.S || 0}개)</option>
+                <option value="A">A등급 ({stats.by_grade.A || 0}개)</option>
+                <option value="B">B등급 ({stats.by_grade.B || 0}개)</option>
+                <option value="C">C등급 ({stats.by_grade.C || 0}개)</option>
+                <option value="D">D등급 ({stats.by_grade.D || 0}개)</option>
+              </select>
+            </div>
+          )}
+
+          {/* Expected Count */}
+          <div className="text-sm text-gray-400">
+            복사 예상: <span className="text-blue-400 font-medium">{getExpectedCopyCount()}개</span> 레벨
+          </div>
+
+          {/* Progress Bar */}
+          {isCopying && copyProgress.total > 0 && (
+            <div>
+              <div className="flex justify-between text-xs text-gray-400 mb-1">
+                <span>복사 중...</span>
+                <span>{copyProgress.current} / {copyProgress.total}</span>
+              </div>
+              <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-blue-500 transition-all duration-200"
+                  style={{ width: `${(copyProgress.current / copyProgress.total) * 100}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Copy Button */}
+          <Button
+            onClick={handleCopyToLocal}
+            disabled={isCopying || getExpectedCopyCount() === 0}
+            variant="primary"
+            className="w-full"
+          >
+            {isCopying ? `복사 중... (${copyProgress.current}/${copyProgress.total})` : `로컬로 복사 (${getExpectedCopyCount()}개)`}
+          </Button>
+
+          {/* Info */}
+          <div className="text-xs text-gray-500 bg-gray-900 rounded p-2">
+            복사된 레벨은 에디터 탭의 로컬 레벨 브라우저에서 확인하거나,
+            게임부스트 서버에 업로드할 수 있습니다.
+          </div>
         </div>
       </div>
     </div>

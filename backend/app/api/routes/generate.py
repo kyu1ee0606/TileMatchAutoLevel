@@ -15,7 +15,7 @@ from ...models.schemas import (
     ValidatedGenerateRequest,
     ValidatedGenerateResponse,
 )
-from ...models.level import GenerationParams, LayerTileConfig, LayerObstacleConfig
+from ...models.level import GenerationParams, LayerTileConfig, LayerObstacleConfig, LayerPatternConfig
 from ...core.generator import LevelGenerator
 from ...core.simulator import LevelSimulator
 from ...core.bot_simulator import BotSimulator
@@ -783,6 +783,18 @@ async def generate_level(
             for c in request.layer_obstacle_configs
         ]
 
+    # Convert layer_pattern_configs from Pydantic models to dataclasses
+    layer_pattern_configs = None
+    if hasattr(request, 'layer_pattern_configs') and request.layer_pattern_configs is not None:
+        layer_pattern_configs = [
+            LayerPatternConfig(
+                layer=c.layer,
+                pattern_type=c.pattern_type,
+                pattern_index=c.pattern_index
+            )
+            for c in request.layer_pattern_configs
+        ]
+
     # Check if this is a tutorial level (new gimmick introduction)
     tutorial_gimmick = get_tutorial_gimmick(
         request.level_number,
@@ -874,6 +886,7 @@ async def generate_level(
         active_layer_count=request.active_layer_count,
         layer_tile_configs=layer_tile_configs,
         layer_obstacle_configs=layer_obstacle_configs,
+        layer_pattern_configs=layer_pattern_configs,
         symmetry_mode=actual_symmetry,
         pattern_type=pattern_type,  # Use local variable (may be overridden for special shape)
         pattern_index=pattern_index,  # Use local variable (may be overridden for special shape)

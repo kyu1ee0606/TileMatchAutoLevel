@@ -62,7 +62,8 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
 
   // Generation state
   const [isGenerating, setIsGenerating] = useState(false);
-  const [useValidatedGeneration, setUseValidatedGeneration] = useState(true); // 검증 기반 생성 활성화
+  const [useValidatedGeneration, setUseValidatedGeneration] = useState(false); // 검증 기반 생성 (기본 OFF - 빠른 생성)
+  const [useCoreBots, setUseCoreBots] = useState(true); // 3봇 코어 모드 (기본 ON - 40% 빠름)
   const [validationConfig, setValidationConfig] = useState({
     max_retries: 3,           // 최대 재시도 횟수
     tolerance: 20.0,          // 허용 오차 (%)
@@ -215,170 +216,90 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             setProgress * (batch.difficulty_end - batch.difficulty_start);
         }
 
+        // PARALLEL GENERATION: Generate all levels in this set concurrently
+        // Concurrency: 검증 모드 10개, 비검증 모드 10개 동시 처리
+        // (검증 모드에서도 10개 가능 - sync def 전환으로 FastAPI threadpool이 요청 분산)
+        const CONCURRENCY = 10;
+
+        // Prepare level generation tasks for this set
+        interface LevelTask {
+          localIdx: number;
+          levelNumber: number;
+          targetDifficulty: number;
+        }
+
+        const levelTasks: LevelTask[] = [];
         for (let localIdx = 1; localIdx <= batch.levels_per_set; localIdx++) {
-          if (signal.aborted) throw new Error('cancelled');
-
           const levelNumber = setIdx * batch.levels_per_set + localIdx;
-
-          // Calculate level-specific difficulty
           let targetDifficulty = baseDifficulty;
-
           if (batch.use_sawtooth) {
-            // Sawtooth within set: gradual increase, spike at level 10
             const localProgress = (localIdx - 1) / (batch.levels_per_set - 1);
             const sawtoothBonus = localIdx === 10 ? 0.1 : localProgress * 0.05;
             targetDifficulty = Math.min(0.95, baseDifficulty + sawtoothBonus);
           }
+          levelTasks.push({ localIdx, levelNumber, targetDifficulty });
+        }
 
-          setGenerationProgress(prev => ({
-            ...prev,
-            current_level: levelNumber,
-            elapsed_ms: Date.now() - startTime,
-            estimated_remaining_ms: completedCount > 0
-              ? ((Date.now() - startTime) / completedCount) * (batch.total_levels - completedCount)
-              : 0,
-          }));
+        // Helper: Generate a single level (returns ProductionLevel or null on failure)
+        const generateOneLevel = async (task: LevelTask): Promise<ProductionLevel | null> => {
+          const { localIdx, levelNumber, targetDifficulty } = task;
 
           try {
-            // Generate level with optimized aesthetic variety
-            // Level characteristics affect pattern selection
             const isEarlyLevel = levelNumber <= 30;
-            const isSpecialShape = levelNumber % 10 === 9;  // 9, 19, 29, ...
-            const isBossLevel = levelNumber % 10 === 0 && levelNumber > 0;  // 10, 20, 30, ...
+            const isSpecialShape = levelNumber % 10 === 9;
+            const isBossLevel = levelNumber % 10 === 0 && levelNumber > 0;
 
-            // Pattern type selection based on level characteristics
-            // - Early levels: Prefer geometric for clean, predictable look (50% geometric, 40% aesthetic, 10% clustered)
-            // - Boss levels: Prefer aesthetic for impressive visuals (75% aesthetic, 20% geometric, 5% clustered)
-            // - Special shapes: Allow more clustered for variety (50% aesthetic, 25% geometric, 25% clustered)
-            // - Regular levels: Balanced aesthetic-focused (60% aesthetic, 25% geometric, 15% clustered)
+            // Pattern type selection
             const patternRoll = Math.random();
             let patternType: 'aesthetic' | 'geometric' | 'clustered';
-
             if (isEarlyLevel) {
-              // Early levels: Clean, predictable patterns
-              if (patternRoll < 0.50) {
-                patternType = 'geometric';
-              } else if (patternRoll < 0.90) {
-                patternType = 'aesthetic';
-              } else {
-                patternType = 'clustered';
-              }
+              patternType = patternRoll < 0.50 ? 'geometric' : patternRoll < 0.90 ? 'aesthetic' : 'clustered';
             } else if (isBossLevel) {
-              // Boss levels: Impressive aesthetic patterns
-              if (patternRoll < 0.75) {
-                patternType = 'aesthetic';
-              } else if (patternRoll < 0.95) {
-                patternType = 'geometric';
-              } else {
-                patternType = 'clustered';
-              }
+              patternType = patternRoll < 0.75 ? 'aesthetic' : patternRoll < 0.95 ? 'geometric' : 'clustered';
             } else if (isSpecialShape) {
-              // Special shapes: More variety
-              if (patternRoll < 0.50) {
-                patternType = 'aesthetic';
-              } else if (patternRoll < 0.75) {
-                patternType = 'geometric';
-              } else {
-                patternType = 'clustered';
-              }
+              patternType = patternRoll < 0.50 ? 'aesthetic' : patternRoll < 0.75 ? 'geometric' : 'clustered';
             } else {
-              // Regular levels: Balanced aesthetic-focused
-              if (patternRoll < 0.60) {
-                patternType = 'aesthetic';
-              } else if (patternRoll < 0.85) {
-                patternType = 'geometric';
-              } else {
-                patternType = 'clustered';
-              }
+              patternType = patternRoll < 0.60 ? 'aesthetic' : patternRoll < 0.85 ? 'geometric' : 'clustered';
             }
 
-            // Symmetry mode selection based on level characteristics (reusing level type flags from above)
+            // Symmetry mode selection
             const symmetryRoll = Math.random();
             let symmetryMode: 'none' | 'horizontal' | 'vertical' | 'both';
-
             if (isEarlyLevel) {
-              // Early levels: Clean, symmetric patterns (0% none, 25% h, 25% v, 50% both)
-              if (symmetryRoll < 0.25) {
-                symmetryMode = 'horizontal';
-              } else if (symmetryRoll < 0.50) {
-                symmetryMode = 'vertical';
-              } else {
-                symmetryMode = 'both';
-              }
+              symmetryMode = symmetryRoll < 0.25 ? 'horizontal' : symmetryRoll < 0.50 ? 'vertical' : 'both';
             } else if (isSpecialShape) {
-              // Special shape levels: Allow asymmetry for distinctive patterns (30% none, 35% h, 35% v)
-              if (symmetryRoll < 0.30) {
-                symmetryMode = 'none';
-              } else if (symmetryRoll < 0.65) {
-                symmetryMode = 'horizontal';
-              } else {
-                symmetryMode = 'vertical';
-              }
+              symmetryMode = symmetryRoll < 0.30 ? 'none' : symmetryRoll < 0.65 ? 'horizontal' : 'vertical';
             } else if (isBossLevel) {
-              // Boss levels: Strong symmetry for impressive visuals (0% none, 20% h, 20% v, 60% both)
-              if (symmetryRoll < 0.20) {
-                symmetryMode = 'horizontal';
-              } else if (symmetryRoll < 0.40) {
-                symmetryMode = 'vertical';
-              } else {
-                symmetryMode = 'both';
-              }
+              symmetryMode = symmetryRoll < 0.20 ? 'horizontal' : symmetryRoll < 0.40 ? 'vertical' : 'both';
             } else {
-              // Regular levels: Balanced selection (5% none, 35% h, 35% v, 25% both)
-              if (symmetryRoll < 0.05) {
-                symmetryMode = 'none';
-              } else if (symmetryRoll < 0.40) {
-                symmetryMode = 'horizontal';
-              } else if (symmetryRoll < 0.75) {
-                symmetryMode = 'vertical';
-              } else {
-                symmetryMode = 'both';
-              }
+              symmetryMode = symmetryRoll < 0.05 ? 'none' : symmetryRoll < 0.40 ? 'horizontal' : symmetryRoll < 0.75 ? 'vertical' : 'both';
             }
 
-            // Goal direction selection - align with symmetry for better aesthetics
-            // For 'both' symmetry: prefer center-aligned directions (s, n)
-            // For 'horizontal': prefer horizontal directions (e, w)
-            // For 'vertical': prefer vertical directions (s, n)
+            // Goal direction
             let goalDirections: Array<'s' | 'n' | 'e' | 'w'>;
             if (symmetryMode === 'both' || symmetryMode === 'vertical') {
-              // Prefer vertical-aligned goals (s, n) with 70% probability
               goalDirections = Math.random() < 0.7 ? ['s', 'n'] : ['e', 'w'];
             } else if (symmetryMode === 'horizontal') {
-              // Prefer horizontal-aligned goals (e, w) with 70% probability
               goalDirections = Math.random() < 0.7 ? ['e', 'w'] : ['s', 'n'];
             } else {
-              // None symmetry: any direction
               goalDirections = ['s', 'n', 'e', 'w'];
             }
             const goalDirection = goalDirections[Math.floor(Math.random() * goalDirections.length)];
+            const goalType = (['craft', 'stack'] as const)[Math.floor(Math.random() * 2)];
 
-            // Randomize goal types between craft and stack
-            const goalTypes: Array<'craft' | 'stack'> = ['craft', 'stack'];
-            const goalType = goalTypes[Math.floor(Math.random() * goalTypes.length)];
-
-            // Pattern index selection for aesthetic mode
-            // Boss levels use impressive patterns: heart(8), stars(15,16), butterfly(45), flower(46)
-            // Special shape levels use distinctive patterns
-            // Regular levels: auto-select (undefined)
+            // Pattern index
             let patternIndex: number | undefined = undefined;
             if (patternType === 'aesthetic') {
               if (isBossLevel) {
-                // Impressive patterns for boss levels
-                const bossPatterns = [8, 15, 16, 45, 46, 17, 18];  // heart, 5-star, 6-star, butterfly, flower, scattered stars, crescent
+                const bossPatterns = [8, 15, 16, 45, 46, 17, 18];
                 patternIndex = bossPatterns[Math.floor(Math.random() * bossPatterns.length)];
               } else if (isSpecialShape) {
-                // Distinctive patterns for special shape levels
-                const specialPatterns = [3, 4, 20, 23, 24, 30, 33];  // cross, donut, H, U, X, triangle, stairs
+                const specialPatterns = [3, 4, 20, 23, 24, 30, 33];
                 patternIndex = specialPatterns[Math.floor(Math.random() * specialPatterns.length)];
               }
-              // Regular levels: leave undefined for auto-selection with diversity
             }
 
-            // Grid size optimization
-            // - Early levels: Standard 7x7 for simplicity
-            // - Boss levels: Slightly larger 8x8 for more impressive layouts
-            // - Regular levels: Vary between 7x7 and 8x8 for diversity
+            // Grid size
             let gridSize: [number, number] = [7, 7];
             if (isBossLevel && targetDifficulty > 0.3) {
               gridSize = [8, 8];
@@ -386,32 +307,17 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
               gridSize = [8, 8];
             }
 
-            // Layer optimization based on difficulty and level type
-            // - Early levels: Fewer layers (2-4) for easier learning
-            // - Boss levels: More layers (4-7) for challenge
-            // - Regular: Scale with difficulty
+            // Layers
             let minLayers = 2;
             let maxLayers = Math.min(7, 3 + Math.floor(targetDifficulty * 4));
-            if (isEarlyLevel) {
-              minLayers = 2;
-              maxLayers = Math.min(4, maxLayers);
-            } else if (isBossLevel) {
-              minLayers = Math.max(3, Math.floor(2 + targetDifficulty * 2));
-              maxLayers = Math.min(7, 4 + Math.floor(targetDifficulty * 3));
-            }
+            if (isEarlyLevel) { minLayers = 2; maxLayers = Math.min(4, maxLayers); }
+            else if (isBossLevel) { minLayers = Math.max(3, Math.floor(2 + targetDifficulty * 2)); maxLayers = Math.min(7, 4 + Math.floor(targetDifficulty * 3)); }
 
-            // Tile type count optimization
-            // - Early levels (1-30): Fewer types (3-4) for cleaner, easier gameplay
-            // - Boss levels: More types (4-6) for variety and challenge
-            // - Regular: Scale with difficulty (3-6)
+            // Tile types
             let tileTypeCount: number;
-            if (isEarlyLevel) {
-              tileTypeCount = Math.min(4, 3 + Math.floor(targetDifficulty * 2));
-            } else if (isBossLevel) {
-              tileTypeCount = Math.max(4, Math.min(6, 4 + Math.floor(targetDifficulty * 2)));
-            } else {
-              tileTypeCount = 3 + Math.floor(targetDifficulty * 3);
-            }
+            if (isEarlyLevel) { tileTypeCount = Math.min(4, 3 + Math.floor(targetDifficulty * 2)); }
+            else if (isBossLevel) { tileTypeCount = Math.max(4, Math.min(6, 4 + Math.floor(targetDifficulty * 2))); }
+            else { tileTypeCount = 3 + Math.floor(targetDifficulty * 3); }
             const tileTypes = ['t1', 't2', 't3', 't4', 't5', 't6'].slice(0, tileTypeCount);
 
             const params: GenerationParams = {
@@ -440,7 +346,6 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             let matchScore = 100;
 
             if (useValidatedGeneration) {
-              // 검증 기반 생성 사용
               const validatedResult = await generateValidatedLevel(
                 { ...params, gimmick_intensity: Math.min(1, levelNumber / 500) },
                 {
@@ -448,13 +353,10 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
                   tolerance: validationConfig.tolerance,
                   simulation_iterations: validationConfig.simulation_iterations,
                   use_best_match: true,
+                  use_core_bots_only: useCoreBots,
                 },
                 gimmickOptions
               );
-
-              // 즉시 abort 체크 - API 호출 직후 빠른 중단
-              if (signal.aborted) throw new Error('cancelled');
-
               result = {
                 level_json: validatedResult.level_json,
                 actual_difficulty: validatedResult.actual_difficulty,
@@ -464,17 +366,12 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
               validationAttempts = validatedResult.attempts;
               matchScore = validatedResult.match_score;
             } else {
-              // 기본 생성 (검증 없음)
               result = await generateLevel(params, {
                 ...gimmickOptions,
                 gimmick_intensity: Math.min(1, levelNumber / 500),
               });
-
-              // 즉시 abort 체크 - API 호출 직후 빠른 중단
-              if (signal.aborted) throw new Error('cancelled');
             }
 
-            // Create production level
             const meta: ProductionLevelMeta = {
               level_number: levelNumber,
               set_index: setIdx,
@@ -483,13 +380,13 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
               target_difficulty: targetDifficulty,
               actual_difficulty: result.actual_difficulty,
               grade: result.grade as DifficultyGrade,
-              status: validationPassed ? 'generated' : 'playtest_queue', // 검증 실패시 플레이테스트 필요
+              status: validationPassed ? 'generated' : 'playtest_queue',
               status_updated_at: new Date().toISOString(),
               playtest_required: !validationPassed || shouldRequirePlaytest(
                 { level_number: levelNumber, grade: result.grade as DifficultyGrade, match_score: matchScore, target_difficulty: targetDifficulty },
                 playtestConfig
               ),
-              playtest_priority: validationPassed ? levelNumber : levelNumber - 10000,  // 검증 실패 레벨 우선
+              playtest_priority: validationPassed ? levelNumber : levelNumber - 10000,
               playtest_results: [],
               match_score: matchScore,
               validation_attempts: validationAttempts,
@@ -499,28 +396,59 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
               meta.status = 'playtest_queue';
             }
 
-            const prodLevel: ProductionLevel = {
-              meta,
-              level_json: result.level_json,
-            };
-
-            pendingLevels.push(prodLevel);
-            completedCount++;
-
-            // Checkpoint save every N levels (또는 abort 직전에 저장)
-            if (pendingLevels.length >= 50 || signal.aborted) {
-              await saveProductionLevels(selectedBatchId, pendingLevels);
-              await recalculateBatchCounts(selectedBatchId);  // Update batch counts
-              pendingLevels.length = 0;
-              setGenerationProgress(prev => ({
-                ...prev,
-                last_checkpoint_at: new Date().toISOString(),
-                completed_levels: completedCount,
-              }));
-            }
+            return { meta, level_json: result.level_json };
           } catch (err) {
             console.error(`Failed to generate level ${levelNumber}:`, err);
-            failedLevels.push(levelNumber);
+            return null;
+          }
+        };
+
+        // Execute in parallel batches with concurrency limit
+        for (let batchStart = 0; batchStart < levelTasks.length; batchStart += CONCURRENCY) {
+          if (signal.aborted) throw new Error('cancelled');
+
+          const batchSlice = levelTasks.slice(batchStart, batchStart + CONCURRENCY);
+
+          // Update progress for current batch
+          const lastLevelNum = batchSlice[batchSlice.length - 1].levelNumber;
+          setGenerationProgress(prev => ({
+            ...prev,
+            current_level: lastLevelNum,
+            elapsed_ms: Date.now() - startTime,
+            estimated_remaining_ms: completedCount > 0
+              ? ((Date.now() - startTime) / completedCount) * (batch.total_levels - completedCount)
+              : 0,
+          }));
+
+          // Run batch in parallel
+          const results = await Promise.allSettled(
+            batchSlice.map(task => generateOneLevel(task))
+          );
+
+          // Process results
+          for (let i = 0; i < results.length; i++) {
+            const r = results[i];
+            const task = batchSlice[i];
+            if (r.status === 'fulfilled' && r.value) {
+              pendingLevels.push(r.value);
+              completedCount++;
+            } else {
+              failedLevels.push(task.levelNumber);
+              if (r.status === 'rejected') {
+                console.error(`Failed to generate level ${task.levelNumber}:`, r.reason);
+              }
+            }
+          }
+
+          // Checkpoint save every 50 levels (skip recalculateBatchCounts during generation — O(n²) bottleneck)
+          if (pendingLevels.length >= 50 || signal.aborted) {
+            await saveProductionLevels(selectedBatchId, pendingLevels);
+            pendingLevels.length = 0;
+            setGenerationProgress(prev => ({
+              ...prev,
+              last_checkpoint_at: new Date().toISOString(),
+              completed_levels: completedCount,
+            }));
           }
         }
 
@@ -654,7 +582,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
           >
             {batches.map((batch) => (
               <option key={batch.id} value={batch.id}>
-                {batch.name} ({batch.generated_count}/{batch.total_levels})
+                {batch.name} ({batch.generated_count + batch.playtest_count}/{batch.total_levels})
               </option>
             ))}
           </select>
@@ -711,6 +639,8 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             onUseValidationChange={setUseValidatedGeneration}
             validationConfig={validationConfig}
             onValidationConfigChange={setValidationConfig}
+            useCoreBots={useCoreBots}
+            onUseCoreBotsChange={setUseCoreBots}
           />
         )}
 
@@ -766,7 +696,7 @@ function OverviewTab({ stats, batch }: { stats: ProductionStats; batch: Producti
     <div className="space-y-6">
       {/* Progress Overview */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard label="생성됨" value={batch.generated_count} total={batch.total_levels} />
+        <StatCard label="생성 완료" value={batch.generated_count + batch.playtest_count} total={batch.total_levels} />
         <StatCard label="플레이테스트" value={stats.playtest_progress.completed} total={stats.playtest_progress.total_required} />
         <StatCard label="승인됨" value={stats.by_status.approved} total={batch.total_levels} color="green" />
         <StatCard label="거부/수정필요" value={stats.by_status.rejected + stats.by_status.needs_rework} color="red" />
@@ -835,6 +765,8 @@ function GenerateTab({
   onUseValidationChange,
   validationConfig,
   onValidationConfigChange,
+  useCoreBots,
+  onUseCoreBotsChange,
 }: {
   batch: ProductionBatch;
   progress: ProductionGenerationProgress;
@@ -845,6 +777,8 @@ function GenerateTab({
   onUseValidationChange: (value: boolean) => void;
   validationConfig: { max_retries: number; tolerance: number; simulation_iterations: number };
   onValidationConfigChange: (config: { max_retries: number; tolerance: number; simulation_iterations: number }) => void;
+  useCoreBots: boolean;
+  onUseCoreBotsChange: (value: boolean) => void;
 }) {
   const [playtestStrategy, setPlaytestStrategy] = useState<PlaytestStrategy>('sample_boss');
 
@@ -934,8 +868,25 @@ function GenerateTab({
                     <option value={50}>🎯 정밀 (50회)</option>
                   </select>
                 </div>
+                <div className="flex items-center justify-between mt-2">
+                  <span className="text-gray-400">봇 모드</span>
+                  <select
+                    value={useCoreBots ? 'core' : 'full'}
+                    onChange={(e) => onUseCoreBotsChange(e.target.value === 'core')}
+                    className="px-2 py-1 bg-gray-600 border border-gray-500 rounded text-white text-xs"
+                  >
+                    <option value="core">⚡ 코어 3봇 (빠름)</option>
+                    <option value="full">🎯 전체 5봇 (정밀)</option>
+                  </select>
+                </div>
                 <p className="text-xs text-gray-500 mt-1">
                   검증 실패시 자동 재생성하여 클리어 가능한 레벨만 생성합니다.
+                  {validationConfig.simulation_iterations === 0 && (
+                    <span className="block text-yellow-400 mt-1">시뮬레이션 없이 빠르게 생성합니다 (캘리브레이션만 적용).</span>
+                  )}
+                  {useCoreBots && validationConfig.simulation_iterations > 0 && (
+                    <span className="block text-blue-400 mt-1">코어 3봇 (casual/average/expert)으로 ~40% 빠른 검증.</span>
+                  )}
                 </p>
               </div>
             )}
@@ -946,8 +897,9 @@ function GenerateTab({
             <div>총 {batch.total_levels}개 레벨 생성</div>
             <div>난이도 범위: {(batch.difficulty_start * 100).toFixed(0)}% ~ {(batch.difficulty_end * 100).toFixed(0)}%</div>
             <div>패턴: {batch.use_sawtooth ? '톱니바퀴 (보스/휴식 사이클)' : '선형 증가'}</div>
+            <div className="text-blue-400">⚡ 병렬 생성: 10개 동시 처리</div>
             {useValidation && (
-              <div className="text-green-400">✓ 난이도 검증 활성화 (최대 {validationConfig.max_retries}회 재시도)</div>
+              <div className="text-green-400">✓ 난이도 검증 활성화 (최대 {validationConfig.max_retries}회 재시도{validationConfig.simulation_iterations === 0 ? ', 시뮬레이션 없음' : ''}{useCoreBots ? ', 코어 3봇' : ', 전체 5봇'})</div>
             )}
           </div>
 
@@ -1396,69 +1348,84 @@ function TestTab({
 
     const results: { level_number: number; match_score: number; grade: string; status: string; target_difficulty: number; autoplay_score: number; static_score: number }[] = [];
     const failedLevels: number[] = [];
+    let completedCount = 0;
 
-    for (let i = 0; i < filteredLevels.length; i++) {
+    // Process a single level's auto test
+    const testOneLevel = async (level: typeof filteredLevels[0]) => {
+      const result = await analyzeAutoPlay(level.level_json, {
+        iterations: autoTestIterations,
+        targetDifficulty: level.meta.target_difficulty,
+      });
+
+      const matchScore = calculateMatchScoreFromBots(result.bot_stats);
+
+      const testResult = {
+        level_number: level.meta.level_number,
+        match_score: matchScore,
+        grade: result.autoplay_grade,
+        status: result.balance_status,
+        target_difficulty: level.meta.target_difficulty,
+        autoplay_score: result.autoplay_score,
+        static_score: result.static_score,
+      };
+
+      // Save result to level meta
+      const botClearRates = {
+        novice: result.bot_stats.find(s => s.profile === 'novice')?.clear_rate || 0,
+        casual: result.bot_stats.find(s => s.profile === 'casual')?.clear_rate || 0,
+        average: result.bot_stats.find(s => s.profile === 'average')?.clear_rate || 0,
+        expert: result.bot_stats.find(s => s.profile === 'expert')?.clear_rate || 0,
+        optimal: result.bot_stats.find(s => s.profile === 'optimal')?.clear_rate || 0,
+      };
+
+      await saveProductionLevels(batchId, [{
+        meta: {
+          ...level.meta,
+          bot_clear_rates: botClearRates,
+          match_score: matchScore,
+        },
+        level_json: level.level_json,
+      }]);
+
+      return testResult;
+    };
+
+    // Execute in parallel batches of 10
+    const TEST_CONCURRENCY = 10;
+    for (let batchStart = 0; batchStart < filteredLevels.length; batchStart += TEST_CONCURRENCY) {
       if (signal.aborted) {
         setBatchTestProgress(prev => ({ ...prev, status: 'paused' }));
         break;
       }
 
-      const level = filteredLevels[i];
+      const batchSlice = filteredLevels.slice(batchStart, batchStart + TEST_CONCURRENCY);
+
       setBatchTestProgress(prev => ({
         ...prev,
-        currentLevel: level.meta.level_number,
-        completed: i,
+        currentLevel: batchSlice[0].meta.level_number,
       }));
 
-      try {
-        const result = await analyzeAutoPlay(level.level_json, {
-          iterations: autoTestIterations,
-          targetDifficulty: level.meta.target_difficulty,
-        });
+      const batchResults = await Promise.allSettled(
+        batchSlice.map(level => testOneLevel(level))
+      );
 
-        const matchScore = calculateMatchScoreFromBots(result.bot_stats);
-
-        results.push({
-          level_number: level.meta.level_number,
-          match_score: matchScore,
-          grade: result.autoplay_grade,
-          status: result.balance_status,
-          target_difficulty: level.meta.target_difficulty,
-          autoplay_score: result.autoplay_score,
-          static_score: result.static_score,
-        });
-
-        // Save result to level meta
-        const botClearRates = {
-          novice: result.bot_stats.find(s => s.profile === 'novice')?.clear_rate || 0,
-          casual: result.bot_stats.find(s => s.profile === 'casual')?.clear_rate || 0,
-          average: result.bot_stats.find(s => s.profile === 'average')?.clear_rate || 0,
-          expert: result.bot_stats.find(s => s.profile === 'expert')?.clear_rate || 0,
-          optimal: result.bot_stats.find(s => s.profile === 'optimal')?.clear_rate || 0,
-        };
-
-        await saveProductionLevels(batchId, [{
-          meta: {
-            ...level.meta,
-            bot_clear_rates: botClearRates,
-            match_score: matchScore,
-          },
-          level_json: level.level_json,
-        }]);
-
-        setBatchTestProgress(prev => ({
-          ...prev,
-          completed: i + 1,
-          results: [...prev.results, results[results.length - 1]],
-        }));
-      } catch (err) {
-        console.error(`Auto test failed for level ${level.meta.level_number}:`, err);
-        failedLevels.push(level.meta.level_number);
-        setBatchTestProgress(prev => ({
-          ...prev,
-          failedLevels: [...prev.failedLevels, level.meta.level_number],
-        }));
+      for (let j = 0; j < batchResults.length; j++) {
+        const r = batchResults[j];
+        completedCount++;
+        if (r.status === 'fulfilled') {
+          results.push(r.value);
+        } else {
+          console.error(`Auto test failed for level ${batchSlice[j].meta.level_number}:`, r.reason);
+          failedLevels.push(batchSlice[j].meta.level_number);
+        }
       }
+
+      setBatchTestProgress(prev => ({
+        ...prev,
+        completed: completedCount,
+        results: [...results],
+        failedLevels: [...failedLevels],
+      }));
     }
 
     if (!signal.aborted) {
@@ -1478,6 +1445,7 @@ function TestTab({
   const [regeneratingLevels, setRegeneratingLevels] = useState<Set<number>>(new Set());
   const [isBatchRegenerating, setIsBatchRegenerating] = useState(false);
   const [regenerationThreshold, setRegenerationThreshold] = useState(70);
+  const [selectedRegenLevels, setSelectedRegenLevels] = useState<Set<number>>(new Set());
 
   // Regenerate single level - follows same rules as Production generation
   const handleRegenerateLevel = async (levelNumber: number) => {
@@ -1615,9 +1583,11 @@ function TestTab({
     }
   };
 
-  // Batch regenerate low match score levels
+  // Batch regenerate low match score levels from test results (PARALLEL: 10개 동시 처리)
   const handleBatchRegenerate = async () => {
-    const lowMatchLevels = batchTestProgress.results.filter(r => r.match_score < regenerationThreshold);
+    const lowMatchLevels = batchTestProgress.results
+      .filter(r => r.match_score < regenerationThreshold)
+      .sort((a, b) => a.match_score - b.match_score); // 일치도 낮은 순서 우선
     if (lowMatchLevels.length === 0) {
       addNotification('info', `일치도 ${regenerationThreshold}% 미만 레벨이 없습니다.`);
       return;
@@ -1626,18 +1596,89 @@ function TestTab({
     setIsBatchRegenerating(true);
     let successCount = 0;
     let failCount = 0;
+    const REGEN_CONCURRENCY = 10;
 
-    for (const result of lowMatchLevels) {
-      try {
-        await handleRegenerateLevel(result.level_number);
-        successCount++;
-      } catch {
-        failCount++;
+    for (let batchStart = 0; batchStart < lowMatchLevels.length; batchStart += REGEN_CONCURRENCY) {
+      const batchSlice = lowMatchLevels.slice(batchStart, batchStart + REGEN_CONCURRENCY);
+      const results = await Promise.allSettled(
+        batchSlice.map(result => handleRegenerateLevel(result.level_number))
+      );
+      for (const r of results) {
+        if (r.status === 'fulfilled') successCount++;
+        else failCount++;
       }
     }
 
     setIsBatchRegenerating(false);
     addNotification('success', `일괄 재생성 완료: ${successCount}개 성공, ${failCount}개 실패`);
+  };
+
+  // Batch regenerate low match score levels from stored level data (PARALLEL: 10개 동시 처리)
+  const handleBatchRegenerateFromStored = async () => {
+    const storedLowMatch = levels
+      .filter(l => l.meta.match_score !== undefined && l.meta.match_score > 0 && l.meta.match_score < regenerationThreshold)
+      .sort((a, b) => (a.meta.match_score || 0) - (b.meta.match_score || 0)); // 일치도 낮은 순서 우선
+    if (storedLowMatch.length === 0) {
+      addNotification('info', `저장된 일치도 ${regenerationThreshold}% 미만 레벨이 없습니다.`);
+      return;
+    }
+
+    setIsBatchRegenerating(true);
+    let successCount = 0;
+    let failCount = 0;
+    const REGEN_CONCURRENCY = 10;
+
+    for (let batchStart = 0; batchStart < storedLowMatch.length; batchStart += REGEN_CONCURRENCY) {
+      const batchSlice = storedLowMatch.slice(batchStart, batchStart + REGEN_CONCURRENCY);
+      const results = await Promise.allSettled(
+        batchSlice.map(level => handleRegenerateLevel(level.meta.level_number))
+      );
+      for (const r of results) {
+        if (r.status === 'fulfilled') successCount++;
+        else failCount++;
+      }
+    }
+
+    setIsBatchRegenerating(false);
+    loadLevels();
+    onStatsUpdate();
+    addNotification('success', `저장된 미달 레벨 일괄 재생성 완료: ${successCount}개 성공, ${failCount}개 실패`);
+  };
+
+  // Batch regenerate selected levels only (PARALLEL: 10개 동시 처리)
+  const handleRegenerateSelected = async () => {
+    if (selectedRegenLevels.size === 0) {
+      addNotification('info', '선택된 레벨이 없습니다.');
+      return;
+    }
+
+    const targetLevels = [...selectedRegenLevels].sort((a, b) => {
+      const aScore = levels.find(l => l.meta.level_number === a)?.meta.match_score || 0;
+      const bScore = levels.find(l => l.meta.level_number === b)?.meta.match_score || 0;
+      return aScore - bScore; // 일치도 낮은 순서 우선
+    });
+
+    setIsBatchRegenerating(true);
+    let successCount = 0;
+    let failCount = 0;
+    const REGEN_CONCURRENCY = 10;
+
+    for (let batchStart = 0; batchStart < targetLevels.length; batchStart += REGEN_CONCURRENCY) {
+      const batchSlice = targetLevels.slice(batchStart, batchStart + REGEN_CONCURRENCY);
+      const results = await Promise.allSettled(
+        batchSlice.map(levelNum => handleRegenerateLevel(levelNum))
+      );
+      for (const r of results) {
+        if (r.status === 'fulfilled') successCount++;
+        else failCount++;
+      }
+    }
+
+    setIsBatchRegenerating(false);
+    setSelectedRegenLevels(new Set());
+    loadLevels();
+    onStatsUpdate();
+    addNotification('success', `선택 레벨 재생성 완료: ${successCount}개 성공, ${failCount}개 실패`);
   };
 
   // Filtered levels based on search
@@ -1898,6 +1939,147 @@ function TestTab({
           🚀 자동 (일괄)
         </button>
       </div>
+
+      {/* Stored Low-Match Levels Regeneration */}
+      {testMode === 'auto_batch' && (() => {
+        const storedTestedLevels = levels.filter(l => l.meta.match_score !== undefined && l.meta.match_score > 0);
+        const storedLowMatch = storedTestedLevels
+          .filter(l => (l.meta.match_score || 0) < regenerationThreshold)
+          .sort((a, b) => (a.meta.match_score || 0) - (b.meta.match_score || 0));
+        const allSelected = storedLowMatch.length > 0 && storedLowMatch.every(l => selectedRegenLevels.has(l.meta.level_number));
+        return storedTestedLevels.length > 0 ? (
+          <div className="bg-gray-800 rounded-lg p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-medium text-white">미달 레벨 재생성</h3>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-400">
+                  테스트 완료: {storedTestedLevels.length}개 / 미달: <span className={storedLowMatch.length > 0 ? 'text-orange-400 font-medium' : 'text-green-400'}>{storedLowMatch.length}개</span>
+                </span>
+                <select
+                  value={regenerationThreshold}
+                  onChange={(e) => { setRegenerationThreshold(Number(e.target.value)); setSelectedRegenLevels(new Set()); }}
+                  className="px-2 py-1 bg-gray-700 border border-gray-600 rounded text-xs"
+                  disabled={isBatchRegenerating}
+                >
+                  <option value={50}>50% 미만</option>
+                  <option value={60}>60% 미만</option>
+                  <option value={70}>70% 미만</option>
+                  <option value={80}>80% 미만</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            {storedLowMatch.length > 0 && (
+              <div className="flex items-center gap-2">
+                <Button
+                  onClick={handleBatchRegenerateFromStored}
+                  disabled={isBatchRegenerating}
+                  variant="danger"
+                  size="sm"
+                  className="flex-1"
+                >
+                  {isBatchRegenerating ? (
+                    <><span className="animate-spin mr-1">⟳</span>재생성 중...</>
+                  ) : (
+                    `🔄 전체 ${storedLowMatch.length}개 일괄 재생성`
+                  )}
+                </Button>
+                <Button
+                  onClick={handleRegenerateSelected}
+                  disabled={isBatchRegenerating || selectedRegenLevels.size === 0}
+                  size="sm"
+                  className={`flex-1 ${selectedRegenLevels.size > 0 ? 'bg-orange-600 hover:bg-orange-500' : 'bg-gray-600'}`}
+                >
+                  {isBatchRegenerating ? (
+                    <><span className="animate-spin mr-1">⟳</span>재생성 중...</>
+                  ) : (
+                    `🎯 선택 ${selectedRegenLevels.size}개만 재생성`
+                  )}
+                </Button>
+              </div>
+            )}
+
+            {/* Selectable Level List */}
+            {storedLowMatch.length > 0 && (
+              <div className="border border-gray-700 rounded-lg overflow-hidden">
+                {/* Header with Select All */}
+                <div className="flex items-center gap-2 px-3 py-2 bg-gray-700/60 border-b border-gray-600 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    onChange={() => {
+                      if (allSelected) {
+                        setSelectedRegenLevels(new Set());
+                      } else {
+                        setSelectedRegenLevels(new Set(storedLowMatch.map(l => l.meta.level_number)));
+                      }
+                    }}
+                    className="rounded border-gray-500 accent-orange-500"
+                    disabled={isBatchRegenerating}
+                  />
+                  <span className="text-gray-400 flex-1">전체 선택</span>
+                  <span className="w-12 text-center text-gray-500">레벨</span>
+                  <span className="w-14 text-center text-gray-500">일치도</span>
+                  <span className="w-14 text-center text-gray-500">등급</span>
+                  <span className="w-14 text-center text-gray-500">목표</span>
+                </div>
+                {/* Scrollable List */}
+                <div className="max-h-[200px] overflow-y-auto">
+                  {storedLowMatch.map(level => {
+                    const score = level.meta.match_score || 0;
+                    const isSelected = selectedRegenLevels.has(level.meta.level_number);
+                    const isRegen = regeneratingLevels.has(level.meta.level_number);
+                    return (
+                      <label
+                        key={level.meta.level_number}
+                        className={`flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer transition-colors ${
+                          isSelected ? 'bg-orange-900/30' : 'hover:bg-gray-700/40'
+                        } ${isRegen ? 'opacity-50' : ''}`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => {
+                            setSelectedRegenLevels(prev => {
+                              const next = new Set(prev);
+                              if (next.has(level.meta.level_number)) next.delete(level.meta.level_number);
+                              else next.add(level.meta.level_number);
+                              return next;
+                            });
+                          }}
+                          className="rounded border-gray-500 accent-orange-500"
+                          disabled={isBatchRegenerating || isRegen}
+                        />
+                        <span className="flex-1 text-gray-300">
+                          {isRegen && <span className="animate-spin mr-1">⟳</span>}
+                        </span>
+                        <span className="w-12 text-center text-gray-300 font-medium">Lv.{level.meta.level_number}</span>
+                        <span className={`w-14 text-center font-bold ${
+                          score >= 50 ? 'text-yellow-400' : 'text-red-400'
+                        }`}>
+                          {score.toFixed(0)}%
+                        </span>
+                        <span className={`w-14 text-center font-bold ${
+                          level.meta.grade === 'S' ? 'text-green-400' :
+                          level.meta.grade === 'A' ? 'text-blue-400' :
+                          level.meta.grade === 'B' ? 'text-yellow-400' :
+                          level.meta.grade === 'C' ? 'text-orange-400' : 'text-red-400'
+                        }`}>{level.meta.grade}</span>
+                        <span className="w-14 text-center text-gray-400">{(level.meta.target_difficulty * 100).toFixed(0)}%</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {storedLowMatch.length === 0 && (
+              <div className="text-center text-xs text-green-400 py-2">✅ 미달 레벨 없음</div>
+            )}
+          </div>
+        ) : null;
+      })()}
 
       {/* Batch Auto Test Panel */}
       {testMode === 'auto_batch' && (
@@ -2569,7 +2751,7 @@ function TestTab({
                     <div className="text-center">
                       <span className="text-4xl">🤖</span>
                       <h3 className="text-white font-medium mt-2">봇 자동 테스트</h3>
-                      <p className="text-sm text-gray-400">5개 봇 프로필로 난이도 검증</p>
+                      <p className="text-sm text-gray-400">봇 프로필로 난이도 검증</p>
                     </div>
 
                     <div className="flex items-center gap-2">
@@ -2652,6 +2834,30 @@ function TestTab({
                           <div className="text-xs text-gray-400">
                             💡 {autoTestResult.recommendations[0]}
                           </div>
+                        )}
+
+                        {/* Regenerate button when match score is low */}
+                        {autoTestResult.match_score < 70 && selectedLevel && (
+                          <Button
+                            onClick={() => {
+                              const levelNum = selectedLevel.meta.level_number;
+                              handleRegenerateLevel(levelNum).then(() => {
+                                setAutoTestResult(null);
+                                addNotification('success', `레벨 ${levelNum} 재생성 완료`);
+                              });
+                            }}
+                            disabled={regeneratingLevels.has(selectedLevel.meta.level_number)}
+                            className="w-full py-2 bg-orange-600 hover:bg-orange-500"
+                          >
+                            {regeneratingLevels.has(selectedLevel.meta.level_number) ? (
+                              <>
+                                <span className="animate-spin mr-2">⟳</span>
+                                재생성 중...
+                              </>
+                            ) : (
+                              `🔄 미달 레벨 재생성 (${autoTestResult.match_score.toFixed(0)}%)`
+                            )}
+                          </Button>
                         )}
                       </div>
                     )}

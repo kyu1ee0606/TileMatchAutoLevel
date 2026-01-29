@@ -2774,6 +2774,12 @@ class BotSimulator:
                 best_move = move
                 best_future_score = future_score
 
+        # Fallback: if best move is still catastrophic, deadlock detection is
+        # counterproductive — fall back to standard greedy (same as expert bot).
+        # This prevents the optimal bot from performing worse than lower-tier bots.
+        if best_future_score <= -1000.0:
+            return sorted_moves[0]  # Use original score ranking (greedy)
+
         return best_move
 
     def _evaluate_move_sequence(

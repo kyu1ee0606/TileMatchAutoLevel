@@ -518,8 +518,9 @@ class ValidatedGenerateRequest(BaseModel):
     # Validation parameters
     max_retries: int = Field(default=5, ge=1, le=20, description="Maximum generation retries")
     tolerance: float = Field(default=15.0, ge=1.0, le=50.0, description="Acceptable gap percentage from target")
-    simulation_iterations: int = Field(default=30, ge=10, le=100, description="Iterations for validation simulation")
+    simulation_iterations: int = Field(default=30, ge=0, le=100, description="Iterations for validation simulation (0=skip simulation, fast generation only)")
     use_best_match: bool = Field(default=True, description="Use best match strategy - always return best result after max_retries")
+    use_core_bots_only: bool = Field(default=False, description="Use only 3 core bots (casual/average/expert) for faster validation - 40% speed boost")
 
 
 class ValidatedGenerateResponse(BaseModel):

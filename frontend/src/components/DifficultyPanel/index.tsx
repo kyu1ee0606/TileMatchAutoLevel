@@ -202,48 +202,57 @@ export function DifficultyPanel({ className }: DifficultyPanelProps) {
       console.log('Preserved symmetry_mode:', symmetryMode);
       console.log('Preserved pattern_type:', patternType);
 
-      // Generate multiple levels and track the best one
+      // PARALLEL GENERATION: Generate all attempts concurrently and pick the best
       let bestResult: Awaited<ReturnType<typeof generateValidatedLevel>> | null = null;
       let bestMatchScore = 0;
 
-      for (let i = 0; i < attempts; i++) {
-        try {
-          const result = await generateValidatedLevel(
-            {
-              target_difficulty: targetDifficulty,
-              grid_size: [gridWidth, gridHeight],
-              max_layers: currentLevel.layer ?? 8,
-              goals: goals,
-              tile_types: tileTypes.length > 0 ? tileTypes : undefined,
-              obstacle_types: obstacleTypes.length > 0 ? obstacleTypes : undefined,
-              symmetry_mode: symmetryMode,
-              pattern_type: patternType,
-            },
-            {
-              max_retries: 5,
-              tolerance: 15.0,
-              simulation_iterations: 50,
-              use_best_match: true,
+      const regenParams = {
+        target_difficulty: targetDifficulty,
+        grid_size: [gridWidth, gridHeight] as [number, number],
+        max_layers: currentLevel.layer ?? 8,
+        goals: goals,
+        tile_types: tileTypes.length > 0 ? tileTypes : undefined,
+        obstacle_types: obstacleTypes.length > 0 ? obstacleTypes : undefined,
+        symmetry_mode: symmetryMode,
+        pattern_type: patternType,
+      };
+      const regenOptions = {
+        max_retries: 5,
+        tolerance: 15.0,
+        simulation_iterations: 50,
+        use_best_match: true,
+      };
+
+      // Run all attempts in parallel
+      const attemptPromises = Array.from({ length: attempts }, (_, i) =>
+        generateValidatedLevel(regenParams, regenOptions)
+          .then(result => {
+            // Track best result as results come in
+            if (result.match_score > bestMatchScore) {
+              bestMatchScore = result.match_score;
+              bestResult = result;
             }
-          );
+            setRegenerationProgress({
+              current: i + 1,
+              total: attempts,
+              bestScore: bestMatchScore,
+            });
+            console.log(`Attempt ${i + 1}/${attempts}: match_score=${result.match_score.toFixed(1)}%, best=${bestMatchScore.toFixed(1)}%`);
+            return result;
+          })
+          .catch(err => {
+            console.error(`Regeneration attempt ${i + 1} failed:`, err);
+            return null;
+          })
+      );
 
-          // Track the best result based on match_score
-          if (result.match_score > bestMatchScore) {
-            bestMatchScore = result.match_score;
-            bestResult = result;
-          }
+      const allResults = await Promise.allSettled(attemptPromises);
 
-          // Update progress
-          setRegenerationProgress({
-            current: i + 1,
-            total: attempts,
-            bestScore: bestMatchScore,
-          });
-
-          console.log(`Attempt ${i + 1}/${attempts}: match_score=${result.match_score.toFixed(1)}%, best=${bestMatchScore.toFixed(1)}%`);
-        } catch (attemptError) {
-          console.error(`Regeneration attempt ${i + 1} failed:`, attemptError);
-          // Continue to next attempt
+      // Final best selection (in case of race conditions in progress tracking)
+      for (const r of allResults) {
+        if (r.status === 'fulfilled' && r.value && r.value.match_score > bestMatchScore) {
+          bestMatchScore = r.value.match_score;
+          bestResult = r.value;
         }
       }
 

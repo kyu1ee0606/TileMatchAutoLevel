@@ -78,11 +78,17 @@ async def debug_env():
 
 
 if __name__ == "__main__":
+    import os
     import uvicorn
+
+    # Multi-worker: reload mode (debug) doesn't support workers
+    # In production mode, use multiple workers for true parallelism
+    worker_count = 1 if settings.debug else min(4, os.cpu_count() or 4)
 
     uvicorn.run(
         "app.main:app",
         host=settings.host,
         port=settings.port,
         reload=settings.debug,
+        workers=worker_count,
     )

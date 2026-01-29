@@ -646,7 +646,7 @@ def generate_fallback_level(
 
 
 @router.post("/generate", response_model=GenerateResponse)
-async def generate_level(
+def generate_level(
     request: GenerateRequest,
     generator: LevelGenerator = Depends(get_level_generator),
 ) -> GenerateResponse:
@@ -977,7 +977,7 @@ async def generate_level(
 
 
 @router.post("/simulate", response_model=SimulateResponse)
-async def simulate_level(
+def simulate_level(
     request: SimulateRequest,
     simulator: LevelSimulator = Depends(get_level_simulator),
 ) -> SimulateResponse:
@@ -1019,7 +1019,7 @@ async def simulate_level(
 
 
 @router.post("/generate/validated", response_model=ValidatedGenerateResponse)
-async def generate_validated_level(
+def generate_validated_level(
     request: ValidatedGenerateRequest,
     generator: LevelGenerator = Depends(get_level_generator),
 ) -> ValidatedGenerateResponse:
@@ -1090,20 +1090,27 @@ async def generate_validated_level(
             match_score=100.0,
         )
 
-    bot_simulator = BotSimulator()
+    # Skip bot simulator initialization if simulation is disabled
+    skip_simulation = (request.simulation_iterations == 0)
+    bot_simulator = None if skip_simulation else BotSimulator()
 
     # Import analyzer for static analysis (only used once at the end)
     from ...core.analyzer import LevelAnalyzer
     analyzer = LevelAnalyzer()
 
     # OPTIMIZATION: Adaptive simulation iterations based on difficulty
-    # Easy levels need fewer iterations for stable results
-    if request.target_difficulty <= 0.3:
-        effective_iterations = min(15, request.simulation_iterations)
-    elif request.target_difficulty <= 0.5:
-        effective_iterations = min(20, request.simulation_iterations)
+    # Lower difficulty = fewer iterations needed (more predictable outcomes)
+    if skip_simulation:
+        effective_iterations = 0
+        logger.info(f"[FAST_GENERATE] simulation_iterations=0, skipping bot simulation")
+    elif request.target_difficulty <= 0.2:
+        effective_iterations = min(8, request.simulation_iterations)   # Very easy: 8 iterations enough
+    elif request.target_difficulty <= 0.4:
+        effective_iterations = min(12, request.simulation_iterations)  # Easy: 12 iterations
+    elif request.target_difficulty <= 0.6:
+        effective_iterations = min(18, request.simulation_iterations)  # Medium: 18 iterations
     else:
-        effective_iterations = request.simulation_iterations
+        effective_iterations = request.simulation_iterations            # Hard: full iterations
 
     # OPTIMIZATION: Early exit threshold - stop if match is good enough
     EARLY_EXIT_THRESHOLD = 80.0  # Stop if match score >= 80%
@@ -1324,14 +1331,41 @@ async def generate_validated_level(
             if request.pattern_type:
                 level_json["pattern_type"] = request.pattern_type
 
+            # FAST PATH: Skip bot simulation entirely when simulation is disabled
+            if skip_simulation:
+                static_report = analyzer.analyze(level_json)
+                generation_time_ms = int((time.time() - start_time) * 1000)
+                return ValidatedGenerateResponse(
+                    level_json=level_json,
+                    actual_difficulty=result.actual_difficulty,
+                    grade=result.grade.value,
+                    generation_time_ms=generation_time_ms,
+                    validation_passed=True,
+                    attempts=1,
+                    bot_clear_rates={},
+                    target_clear_rates={},
+                    avg_gap=0.0,
+                    max_gap=0.0,
+                    match_score=100.0,
+                )
+
             # Calculate target rates based on USER's target_difficulty (NOT static score!)
             # This ensures the generated level matches what the user requested
             # The adaptive algorithm adjusts level parameters to hit these targets
-            target_rates = calculate_target_clear_rates(request.target_difficulty)
+            all_target_rates = calculate_target_clear_rates(request.target_difficulty)
 
             # OPTIMIZATION: Run bot simulations in PARALLEL
+            # Core bots mode: 3 bots (casual/average/expert) for ~40% faster validation
+            # Full mode: 5 bots (all types) for comprehensive validation
             actual_rates = {}
-            bot_types = [BotType.NOVICE, BotType.CASUAL, BotType.AVERAGE, BotType.EXPERT, BotType.OPTIMAL]
+            if request.use_core_bots_only:
+                bot_types = [BotType.CASUAL, BotType.AVERAGE, BotType.EXPERT]
+            else:
+                bot_types = [BotType.NOVICE, BotType.CASUAL, BotType.AVERAGE, BotType.EXPERT, BotType.OPTIMAL]
+
+            # Filter target rates to only include simulated bot types
+            bot_type_names = {bt.value for bt in bot_types}
+            target_rates = {k: v for k, v in all_target_rates.items() if k in bot_type_names}
 
             def run_bot_simulation(bot_type: BotType) -> Tuple[str, float]:
                 profile = get_profile(bot_type)
@@ -1343,7 +1377,7 @@ async def generate_validated_level(
                 )
                 return bot_type.value, sim_result.clear_rate
 
-            with ThreadPoolExecutor(max_workers=5) as executor:
+            with ThreadPoolExecutor(max_workers=len(bot_types)) as executor:
                 futures = {executor.submit(run_bot_simulation, bt): bt for bt in bot_types}
                 for future in as_completed(futures):
                     bot_name, clear_rate = future.result()

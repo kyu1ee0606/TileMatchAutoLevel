@@ -127,6 +127,7 @@ export interface ValidatedGenerateRequest {
   tolerance?: number;            // Default: 15.0 (percentage)
   simulation_iterations?: number; // Default: 30
   use_best_match?: boolean;      // Default: true - always return best result after max_retries
+  use_core_bots_only?: boolean;  // Default: false - use only 3 core bots (casual/average/expert) for ~40% faster validation
   // Auto gimmick selection parameters
   auto_select_gimmicks?: boolean;   // Enable auto gimmick selection based on difficulty
   available_gimmicks?: string[];    // Pool of available gimmicks for auto-selection
@@ -166,6 +167,7 @@ export async function generateValidatedLevel(
     tolerance?: number;
     simulation_iterations?: number;
     use_best_match?: boolean;
+    use_core_bots_only?: boolean;
   },
   gimmickOptions?: {
     auto_select_gimmicks?: boolean;
@@ -187,6 +189,7 @@ export async function generateValidatedLevel(
     tolerance: validationOptions?.tolerance ?? 15.0,
     simulation_iterations: validationOptions?.simulation_iterations ?? 30,
     use_best_match: validationOptions?.use_best_match ?? true,  // Default: use best match strategy
+    use_core_bots_only: validationOptions?.use_core_bots_only ?? false,
     // Auto gimmick selection
     auto_select_gimmicks: gimmickOptions?.auto_select_gimmicks,
     available_gimmicks: gimmickOptions?.available_gimmicks,

@@ -344,7 +344,7 @@ def _run_bot_simulation(
 
 
 @router.post("/analyze/autoplay", response_model=AutoPlayResponse)
-async def analyze_autoplay(
+def analyze_autoplay(
     request: AutoPlayRequest,
     analyzer: LevelAnalyzer = Depends(get_level_analyzer),
 ) -> AutoPlayResponse:

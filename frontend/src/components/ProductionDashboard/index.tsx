@@ -217,9 +217,9 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
         }
 
         // PARALLEL GENERATION: Generate all levels in this set concurrently
-        // Concurrency: 검증 모드 10개, 비검증 모드 10개 동시 처리
-        // (검증 모드에서도 10개 가능 - sync def 전환으로 FastAPI threadpool이 요청 분산)
-        const CONCURRENCY = 10;
+        // 비검증 모드: 10개 동시 (빠름, 요청당 ~3ms)
+        // 검증 모드: 8개 동시 (ProcessPoolExecutor 병렬화 + 4 uvicorn workers)
+        const CONCURRENCY = useValidatedGeneration ? 8 : 10;
 
         // Prepare level generation tasks for this set
         interface LevelTask {
@@ -343,7 +343,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             let result;
             let validationPassed = true;
             let validationAttempts = 1;
-            let matchScore = 100;
+            let matchScore: number | undefined = undefined;
 
             if (useValidatedGeneration) {
               const validatedResult = await generateValidatedLevel(
@@ -440,6 +440,16 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             }
           }
 
+          // Update completed_levels after every batch (real-time progress)
+          setGenerationProgress(prev => ({
+            ...prev,
+            completed_levels: completedCount,
+            elapsed_ms: Date.now() - startTime,
+            estimated_remaining_ms: completedCount > 0
+              ? ((Date.now() - startTime) / completedCount) * (batch.total_levels - completedCount)
+              : 0,
+          }));
+
           // Checkpoint save every 50 levels (skip recalculateBatchCounts during generation — O(n²) bottleneck)
           if (pendingLevels.length >= 50 || signal.aborted) {
             await saveProductionLevels(selectedBatchId, pendingLevels);
@@ -447,7 +457,6 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             setGenerationProgress(prev => ({
               ...prev,
               last_checkpoint_at: new Date().toISOString(),
-              completed_levels: completedCount,
             }));
           }
         }
@@ -511,7 +520,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
     } finally {
       setIsGenerating(false);
     }
-  }, [selectedBatchId, addNotification]);
+  }, [selectedBatchId, addNotification, useValidatedGeneration, validationConfig, useCoreBots]);
 
   // Cancel generation
   const handleCancelGeneration = useCallback(() => {
@@ -1153,6 +1162,16 @@ function TestTab({
     loadLevels();
   }, [batchId, filter]);
 
+  // Sync selectedLevel with latest levels data (after regeneration, auto test save, etc.)
+  useEffect(() => {
+    if (selectedLevel) {
+      const updated = levels.find(l => l.meta.level_number === selectedLevel.meta.level_number);
+      if (updated && updated !== selectedLevel) {
+        setSelectedLevel(updated);
+      }
+    }
+  }, [levels]);
+
   // Generate preview tiles when selected level changes
   useEffect(() => {
     if (!selectedLevel) {
@@ -1286,15 +1305,15 @@ function TestTab({
     }
   };
 
-  // Calculate match score from bot stats
+  // Calculate match score from bot stats (aligned with backend formula for consistency)
   const calculateMatchScoreFromBots = (botStats: { clear_rate: number; target_clear_rate: number }[]) => {
     if (!botStats.length) return 0;
     const gaps = botStats.map(s => Math.abs((s.clear_rate - s.target_clear_rate) * 100));
     const avgGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
     const maxGap = Math.max(...gaps);
-    // Improved formula: reduced maxGap weight (0.25 vs 0.4) and gentler penalty (1.5x vs 2x)
-    const weightedGap = (avgGap * 0.75 + maxGap * 0.25);
-    return Math.max(0, 100 - weightedGap * 1.5);
+    // Aligned with backend: avg_gap * 0.6 + max_gap * 0.4, penalty * 2
+    const weightedGap = (avgGap * 0.6 + maxGap * 0.4);
+    return Math.max(0, 100 - weightedGap * 2);
   };
 
   // Batch auto test
@@ -1317,7 +1336,7 @@ function TestTab({
         filteredLevels = filteredLevels.filter(l => tutorialLevels.includes(l.meta.level_number));
         break;
       case 'low_match':
-        filteredLevels = filteredLevels.filter(l => (l.meta.match_score || 0) < 70);
+        filteredLevels = filteredLevels.filter(l => l.meta.match_score !== undefined && l.meta.match_score < 70);
         break;
       case 'range':
         filteredLevels = filteredLevels.filter(l =>
@@ -1447,7 +1466,7 @@ function TestTab({
   const [regenerationThreshold, setRegenerationThreshold] = useState(70);
   const [selectedRegenLevels, setSelectedRegenLevels] = useState<Set<number>>(new Set());
 
-  // Regenerate single level - follows same rules as Production generation
+  // Regenerate single level - uses adaptive feedback from previous test results
   const handleRegenerateLevel = async (levelNumber: number) => {
     const level = levels.find(l => l.meta.level_number === levelNumber);
     if (!level) return;
@@ -1461,7 +1480,55 @@ function TestTab({
         throw new Error('Batch not found');
       }
 
-      const targetDifficulty = level.meta.target_difficulty;
+      let targetDifficulty = level.meta.target_difficulty;
+
+      // === ADAPTIVE REGENERATION: Use previous test feedback ===
+      // Adjust target_difficulty based on previous bot clear rates
+      const prevBotRates = level.meta.bot_clear_rates;
+      if (prevBotRates && level.meta.match_score !== undefined && level.meta.match_score < regenerationThreshold) {
+        // Calculate target clear rates for comparison (same formula as backend)
+        const calcTargetRate = (diff: number, botType: string): number => {
+          if (diff <= 0.4) {
+            const t = diff / 0.4;
+            const easyRates: Record<string, number> = {
+              novice: 0.99 - t * 0.20, casual: 0.99 - t * 0.15,
+              average: 0.99 - t * 0.10, expert: 0.99 - t * 0.05, optimal: 0.99 - t * 0.01,
+            };
+            return easyRates[botType] ?? 0.95;
+          } else if (diff <= 0.6) {
+            const t = (diff - 0.4) / 0.2;
+            const starts: Record<string, number> = { novice: 0.79, casual: 0.84, average: 0.89, expert: 0.94, optimal: 0.98 };
+            const ends: Record<string, number> = { novice: 0.55, casual: 0.70, average: 0.82, expert: 0.92, optimal: 0.97 };
+            return (starts[botType] ?? 0.9) - t * ((starts[botType] ?? 0.9) - (ends[botType] ?? 0.8));
+          } else {
+            const t = (diff - 0.6) / 0.4;
+            const medEnds: Record<string, number> = { novice: 0.55, casual: 0.70, average: 0.82, expert: 0.92, optimal: 0.97 };
+            const hardEnds: Record<string, number> = { novice: 0.20, casual: 0.40, average: 0.70, expert: 0.90, optimal: 0.95 };
+            return (medEnds[botType] ?? 0.8) - t * ((medEnds[botType] ?? 0.8) - (hardEnds[botType] ?? 0.5));
+          }
+        };
+
+        // Core bots for direction calculation
+        const coreBots = ['casual', 'average', 'expert'] as const;
+        let totalGap = 0;
+        let botCount = 0;
+        for (const bot of coreBots) {
+          const actual = prevBotRates[bot] || 0;
+          const target = calcTargetRate(targetDifficulty, bot);
+          totalGap += (actual - target);
+          botCount++;
+        }
+        const avgDirection = botCount > 0 ? totalGap / botCount : 0;
+
+        // Adjust target_difficulty proportionally to the gap
+        // Positive avgDirection = level too easy = need higher difficulty
+        // Negative avgDirection = level too hard = need lower difficulty
+        const adjustment = avgDirection * 0.4; // Scale factor
+        targetDifficulty = Math.max(0.05, Math.min(0.95, targetDifficulty + adjustment));
+        console.log(`[REGEN] Level ${levelNumber}: prev match=${level.meta.match_score?.toFixed(0)}%, ` +
+          `avgDirection=${(avgDirection * 100).toFixed(1)}%, adjustment=${(adjustment * 100).toFixed(1)}%, ` +
+          `difficulty ${level.meta.target_difficulty.toFixed(2)} -> ${targetDifficulty.toFixed(2)}`);
+      }
 
       // === FOLLOW PRODUCTION GENERATION RULES ===
       // Randomize pattern type for visual diversity (same as Production)
@@ -1480,23 +1547,17 @@ function TestTab({
       const goalTypes: Array<'craft' | 'stack'> = ['craft', 'stack'];
       const goalType = goalTypes[Math.floor(Math.random() * goalTypes.length)];
 
-      // Calculate tile_types based on difficulty (same as Production)
-      const tileTypeCount = 3 + Math.floor(targetDifficulty * 3);
-      const tileTypes = ['t1', 't2', 't3', 't4', 't5', 't6'].slice(0, tileTypeCount);
-
-      // Calculate max_layers based on difficulty (same as Production)
-      const maxLayers = Math.min(7, 3 + Math.floor(targetDifficulty * 4));
-
       // Calculate gimmick_intensity based on level number (same as Production)
       const gimmickIntensity = Math.min(1, levelNumber / 500);
 
-      // Generate new level with Production rules
+      // Generate new level - let backend use its own calibrated tile_types and grid_size
+      // Don't override backend's sophisticated calibration with frontend's simpler formula
       const validatedResult = await generateValidatedLevel(
         {
           target_difficulty: targetDifficulty,
-          grid_size: [7, 7],
-          max_layers: maxLayers,
-          tile_types: tileTypes,
+          grid_size: [7, 7],   // Backend overrides with calibrated grid anyway
+          max_layers: 7,       // Let backend's adaptive algorithm adjust from max
+          tile_types: [],      // Empty = backend uses its own calibrated defaults
           obstacle_types: [],
           goals: [{
             type: goalType,
@@ -1505,12 +1566,12 @@ function TestTab({
           }],
           symmetry_mode: symmetryMode,
           pattern_type: patternType,
-          gimmick_intensity: gimmickIntensity,  // Include in params (API signature)
+          gimmick_intensity: gimmickIntensity,
         },
         {
-          max_retries: 5,
+          max_retries: 10,               // More retries for regeneration (was 5)
           tolerance: 15.0,
-          simulation_iterations: 50,
+          simulation_iterations: 50,     // Adequate for internal validation
           use_best_match: true,
         },
         {
@@ -1521,23 +1582,23 @@ function TestTab({
         }
       );
 
-      // Use the validation results directly
-      const matchScore = validatedResult.match_score;
-      const botClearRates = validatedResult.bot_clear_rates as {
-        novice: number;
-        casual: number;
-        average: number;
-        expert: number;
-        optimal: number;
-      };
-
-      // Get autoplay analysis for additional metrics
+      // Re-test with autoTestIterations for consistent scoring with batch test
       const autoplayResult = await analyzeAutoPlay(validatedResult.level_json, {
-        iterations: 100,
-        targetDifficulty: level.meta.target_difficulty,
+        iterations: autoTestIterations,
+        targetDifficulty: level.meta.target_difficulty,  // Use ORIGINAL target for scoring consistency
       });
 
-      // Save regenerated level
+      // Use the re-test match_score (consistent with batch test scoring)
+      const matchScore = calculateMatchScoreFromBots(autoplayResult.bot_stats);
+      const botClearRates = {
+        novice: autoplayResult.bot_stats.find((s: { profile: string }) => s.profile === 'novice')?.clear_rate || 0,
+        casual: autoplayResult.bot_stats.find((s: { profile: string }) => s.profile === 'casual')?.clear_rate || 0,
+        average: autoplayResult.bot_stats.find((s: { profile: string }) => s.profile === 'average')?.clear_rate || 0,
+        expert: autoplayResult.bot_stats.find((s: { profile: string }) => s.profile === 'expert')?.clear_rate || 0,
+        optimal: autoplayResult.bot_stats.find((s: { profile: string }) => s.profile === 'optimal')?.clear_rate || 0,
+      };
+
+      // Save regenerated level with re-test score
       await saveProductionLevels(batchId, [{
         meta: {
           ...level.meta,

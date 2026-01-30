@@ -1,9 +1,10 @@
 """Level generation API routes."""
+import os
 import time
 import logging
 from fastapi import APIRouter, Depends, HTTPException
-from typing import Dict, List, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List, Tuple, Any
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,43 @@ from ...models.gimmick_profile import (
 )
 from ..deps import get_level_generator, get_level_simulator
 import random
+
+
+# ============================================================
+# Module-level ProcessPoolExecutor for CPU-bound bot simulations
+# Enables true CPU parallelism (bypasses GIL) even with single uvicorn worker
+# ============================================================
+_bot_process_pool: ProcessPoolExecutor | None = None
+
+def _get_bot_pool() -> ProcessPoolExecutor:
+    """Get or create the module-level ProcessPoolExecutor for bot simulations.
+
+    Pool size = 3 (matches core bot count: casual/average/expert).
+    With multi-worker uvicorn (4 workers), total child processes = 4 × 3 = 12.
+    Fits within 10 CPU cores with acceptable oversubscription.
+    """
+    global _bot_process_pool
+    if _bot_process_pool is None:
+        workers = 3
+        _bot_process_pool = ProcessPoolExecutor(max_workers=workers)
+        logger.info(f"[BOT_POOL] Created ProcessPoolExecutor with {workers} workers (PID={os.getpid()})")
+    return _bot_process_pool
+
+
+def _simulate_single_bot(args: Tuple[str, dict, int, int]) -> Tuple[str, float]:
+    """
+    Top-level function for ProcessPoolExecutor (must be picklable).
+    Runs a single bot simulation in a separate process for true CPU parallelism.
+    """
+    bot_type_value, level_json, iterations, max_moves = args
+    from ...core.bot_simulator import BotSimulator
+    from ...models.bot_profile import BotType, get_profile
+    simulator = BotSimulator()
+    profile = get_profile(BotType(bot_type_value))
+    result = simulator.simulate_with_profile(
+        level_json, profile, iterations=iterations, max_moves=max_moves,
+    )
+    return bot_type_value, result.clear_rate
 
 
 def resolve_symmetry_mode(symmetry_mode: str | None, allow_none: bool = False) -> str:
@@ -1367,21 +1405,17 @@ def generate_validated_level(
             bot_type_names = {bt.value for bt in bot_types}
             target_rates = {k: v for k, v in all_target_rates.items() if k in bot_type_names}
 
-            def run_bot_simulation(bot_type: BotType) -> Tuple[str, float]:
-                profile = get_profile(bot_type)
-                sim_result = bot_simulator.simulate_with_profile(
-                    level_json,
-                    profile,
-                    iterations=effective_iterations,
-                    max_moves=modified_max_moves,
-                )
-                return bot_type.value, sim_result.clear_rate
-
-            with ThreadPoolExecutor(max_workers=len(bot_types)) as executor:
-                futures = {executor.submit(run_bot_simulation, bt): bt for bt in bot_types}
-                for future in as_completed(futures):
-                    bot_name, clear_rate = future.result()
-                    actual_rates[bot_name] = clear_rate
+            # Run bot simulations in PARALLEL using ProcessPoolExecutor
+            # True CPU parallelism (separate processes, no GIL)
+            pool = _get_bot_pool()
+            sim_args = [
+                (bt.value, level_json, effective_iterations, modified_max_moves)
+                for bt in bot_types
+            ]
+            futures = [pool.submit(_simulate_single_bot, args) for args in sim_args]
+            for future in as_completed(futures):
+                bot_name, clear_rate = future.result()
+                actual_rates[bot_name] = clear_rate
 
             # Calculate match score
             match_score, avg_gap, max_gap = calculate_match_score(actual_rates, target_rates)
@@ -1559,21 +1593,14 @@ def generate_validated_level(
 
                     # Run bot simulations on reshuffled level
                     reshuffle_rates = {}
-                    with ThreadPoolExecutor(max_workers=5) as executor:
-                        def run_reshuffle_sim(bot_type: BotType) -> Tuple[str, float]:
-                            profile = get_profile(bot_type)
-                            sim_result = bot_simulator.simulate_with_profile(
-                                reshuffled_level,
-                                profile,
-                                iterations=effective_iterations,
-                                max_moves=best_max_moves,
-                            )
-                            return bot_type.value, sim_result.clear_rate
-
-                        futures = {executor.submit(run_reshuffle_sim, bt): bt for bt in bot_types}
-                        for future in as_completed(futures):
-                            bot_name, clear_rate = future.result()
-                            reshuffle_rates[bot_name] = clear_rate
+                    reshuffle_sim_args = [
+                        (bt.value, reshuffled_level, effective_iterations, best_max_moves)
+                        for bt in bot_types
+                    ]
+                    reshuffle_futures = [pool.submit(_simulate_single_bot, args) for args in reshuffle_sim_args]
+                    for future in as_completed(reshuffle_futures):
+                        bot_name, clear_rate = future.result()
+                        reshuffle_rates[bot_name] = clear_rate
 
                     reshuffle_score, reshuffle_avg_gap, reshuffle_max_gap = calculate_match_score(
                         reshuffle_rates, target_rates

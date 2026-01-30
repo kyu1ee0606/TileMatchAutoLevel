@@ -55,6 +55,14 @@ async def root():
     }
 
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup ProcessPoolExecutor on shutdown."""
+    from .api.routes.generate import _bot_process_pool
+    if _bot_process_pool is not None:
+        _bot_process_pool.shutdown(wait=False)
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""

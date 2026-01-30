@@ -8,10 +8,17 @@ BACKEND_DIR="$ROOT_DIR/backend"
 FRONTEND_DIR="$ROOT_DIR/frontend"
 
 case "$1" in
-    # 백엔드 실행
+    # 백엔드 실행 (개발 모드 - hot reload, 1 worker)
     backend|b)
-        echo "🚀 백엔드 서버 시작 (http://localhost:8000)..."
-        cd "$BACKEND_DIR" && source venv/bin/activate && uvicorn app.main:app --reload --port 8000
+        echo "🚀 백엔드 서버 시작 - 개발 모드 (http://localhost:8000)..."
+        cd "$BACKEND_DIR" && source .venv/bin/activate && uvicorn app.main:app --reload --port 8000
+        ;;
+
+    # 백엔드 실행 (프로덕션 모드 - multi-worker, 검증 생성 고속)
+    backend-prod|bp)
+        WORKERS=${2:-4}
+        echo "🚀 백엔드 서버 시작 - 프로덕션 모드 (workers=$WORKERS, http://localhost:8000)..."
+        cd "$BACKEND_DIR" && source .venv/bin/activate && uvicorn app.main:app --workers "$WORKERS" --port 8000
         ;;
 
     # 프론트엔드 실행
@@ -53,7 +60,8 @@ case "$1" in
         echo "사용법: ./run.sh [command]"
         echo ""
         echo "명령어:"
-        echo "  backend, b   - 백엔드 서버 실행 (port 8000)"
+        echo "  backend, b          - 백엔드 서버 실행 - 개발 모드 (hot reload)"
+        echo "  backend-prod, bp [N] - 백엔드 서버 실행 - 프로덕션 모드 (N workers)"
         echo "  frontend, f  - 프론트엔드 서버 실행"
         echo "  test, t      - pytest 테스트 실행"
         echo "  check, c     - 빠른 임포트 검사"

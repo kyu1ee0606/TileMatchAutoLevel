@@ -146,6 +146,11 @@ export interface ProductionLevelMeta {
   match_score?: number;
   validation_attempts?: number;  // 검증 기반 생성시 재시도 횟수
 
+  // 재생성 추적 (이진 탐색 수렴용)
+  regen_attempts?: number;          // 재생성 시도 횟수
+  regen_lower_bound?: number;       // 난이도 하한 (너무 쉬웠던 경계)
+  regen_upper_bound?: number;       // 난이도 상한 (너무 어려웠던 경계)
+
   // 상태 관리
   status: LevelStatus;
   status_updated_at: string;

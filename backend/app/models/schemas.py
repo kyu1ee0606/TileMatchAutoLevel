@@ -515,6 +515,14 @@ class ValidatedGenerateRequest(BaseModel):
         description="Current level number (used for gimmick unlock checking)"
     )
 
+    # Scoring difficulty: original target difficulty for match_score calculation during regeneration
+    # When regenerating, target_difficulty is adjusted (binary search), but match_score should be
+    # calculated against the ORIGINAL difficulty. If not provided, target_difficulty is used.
+    scoring_difficulty: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0,
+        description="Original target difficulty for match_score calculation (used during regeneration). If not provided, target_difficulty is used."
+    )
+
     # Validation parameters
     max_retries: int = Field(default=5, ge=1, le=20, description="Maximum generation retries")
     tolerance: float = Field(default=15.0, ge=1.0, le=50.0, description="Acceptable gap percentage from target")
@@ -540,3 +548,27 @@ class ValidatedGenerateResponse(BaseModel):
     avg_gap: float = Field(default=0, description="Average gap from target (%)")
     max_gap: float = Field(default=0, description="Maximum gap from target (%)")
     match_score: float = Field(default=0, description="Match score (0-100%, higher is better)")
+
+
+# ============================================================
+# Level Enhancement Schemas (Incremental difficulty adjustment)
+# ============================================================
+
+class EnhanceLevelRequest(BaseModel):
+    """Request schema for enhancing an existing level's difficulty."""
+    level_json: Dict[str, Any] = Field(..., description="Existing level JSON to enhance")
+    target_difficulty: float = Field(..., ge=0.0, le=1.0, description="Original target difficulty (0.0-1.0)")
+    max_iterations: int = Field(default=5, ge=1, le=10, description="Maximum enhancement iterations")
+    simulation_iterations: int = Field(default=50, ge=10, le=200, description="Bot simulation iterations per evaluation")
+
+
+class EnhanceLevelResponse(BaseModel):
+    """Response schema for level enhancement."""
+    level_json: Dict[str, Any] = Field(..., description="Enhanced level JSON")
+    match_score: float = Field(default=0, description="Match score after enhancement (0-100%)")
+    bot_clear_rates: Dict[str, float] = Field(default={}, description="Bot clear rates after enhancement")
+    target_clear_rates: Dict[str, float] = Field(default={}, description="Target clear rates")
+    avg_gap: float = Field(default=0, description="Average gap from target (%)")
+    max_gap: float = Field(default=0, description="Maximum gap from target (%)")
+    modifications: List[str] = Field(default=[], description="List of modifications applied")
+    enhanced: bool = Field(default=False, description="Whether enhancement improved the level")

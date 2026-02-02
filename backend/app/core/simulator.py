@@ -35,6 +35,7 @@ class GameState:
     cleared: bool = False
     failed: bool = False  # Dock overflow
     max_moves: int = 30
+    used_tile_types: List[str] = field(default_factory=list)  # t0 할당 시 사용할 타일 풀
 
 
 @dataclass
@@ -133,12 +134,21 @@ class LevelSimulator:
                                 goals_remaining.get(goal_type, 0) + goal_count
                             )
 
+        # t0 할당용: 레벨에 실제 사용된 타일 타입 추출 (t0 제외)
+        used_types = set()
+        for layer_tiles in tiles.values():
+            for tile_data in layer_tiles.values():
+                if isinstance(tile_data, list) and tile_data[0].startswith('t') and tile_data[0] != 't0':
+                    used_types.add(tile_data[0])
+        used_tile_types = sorted(used_types) if used_types else ["t1", "t2", "t3"]
+
         return GameState(
             tiles=tiles,
             goals_remaining=goals_remaining,
             max_moves=max_moves,
             dock=[],
             dock_max_size=7,
+            used_tile_types=used_tile_types,
         )
 
     def _play_game(self, state: GameState, strategy: SimulationStrategy) -> GameState:
@@ -528,9 +538,9 @@ class LevelSimulator:
             tile_data = layer_tiles[move.position]
             tile_type = tile_data[0]
 
-            # Handle t0 (random tile) - assign random type
+            # Handle t0 (random tile) - assign from level's actual tile types
             if tile_type == "t0":
-                tile_type = random.choice(["t1", "t2", "t3", "t4", "t5", "t6"])
+                tile_type = random.choice(state.used_tile_types if state.used_tile_types else ["t1", "t2", "t3"])
 
             tiles_to_add.append(DockTile(
                 tile_type=tile_type,
@@ -548,9 +558,9 @@ class LevelSimulator:
                 linked_tile_data = linked_layer_tiles[linked_pos]
                 linked_type = linked_tile_data[0]
 
-                # Handle t0 (random tile)
+                # Handle t0 (random tile) - assign from level's actual tile types
                 if linked_type == "t0":
-                    linked_type = random.choice(["t1", "t2", "t3", "t4", "t5", "t6"])
+                    linked_type = random.choice(state.used_tile_types if state.used_tile_types else ["t1", "t2", "t3"])
 
                 tiles_to_add.append(DockTile(
                     tile_type=linked_type,

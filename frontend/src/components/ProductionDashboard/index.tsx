@@ -6,7 +6,7 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { Button } from '../ui';
 import { useUIStore } from '../../stores/uiStore';
-import { generateLevel, generateValidatedLevel } from '../../api/generate';
+import { generateLevel, generateValidatedLevel, enhanceLevel } from '../../api/generate';
 import { analyzeAutoPlay } from '../../api/analyze';
 import GamePlayer from '../GamePlayer';
 import GameBoard from '../GamePlayer/GameBoard';
@@ -33,6 +33,7 @@ import {
   initProductionDB,
   createProductionBatch,
   getProductionBatch,
+  updateProductionBatch,
   listProductionBatches,
   saveProductionLevels,
   getProductionLevelsByBatch,
@@ -84,6 +85,34 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
   });
 
   const abortControllerRef = useRef<AbortController | null>(null);
+
+  // Throttled progress updater: max 2 renders/sec instead of ~630 during generation
+  const progressRef = useRef<ProductionGenerationProgress>(generationProgress);
+  const progressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flushProgress = useCallback(() => {
+    setGenerationProgress({ ...progressRef.current });
+  }, []);
+
+  const updateProgressThrottled = useCallback((
+    updater: (prev: ProductionGenerationProgress) => ProductionGenerationProgress
+  ) => {
+    progressRef.current = updater(progressRef.current);
+    if (!progressTimerRef.current) {
+      progressTimerRef.current = setTimeout(() => {
+        progressTimerRef.current = null;
+        flushProgress();
+      }, 500);
+    }
+  }, [flushProgress]);
+
+  const flushProgressImmediate = useCallback(() => {
+    if (progressTimerRef.current) {
+      clearTimeout(progressTimerRef.current);
+      progressTimerRef.current = null;
+    }
+    flushProgress();
+  }, [flushProgress]);
 
   // Initialize DB and load batches
   useEffect(() => {
@@ -171,7 +200,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
     const signal = abortControllerRef.current.signal;
 
     const startTime = Date.now();
-    setGenerationProgress({
+    const initialProgress: ProductionGenerationProgress = {
       status: 'generating',
       total_sets: batch.total_sets,
       completed_sets: 0,
@@ -184,17 +213,25 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
       started_at: new Date().toISOString(),
       failed_levels: [],
       checkpoint_interval_levels: 50,
-    });
+    };
+    progressRef.current = initialProgress;
+    setGenerationProgress(initialProgress);
 
     const pendingLevels: ProductionLevel[] = [];
     let completedCount = 0;
     const failedLevels: number[] = [];
 
+    // In-memory counters to avoid post-generation full IndexedDB scans
+    const statusCounts = { generated_count: 0, playtest_count: 0, approved_count: 0, rejected_count: 0, exported_count: 0 };
+    const gradeCounts: Record<string, number> = { S: 0, A: 0, B: 0, C: 0, D: 0 };
+    let totalMatchScore = 0;
+    let matchScoreCount = 0;
+
     try {
       for (let setIdx = 0; setIdx < batch.total_sets; setIdx++) {
         if (signal.aborted) throw new Error('cancelled');
 
-        setGenerationProgress(prev => ({
+        updateProgressThrottled(prev => ({
           ...prev,
           current_set_index: setIdx,
         }));
@@ -318,7 +355,14 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             if (isEarlyLevel) { tileTypeCount = Math.min(4, 3 + Math.floor(targetDifficulty * 2)); }
             else if (isBossLevel) { tileTypeCount = Math.max(4, Math.min(6, 4 + Math.floor(targetDifficulty * 2))); }
             else { tileTypeCount = 3 + Math.floor(targetDifficulty * 3); }
-            const tileTypes = ['t1', 't2', 't3', 't4', 't5', 't6'].slice(0, tileTypeCount);
+            // t1~t15 풀에서 랜덤 N개 선택 (골고루 사용)
+            const allTiles = Array.from({ length: 15 }, (_, i) => `t${i + 1}`);
+            const shuffled = [...allTiles];
+            for (let i = shuffled.length - 1; i > 0; i--) {
+              const j = Math.floor(Math.random() * (i + 1));
+              [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+            }
+            const tileTypes = shuffled.slice(0, tileTypeCount).sort();
 
             const params: GenerationParams = {
               target_difficulty: targetDifficulty,
@@ -409,9 +453,9 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
 
           const batchSlice = levelTasks.slice(batchStart, batchStart + CONCURRENCY);
 
-          // Update progress for current batch
+          // Update progress for current batch (throttled to reduce re-renders)
           const lastLevelNum = batchSlice[batchSlice.length - 1].levelNumber;
-          setGenerationProgress(prev => ({
+          updateProgressThrottled(prev => ({
             ...prev,
             current_level: lastLevelNum,
             elapsed_ms: Date.now() - startTime,
@@ -425,13 +469,22 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             batchSlice.map(task => generateOneLevel(task))
           );
 
-          // Process results
+          // Process results and accumulate in-memory counters
           for (let i = 0; i < results.length; i++) {
             const r = results[i];
             const task = batchSlice[i];
             if (r.status === 'fulfilled' && r.value) {
               pendingLevels.push(r.value);
               completedCount++;
+              // Accumulate stats in-memory
+              const meta = r.value.meta;
+              if (meta.status === 'generated') statusCounts.generated_count++;
+              else if (meta.status === 'playtest_queue' || meta.status === 'playtesting') statusCounts.playtest_count++;
+              if (meta.grade in gradeCounts) gradeCounts[meta.grade]++;
+              if (meta.match_score !== undefined) {
+                totalMatchScore += meta.match_score;
+                matchScoreCount++;
+              }
             } else {
               failedLevels.push(task.levelNumber);
               if (r.status === 'rejected') {
@@ -440,8 +493,8 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             }
           }
 
-          // Update completed_levels after every batch (real-time progress)
-          setGenerationProgress(prev => ({
+          // Update completed_levels after every batch (throttled)
+          updateProgressThrottled(prev => ({
             ...prev,
             completed_levels: completedCount,
             elapsed_ms: Date.now() - startTime,
@@ -450,18 +503,22 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
               : 0,
           }));
 
-          // Checkpoint save every 50 levels (skip recalculateBatchCounts during generation — O(n²) bottleneck)
+          // Checkpoint save every 50 levels — non-blocking fire-and-forget
           if (pendingLevels.length >= 50 || signal.aborted) {
-            await saveProductionLevels(selectedBatchId, pendingLevels);
+            const levelsToSave = [...pendingLevels];
             pendingLevels.length = 0;
-            setGenerationProgress(prev => ({
+            saveProductionLevels(selectedBatchId, levelsToSave).catch(err => {
+              console.error('[Checkpoint] Save failed, will retry:', err);
+              pendingLevels.push(...levelsToSave);
+            });
+            updateProgressThrottled(prev => ({
               ...prev,
               last_checkpoint_at: new Date().toISOString(),
             }));
           }
         }
 
-        setGenerationProgress(prev => ({
+        updateProgressThrottled(prev => ({
           ...prev,
           completed_sets: setIdx + 1,
           completed_levels: completedCount,
@@ -473,9 +530,11 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
         await saveProductionLevels(selectedBatchId, pendingLevels);
       }
 
-      // Update batch counts after all levels are saved
-      await recalculateBatchCounts(selectedBatchId);
+      // Update batch counts using in-memory counters (avoids full IndexedDB scan)
+      await updateProductionBatch(selectedBatchId, statusCounts);
 
+      // Flush throttled progress, then set final state immediately
+      flushProgressImmediate();
       setGenerationProgress(prev => ({
         ...prev,
         status: 'completed',
@@ -483,9 +542,43 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
         failed_levels: failedLevels,
       }));
 
-      // Refresh stats and batch list
-      const newStats = await calculateProductionStats(selectedBatchId);
-      setStats(newStats);
+      // Build stats from in-memory counters (avoids second full IndexedDB scan)
+      const playtestRequired = statusCounts.playtest_count;
+      const inMemoryStats: ProductionStats = {
+        total_levels: completedCount,
+        by_status: {
+          generated: statusCounts.generated_count,
+          playtest_queue: statusCounts.playtest_count,
+          playtesting: 0,
+          approved: 0,
+          rejected: 0,
+          needs_rework: 0,
+          exported: 0,
+        } as Record<LevelStatus, number>,
+        by_grade: {
+          S: gradeCounts['S'] || 0,
+          A: gradeCounts['A'] || 0,
+          B: gradeCounts['B'] || 0,
+          C: gradeCounts['C'] || 0,
+          D: gradeCounts['D'] || 0,
+        } as Record<DifficultyGrade, number>,
+        playtest_progress: {
+          total_required: playtestRequired,
+          completed: 0,
+          pending: playtestRequired,
+        },
+        quality_metrics: {
+          avg_match_score: matchScoreCount > 0 ? totalMatchScore / matchScoreCount : 0,
+          avg_fun_rating: 0,
+          avg_perceived_difficulty: 0,
+          rejection_rate: 0,
+        },
+        estimated_completion: {
+          remaining_playtest_hours: (playtestRequired * 3) / 60,
+          ready_for_export: 0,
+        },
+      };
+      setStats(inMemoryStats);
 
       // Refresh batches list to show updated generated_count
       const updatedBatches = await listProductionBatches();
@@ -503,6 +596,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
         }
         // Update batch counts after pause
         await recalculateBatchCounts(selectedBatchId);
+        flushProgressImmediate();
         setGenerationProgress(prev => ({
           ...prev,
           status: 'paused',
@@ -510,6 +604,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
         }));
         addNotification('info', `생성 일시 정지됨 (${completedCount}개 저장됨)`);
       } else {
+        flushProgressImmediate();
         setGenerationProgress(prev => ({
           ...prev,
           status: 'error',
@@ -520,7 +615,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
     } finally {
       setIsGenerating(false);
     }
-  }, [selectedBatchId, addNotification, useValidatedGeneration, validationConfig, useCoreBots]);
+  }, [selectedBatchId, addNotification, useValidatedGeneration, validationConfig, useCoreBots, updateProgressThrottled, flushProgressImmediate]);
 
   // Cancel generation
   const handleCancelGeneration = useCallback(() => {
@@ -942,7 +1037,7 @@ function GenerateTab({
             </div>
             <div className="h-3 bg-gray-700 rounded-full overflow-hidden">
               <div
-                className={`h-full transition-all duration-300 ${
+                className={`h-full transition-[width] duration-500 ease-linear ${
                   progress.status === 'error' ? 'bg-red-500' :
                   progress.status === 'completed' ? 'bg-green-500' :
                   'bg-indigo-500'
@@ -1462,12 +1557,14 @@ function TestTab({
 
   // Regeneration state
   const [regeneratingLevels, setRegeneratingLevels] = useState<Set<number>>(new Set());
+  const [enhancingLevels, setEnhancingLevels] = useState<Set<number>>(new Set());
   const [isBatchRegenerating, setIsBatchRegenerating] = useState(false);
   const [regenerationThreshold, setRegenerationThreshold] = useState(70);
   const [selectedRegenLevels, setSelectedRegenLevels] = useState<Set<number>>(new Set());
 
-  // Regenerate single level - uses adaptive feedback from previous test results
-  const handleRegenerateLevel = async (levelNumber: number) => {
+  // Regenerate single level - binary search with bounds tracking for convergence
+  // autoReTest: true면 재생성 후 analyzeAutoPlay로 일치율 재측정 (일괄 재생성용)
+  const handleRegenerateLevel = async (levelNumber: number, autoReTest: boolean = false) => {
     const level = levels.find(l => l.meta.level_number === levelNumber);
     if (!level) return;
 
@@ -1480,13 +1577,16 @@ function TestTab({
         throw new Error('Batch not found');
       }
 
-      let targetDifficulty = level.meta.target_difficulty;
+      const originalTarget = level.meta.target_difficulty;
+      let targetDifficulty = originalTarget;
 
-      // === ADAPTIVE REGENERATION: Use previous test feedback ===
-      // Adjust target_difficulty based on previous bot clear rates
+      // === BINARY SEARCH REGENERATION: Track bounds for convergence ===
+      let lowerBound = level.meta.regen_lower_bound ?? 0.05;
+      let upperBound = level.meta.regen_upper_bound ?? 0.95;
+
       const prevBotRates = level.meta.bot_clear_rates;
       if (prevBotRates && level.meta.match_score !== undefined && level.meta.match_score < regenerationThreshold) {
-        // Calculate target clear rates for comparison (same formula as backend)
+        // Calculate direction from previous result
         const calcTargetRate = (diff: number, botType: string): number => {
           if (diff <= 0.4) {
             const t = diff / 0.4;
@@ -1508,26 +1608,39 @@ function TestTab({
           }
         };
 
-        // Core bots for direction calculation
+        // Use core bots to determine direction
         const coreBots = ['casual', 'average', 'expert'] as const;
         let totalGap = 0;
         let botCount = 0;
         for (const bot of coreBots) {
           const actual = prevBotRates[bot] || 0;
-          const target = calcTargetRate(targetDifficulty, bot);
+          const target = calcTargetRate(originalTarget, bot);
           totalGap += (actual - target);
           botCount++;
         }
         const avgDirection = botCount > 0 ? totalGap / botCount : 0;
 
-        // Adjust target_difficulty proportionally to the gap
-        // Positive avgDirection = level too easy = need higher difficulty
-        // Negative avgDirection = level too hard = need lower difficulty
-        const adjustment = avgDirection * 0.4; // Scale factor
-        targetDifficulty = Math.max(0.05, Math.min(0.95, targetDifficulty + adjustment));
+        // Update bounds based on direction
+        // Previous targetDifficulty was either original or last adjusted value
+        const prevTargetDiff = targetDifficulty;
+        if (avgDirection > 0.02) {
+          // Level was too easy → current difficulty is a lower bound
+          lowerBound = Math.max(lowerBound, prevTargetDiff);
+        } else if (avgDirection < -0.02) {
+          // Level was too hard → current difficulty is an upper bound
+          upperBound = Math.min(upperBound, prevTargetDiff);
+        }
+
+        // Binary search: midpoint of bounds
+        targetDifficulty = (lowerBound + upperBound) / 2;
+
+        // Bias slightly toward original target to aid convergence
+        targetDifficulty = targetDifficulty * 0.7 + originalTarget * 0.3;
+        targetDifficulty = Math.max(0.05, Math.min(0.95, targetDifficulty));
+
         console.log(`[REGEN] Level ${levelNumber}: prev match=${level.meta.match_score?.toFixed(0)}%, ` +
-          `avgDirection=${(avgDirection * 100).toFixed(1)}%, adjustment=${(adjustment * 100).toFixed(1)}%, ` +
-          `difficulty ${level.meta.target_difficulty.toFixed(2)} -> ${targetDifficulty.toFixed(2)}`);
+          `avgDirection=${(avgDirection * 100).toFixed(1)}%, bounds=[${lowerBound.toFixed(3)}, ${upperBound.toFixed(3)}], ` +
+          `difficulty ${originalTarget.toFixed(3)} -> ${targetDifficulty.toFixed(3)} (attempt ${(level.meta.regen_attempts || 0) + 1})`);
       }
 
       // === FOLLOW PRODUCTION GENERATION RULES ===
@@ -1550,14 +1663,15 @@ function TestTab({
       // Calculate gimmick_intensity based on level number (same as Production)
       const gimmickIntensity = Math.min(1, levelNumber / 500);
 
-      // Generate new level - let backend use its own calibrated tile_types and grid_size
-      // Don't override backend's sophisticated calibration with frontend's simpler formula
+      // Generate new level with scoring_difficulty set to ORIGINAL target
+      // Backend will use scoring_difficulty for match_score calculation (consistent with batch test)
+      // and target_difficulty for generation parameter calibration
       const validatedResult = await generateValidatedLevel(
         {
           target_difficulty: targetDifficulty,
-          grid_size: [7, 7],   // Backend overrides with calibrated grid anyway
-          max_layers: 7,       // Let backend's adaptive algorithm adjust from max
-          tile_types: [],      // Empty = backend uses its own calibrated defaults
+          grid_size: [7, 7],
+          max_layers: 7,
+          tile_types: [],
           obstacle_types: [],
           goals: [{
             type: goalType,
@@ -1569,36 +1683,58 @@ function TestTab({
           gimmick_intensity: gimmickIntensity,
         },
         {
-          max_retries: 10,               // More retries for regeneration (was 5)
-          tolerance: 15.0,
-          simulation_iterations: 50,     // Adequate for internal validation
+          max_retries: 5,
+          tolerance: 12.0,
+          simulation_iterations: 50,
           use_best_match: true,
+          use_core_bots_only: false,  // 5봇 전체로 정확하게
         },
         {
           auto_select_gimmicks: true,
           available_gimmicks: ['chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport', 'unknown'],
           gimmick_unlock_levels: currentBatch.gimmick_unlock_levels || PROFESSIONAL_GIMMICK_UNLOCK_LEVELS,
           level_number: levelNumber,
+        },
+        {
+          scoring_difficulty: originalTarget,  // 원본 난이도로 match_score 계산
         }
       );
 
-      // Re-test with autoTestIterations for consistent scoring with batch test
-      const autoplayResult = await analyzeAutoPlay(validatedResult.level_json, {
-        iterations: autoTestIterations,
-        targetDifficulty: level.meta.target_difficulty,  // Use ORIGINAL target for scoring consistency
-      });
+      // Determine match_score: re-test with analyzeAutoPlay (batch) or use backend score (individual)
+      let matchScore: number;
+      let botClearRates: { novice: number; casual: number; average: number; expert: number; optimal: number };
+      let reTestGrade: string | undefined;
+      let reTestStatus: string | undefined;
 
-      // Use the re-test match_score (consistent with batch test scoring)
-      const matchScore = calculateMatchScoreFromBots(autoplayResult.bot_stats);
-      const botClearRates = {
-        novice: autoplayResult.bot_stats.find((s: { profile: string }) => s.profile === 'novice')?.clear_rate || 0,
-        casual: autoplayResult.bot_stats.find((s: { profile: string }) => s.profile === 'casual')?.clear_rate || 0,
-        average: autoplayResult.bot_stats.find((s: { profile: string }) => s.profile === 'average')?.clear_rate || 0,
-        expert: autoplayResult.bot_stats.find((s: { profile: string }) => s.profile === 'expert')?.clear_rate || 0,
-        optimal: autoplayResult.bot_stats.find((s: { profile: string }) => s.profile === 'optimal')?.clear_rate || 0,
-      };
+      if (autoReTest) {
+        // 일괄 재생성: analyzeAutoPlay로 정확한 일치율 재측정
+        const autoplayResult = await analyzeAutoPlay(validatedResult.level_json, {
+          iterations: autoTestIterations,
+          targetDifficulty: originalTarget,
+        });
+        matchScore = calculateMatchScoreFromBots(autoplayResult.bot_stats);
+        botClearRates = {
+          novice: autoplayResult.bot_stats.find((s: { profile: string }) => s.profile === 'novice')?.clear_rate || 0,
+          casual: autoplayResult.bot_stats.find((s: { profile: string }) => s.profile === 'casual')?.clear_rate || 0,
+          average: autoplayResult.bot_stats.find((s: { profile: string }) => s.profile === 'average')?.clear_rate || 0,
+          expert: autoplayResult.bot_stats.find((s: { profile: string }) => s.profile === 'expert')?.clear_rate || 0,
+          optimal: autoplayResult.bot_stats.find((s: { profile: string }) => s.profile === 'optimal')?.clear_rate || 0,
+        };
+        reTestGrade = autoplayResult.autoplay_grade;
+        reTestStatus = autoplayResult.balance_status;
+      } else {
+        // 개별 재생성: 백엔드 match_score 직접 사용 (사용자가 수동 테스트)
+        matchScore = validatedResult.match_score;
+        botClearRates = {
+          novice: validatedResult.bot_clear_rates?.['novice'] ?? 0,
+          casual: validatedResult.bot_clear_rates?.['casual'] ?? 0,
+          average: validatedResult.bot_clear_rates?.['average'] ?? 0,
+          expert: validatedResult.bot_clear_rates?.['expert'] ?? 0,
+          optimal: validatedResult.bot_clear_rates?.['optimal'] ?? 0,
+        };
+      }
 
-      // Save regenerated level with re-test score
+      // Save regenerated level with score + bounds for next regen
       await saveProductionLevels(batchId, [{
         meta: {
           ...level.meta,
@@ -1608,6 +1744,10 @@ function TestTab({
           bot_clear_rates: botClearRates,
           match_score: matchScore,
           status_updated_at: new Date().toISOString(),
+          // Track regen bounds for next iteration
+          regen_attempts: (level.meta.regen_attempts || 0) + 1,
+          regen_lower_bound: lowerBound,
+          regen_upper_bound: upperBound,
         },
         level_json: validatedResult.level_json,
       }]);
@@ -1620,10 +1760,8 @@ function TestTab({
             ? {
                 ...r,
                 match_score: matchScore,
-                grade: autoplayResult.autoplay_grade,
-                status: autoplayResult.balance_status,
-                autoplay_score: autoplayResult.autoplay_score,
-                static_score: autoplayResult.static_score,
+                grade: reTestGrade ?? validatedResult.grade,
+                status: reTestStatus ?? (validatedResult.validation_passed ? 'balanced' : 'unbalanced'),
               }
             : r
         ),
@@ -1637,6 +1775,68 @@ function TestTab({
       addNotification('error', `레벨 ${levelNumber} 재생성 실패`);
     } finally {
       setRegeneratingLevels(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(levelNumber);
+        return newSet;
+      });
+    }
+  };
+
+  // Enhance existing level (incremental difficulty adjustment instead of full regeneration)
+  const handleEnhanceLevel = async (levelNumber: number) => {
+    const level = levels.find(l => l.meta.level_number === levelNumber);
+    if (!level || !level.level_json) return;
+
+    setEnhancingLevels(prev => new Set([...prev, levelNumber]));
+
+    try {
+      const result = await enhanceLevel({
+        level_json: level.level_json,
+        target_difficulty: level.meta.target_difficulty,
+        max_iterations: 5,
+        simulation_iterations: 50,
+      });
+
+      // Calculate match score for meta update
+      const matchScore = result.match_score;
+
+      // Save enhanced level
+      const botRates = result.bot_clear_rates as { novice: number; casual: number; average: number; expert: number; optimal: number };
+      await saveProductionLevels(batchId, [{
+        meta: {
+          ...level.meta,
+          generated_at: new Date().toISOString(),
+          bot_clear_rates: botRates,
+          match_score: matchScore,
+          status_updated_at: new Date().toISOString(),
+        },
+        level_json: result.level_json,
+      }]);
+
+      // Update batch test results if exists
+      setBatchTestProgress(prev => ({
+        ...prev,
+        results: prev.results.map(r =>
+          r.level_number === levelNumber
+            ? { ...r, match_score: matchScore }
+            : r
+        ),
+      }));
+
+      const modsText = result.modifications.length > 0
+        ? result.modifications.join(', ')
+        : '변경 없음';
+      addNotification(
+        result.enhanced ? 'success' : 'info',
+        `레벨 ${levelNumber} 개선 ${result.enhanced ? '완료' : '미개선'}: ${modsText} (일치도: ${matchScore.toFixed(0)}%)`
+      );
+      loadLevels();
+      onStatsUpdate();
+    } catch (err) {
+      console.error('Enhancement failed:', err);
+      addNotification('error', `레벨 ${levelNumber} 개선 실패`);
+    } finally {
+      setEnhancingLevels(prev => {
         const newSet = new Set(prev);
         newSet.delete(levelNumber);
         return newSet;
@@ -1662,7 +1862,7 @@ function TestTab({
     for (let batchStart = 0; batchStart < lowMatchLevels.length; batchStart += REGEN_CONCURRENCY) {
       const batchSlice = lowMatchLevels.slice(batchStart, batchStart + REGEN_CONCURRENCY);
       const results = await Promise.allSettled(
-        batchSlice.map(result => handleRegenerateLevel(result.level_number))
+        batchSlice.map(result => handleRegenerateLevel(result.level_number, true))
       );
       for (const r of results) {
         if (r.status === 'fulfilled') successCount++;
@@ -1692,7 +1892,7 @@ function TestTab({
     for (let batchStart = 0; batchStart < storedLowMatch.length; batchStart += REGEN_CONCURRENCY) {
       const batchSlice = storedLowMatch.slice(batchStart, batchStart + REGEN_CONCURRENCY);
       const results = await Promise.allSettled(
-        batchSlice.map(level => handleRegenerateLevel(level.meta.level_number))
+        batchSlice.map(level => handleRegenerateLevel(level.meta.level_number, true))
       );
       for (const r of results) {
         if (r.status === 'fulfilled') successCount++;
@@ -1727,7 +1927,7 @@ function TestTab({
     for (let batchStart = 0; batchStart < targetLevels.length; batchStart += REGEN_CONCURRENCY) {
       const batchSlice = targetLevels.slice(batchStart, batchStart + REGEN_CONCURRENCY);
       const results = await Promise.allSettled(
-        batchSlice.map(levelNum => handleRegenerateLevel(levelNum))
+        batchSlice.map(levelNum => handleRegenerateLevel(levelNum, true))
       );
       for (const r of results) {
         if (r.status === 'fulfilled') successCount++;
@@ -2225,7 +2425,7 @@ function TestTab({
               </div>
               <div className="h-3 bg-gray-700 rounded-full overflow-hidden">
                 <div
-                  className={`h-full transition-all duration-300 ${
+                  className={`h-full transition-[width] duration-500 ease-linear ${
                     batchTestProgress.status === 'completed' ? 'bg-green-500' :
                     batchTestProgress.status === 'error' ? 'bg-red-500' : 'bg-indigo-500'
                   }`}
@@ -2897,28 +3097,49 @@ function TestTab({
                           </div>
                         )}
 
-                        {/* Regenerate button when match score is low */}
+                        {/* Regenerate & Enhance buttons when match score is low */}
                         {autoTestResult.match_score < 70 && selectedLevel && (
-                          <Button
-                            onClick={() => {
-                              const levelNum = selectedLevel.meta.level_number;
-                              handleRegenerateLevel(levelNum).then(() => {
-                                setAutoTestResult(null);
-                                addNotification('success', `레벨 ${levelNum} 재생성 완료`);
-                              });
-                            }}
-                            disabled={regeneratingLevels.has(selectedLevel.meta.level_number)}
-                            className="w-full py-2 bg-orange-600 hover:bg-orange-500"
-                          >
-                            {regeneratingLevels.has(selectedLevel.meta.level_number) ? (
-                              <>
-                                <span className="animate-spin mr-2">⟳</span>
-                                재생성 중...
-                              </>
-                            ) : (
-                              `🔄 미달 레벨 재생성 (${autoTestResult.match_score.toFixed(0)}%)`
-                            )}
-                          </Button>
+                          <div className="flex flex-col gap-2">
+                            <Button
+                              onClick={() => {
+                                const levelNum = selectedLevel.meta.level_number;
+                                handleRegenerateLevel(levelNum).then(() => {
+                                  setAutoTestResult(null);
+                                  addNotification('success', `레벨 ${levelNum} 재생성 완료`);
+                                });
+                              }}
+                              disabled={regeneratingLevels.has(selectedLevel.meta.level_number) || enhancingLevels.has(selectedLevel.meta.level_number)}
+                              className="w-full py-2 bg-orange-600 hover:bg-orange-500"
+                            >
+                              {regeneratingLevels.has(selectedLevel.meta.level_number) ? (
+                                <>
+                                  <span className="animate-spin mr-2">⟳</span>
+                                  재생성 중...
+                                </>
+                              ) : (
+                                `🔄 미달 레벨 재생성 (${autoTestResult.match_score.toFixed(0)}%)`
+                              )}
+                            </Button>
+                            <Button
+                              onClick={() => {
+                                const levelNum = selectedLevel.meta.level_number;
+                                handleEnhanceLevel(levelNum).then(() => {
+                                  setAutoTestResult(null);
+                                });
+                              }}
+                              disabled={enhancingLevels.has(selectedLevel.meta.level_number) || regeneratingLevels.has(selectedLevel.meta.level_number)}
+                              className="w-full py-2 bg-blue-600 hover:bg-blue-500"
+                            >
+                              {enhancingLevels.has(selectedLevel.meta.level_number) ? (
+                                <>
+                                  <span className="animate-spin mr-2">⟳</span>
+                                  개선 중...
+                                </>
+                              ) : (
+                                `🔧 레벨 개선 (${autoTestResult.match_score.toFixed(0)}%)`
+                              )}
+                            </Button>
+                          </div>
                         )}
                       </div>
                     )}

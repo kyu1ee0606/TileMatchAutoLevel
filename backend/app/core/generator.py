@@ -543,8 +543,79 @@ class LevelGenerator:
             new_tiles = {}
             used_positions = set()
 
-            # STEP 1: Place plain tiles first (they will be neighbors for gimmick tiles)
-            # Place them in a cluster pattern to ensure connectivity
+            # STEP 1: Place goal tiles FIRST (need clear output direction for craft/stack)
+            # Must be placed before other tiles to ensure output positions are available
+            # Goal tiles (craft/stack) need their output direction to be clear of other tiles
+            for tile_type, gimmick, extra in goal_tiles:
+                direction = tile_type[-1] if tile_type else 's'
+                valid_positions = []
+
+                # Calculate output direction offset
+                dir_offsets = {'s': (0, 1), 'n': (0, -1), 'e': (1, 0), 'w': (-1, 0)}
+                dc, dr = dir_offsets.get(direction, (0, 1))
+
+                # Calculate how many output positions need to be clear
+                # stack_offset = 0.1 per item, so count=3 → max_offset=0.2 → 1 position
+                stack_count = extra[0] if extra and isinstance(extra, list) and len(extra) > 0 else 3
+                max_offset = (stack_count - 1) * 0.1
+                positions_to_clear = max(1, int(max_offset) + 1)  # At least the immediate output position
+
+                for pos in all_positions:
+                    if pos in used_positions:
+                        continue
+                    col_pos, row_pos = map(int, pos.split("_"))
+
+                    # Check boundary constraints
+                    if direction == 's' and row_pos >= rows - 1:
+                        continue
+                    if direction == 'n' and row_pos <= 0:
+                        continue
+                    if direction == 'e' and col_pos >= cols - 1:
+                        continue
+                    if direction == 'w' and col_pos <= 0:
+                        continue
+
+                    # Check that output positions are clear (not occupied by any tile)
+                    output_clear = True
+                    for step in range(1, positions_to_clear + 1):
+                        out_c = col_pos + dc * step
+                        out_r = row_pos + dr * step
+                        out_pos = f"{out_c}_{out_r}"
+                        # Output position must be within bounds and not occupied
+                        if out_c < 0 or out_c >= cols or out_r < 0 or out_r >= rows:
+                            output_clear = False
+                            break
+                        if out_pos in used_positions or out_pos in new_tiles:
+                            output_clear = False
+                            break
+
+                    if not output_clear:
+                        continue
+
+                    valid_positions.append(pos)
+
+                if valid_positions:
+                    random.shuffle(valid_positions)
+                    pos = valid_positions[0]
+                    used_positions.add(pos)
+                    # Also reserve output positions so other goals don't use them
+                    col_pos, row_pos = map(int, pos.split("_"))
+                    for step in range(1, positions_to_clear + 1):
+                        out_c = col_pos + dc * step
+                        out_r = row_pos + dr * step
+                        out_pos = f"{out_c}_{out_r}"
+                        used_positions.add(out_pos)
+                    self._place_tile(new_tiles, pos, tile_type, gimmick, extra)
+                else:
+                    # FALLBACK: If no valid position found, place in any available position
+                    # This ensures goals are never lost during reshuffle
+                    for pos in all_positions:
+                        if pos not in used_positions:
+                            used_positions.add(pos)
+                            self._place_tile(new_tiles, pos, tile_type, gimmick, extra)
+                            break
+
+            # STEP 2: Place plain tiles (they will be neighbors for gimmick tiles)
             random.shuffle(plain_tiles)
             for tile_type, gimmick, extra in plain_tiles:
                 for pos in all_positions:
@@ -553,21 +624,18 @@ class LevelGenerator:
                         self._place_tile(new_tiles, pos, tile_type, gimmick, extra)
                         break
 
-            # STEP 2: Place neighbor-dependent gimmick tiles using gimmick-specific neighbor rules
+            # STEP 3: Place neighbor-dependent gimmick tiles using gimmick-specific neighbor rules
             random.shuffle(gimmick_tiles)
             for tile_type, gimmick, extra in gimmick_tiles:
                 placed = False
-                # Find a position with valid neighbor for this specific gimmick type
                 candidates = []
                 for pos in all_positions:
                     if pos in used_positions:
                         continue
-                    # Check required adjacent positions for this gimmick type
                     required_adj = get_required_adjacent(pos, gimmick)
                     for adj_pos in required_adj:
                         if adj_pos in new_tiles:
                             adj_tile = new_tiles[adj_pos]
-                            # Plain tile = no gimmick attribute, or frog (clearable)
                             if len(adj_tile) >= 2 and (not adj_tile[1] or adj_tile[1] == "frog"):
                                 candidates.append(pos)
                                 break
@@ -579,7 +647,6 @@ class LevelGenerator:
                     self._place_tile(new_tiles, pos, tile_type, gimmick, extra)
                     placed = True
 
-                # Fallback: place anywhere if no good position found
                 if not placed:
                     for pos in all_positions:
                         if pos not in used_positions:
@@ -587,7 +654,7 @@ class LevelGenerator:
                             self._place_tile(new_tiles, pos, tile_type, gimmick, extra)
                             break
 
-            # STEP 3: Place other gimmick tiles (ice, frog, bomb, etc.)
+            # STEP 4: Place other gimmick tiles (ice, frog, bomb, etc.)
             random.shuffle(other_gimmick_tiles)
             for tile_type, gimmick, extra in other_gimmick_tiles:
                 for pos in all_positions:
@@ -595,42 +662,6 @@ class LevelGenerator:
                         used_positions.add(pos)
                         self._place_tile(new_tiles, pos, tile_type, gimmick, extra)
                         break
-
-            # STEP 4: Place goal tiles (respecting direction constraints)
-            for tile_type, gimmick, extra in goal_tiles:
-                direction = tile_type[-1] if tile_type else 's'
-                valid_positions = []
-
-                for pos in all_positions:
-                    if pos in used_positions:
-                        continue
-                    col, row = map(int, pos.split("_"))
-
-                    # Check direction constraints
-                    if direction == 's' and row >= rows - 1:
-                        continue
-                    if direction == 'n' and row <= 0:
-                        continue
-                    if direction == 'e' and col >= cols - 1:
-                        continue
-                    if direction == 'w' and col <= 0:
-                        continue
-
-                    valid_positions.append(pos)
-
-                if valid_positions:
-                    random.shuffle(valid_positions)
-                    pos = valid_positions[0]
-                    used_positions.add(pos)
-                    self._place_tile(new_tiles, pos, tile_type, gimmick, extra)
-                else:
-                    # FALLBACK: If no valid position found, place in any available position
-                    # This ensures goals are never lost during reshuffle
-                    for pos in all_positions:
-                        if pos not in used_positions:
-                            used_positions.add(pos)
-                            self._place_tile(new_tiles, pos, tile_type, gimmick, extra)
-                            break
 
             # Update layer with new tiles
             layer_data["tiles"] = new_tiles

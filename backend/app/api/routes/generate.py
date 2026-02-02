@@ -15,6 +15,8 @@ from ...models.schemas import (
     SimulateResponse,
     ValidatedGenerateRequest,
     ValidatedGenerateResponse,
+    EnhanceLevelRequest,
+    EnhanceLevelResponse,
 )
 from ...models.level import GenerationParams, LayerTileConfig, LayerObstacleConfig, LayerPatternConfig
 from ...core.generator import LevelGenerator
@@ -646,13 +648,15 @@ def generate_fallback_level(
     """
     # Use very simple, safe parameters that are guaranteed to work
     # NOTE: t0 is excluded - causes issues with bot simulation
-    simple_tile_types = ["t1", "t2", "t3"]  # Only 3 types
+    # t1~t15 풀에서 랜덤 선택
+    _all_tiles = [f"t{i}" for i in range(1, 16)]
+    simple_tile_types = sorted(random.sample(_all_tiles, 3))  # 3 types
     simple_grid = (5, 5)  # Small grid
     simple_layers = 4  # Few layers
 
     # Adjust parameters based on difficulty
     if target_difficulty >= 0.6:
-        simple_tile_types = ["t1", "t2", "t3", "t4"]
+        simple_tile_types = sorted(random.sample(_all_tiles, 4))
         simple_grid = (6, 6)
         simple_layers = 5
 
@@ -710,7 +714,6 @@ def generate_level(
         #   t3 t3 t3
         if request.level_number == 1:
             import time
-            import random
             start_time = time.time()
 
             # Fixed 3x3 layout centered in 5x5 grid (positions 1-3 in both axes)
@@ -1083,6 +1086,9 @@ def generate_validated_level(
     """
     start_time = time.time()
 
+    if request.scoring_difficulty is not None:
+        logger.info(f"[REGEN] scoring_difficulty={request.scoring_difficulty:.3f}, target_difficulty={request.target_difficulty:.3f} (match_score will use scoring_difficulty)")
+
     # Check for tutorial levels (1-3) - use special simplified configurations
     tutorial_config = get_tutorial_config(request.level_number)
     if tutorial_config:
@@ -1201,33 +1207,37 @@ def generate_validated_level(
     # CALIBRATED tile types based on target difficulty
     # More types = harder (more variety to match)
     # NOTE: t0 is excluded - causes issues with bot simulation
+    # t1~t15 풀에서 난이도별 개수만큼 랜덤 선택 (골고루 사용)
     #
     # 프로페셔널 게임 참고 (Tile Buster, Tile Explorer 등):
     # - 대부분의 타일 매칭 게임은 4-8개 타일 타입 사용
     # - 9개 이상은 인지 부하가 과도하여 플레이 경험 저하
     # - 최대 난이도에서도 8개로 제한 (기믹과 무브 제한으로 난이도 조절)
     # - 3개 타일은 레벨 1 튜토리얼에서만 사용, 이후 최소 4개
+    ALL_AVAILABLE_TILES = [f"t{i}" for i in range(1, 16)]  # t1~t15 전체 풀
     is_tutorial_level_1 = request.level_number == 1
 
     if request.target_difficulty >= 0.85:
-        default_tile_types = ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"]  # 8 types for extreme (85%+)
+        tile_type_count = 8   # extreme (85%+)
     elif request.target_difficulty >= 0.75:
-        default_tile_types = ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"]  # 8 types for very hard (75-85%)
+        tile_type_count = 8   # very hard (75-85%)
     elif request.target_difficulty >= 0.65:
-        default_tile_types = ["t1", "t2", "t3", "t4", "t5", "t6", "t7"]  # 7 types for hard (65-75%)
+        tile_type_count = 7   # hard (65-75%)
     elif request.target_difficulty >= 0.55:
-        default_tile_types = ["t1", "t2", "t3", "t4", "t5", "t6"]  # 6 types for medium-hard (55-65%)
+        tile_type_count = 6   # medium-hard (55-65%)
     elif request.target_difficulty >= 0.45:
-        default_tile_types = ["t1", "t2", "t3", "t4", "t5"]  # 5 types for medium (45-55%)
+        tile_type_count = 5   # medium (45-55%)
     elif request.target_difficulty >= 0.35:
-        default_tile_types = ["t1", "t2", "t3", "t4", "t5"]  # 5 types for medium-easy (35-45%)
+        tile_type_count = 5   # medium-easy (35-45%)
     elif is_tutorial_level_1 and request.target_difficulty < 0.25:
-        default_tile_types = ["t1", "t2", "t3"]  # 3 types ONLY for level 1 tutorial (<25%)
+        tile_type_count = 3   # level 1 tutorial only (<25%)
     else:
-        default_tile_types = ["t1", "t2", "t3", "t4"]  # 4 types minimum for all other levels
+        tile_type_count = 4   # minimum for all other levels
+
+    default_tile_types = sorted(random.sample(ALL_AVAILABLE_TILES, tile_type_count))
 
     base_tile_types = list(request.tile_types) if request.tile_types else default_tile_types
-    all_tile_types = ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"]  # Extended tile types (t0 excluded, max 8)
+    all_tile_types = ALL_AVAILABLE_TILES[:]  # t1~t15 전체 풀 (retry 시 랜덤 추가용)
     current_tile_types = base_tile_types.copy()
 
     # Track tile type count separately for fine-tuning
@@ -1286,7 +1296,6 @@ def generate_validated_level(
     # - 작은 그리드 = 적은 타일 = 쉬움 (S등급)
     # - 큰 그리드 = 많은 타일 = 어려움 (D등급)
     # 각 난이도는 연속된 2개 사이즈 중 랜덤 선택 (다양성 제공)
-    import random
     if request.target_difficulty <= 0.2:
         # S등급 (매우 쉬움): 5x5 또는 6x6
         grid_choice = random.choice([5, 6])
@@ -1387,10 +1396,13 @@ def generate_validated_level(
                     match_score=100.0,
                 )
 
-            # Calculate target rates based on USER's target_difficulty (NOT static score!)
-            # This ensures the generated level matches what the user requested
-            # The adaptive algorithm adjusts level parameters to hit these targets
-            all_target_rates = calculate_target_clear_rates(request.target_difficulty)
+            # Calculate target rates for match_score calculation
+            # Use scoring_difficulty (original difficulty) when provided (regeneration case)
+            # Otherwise use target_difficulty (normal generation case)
+            # This ensures regeneration match_score is always against the ORIGINAL difficulty target,
+            # even when target_difficulty has been adjusted by the binary search algorithm
+            scoring_diff = request.scoring_difficulty if request.scoring_difficulty is not None else request.target_difficulty
+            all_target_rates = calculate_target_clear_rates(scoring_diff)
 
             # OPTIMIZATION: Run bot simulations in PARALLEL
             # Core bots mode: 3 bots (casual/average/expert) for ~40% faster validation
@@ -1494,15 +1506,16 @@ def generate_validated_level(
 
                 # PRIMARY Strategy: Tile type count (most effective for high difficulty)
                 # More tile types = harder to match before dock fills
+                # t1~t15 중 미사용 타일에서 랜덤 선택
                 if request.target_difficulty >= 0.7 and average_gap > 0.1:
                     # Add tile types more aggressively
                     types_to_add = 1 if avg_gap < 20 else 2
-                    for _ in range(types_to_add):
-                        for t in all_tile_types:
-                            if t not in current_tile_types and len(current_tile_types) < 8:
-                                current_tile_types.append(t)
-                                current_tile_type_count = len(current_tile_types)
-                                break
+                    unused_tiles = [t for t in all_tile_types if t not in current_tile_types]
+                    random.shuffle(unused_tiles)
+                    for t in unused_tiles[:types_to_add]:
+                        if len(current_tile_types) < 8:
+                            current_tile_types.append(t)
+                            current_tile_type_count = len(current_tile_types)
 
                 # Strategy 2: Reduce moves ratio (tighter constraint)
                 if request.target_difficulty >= 0.7:
@@ -1657,7 +1670,8 @@ def generate_validated_level(
         print(f"All {request.max_retries} attempts failed. Generating fallback level...")
         try:
             fallback = generate_fallback_level(generator, request.target_difficulty, goals)
-            target_rates = calculate_target_clear_rates(request.target_difficulty)
+            fallback_scoring_diff = request.scoring_difficulty if request.scoring_difficulty is not None else request.target_difficulty
+            target_rates = calculate_target_clear_rates(fallback_scoring_diff)
 
             return ValidatedGenerateResponse(
                 level_json=fallback["level_json"],
@@ -1689,4 +1703,211 @@ def generate_validated_level(
         avg_gap=best_gaps[0],
         max_gap=best_gaps[1],
         match_score=best_match_score,
+    )
+
+
+@router.post("/generate/enhance", response_model=EnhanceLevelResponse)
+def enhance_level(
+    request: EnhanceLevelRequest,
+    generator: LevelGenerator = Depends(get_level_generator),
+) -> EnhanceLevelResponse:
+    """
+    Enhance an existing level by incrementally adjusting its difficulty.
+
+    Instead of regenerating from scratch, this endpoint modifies the existing level:
+    - Too easy: adds gimmicks (chain, ice), adds tiles, reduces max_moves
+    - Too hard: removes gimmicks, removes tiles, increases max_moves
+
+    The enhancement loop runs bot simulations to measure the effect of each modification,
+    keeping the best version found within max_iterations attempts.
+    """
+    import copy
+    import time as _time
+
+    start_time = _time.time()
+    level_json = copy.deepcopy(request.level_json)
+    modifications: List[str] = []
+
+    bot_simulator = BotSimulator()
+    pool = _get_bot_pool()
+
+    # Calculate target clear rates from the original target difficulty
+    target_rates = calculate_target_clear_rates(request.target_difficulty)
+
+    # --- Step 1: Measure current state ---
+    bot_types = [BotType.NOVICE, BotType.CASUAL, BotType.AVERAGE, BotType.EXPERT, BotType.OPTIMAL]
+    max_moves_val = level_json.get("max_moves", 50)
+
+    def _run_simulation(lj: Dict) -> Dict[str, float]:
+        """Run parallel bot simulation and return clear rates."""
+        mv = lj.get("max_moves", 50)
+        sim_args = [
+            (bt.value, lj, request.simulation_iterations, mv)
+            for bt in bot_types
+        ]
+        futures = [pool.submit(_simulate_single_bot, args) for args in sim_args]
+        rates: Dict[str, float] = {}
+        for future in as_completed(futures):
+            bot_name, clear_rate = future.result()
+            rates[bot_name] = clear_rate
+        return rates
+
+    current_rates = _run_simulation(level_json)
+    current_score, current_avg_gap, current_max_gap = calculate_match_score(current_rates, target_rates)
+
+    best_level = copy.deepcopy(level_json)
+    best_rates = current_rates.copy()
+    best_score = current_score
+    best_avg_gap = current_avg_gap
+    best_max_gap = current_max_gap
+
+    logger.info(f"[ENHANCE] Start: match_score={current_score:.1f}%, avg_gap={current_avg_gap:.1f}%, "
+                f"target_difficulty={request.target_difficulty:.3f}")
+
+    # --- Step 2: Determine direction ---
+    avg_direction = sum(
+        (current_rates.get(bt.value, 0) - target_rates[bt.value])
+        for bt in bot_types
+    ) / len(bot_types)
+
+    # Deadband: if direction is very small, level is already close
+    DIRECTION_THRESHOLD = 0.02
+
+    # --- Step 3: Iterative enhancement ---
+    for iteration in range(1, request.max_iterations + 1):
+        candidate = copy.deepcopy(best_level)
+        iter_mods: List[str] = []
+
+        if avg_direction > DIRECTION_THRESHOLD:
+            # === TOO EASY: increase difficulty ===
+            # Priority order based on analyzer weights
+            action = random.choice(["chain", "ice", "tiles", "max_moves"])
+
+            if action == "chain":
+                try:
+                    candidate = generator._add_chain_to_tile(candidate)
+                    iter_mods.append("chain 추가")
+                except Exception:
+                    pass
+
+            elif action == "ice":
+                try:
+                    candidate = generator._add_ice_to_tile(candidate)
+                    iter_mods.append("ice 추가")
+                except Exception:
+                    pass
+
+            elif action == "tiles":
+                # Add tiles in multiples of 3
+                added = 0
+                for _ in range(3):
+                    try:
+                        candidate = generator._add_tile_to_layer(candidate)
+                        added += 1
+                    except Exception:
+                        break
+                if added > 0:
+                    iter_mods.append(f"타일 {added}개 추가")
+
+            elif action == "max_moves":
+                cur_moves = candidate.get("max_moves", 50)
+                total_tiles = calculate_total_tiles(candidate)
+                new_moves = max(total_tiles, cur_moves - 3)
+                if new_moves < cur_moves:
+                    candidate["max_moves"] = new_moves
+                    iter_mods.append(f"max_moves {cur_moves} → {new_moves}")
+
+        elif avg_direction < -DIRECTION_THRESHOLD:
+            # === TOO HARD: decrease difficulty ===
+            action = random.choice(["remove_gimmick", "remove_tiles", "max_moves"])
+
+            if action == "remove_gimmick":
+                try:
+                    candidate = generator._remove_random_obstacle(candidate)
+                    iter_mods.append("기믹 제거")
+                except Exception:
+                    pass
+
+            elif action == "remove_tiles":
+                removed = 0
+                for _ in range(3):
+                    try:
+                        candidate = generator._remove_tile_from_layer(candidate)
+                        removed += 1
+                    except Exception:
+                        break
+                if removed > 0:
+                    iter_mods.append(f"타일 {removed}개 제거")
+                    # Ensure tile count stays divisible by 3
+                    total_tiles = calculate_total_tiles(candidate)
+                    remainder = total_tiles % 3
+                    if remainder != 0:
+                        for _ in range(3 - remainder):
+                            try:
+                                candidate = generator._remove_tile_from_layer(candidate)
+                                removed += 1
+                            except Exception:
+                                break
+                        if removed > 0:
+                            iter_mods[-1] = f"타일 {removed}개 제거"
+
+            elif action == "max_moves":
+                cur_moves = candidate.get("max_moves", 50)
+                new_moves = cur_moves + 3
+                candidate["max_moves"] = new_moves
+                iter_mods.append(f"max_moves {cur_moves} → {new_moves}")
+
+        else:
+            # Already close enough, try minor tweaks
+            logger.info(f"[ENHANCE] Iteration {iteration}: direction={avg_direction:.4f} within deadband, skipping")
+            continue
+
+        if not iter_mods:
+            continue
+
+        # --- Run simulation on candidate ---
+        try:
+            cand_rates = _run_simulation(candidate)
+            cand_score, cand_avg_gap, cand_max_gap = calculate_match_score(cand_rates, target_rates)
+        except Exception as e:
+            logger.warning(f"[ENHANCE] Iteration {iteration} simulation failed: {e}")
+            continue
+
+        logger.info(f"[ENHANCE] Iteration {iteration}: {', '.join(iter_mods)} → "
+                    f"match_score={cand_score:.1f}% (was {best_score:.1f}%)")
+
+        # Update best if improved
+        if cand_score > best_score:
+            best_level = copy.deepcopy(candidate)
+            best_rates = cand_rates.copy()
+            best_score = cand_score
+            best_avg_gap = cand_avg_gap
+            best_max_gap = cand_max_gap
+            modifications.extend(iter_mods)
+
+            # Recalculate direction based on new best
+            avg_direction = sum(
+                (best_rates.get(bt.value, 0) - target_rates[bt.value])
+                for bt in bot_types
+            ) / len(bot_types)
+
+            # Early exit if match score is great
+            if best_score >= 80.0:
+                logger.info(f"[ENHANCE] Early exit: match_score={best_score:.1f}% >= 80%")
+                break
+
+    enhanced = best_score > current_score
+    elapsed_ms = int((_time.time() - start_time) * 1000)
+    logger.info(f"[ENHANCE] Done in {elapsed_ms}ms: {current_score:.1f}% → {best_score:.1f}%, "
+                f"enhanced={enhanced}, modifications={modifications}")
+
+    return EnhanceLevelResponse(
+        level_json=best_level,
+        match_score=best_score,
+        bot_clear_rates=best_rates,
+        target_clear_rates=target_rates,
+        avg_gap=best_avg_gap,
+        max_gap=best_max_gap,
+        modifications=modifications,
+        enhanced=enhanced,
     )

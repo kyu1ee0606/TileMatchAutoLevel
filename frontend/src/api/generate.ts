@@ -68,11 +68,6 @@ export async function generateLevel(
     level_number: gimmickOptions?.level_number,
   };
 
-  // Debug: Log gimmick unlock system params
-  if (gimmickOptions?.level_number) {
-    console.log(`[API] generate level_number=${gimmickOptions.level_number}, unlock_levels=`, gimmickOptions.gimmick_unlock_levels);
-  }
-
   // Increase timeout when using auto gimmick selection (requires additional processing)
   const timeoutMs = gimmickOptions?.auto_select_gimmicks ? 60000 : 30000;
 
@@ -136,6 +131,8 @@ export interface ValidatedGenerateRequest {
   // Gimmick unlock system
   gimmick_unlock_levels?: Record<string, number>;  // e.g., {chain: 50, frog: 100}
   level_number?: number;  // Current level number for unlock checking
+  // Scoring difficulty: 원본 난이도 (재생성 시 match_score 계산용, 없으면 target_difficulty 사용)
+  scoring_difficulty?: number;
 }
 
 export interface ValidatedGenerateResult {
@@ -174,6 +171,9 @@ export async function generateValidatedLevel(
     available_gimmicks?: string[];
     gimmick_unlock_levels?: Record<string, number>;  // e.g., {chain: 50, frog: 100}
     level_number?: number;  // Current level number for unlock checking
+  },
+  scoringOptions?: {
+    scoring_difficulty?: number;  // 원본 난이도 (재생성 시 match_score 계산용)
   }
 ): Promise<ValidatedGenerateResult> {
   const request: ValidatedGenerateRequest = {
@@ -198,6 +198,8 @@ export async function generateValidatedLevel(
     // Gimmick unlock system
     gimmick_unlock_levels: gimmickOptions?.gimmick_unlock_levels,
     level_number: gimmickOptions?.level_number,
+    // Scoring difficulty for regeneration consistency
+    scoring_difficulty: scoringOptions?.scoring_difficulty,
   };
 
   // Calculate timeout: base 60s + extra time for retries and simulations
@@ -206,6 +208,43 @@ export async function generateValidatedLevel(
   const timeoutMs = 60000 + (maxRetries * 15000); // 60s base + 15s per retry
 
   const response = await apiClient.post<ValidatedGenerateResult>('/generate/validated', request, {
+    timeout: timeoutMs,
+  });
+  return response.data;
+}
+
+// ==================== Level Enhancement ====================
+
+export interface EnhanceLevelRequest {
+  level_json: LevelJSON;
+  target_difficulty: number;
+  max_iterations?: number;
+  simulation_iterations?: number;
+}
+
+export interface EnhanceLevelResult {
+  level_json: LevelJSON;
+  match_score: number;
+  bot_clear_rates: Record<string, number>;
+  target_clear_rates: Record<string, number>;
+  avg_gap: number;
+  max_gap: number;
+  modifications: string[];
+  enhanced: boolean;
+}
+
+/**
+ * Enhance an existing level by incrementally adjusting its difficulty.
+ * Instead of regenerating from scratch, this modifies the existing level
+ * (add/remove gimmicks, tiles, adjust max_moves) to better match the target.
+ */
+export async function enhanceLevel(
+  request: EnhanceLevelRequest
+): Promise<EnhanceLevelResult> {
+  // Enhancement with 5 iterations and 50 sim iterations can take a while
+  const timeoutMs = 120000; // 2 minutes
+
+  const response = await apiClient.post<EnhanceLevelResult>('/generate/enhance', request, {
     timeout: timeoutMs,
   });
   return response.data;

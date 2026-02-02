@@ -12,10 +12,14 @@ const apiClient = axios.create({
   timeout: 30000, // 30 second timeout
 });
 
-// Request interceptor for logging
+// Request interceptor for logging (suppress high-frequency generation endpoints)
+const LOG_SUPPRESSED_URLS = ['/generate', '/generate/validated'];
+
 apiClient.interceptors.request.use(
   (config) => {
-    console.log(`[API] ${config.method?.toUpperCase()} ${config.url}`);
+    if (!LOG_SUPPRESSED_URLS.some(u => config.url?.startsWith(u))) {
+      console.log(`[API] ${config.method?.toUpperCase()} ${config.url}`);
+    }
     return config;
   },
   (error) => {

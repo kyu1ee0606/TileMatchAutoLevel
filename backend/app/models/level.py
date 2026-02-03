@@ -40,6 +40,10 @@ class LevelMetrics:
     layer_blocking: float = 0.0
     tile_types: Dict[str, int] = field(default_factory=dict)
     goals: List[Dict[str, Any]] = field(default_factory=list)
+    # New metrics for better bot simulation correlation
+    tile_type_count: int = 0       # 타일 종류 다양성 (덱 큐 막힘 확률)
+    max_moves: int = 30            # 최대 무브 수
+    move_ratio: float = 0.0        # total_tiles / max_moves (높을수록 어려움)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -54,6 +58,9 @@ class LevelMetrics:
             "layer_blocking": self.layer_blocking,
             "tile_types": self.tile_types,
             "goals": self.goals,
+            "tile_type_count": self.tile_type_count,
+            "max_moves": self.max_moves,
+            "move_ratio": round(self.move_ratio, 2),
         }
 
 

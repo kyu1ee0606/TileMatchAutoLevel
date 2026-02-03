@@ -6,13 +6,13 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { Button } from '../ui';
 import { useUIStore } from '../../stores/uiStore';
-import { generateLevel, generateValidatedLevel, enhanceLevel } from '../../api/generate';
+import { generateLevel, enhanceLevel } from '../../api/generate';
 import { analyzeAutoPlay } from '../../api/analyze';
 import GamePlayer from '../GamePlayer';
 import GameBoard from '../GamePlayer/GameBoard';
 import { createGameEngine } from '../../engine/gameEngine';
 import type { GameStats, LevelInfo, GameTile } from '../../types/game';
-import type { GenerationParams, DifficultyGrade, LevelJSON } from '../../types';
+import type { GenerationParams, GenerationResult, DifficultyGrade, LevelJSON } from '../../types';
 import {
   ProductionBatch,
   ProductionLevel,
@@ -281,6 +281,16 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
         const generateOneLevel = async (task: LevelTask): Promise<ProductionLevel | null> => {
           const { localIdx, levelNumber, targetDifficulty } = task;
 
+          // Local helper: Calculate match score from bot stats
+          const calcMatchScore = (botStats: { clear_rate: number; target_clear_rate: number }[]) => {
+            if (!botStats.length) return 0;
+            const gaps = botStats.map(s => Math.abs((s.clear_rate - s.target_clear_rate) * 100));
+            const avgGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+            const maxGap = Math.max(...gaps);
+            const weightedGap = (avgGap * 0.6 + maxGap * 0.4);
+            return Math.max(0, 100 - weightedGap * 2);
+          };
+
           try {
             const isEarlyLevel = levelNumber <= 30;
             const isSpecialShape = levelNumber % 10 === 9;
@@ -388,32 +398,86 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             let validationPassed = true;
             let validationAttempts = 1;
             let matchScore: number | undefined = undefined;
+            let botClearRates: { novice: number; casual: number; average: number; expert: number; optimal: number } | undefined = undefined;
 
-            if (useValidatedGeneration) {
-              const validatedResult = await generateValidatedLevel(
-                { ...params, gimmick_intensity: Math.min(1, levelNumber / 500) },
-                {
-                  max_retries: validationConfig.max_retries,
-                  tolerance: validationConfig.tolerance,
-                  simulation_iterations: validationConfig.simulation_iterations,
-                  use_best_match: true,
-                  use_core_bots_only: useCoreBots,
-                },
-                gimmickOptions
+            // === 공통: 허용 오차 다중 후보 방식으로 정적 난이도 오차 0.05 이내 달성 ===
+            const DIFFICULTY_TOLERANCE = 5.0; // 0.05 in 0-1 scale = 5.0 in 0-100 scale
+            const CANDIDATES_PER_ATTEMPT = 3;
+            const MAX_ATTEMPTS = 5;
+            const targetScore = targetDifficulty * 100;
+
+            let bestResult: GenerationResult | null = null;
+            let bestGap = Infinity;
+            let actualAttempts = 0;
+
+            for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+              actualAttempts = attempt + 1;
+              const candidates = await Promise.all(
+                Array.from({ length: CANDIDATES_PER_ATTEMPT }, () => {
+                  // 미형 로직 유지: pattern_type, symmetry_mode, pattern_index는 기존 params 사용
+                  // 난이도 다양성을 위해 goal direction/type만 변경
+                  const candidateGoalDirection = (['s', 'n', 'e', 'w'] as const)[Math.floor(Math.random() * 4)];
+                  const candidateGoalType = (['craft', 'stack'] as const)[Math.floor(Math.random() * 2)];
+
+                  return generateLevel(
+                    {
+                      ...params,
+                      goals: [{
+                        type: candidateGoalType,
+                        direction: candidateGoalDirection,
+                        count: Math.max(2, Math.floor(3 + targetDifficulty * 2))
+                      }],
+                    },
+                    {
+                      ...gimmickOptions,
+                      gimmick_intensity: Math.min(1, levelNumber / 500),
+                    }
+                  ).catch(() => null);
+                })
               );
-              result = {
-                level_json: validatedResult.level_json,
-                actual_difficulty: validatedResult.actual_difficulty,
-                grade: validatedResult.grade,
-              };
-              validationPassed = validatedResult.validation_passed;
-              validationAttempts = validatedResult.attempts;
-              matchScore = validatedResult.match_score;
-            } else {
-              result = await generateLevel(params, {
-                ...gimmickOptions,
-                gimmick_intensity: Math.min(1, levelNumber / 500),
-              });
+
+              for (const c of candidates) {
+                if (!c) continue;
+                const gap = Math.abs(c.actual_difficulty - targetScore);
+                if (gap < bestGap) {
+                  bestGap = gap;
+                  bestResult = c;
+                }
+              }
+
+              if (bestGap <= DIFFICULTY_TOLERANCE) break; // 허용 오차 이내 → 즉시 채택
+            }
+
+            if (!bestResult) {
+              throw new Error(`${MAX_ATTEMPTS * CANDIDATES_PER_ATTEMPT}개 후보 모두 실패`);
+            }
+            result = bestResult;
+            validationAttempts = actualAttempts;
+
+            // === 검증 활성화 시: 봇 시뮬레이션으로 match_score 측정 ===
+            if (useValidatedGeneration && validationConfig.simulation_iterations > 0) {
+              try {
+                const botProfiles = useCoreBots
+                  ? ['casual', 'average', 'expert']  // 코어 3봇
+                  : ['novice', 'casual', 'average', 'expert', 'optimal'];  // 전체 5봇
+                const simResult = await analyzeAutoPlay(result.level_json, {
+                  iterations: validationConfig.simulation_iterations,
+                  targetDifficulty: targetDifficulty,
+                  botProfiles: botProfiles,
+                });
+                matchScore = calcMatchScore(simResult.bot_stats);
+                botClearRates = {
+                  novice: simResult.bot_stats.find(s => s.profile === 'novice')?.clear_rate || 0,
+                  casual: simResult.bot_stats.find(s => s.profile === 'casual')?.clear_rate || 0,
+                  average: simResult.bot_stats.find(s => s.profile === 'average')?.clear_rate || 0,
+                  expert: simResult.bot_stats.find(s => s.profile === 'expert')?.clear_rate || 0,
+                  optimal: simResult.bot_stats.find(s => s.profile === 'optimal')?.clear_rate || 0,
+                };
+                validationPassed = matchScore !== undefined && matchScore >= validationConfig.tolerance;
+              } catch (simErr) {
+                console.warn(`Bot simulation failed for level ${levelNumber}:`, simErr);
+                // 시뮬레이션 실패 시 match_score 없이 진행
+              }
             }
 
             const meta: ProductionLevelMeta = {
@@ -433,6 +497,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
               playtest_priority: validationPassed ? levelNumber : levelNumber - 10000,
               playtest_results: [],
               match_score: matchScore,
+              bot_clear_rates: botClearRates,
               validation_attempts: validationAttempts,
             };
 
@@ -1562,217 +1627,186 @@ function TestTab({
   const [regenerationThreshold, setRegenerationThreshold] = useState(70);
   const [selectedRegenLevels, setSelectedRegenLevels] = useState<Set<number>>(new Set());
 
-  // Regenerate single level - binary search with bounds tracking for convergence
-  // autoReTest: true면 재생성 후 analyzeAutoPlay로 일치율 재측정 (일괄 재생성용)
-  const handleRegenerateLevel = async (levelNumber: number, autoReTest: boolean = false) => {
+  // Per-level regeneration progress tracking
+  const [regenProgressMap, setRegenProgressMap] = useState<Map<number, {
+    status: 'waiting' | 'generating' | 'saving' | 'done' | 'failed';
+    matchScore?: number;
+    error?: string;
+  }>>(new Map());
+  const [batchRegenTotal, setBatchRegenTotal] = useState(0);
+
+  // Regenerate single level - pure generation without bot simulation
+  // 봇 시뮬레이션 없이 목표 난이도에 근접한 레벨만 생성, match_score는 일괄 테스트에서 측정
+  const handleRegenerateLevel = async (levelNumber: number) => {
     const level = levels.find(l => l.meta.level_number === levelNumber);
     if (!level) return;
 
     setRegeneratingLevels(prev => new Set([...prev, levelNumber]));
+    setRegenProgressMap(prev => new Map(prev).set(levelNumber, { status: 'generating' }));
 
     try {
-      // Get current batch for gimmick unlock levels and difficulty settings
+      // Get current batch for gimmick unlock levels
       const currentBatch = await getProductionBatch(batchId);
       if (!currentBatch) {
         throw new Error('Batch not found');
       }
 
-      const originalTarget = level.meta.target_difficulty;
-      let targetDifficulty = originalTarget;
-
-      // === BINARY SEARCH REGENERATION: Track bounds for convergence ===
-      let lowerBound = level.meta.regen_lower_bound ?? 0.05;
-      let upperBound = level.meta.regen_upper_bound ?? 0.95;
-
-      const prevBotRates = level.meta.bot_clear_rates;
-      if (prevBotRates && level.meta.match_score !== undefined && level.meta.match_score < regenerationThreshold) {
-        // Calculate direction from previous result
-        const calcTargetRate = (diff: number, botType: string): number => {
-          if (diff <= 0.4) {
-            const t = diff / 0.4;
-            const easyRates: Record<string, number> = {
-              novice: 0.99 - t * 0.20, casual: 0.99 - t * 0.15,
-              average: 0.99 - t * 0.10, expert: 0.99 - t * 0.05, optimal: 0.99 - t * 0.01,
-            };
-            return easyRates[botType] ?? 0.95;
-          } else if (diff <= 0.6) {
-            const t = (diff - 0.4) / 0.2;
-            const starts: Record<string, number> = { novice: 0.79, casual: 0.84, average: 0.89, expert: 0.94, optimal: 0.98 };
-            const ends: Record<string, number> = { novice: 0.55, casual: 0.70, average: 0.82, expert: 0.92, optimal: 0.97 };
-            return (starts[botType] ?? 0.9) - t * ((starts[botType] ?? 0.9) - (ends[botType] ?? 0.8));
-          } else {
-            const t = (diff - 0.6) / 0.4;
-            const medEnds: Record<string, number> = { novice: 0.55, casual: 0.70, average: 0.82, expert: 0.92, optimal: 0.97 };
-            const hardEnds: Record<string, number> = { novice: 0.20, casual: 0.40, average: 0.70, expert: 0.90, optimal: 0.95 };
-            return (medEnds[botType] ?? 0.8) - t * ((medEnds[botType] ?? 0.8) - (hardEnds[botType] ?? 0.5));
-          }
-        };
-
-        // Use core bots to determine direction
-        const coreBots = ['casual', 'average', 'expert'] as const;
-        let totalGap = 0;
-        let botCount = 0;
-        for (const bot of coreBots) {
-          const actual = prevBotRates[bot] || 0;
-          const target = calcTargetRate(originalTarget, bot);
-          totalGap += (actual - target);
-          botCount++;
-        }
-        const avgDirection = botCount > 0 ? totalGap / botCount : 0;
-
-        // Update bounds based on direction
-        // Previous targetDifficulty was either original or last adjusted value
-        const prevTargetDiff = targetDifficulty;
-        if (avgDirection > 0.02) {
-          // Level was too easy → current difficulty is a lower bound
-          lowerBound = Math.max(lowerBound, prevTargetDiff);
-        } else if (avgDirection < -0.02) {
-          // Level was too hard → current difficulty is an upper bound
-          upperBound = Math.min(upperBound, prevTargetDiff);
-        }
-
-        // Binary search: midpoint of bounds
-        targetDifficulty = (lowerBound + upperBound) / 2;
-
-        // Bias slightly toward original target to aid convergence
-        targetDifficulty = targetDifficulty * 0.7 + originalTarget * 0.3;
-        targetDifficulty = Math.max(0.05, Math.min(0.95, targetDifficulty));
-
-        console.log(`[REGEN] Level ${levelNumber}: prev match=${level.meta.match_score?.toFixed(0)}%, ` +
-          `avgDirection=${(avgDirection * 100).toFixed(1)}%, bounds=[${lowerBound.toFixed(3)}, ${upperBound.toFixed(3)}], ` +
-          `difficulty ${originalTarget.toFixed(3)} -> ${targetDifficulty.toFixed(3)} (attempt ${(level.meta.regen_attempts || 0) + 1})`);
-      }
-
-      // === FOLLOW PRODUCTION GENERATION RULES ===
-      // Randomize pattern type for visual diversity (same as Production)
-      const patternTypes: Array<'aesthetic' | 'geometric' | 'clustered'> = ['aesthetic', 'geometric', 'clustered'];
-      const patternType = patternTypes[Math.floor(Math.random() * patternTypes.length)];
-
-      // Randomize symmetry mode (same as Production)
-      const symmetryModes: Array<'none' | 'horizontal' | 'vertical'> = ['none', 'horizontal', 'vertical'];
-      const symmetryMode = symmetryModes[Math.floor(Math.random() * symmetryModes.length)];
-
-      // Randomize goal direction (same as Production)
-      const goalDirections: Array<'s' | 'n' | 'e' | 'w'> = ['s', 'n', 'e', 'w'];
-      const goalDirection = goalDirections[Math.floor(Math.random() * goalDirections.length)];
-
-      // Randomize goal type (same as Production)
-      const goalTypes: Array<'craft' | 'stack'> = ['craft', 'stack'];
-      const goalType = goalTypes[Math.floor(Math.random() * goalTypes.length)];
-
-      // Calculate gimmick_intensity based on level number (same as Production)
+      const targetDifficulty = level.meta.target_difficulty;
+      const targetScore = targetDifficulty * 100;
       const gimmickIntensity = Math.min(1, levelNumber / 500);
+      const DIFFICULTY_TOLERANCE = 5.0; // 0.05 in 0-1 scale = 5.0 in 0-100 scale
+      const CANDIDATES_PER_ATTEMPT = 3;
+      const MAX_ATTEMPTS = 5; // 최대 15개 후보
 
-      // Generate new level with scoring_difficulty set to ORIGINAL target
-      // Backend will use scoring_difficulty for match_score calculation (consistent with batch test)
-      // and target_difficulty for generation parameter calibration
-      const validatedResult = await generateValidatedLevel(
-        {
-          target_difficulty: targetDifficulty,
-          grid_size: [7, 7],
-          max_layers: 7,
-          tile_types: [],
-          obstacle_types: [],
-          goals: [{
-            type: goalType,
-            direction: goalDirection,
-            count: Math.max(2, Math.floor(3 + targetDifficulty * 2))
-          }],
-          symmetry_mode: symmetryMode,
-          pattern_type: patternType,
-          gimmick_intensity: gimmickIntensity,
-        },
-        {
-          max_retries: 5,
-          tolerance: 12.0,
-          simulation_iterations: 50,
-          use_best_match: true,
-          use_core_bots_only: false,  // 5봇 전체로 정확하게
-        },
-        {
-          auto_select_gimmicks: true,
-          available_gimmicks: ['chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport', 'unknown'],
-          gimmick_unlock_levels: currentBatch.gimmick_unlock_levels || PROFESSIONAL_GIMMICK_UNLOCK_LEVELS,
-          level_number: levelNumber,
-        },
-        {
-          scoring_difficulty: originalTarget,  // 원본 난이도로 match_score 계산
-        }
-      );
+      // === 미형 로직: 프로덕션 초기 생성과 동일한 레벨 타입 기반 패턴 선택 ===
+      const isEarlyLevel = levelNumber <= 30;
+      const isSpecialShape = levelNumber % 10 === 9;
+      const isBossLevel = levelNumber % 10 === 0 && levelNumber > 0;
 
-      // Determine match_score: re-test with analyzeAutoPlay (batch) or use backend score (individual)
-      let matchScore: number;
-      let botClearRates: { novice: number; casual: number; average: number; expert: number; optimal: number };
-      let reTestGrade: string | undefined;
-      let reTestStatus: string | undefined;
-
-      if (autoReTest) {
-        // 일괄 재생성: analyzeAutoPlay로 정확한 일치율 재측정
-        const autoplayResult = await analyzeAutoPlay(validatedResult.level_json, {
-          iterations: autoTestIterations,
-          targetDifficulty: originalTarget,
-        });
-        matchScore = calculateMatchScoreFromBots(autoplayResult.bot_stats);
-        botClearRates = {
-          novice: autoplayResult.bot_stats.find((s: { profile: string }) => s.profile === 'novice')?.clear_rate || 0,
-          casual: autoplayResult.bot_stats.find((s: { profile: string }) => s.profile === 'casual')?.clear_rate || 0,
-          average: autoplayResult.bot_stats.find((s: { profile: string }) => s.profile === 'average')?.clear_rate || 0,
-          expert: autoplayResult.bot_stats.find((s: { profile: string }) => s.profile === 'expert')?.clear_rate || 0,
-          optimal: autoplayResult.bot_stats.find((s: { profile: string }) => s.profile === 'optimal')?.clear_rate || 0,
-        };
-        reTestGrade = autoplayResult.autoplay_grade;
-        reTestStatus = autoplayResult.balance_status;
+      // Pattern type selection (프로덕션과 동일)
+      const patternRoll = Math.random();
+      let patternType: 'aesthetic' | 'geometric' | 'clustered';
+      if (isEarlyLevel) {
+        patternType = patternRoll < 0.50 ? 'geometric' : patternRoll < 0.90 ? 'aesthetic' : 'clustered';
+      } else if (isBossLevel) {
+        patternType = patternRoll < 0.75 ? 'aesthetic' : patternRoll < 0.95 ? 'geometric' : 'clustered';
+      } else if (isSpecialShape) {
+        patternType = patternRoll < 0.50 ? 'aesthetic' : patternRoll < 0.75 ? 'geometric' : 'clustered';
       } else {
-        // 개별 재생성: 백엔드 match_score 직접 사용 (사용자가 수동 테스트)
-        matchScore = validatedResult.match_score;
-        botClearRates = {
-          novice: validatedResult.bot_clear_rates?.['novice'] ?? 0,
-          casual: validatedResult.bot_clear_rates?.['casual'] ?? 0,
-          average: validatedResult.bot_clear_rates?.['average'] ?? 0,
-          expert: validatedResult.bot_clear_rates?.['expert'] ?? 0,
-          optimal: validatedResult.bot_clear_rates?.['optimal'] ?? 0,
-        };
+        patternType = patternRoll < 0.60 ? 'aesthetic' : patternRoll < 0.85 ? 'geometric' : 'clustered';
       }
 
-      // Save regenerated level with score + bounds for next regen
+      // Symmetry mode selection (프로덕션과 동일)
+      const symmetryRoll = Math.random();
+      let symmetryMode: 'none' | 'horizontal' | 'vertical' | 'both';
+      if (isEarlyLevel) {
+        symmetryMode = symmetryRoll < 0.25 ? 'horizontal' : symmetryRoll < 0.50 ? 'vertical' : 'both';
+      } else if (isSpecialShape) {
+        symmetryMode = symmetryRoll < 0.30 ? 'none' : symmetryRoll < 0.65 ? 'horizontal' : 'vertical';
+      } else if (isBossLevel) {
+        symmetryMode = symmetryRoll < 0.20 ? 'horizontal' : symmetryRoll < 0.40 ? 'vertical' : 'both';
+      } else {
+        symmetryMode = symmetryRoll < 0.05 ? 'none' : symmetryRoll < 0.40 ? 'horizontal' : symmetryRoll < 0.75 ? 'vertical' : 'both';
+      }
+
+      // Pattern index for boss/special levels
+      let patternIndex: number | undefined = undefined;
+      if (patternType === 'aesthetic') {
+        if (isBossLevel) {
+          const bossPatterns = [8, 15, 16, 45, 46, 17, 18];
+          patternIndex = bossPatterns[Math.floor(Math.random() * bossPatterns.length)];
+        } else if (isSpecialShape) {
+          const specialPatterns = [3, 4, 20, 23, 24, 30, 33];
+          patternIndex = specialPatterns[Math.floor(Math.random() * specialPatterns.length)];
+        }
+      }
+
+      // Grid size (프로덕션과 동일)
+      let gridSize: [number, number] = [7, 7];
+      if (isBossLevel && targetDifficulty > 0.3) {
+        gridSize = [8, 8];
+      } else if (!isEarlyLevel && Math.random() < 0.3) {
+        gridSize = [8, 8];
+      }
+
+      // Layers (프로덕션과 동일)
+      let minLayers = 2;
+      let maxLayers = Math.min(7, 3 + Math.floor(targetDifficulty * 4));
+      if (isEarlyLevel) { minLayers = 2; maxLayers = Math.min(4, maxLayers); }
+      else if (isBossLevel) { minLayers = Math.max(3, Math.floor(2 + targetDifficulty * 2)); maxLayers = Math.min(7, 4 + Math.floor(targetDifficulty * 3)); }
+
+      let bestResult: GenerationResult | null = null;
+      let bestGap = Infinity;
+
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        const candidates = await Promise.all(
+          Array.from({ length: CANDIDATES_PER_ATTEMPT }, () => {
+            // 미형 파라미터는 고정, goal direction/type만 랜덤
+            const goalDirection = (['s', 'n', 'e', 'w'] as const)[Math.floor(Math.random() * 4)];
+            const goalType = (['craft', 'stack'] as const)[Math.floor(Math.random() * 2)];
+
+            return generateLevel(
+              {
+                target_difficulty: targetDifficulty,
+                grid_size: gridSize,
+                min_layers: minLayers,
+                max_layers: maxLayers,
+                tile_types: [],
+                obstacle_types: [],
+                goals: [{
+                  type: goalType,
+                  direction: goalDirection,
+                  count: Math.max(2, Math.floor(3 + targetDifficulty * 2))
+                }],
+                symmetry_mode: symmetryMode,
+                pattern_type: patternType,
+                pattern_index: patternIndex,
+              },
+              {
+                auto_select_gimmicks: true,
+                available_gimmicks: ['chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport', 'unknown'],
+                gimmick_intensity: gimmickIntensity,
+                gimmick_unlock_levels: currentBatch.gimmick_unlock_levels || PROFESSIONAL_GIMMICK_UNLOCK_LEVELS,
+                level_number: levelNumber,
+              }
+            ).catch(() => null);
+          })
+        );
+
+        for (const c of candidates) {
+          if (!c) continue;
+          const gap = Math.abs(c.actual_difficulty - targetScore);
+          if (gap < bestGap) {
+            bestGap = gap;
+            bestResult = c;
+          }
+        }
+
+        if (bestGap <= DIFFICULTY_TOLERANCE) break; // 허용 오차 이내 → 즉시 채택
+      }
+
+      if (!bestResult) {
+        throw new Error(`${MAX_ATTEMPTS * CANDIDATES_PER_ATTEMPT}개 후보 모두 실패`);
+      }
+      const result = bestResult;
+
+      // Save regenerated level - match_score/bot_clear_rates는 비워둠 (일괄 테스트에서 측정)
+      setRegenProgressMap(prev => new Map(prev).set(levelNumber, { status: 'saving' }));
       await saveProductionLevels(batchId, [{
         meta: {
           ...level.meta,
           generated_at: new Date().toISOString(),
-          actual_difficulty: validatedResult.actual_difficulty,
-          grade: validatedResult.grade as any,
-          bot_clear_rates: botClearRates,
-          match_score: matchScore,
+          actual_difficulty: result.actual_difficulty,
+          grade: result.grade as any,
+          bot_clear_rates: undefined,
+          match_score: undefined,
           status_updated_at: new Date().toISOString(),
-          // Track regen bounds for next iteration
           regen_attempts: (level.meta.regen_attempts || 0) + 1,
-          regen_lower_bound: lowerBound,
-          regen_upper_bound: upperBound,
+          regen_lower_bound: undefined,
+          regen_upper_bound: undefined,
         },
-        level_json: validatedResult.level_json,
+        level_json: result.level_json,
       }]);
 
-      // Update batch test results if exists
+      // Update batch test results if exists (clear match_score)
       setBatchTestProgress(prev => ({
         ...prev,
         results: prev.results.map(r =>
           r.level_number === levelNumber
-            ? {
-                ...r,
-                match_score: matchScore,
-                grade: reTestGrade ?? validatedResult.grade,
-                status: reTestStatus ?? (validatedResult.validation_passed ? 'balanced' : 'unbalanced'),
-              }
+            ? { ...r, match_score: 0, grade: result.grade, status: 'unbalanced' as const }
             : r
         ),
       }));
 
-      addNotification('success', `레벨 ${levelNumber} 재생성 완료 (일치도: ${matchScore.toFixed(0)}%)`);
+      setRegenProgressMap(prev => new Map(prev).set(levelNumber, { status: 'done' }));
+      addNotification('success', `레벨 ${levelNumber} 재생성 완료 (정적 난이도: ${result.actual_difficulty.toFixed(1)})`);
       loadLevels();
       onStatsUpdate();
     } catch (err) {
-      console.error('Regeneration failed:', err);
-      addNotification('error', `레벨 ${levelNumber} 재생성 실패`);
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error(`Regeneration failed for level ${levelNumber}:`, errMsg, err);
+      setRegenProgressMap(prev => new Map(prev).set(levelNumber, { status: 'failed', error: errMsg }));
+      addNotification('error', `레벨 ${levelNumber} 재생성 실패: ${errMsg}`);
     } finally {
       setRegeneratingLevels(prev => {
         const newSet = new Set(prev);
@@ -1844,102 +1878,237 @@ function TestTab({
     }
   };
 
-  // Batch regenerate low match score levels from test results (PARALLEL: 10개 동시 처리)
+  // === 일괄 재생성 공통 로직 (프로덕션 초기 생성과 동일한 고속 패턴) ===
+  // batch 조회 1회, generateLevel 직접 호출, 저장은 배치 단위로 묶어서 처리
+  const batchRegenerateCore = async (targetLevelNumbers: number[]) => {
+    if (targetLevelNumbers.length === 0) return;
+
+    // 1. batch 정보 1회만 조회
+    const currentBatch = await getProductionBatch(batchId);
+    if (!currentBatch) {
+      addNotification('error', 'Batch not found');
+      return;
+    }
+    const gimmickUnlockLevels = currentBatch.gimmick_unlock_levels || PROFESSIONAL_GIMMICK_UNLOCK_LEVELS;
+
+    // 2. Initialize progress tracking
+    const initMap = new Map<number, { status: 'waiting' | 'generating' | 'saving' | 'done' | 'failed'; matchScore?: number; error?: string }>();
+    targetLevelNumbers.forEach(n => initMap.set(n, { status: 'waiting' }));
+    setRegenProgressMap(initMap);
+    setBatchRegenTotal(targetLevelNumbers.length);
+    setIsBatchRegenerating(true);
+
+    let successCount = 0;
+    let failCount = 0;
+    const REGEN_CONCURRENCY = 10; // 프로덕션 초기 생성과 동일한 동시성
+
+    // 3. 레벨 1개 재생성: 반복 생성으로 오차 0.05 이내 달성
+    const DIFFICULTY_TOLERANCE = 5.0; // 0.05 in 0-1 scale = 5.0 in 0-100 scale
+    const CANDIDATES_PER_ATTEMPT = 3;
+    const MAX_ATTEMPTS = 5; // 최대 15개 후보
+
+    const regenerateOne = async (levelNumber: number): Promise<void> => {
+      const level = levels.find(l => l.meta.level_number === levelNumber);
+      if (!level) throw new Error(`Level ${levelNumber} not found`);
+
+      setRegenProgressMap(prev => new Map(prev).set(levelNumber, { status: 'generating' }));
+
+      const targetDifficulty = level.meta.target_difficulty;
+      const targetScore = targetDifficulty * 100;
+      const gimmickIntensity = Math.min(1, levelNumber / 500);
+
+      // === 미형 로직: 프로덕션 초기 생성과 동일한 레벨 타입 기반 패턴 선택 ===
+      const isEarlyLevel = levelNumber <= 30;
+      const isSpecialShape = levelNumber % 10 === 9;
+      const isBossLevel = levelNumber % 10 === 0 && levelNumber > 0;
+
+      // Pattern type selection (프로덕션과 동일)
+      const patternRoll = Math.random();
+      let patternType: 'aesthetic' | 'geometric' | 'clustered';
+      if (isEarlyLevel) {
+        patternType = patternRoll < 0.50 ? 'geometric' : patternRoll < 0.90 ? 'aesthetic' : 'clustered';
+      } else if (isBossLevel) {
+        patternType = patternRoll < 0.75 ? 'aesthetic' : patternRoll < 0.95 ? 'geometric' : 'clustered';
+      } else if (isSpecialShape) {
+        patternType = patternRoll < 0.50 ? 'aesthetic' : patternRoll < 0.75 ? 'geometric' : 'clustered';
+      } else {
+        patternType = patternRoll < 0.60 ? 'aesthetic' : patternRoll < 0.85 ? 'geometric' : 'clustered';
+      }
+
+      // Symmetry mode selection (프로덕션과 동일)
+      const symmetryRoll = Math.random();
+      let symmetryMode: 'none' | 'horizontal' | 'vertical' | 'both';
+      if (isEarlyLevel) {
+        symmetryMode = symmetryRoll < 0.25 ? 'horizontal' : symmetryRoll < 0.50 ? 'vertical' : 'both';
+      } else if (isSpecialShape) {
+        symmetryMode = symmetryRoll < 0.30 ? 'none' : symmetryRoll < 0.65 ? 'horizontal' : 'vertical';
+      } else if (isBossLevel) {
+        symmetryMode = symmetryRoll < 0.20 ? 'horizontal' : symmetryRoll < 0.40 ? 'vertical' : 'both';
+      } else {
+        symmetryMode = symmetryRoll < 0.05 ? 'none' : symmetryRoll < 0.40 ? 'horizontal' : symmetryRoll < 0.75 ? 'vertical' : 'both';
+      }
+
+      // Pattern index for boss/special levels
+      let patternIndex: number | undefined = undefined;
+      if (patternType === 'aesthetic') {
+        if (isBossLevel) {
+          const bossPatterns = [8, 15, 16, 45, 46, 17, 18];
+          patternIndex = bossPatterns[Math.floor(Math.random() * bossPatterns.length)];
+        } else if (isSpecialShape) {
+          const specialPatterns = [3, 4, 20, 23, 24, 30, 33];
+          patternIndex = specialPatterns[Math.floor(Math.random() * specialPatterns.length)];
+        }
+      }
+
+      // Grid size (프로덕션과 동일)
+      let gridSize: [number, number] = [7, 7];
+      if (isBossLevel && targetDifficulty > 0.3) {
+        gridSize = [8, 8];
+      } else if (!isEarlyLevel && Math.random() < 0.3) {
+        gridSize = [8, 8];
+      }
+
+      // Layers (프로덕션과 동일)
+      let minLayers = 2;
+      let maxLayers = Math.min(7, 3 + Math.floor(targetDifficulty * 4));
+      if (isEarlyLevel) { minLayers = 2; maxLayers = Math.min(4, maxLayers); }
+      else if (isBossLevel) { minLayers = Math.max(3, Math.floor(2 + targetDifficulty * 2)); maxLayers = Math.min(7, 4 + Math.floor(targetDifficulty * 3)); }
+
+      let bestResult: GenerationResult | null = null;
+      let bestGap = Infinity;
+
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        const candidates = await Promise.all(
+          Array.from({ length: CANDIDATES_PER_ATTEMPT }, () => {
+            // 미형 파라미터는 고정, goal direction/type만 랜덤
+            const goalDirection = (['s', 'n', 'e', 'w'] as const)[Math.floor(Math.random() * 4)];
+            const goalType = (['craft', 'stack'] as const)[Math.floor(Math.random() * 2)];
+
+            return generateLevel(
+              {
+                target_difficulty: targetDifficulty,
+                grid_size: gridSize,
+                min_layers: minLayers,
+                max_layers: maxLayers,
+                tile_types: [],
+                obstacle_types: [],
+                goals: [{ type: goalType, direction: goalDirection, count: Math.max(2, Math.floor(3 + targetDifficulty * 2)) }],
+                symmetry_mode: symmetryMode,
+                pattern_type: patternType,
+                pattern_index: patternIndex,
+              },
+              {
+                auto_select_gimmicks: true,
+                available_gimmicks: ['chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport', 'unknown'],
+                gimmick_intensity: gimmickIntensity,
+                gimmick_unlock_levels: gimmickUnlockLevels,
+                level_number: levelNumber,
+              }
+            ).catch(() => null);
+          })
+        );
+
+        for (const c of candidates) {
+          if (!c) continue;
+          const gap = Math.abs(c.actual_difficulty - targetScore);
+          if (gap < bestGap) {
+            bestGap = gap;
+            bestResult = c;
+          }
+        }
+
+        if (bestGap <= DIFFICULTY_TOLERANCE) break; // 허용 오차 이내 → 즉시 채택
+      }
+
+      if (!bestResult) throw new Error(`${MAX_ATTEMPTS * CANDIDATES_PER_ATTEMPT}개 후보 모두 실패`);
+
+      // Save - match_score/bot_clear_rates는 비워둠 (일괄 테스트에서 측정)
+      setRegenProgressMap(prev => new Map(prev).set(levelNumber, { status: 'saving' }));
+      await saveProductionLevels(batchId, [{
+        meta: {
+          ...level.meta,
+          generated_at: new Date().toISOString(),
+          actual_difficulty: bestResult.actual_difficulty,
+          grade: bestResult.grade as any,
+          bot_clear_rates: undefined,
+          match_score: undefined,
+          status_updated_at: new Date().toISOString(),
+          regen_attempts: (level.meta.regen_attempts || 0) + 1,
+          regen_lower_bound: undefined,
+          regen_upper_bound: undefined,
+        },
+        level_json: bestResult.level_json,
+      }]);
+
+      setRegenProgressMap(prev => new Map(prev).set(levelNumber, { status: 'done' }));
+    };
+
+    // 4. Execute in parallel batches (프로덕션 초기 생성과 동일한 패턴)
+    for (let batchStart = 0; batchStart < targetLevelNumbers.length; batchStart += REGEN_CONCURRENCY) {
+      const batchSlice = targetLevelNumbers.slice(batchStart, batchStart + REGEN_CONCURRENCY);
+      const results = await Promise.allSettled(
+        batchSlice.map(num => regenerateOne(num))
+      );
+      for (const r of results) {
+        if (r.status === 'fulfilled') successCount++;
+        else {
+          failCount++;
+          const reason = r.reason instanceof Error ? r.reason.message : String(r.reason);
+          const failedNum = batchSlice[results.indexOf(r)];
+          setRegenProgressMap(prev => new Map(prev).set(failedNum, { status: 'failed', error: reason }));
+        }
+      }
+    }
+
+    // 5. 완료 후 1회만 리로드
+    setIsBatchRegenerating(false);
+    loadLevels();
+    onStatsUpdate();
+    return { successCount, failCount };
+  };
+
+  // Batch regenerate low match score levels from test results
   const handleBatchRegenerate = async () => {
     const lowMatchLevels = batchTestProgress.results
       .filter(r => r.match_score < regenerationThreshold)
-      .sort((a, b) => a.match_score - b.match_score); // 일치도 낮은 순서 우선
+      .sort((a, b) => a.match_score - b.match_score);
     if (lowMatchLevels.length === 0) {
       addNotification('info', `일치도 ${regenerationThreshold}% 미만 레벨이 없습니다.`);
       return;
     }
-
-    setIsBatchRegenerating(true);
-    let successCount = 0;
-    let failCount = 0;
-    const REGEN_CONCURRENCY = 10;
-
-    for (let batchStart = 0; batchStart < lowMatchLevels.length; batchStart += REGEN_CONCURRENCY) {
-      const batchSlice = lowMatchLevels.slice(batchStart, batchStart + REGEN_CONCURRENCY);
-      const results = await Promise.allSettled(
-        batchSlice.map(result => handleRegenerateLevel(result.level_number, true))
-      );
-      for (const r of results) {
-        if (r.status === 'fulfilled') successCount++;
-        else failCount++;
-      }
-    }
-
-    setIsBatchRegenerating(false);
-    addNotification('success', `일괄 재생성 완료: ${successCount}개 성공, ${failCount}개 실패`);
+    const result = await batchRegenerateCore(lowMatchLevels.map(l => l.level_number));
+    if (result) addNotification('success', `일괄 재생성 완료: ${result.successCount}개 성공, ${result.failCount}개 실패`);
   };
 
-  // Batch regenerate low match score levels from stored level data (PARALLEL: 10개 동시 처리)
+  // Batch regenerate low match score levels from stored level data
   const handleBatchRegenerateFromStored = async () => {
     const storedLowMatch = levels
       .filter(l => l.meta.match_score !== undefined && l.meta.match_score > 0 && l.meta.match_score < regenerationThreshold)
-      .sort((a, b) => (a.meta.match_score || 0) - (b.meta.match_score || 0)); // 일치도 낮은 순서 우선
+      .sort((a, b) => (a.meta.match_score || 0) - (b.meta.match_score || 0));
     if (storedLowMatch.length === 0) {
       addNotification('info', `저장된 일치도 ${regenerationThreshold}% 미만 레벨이 없습니다.`);
       return;
     }
-
-    setIsBatchRegenerating(true);
-    let successCount = 0;
-    let failCount = 0;
-    const REGEN_CONCURRENCY = 10;
-
-    for (let batchStart = 0; batchStart < storedLowMatch.length; batchStart += REGEN_CONCURRENCY) {
-      const batchSlice = storedLowMatch.slice(batchStart, batchStart + REGEN_CONCURRENCY);
-      const results = await Promise.allSettled(
-        batchSlice.map(level => handleRegenerateLevel(level.meta.level_number, true))
-      );
-      for (const r of results) {
-        if (r.status === 'fulfilled') successCount++;
-        else failCount++;
-      }
-    }
-
-    setIsBatchRegenerating(false);
-    loadLevels();
-    onStatsUpdate();
-    addNotification('success', `저장된 미달 레벨 일괄 재생성 완료: ${successCount}개 성공, ${failCount}개 실패`);
+    const result = await batchRegenerateCore(storedLowMatch.map(l => l.meta.level_number));
+    if (result) addNotification('success', `저장된 미달 레벨 일괄 재생성 완료: ${result.successCount}개 성공, ${result.failCount}개 실패`);
   };
 
-  // Batch regenerate selected levels only (PARALLEL: 10개 동시 처리)
+  // Batch regenerate selected levels only
   const handleRegenerateSelected = async () => {
     if (selectedRegenLevels.size === 0) {
       addNotification('info', '선택된 레벨이 없습니다.');
       return;
     }
-
     const targetLevels = [...selectedRegenLevels].sort((a, b) => {
       const aScore = levels.find(l => l.meta.level_number === a)?.meta.match_score || 0;
       const bScore = levels.find(l => l.meta.level_number === b)?.meta.match_score || 0;
-      return aScore - bScore; // 일치도 낮은 순서 우선
+      return aScore - bScore;
     });
-
-    setIsBatchRegenerating(true);
-    let successCount = 0;
-    let failCount = 0;
-    const REGEN_CONCURRENCY = 10;
-
-    for (let batchStart = 0; batchStart < targetLevels.length; batchStart += REGEN_CONCURRENCY) {
-      const batchSlice = targetLevels.slice(batchStart, batchStart + REGEN_CONCURRENCY);
-      const results = await Promise.allSettled(
-        batchSlice.map(levelNum => handleRegenerateLevel(levelNum, true))
-      );
-      for (const r of results) {
-        if (r.status === 'fulfilled') successCount++;
-        else failCount++;
-      }
+    const result = await batchRegenerateCore(targetLevels);
+    if (result) {
+      setSelectedRegenLevels(new Set());
+      addNotification('success', `선택 레벨 재생성 완료: ${result.successCount}개 성공, ${result.failCount}개 실패`);
     }
-
-    setIsBatchRegenerating(false);
-    setSelectedRegenLevels(new Set());
-    loadLevels();
-    onStatsUpdate();
-    addNotification('success', `선택 레벨 재생성 완료: ${successCount}개 성공, ${failCount}개 실패`);
   };
 
   // Filtered levels based on search
@@ -2261,6 +2430,77 @@ function TestTab({
               </div>
             )}
 
+            {/* Batch Regeneration Progress */}
+            {/* Batch Regeneration Progress - show during and after batch regen */}
+            {(isBatchRegenerating || regenProgressMap.size > 0) && batchRegenTotal > 0 && (() => {
+              const entries = [...regenProgressMap.values()];
+              const doneCount = entries.filter(p => p.status === 'done').length;
+              const failCount = entries.filter(p => p.status === 'failed').length;
+              const completedCount = doneCount + failCount;
+              const generatingCount = entries.filter(p => p.status === 'generating').length;
+              const savingCount = entries.filter(p => p.status === 'saving').length;
+              const waitingCount = entries.filter(p => p.status === 'waiting').length;
+              const progressPct = (completedCount / batchRegenTotal) * 100;
+              const isFinished = !isBatchRegenerating && completedCount === batchRegenTotal;
+              return (
+                <div className={`border rounded-lg p-3 space-y-2 ${isFinished ? 'bg-gray-800/80 border-gray-600' : 'bg-gray-900/60 border-gray-600'}`}>
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-gray-300 font-medium">
+                      {isFinished ? '재생성 완료' : '재생성 진행도'}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-gray-400">
+                        <span className="text-green-400 font-bold">{doneCount}</span>
+                        {failCount > 0 && <> + <span className="text-red-400 font-bold">{failCount}</span></>}
+                        <span className="text-gray-500"> / {batchRegenTotal}</span>
+                      </span>
+                      {isFinished && (
+                        <button
+                          onClick={() => { setRegenProgressMap(new Map()); setBatchRegenTotal(0); }}
+                          className="text-gray-500 hover:text-gray-300 text-xs px-1"
+                          title="닫기"
+                        >✕</button>
+                      )}
+                    </div>
+                  </div>
+                  {/* Progress bar */}
+                  <div className="w-full h-2 bg-gray-700 rounded-full overflow-hidden">
+                    <div className="h-full rounded-full transition-all duration-300 ease-out"
+                      style={{
+                        width: `${progressPct}%`,
+                        background: failCount > 0
+                          ? `linear-gradient(90deg, #22c55e ${completedCount > 0 ? (doneCount / completedCount) * 100 : 0}%, #ef4444 ${completedCount > 0 ? (doneCount / completedCount) * 100 : 0}%)`
+                          : '#22c55e',
+                      }}
+                    />
+                  </div>
+                  {/* Status summary */}
+                  <div className="flex items-center gap-3 text-xs text-gray-400 flex-wrap">
+                    {isBatchRegenerating && (
+                      <>
+                        {generatingCount > 0 && <span className="flex items-center gap-1"><span className="animate-spin text-blue-400">⟳</span> 생성 {generatingCount}</span>}
+                        {savingCount > 0 && <span className="flex items-center gap-1"><span className="animate-spin text-purple-400">⟳</span> 저장 {savingCount}</span>}
+                        {waitingCount > 0 && <span className="text-gray-500">대기 {waitingCount}</span>}
+                      </>
+                    )}
+                    {doneCount > 0 && (
+                      <span className="text-green-400">완료 {doneCount}</span>
+                    )}
+                    {failCount > 0 && <span className="text-red-400">에러 {failCount}</span>}
+                  </div>
+                  {/* Show first error message for debugging */}
+                  {failCount > 0 && (() => {
+                    const firstError = entries.find(p => p.status === 'failed' && p.error);
+                    return firstError?.error ? (
+                      <div className="text-xs text-red-400/80 bg-red-900/20 rounded px-2 py-1 truncate" title={firstError.error}>
+                        {firstError.error}
+                      </div>
+                    ) : null;
+                  })()}
+                </div>
+              );
+            })()}
+
             {/* Selectable Level List */}
             {storedLowMatch.length > 0 && (
               <div className="border border-gray-700 rounded-lg overflow-hidden">
@@ -2284,6 +2524,7 @@ function TestTab({
                   <span className="w-14 text-center text-gray-500">일치도</span>
                   <span className="w-14 text-center text-gray-500">등급</span>
                   <span className="w-14 text-center text-gray-500">목표</span>
+                  {isBatchRegenerating && <span className="w-16 text-center text-gray-500">상태</span>}
                 </div>
                 {/* Scrollable List */}
                 <div className="max-h-[200px] overflow-y-auto">
@@ -2291,12 +2532,17 @@ function TestTab({
                     const score = level.meta.match_score || 0;
                     const isSelected = selectedRegenLevels.has(level.meta.level_number);
                     const isRegen = regeneratingLevels.has(level.meta.level_number);
+                    const levelProgress = regenProgressMap.get(level.meta.level_number);
+                    const progressStatus = levelProgress?.status;
+                    const isDone = progressStatus === 'done';
+                    const isFailed = progressStatus === 'failed';
                     return (
                       <label
                         key={level.meta.level_number}
                         className={`flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer transition-colors ${
+                          isDone ? 'bg-green-900/20' : isFailed ? 'bg-red-900/20' :
                           isSelected ? 'bg-orange-900/30' : 'hover:bg-gray-700/40'
-                        } ${isRegen ? 'opacity-50' : ''}`}
+                        } ${isRegen ? 'opacity-70' : ''}`}
                       >
                         <input
                           type="checkbox"
@@ -2313,13 +2559,17 @@ function TestTab({
                           disabled={isBatchRegenerating || isRegen}
                         />
                         <span className="flex-1 text-gray-300">
-                          {isRegen && <span className="animate-spin mr-1">⟳</span>}
                         </span>
                         <span className="w-12 text-center text-gray-300 font-medium">Lv.{level.meta.level_number}</span>
                         <span className={`w-14 text-center font-bold ${
-                          score >= 50 ? 'text-yellow-400' : 'text-red-400'
+                          isDone && levelProgress?.matchScore !== undefined
+                            ? (levelProgress.matchScore >= regenerationThreshold ? 'text-green-400' : 'text-yellow-400')
+                            : score >= 50 ? 'text-yellow-400' : 'text-red-400'
                         }`}>
-                          {score.toFixed(0)}%
+                          {isDone && levelProgress?.matchScore !== undefined
+                            ? `${levelProgress.matchScore.toFixed(0)}%`
+                            : `${score.toFixed(0)}%`
+                          }
                         </span>
                         <span className={`w-14 text-center font-bold ${
                           level.meta.grade === 'S' ? 'text-green-400' :
@@ -2328,6 +2578,22 @@ function TestTab({
                           level.meta.grade === 'C' ? 'text-orange-400' : 'text-red-400'
                         }`}>{level.meta.grade}</span>
                         <span className="w-14 text-center text-gray-400">{(level.meta.target_difficulty * 100).toFixed(0)}%</span>
+                        {isBatchRegenerating && (
+                          <span className={`w-16 text-center font-medium ${
+                            progressStatus === 'generating' ? 'text-blue-400' :
+                            progressStatus === 'saving' ? 'text-purple-400' :
+                            progressStatus === 'done' ? 'text-green-400' :
+                            progressStatus === 'failed' ? 'text-red-400' :
+                            'text-gray-500'
+                          }`}>
+                            {progressStatus === 'waiting' && '대기'}
+                            {progressStatus === 'generating' && <><span className="animate-spin inline-block">⟳</span> 생성</>}
+                            {progressStatus === 'saving' && <><span className="animate-spin inline-block">⟳</span> 저장</>}
+                            {progressStatus === 'done' && '✓ 완료'}
+                            {progressStatus === 'failed' && '✗ 실패'}
+                            {!progressStatus && '-'}
+                          </span>
+                        )}
                       </label>
                     );
                   })}

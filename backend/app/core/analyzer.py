@@ -23,6 +23,9 @@ class LevelAnalyzer:
         "ice_count": 4.0,         # 0-15 ice → 0-60 points (increased from 2.5)
         "goal_amount": 1.5,       # 3-10 goals → 4.5-15 points
         "layer_blocking": 0.15,   # Reduced: blocking can be 0-300 → 0-45 points
+        # New weights for better bot simulation correlation
+        "tile_type_count": 8.0,   # 3-6 types → 24-48 points (덱 큐 막힘 확률에 큰 영향)
+        "move_ratio": 15.0,       # 1.5-4.0 ratio → 22.5-60 points (무브 여유도)
     }
 
     # Recommendation thresholds
@@ -74,6 +77,7 @@ class LevelAnalyzer:
         layer_positions: Dict[int, Set[str]] = {}
 
         num_layers = level_json.get("layer", 8)
+        max_moves = level_json.get("max_moves", 30)  # 기본값 30
 
         for i in range(num_layers):
             layer_key = f"layer_{i}"
@@ -117,6 +121,10 @@ class LevelAnalyzer:
         # Calculate layer blocking score
         layer_blocking = self._calculate_layer_blocking(layer_positions, num_layers)
 
+        # Calculate new metrics
+        tile_type_count = len([t for t in tile_types.keys() if t.startswith("t")])  # t1~t15만 카운트
+        move_ratio = total_tiles / max_moves if max_moves > 0 else 0.0
+
         return LevelMetrics(
             total_tiles=total_tiles,
             active_layers=active_layers,
@@ -128,6 +136,9 @@ class LevelAnalyzer:
             layer_blocking=layer_blocking,
             tile_types=tile_types,
             goals=goals,
+            tile_type_count=tile_type_count,
+            max_moves=max_moves,
+            move_ratio=move_ratio,
         )
 
     def _calculate_layer_blocking(
@@ -167,6 +178,15 @@ class LevelAnalyzer:
         score += metrics.ice_count * self.WEIGHTS["ice_count"]
         score += metrics.goal_amount * self.WEIGHTS["goal_amount"]
         score += metrics.layer_blocking * self.WEIGHTS["layer_blocking"]
+
+        # New metrics for better bot simulation correlation
+        # 타일 종류 다양성: 3종류 기준, 초과 시 급격히 어려워짐
+        tile_type_penalty = max(0, metrics.tile_type_count - 3)
+        score += tile_type_penalty * self.WEIGHTS["tile_type_count"]
+
+        # 무브 여유도: 비율 2.0 기준, 초과 시 어려움 증가
+        move_ratio_penalty = max(0, metrics.move_ratio - 2.0)
+        score += move_ratio_penalty * self.WEIGHTS["move_ratio"]
 
         # Normalize to 0-100 range
         normalized_score = score / 3.0

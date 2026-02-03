@@ -202,10 +202,11 @@ export async function generateValidatedLevel(
     scoring_difficulty: scoringOptions?.scoring_difficulty,
   };
 
-  // Calculate timeout: base 60s + extra time for retries and simulations
-  // Each retry with 30 iterations takes ~5-10 seconds
+  // Calculate timeout: base 120s + extra time for retries and simulations
+  // Each retry with 50 iterations + 5 bots takes ~15-30 seconds under load
   const maxRetries = request.max_retries ?? 5;
-  const timeoutMs = 60000 + (maxRetries * 15000); // 60s base + 15s per retry
+  const simIter = request.simulation_iterations ?? 30;
+  const timeoutMs = 120000 + (maxRetries * simIter * 500); // 120s base + retry*iter scaling
 
   const response = await apiClient.post<ValidatedGenerateResult>('/generate/validated', request, {
     timeout: timeoutMs,

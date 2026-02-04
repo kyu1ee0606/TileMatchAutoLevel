@@ -1275,6 +1275,20 @@ function TestTab({
   } | null>(null);
   const [autoTestIterations, setAutoTestIterations] = useState(100);
 
+  // Sequential auto process state (test → regenerate if failed → repeat until pass)
+  const [isSequentialProcessing, setIsSequentialProcessing] = useState(false);
+  const [sequentialProgress, setSequentialProgress] = useState<{
+    currentIndex: number;
+    total: number;
+    currentLevel: number;
+    currentAttempt: number;
+    maxAttempts: number;
+    status: 'testing' | 'regenerating' | 'idle';
+    results: { level_number: number; attempts: number; final_score: number; success: boolean }[];
+  }>({ currentIndex: 0, total: 0, currentLevel: 0, currentAttempt: 0, maxAttempts: 5, status: 'idle', results: [] });
+  const [selectedSequentialLevels, setSelectedSequentialLevels] = useState<Set<number>>(new Set());
+  const sequentialAbortRef = useRef<AbortController | null>(null);
+
   // Batch auto test state
   const [batchTestProgress, setBatchTestProgress] = useState<{
     status: 'idle' | 'running' | 'paused' | 'completed' | 'error';
@@ -1465,6 +1479,128 @@ function TestTab({
     }
   };
 
+  // Sequential auto process: test → regenerate if failed → repeat until pass (70%+)
+  const handleSequentialProcess = async (targetLevelNumbers: number[]) => {
+    if (targetLevelNumbers.length === 0) {
+      addNotification('info', '처리할 레벨이 없습니다.');
+      return;
+    }
+
+    const MAX_ATTEMPTS = 5; // Maximum regeneration attempts per level
+    const PASS_THRESHOLD = 70; // 70% match score to pass
+
+    sequentialAbortRef.current = new AbortController();
+    const signal = sequentialAbortRef.current.signal;
+
+    setIsSequentialProcessing(true);
+    setSequentialProgress({
+      currentIndex: 0,
+      total: targetLevelNumbers.length,
+      currentLevel: targetLevelNumbers[0],
+      currentAttempt: 0,
+      maxAttempts: MAX_ATTEMPTS,
+      status: 'testing',
+      results: [],
+    });
+
+    const results: { level_number: number; attempts: number; final_score: number; success: boolean }[] = [];
+
+    for (let i = 0; i < targetLevelNumbers.length; i++) {
+      if (signal.aborted) break;
+
+      const levelNumber = targetLevelNumbers[i];
+      let currentLevel = levels.find(l => l.meta.level_number === levelNumber);
+      if (!currentLevel) continue;
+
+      let attempts = 0;
+      let matchScore = 0;
+      let passed = false;
+
+      while (attempts < MAX_ATTEMPTS && !passed && !signal.aborted) {
+        attempts++;
+
+        // Update progress: testing
+        setSequentialProgress(prev => ({
+          ...prev,
+          currentIndex: i,
+          currentLevel: levelNumber,
+          currentAttempt: attempts,
+          status: 'testing',
+        }));
+
+        // Test the level
+        try {
+          const result = await analyzeAutoPlay(currentLevel.level_json, {
+            iterations: autoTestIterations,
+            targetDifficulty: currentLevel.meta.target_difficulty,
+          });
+
+          matchScore = calculateMatchScoreFromBots(result.bot_stats);
+
+          // Save test result
+          const botClearRates = {
+            novice: result.bot_stats.find(s => s.profile === 'novice')?.clear_rate || 0,
+            casual: result.bot_stats.find(s => s.profile === 'casual')?.clear_rate || 0,
+            average: result.bot_stats.find(s => s.profile === 'average')?.clear_rate || 0,
+            expert: result.bot_stats.find(s => s.profile === 'expert')?.clear_rate || 0,
+            optimal: result.bot_stats.find(s => s.profile === 'optimal')?.clear_rate || 0,
+          };
+
+          await saveProductionLevels(batchId, [{
+            meta: { ...currentLevel.meta, bot_clear_rates: botClearRates, match_score: matchScore },
+            level_json: currentLevel.level_json,
+          }]);
+
+          // Update levels state
+          setLevels(prev => prev.map(l =>
+            l.meta.level_number === levelNumber
+              ? { ...l, meta: { ...l.meta, match_score: matchScore, bot_clear_rates: botClearRates } }
+              : l
+          ));
+
+          if (matchScore >= PASS_THRESHOLD) {
+            passed = true;
+          } else if (attempts < MAX_ATTEMPTS && !signal.aborted) {
+            // Regenerate if not passed
+            setSequentialProgress(prev => ({ ...prev, status: 'regenerating' }));
+
+            // Use existing regeneration logic
+            await handleRegenerateLevel(levelNumber);
+
+            // Reload the level after regeneration from storage
+            const reloadedLevels = await getProductionLevelsByBatch(batchId);
+            currentLevel = reloadedLevels.find((l: ProductionLevel) => l.meta.level_number === levelNumber);
+            if (!currentLevel) break;
+          }
+        } catch (err) {
+          console.error(`Sequential process failed for level ${levelNumber}:`, err);
+          break;
+        }
+      }
+
+      results.push({ level_number: levelNumber, attempts, final_score: matchScore, success: passed });
+      setSequentialProgress(prev => ({ ...prev, results: [...results] }));
+    }
+
+    setIsSequentialProcessing(false);
+    setSequentialProgress(prev => ({ ...prev, status: 'idle' }));
+
+    const successCount = results.filter(r => r.success).length;
+    const failCount = results.filter(r => !r.success).length;
+    addNotification(
+      successCount > 0 ? 'success' : 'warning',
+      `순차 처리 완료: ${successCount}개 통과, ${failCount}개 미통과`
+    );
+
+    loadLevels();
+    onStatsUpdate();
+  };
+
+  const handleStopSequentialProcess = () => {
+    sequentialAbortRef.current?.abort();
+    addNotification('info', '순차 처리 중지됨');
+  };
+
   // Calculate match score from bot stats (aligned with backend formula for consistency)
   const calculateMatchScoreFromBots = (botStats: { clear_rate: number; target_clear_rate: number }[]) => {
     if (!botStats.length) return 0;
@@ -1588,15 +1724,35 @@ function TestTab({
         batchSlice.map(level => testOneLevel(level))
       );
 
+      // Collect successful results for this batch
+      const batchSuccessResults: typeof results = [];
       for (let j = 0; j < batchResults.length; j++) {
         const r = batchResults[j];
         completedCount++;
         if (r.status === 'fulfilled') {
           results.push(r.value);
+          batchSuccessResults.push(r.value);
         } else {
           console.error(`Auto test failed for level ${batchSlice[j].meta.level_number}:`, r.reason);
           failedLevels.push(batchSlice[j].meta.level_number);
         }
+      }
+
+      // Update levels state directly for immediate UI feedback
+      if (batchSuccessResults.length > 0) {
+        setLevels(prev => prev.map(level => {
+          const result = batchSuccessResults.find(r => r.level_number === level.meta.level_number);
+          if (result) {
+            return {
+              ...level,
+              meta: {
+                ...level.meta,
+                match_score: result.match_score,
+              },
+            };
+          }
+          return level;
+        }));
       }
 
       setBatchTestProgress(prev => ({
@@ -1654,7 +1810,7 @@ function TestTab({
       const targetDifficulty = level.meta.target_difficulty;
       const targetScore = targetDifficulty * 100;
       const gimmickIntensity = Math.min(1, levelNumber / 500);
-      const DIFFICULTY_TOLERANCE = 5.0; // 0.05 in 0-1 scale = 5.0 in 0-100 scale
+      const DIFFICULTY_TOLERANCE = 10.0; // 0.10 in 0-1 scale = 10.0 in 0-100 scale (허용 오차 증가)
       const CANDIDATES_PER_ATTEMPT = 3;
       const MAX_ATTEMPTS = 5; // 최대 15개 후보
 
@@ -1788,14 +1944,10 @@ function TestTab({
         level_json: result.level_json,
       }]);
 
-      // Update batch test results if exists (clear match_score)
+      // Update batch test results if exists (remove regenerated level from results - needs re-test)
       setBatchTestProgress(prev => ({
         ...prev,
-        results: prev.results.map(r =>
-          r.level_number === levelNumber
-            ? { ...r, match_score: 0, grade: result.grade, status: 'unbalanced' as const }
-            : r
-        ),
+        results: prev.results.filter(r => r.level_number !== levelNumber),
       }));
 
       setRegenProgressMap(prev => new Map(prev).set(levelNumber, { status: 'done' }));
@@ -1900,10 +2052,10 @@ function TestTab({
 
     let successCount = 0;
     let failCount = 0;
-    const REGEN_CONCURRENCY = 10; // 프로덕션 초기 생성과 동일한 동시성
+    const REGEN_CONCURRENCY = 20; // 동시성 증가로 속도 개선
 
-    // 3. 레벨 1개 재생성: 반복 생성으로 오차 0.05 이내 달성
-    const DIFFICULTY_TOLERANCE = 5.0; // 0.05 in 0-1 scale = 5.0 in 0-100 scale
+    // 3. 레벨 1개 재생성: 반복 생성으로 오차 0.10 이내 달성
+    const DIFFICULTY_TOLERANCE = 10.0; // 0.10 in 0-1 scale = 10.0 in 0-100 scale (허용 오차 증가)
     const CANDIDATES_PER_ATTEMPT = 3;
     const MAX_ATTEMPTS = 5; // 최대 15개 후보
 
@@ -2076,8 +2228,16 @@ function TestTab({
       addNotification('info', `일치도 ${regenerationThreshold}% 미만 레벨이 없습니다.`);
       return;
     }
-    const result = await batchRegenerateCore(lowMatchLevels.map(l => l.level_number));
-    if (result) addNotification('success', `일괄 재생성 완료: ${result.successCount}개 성공, ${result.failCount}개 실패`);
+    const levelNumbers = lowMatchLevels.map(l => l.level_number);
+    const result = await batchRegenerateCore(levelNumbers);
+    if (result) {
+      // Remove regenerated levels from results (needs re-test)
+      setBatchTestProgress(prev => ({
+        ...prev,
+        results: prev.results.filter(r => !levelNumbers.includes(r.level_number)),
+      }));
+      addNotification('success', `일괄 재생성 완료: ${result.successCount}개 성공, ${result.failCount}개 실패`);
+    }
   };
 
   // Batch regenerate low match score levels from stored level data
@@ -2369,6 +2529,173 @@ function TestTab({
           🚀 자동 (일괄)
         </button>
       </div>
+
+      {/* Sequential Auto Process Panel - auto_single mode */}
+      {testMode === 'auto_single' && (() => {
+        const untestedLevels = levels.filter(l => !l.meta.match_score || l.meta.match_score === 0);
+        const failedLevels = levels.filter(l => l.meta.match_score !== undefined && l.meta.match_score > 0 && l.meta.match_score < 70);
+        const targetLevels = [...untestedLevels, ...failedLevels].sort((a, b) => a.meta.level_number - b.meta.level_number);
+        const allSelected = targetLevels.length > 0 && targetLevels.every(l => selectedSequentialLevels.has(l.meta.level_number));
+
+        return targetLevels.length > 0 || isSequentialProcessing ? (
+          <div className="bg-gray-800 rounded-lg p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-medium text-white">🔄 순차 자동 처리</h3>
+              <span className="text-xs text-gray-400">
+                미측정: <span className="text-blue-400 font-medium">{untestedLevels.length}개</span>
+                {' / '}미달: <span className="text-orange-400 font-medium">{failedLevels.length}개</span>
+              </span>
+            </div>
+
+            <p className="text-xs text-gray-500">
+              테스트 → 미달(70% 미만)시 재생성 → 재테스트 반복 (최대 5회)
+            </p>
+
+            {/* Progress Display */}
+            {isSequentialProcessing && (
+              <div className="bg-gray-900/60 border border-gray-600 rounded-lg p-3 space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-gray-300 font-medium">
+                    Lv.{sequentialProgress.currentLevel} {sequentialProgress.status === 'testing' ? '테스트 중' : '재생성 중'}
+                    {' '}(시도 {sequentialProgress.currentAttempt}/{sequentialProgress.maxAttempts})
+                  </span>
+                  <span className="text-gray-400">
+                    {sequentialProgress.currentIndex + 1} / {sequentialProgress.total}
+                  </span>
+                </div>
+                <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full transition-all ${sequentialProgress.status === 'testing' ? 'bg-blue-500' : 'bg-orange-500'}`}
+                    style={{ width: `${((sequentialProgress.currentIndex + 1) / sequentialProgress.total) * 100}%` }}
+                  />
+                </div>
+                {sequentialProgress.results.length > 0 && (
+                  <div className="flex gap-2 text-xs">
+                    <span className="text-green-400">✓ 통과: {sequentialProgress.results.filter(r => r.success).length}</span>
+                    <span className="text-red-400">✗ 실패: {sequentialProgress.results.filter(r => !r.success).length}</span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Action Buttons */}
+            <div className="flex items-center gap-2">
+              {isSequentialProcessing ? (
+                <Button onClick={handleStopSequentialProcess} variant="danger" size="sm" className="flex-1">
+                  ⏹️ 중지
+                </Button>
+              ) : (
+                <>
+                  <Button
+                    onClick={() => handleSequentialProcess(targetLevels.map(l => l.meta.level_number))}
+                    disabled={targetLevels.length === 0}
+                    size="sm"
+                    className="flex-1 bg-blue-600 hover:bg-blue-500"
+                  >
+                    🚀 전체 {targetLevels.length}개 순차 처리
+                  </Button>
+                  <Button
+                    onClick={() => handleSequentialProcess([...selectedSequentialLevels])}
+                    disabled={selectedSequentialLevels.size === 0}
+                    size="sm"
+                    className={`flex-1 ${selectedSequentialLevels.size > 0 ? 'bg-indigo-600 hover:bg-indigo-500' : 'bg-gray-600'}`}
+                  >
+                    🎯 선택 {selectedSequentialLevels.size}개 처리
+                  </Button>
+                </>
+              )}
+            </div>
+
+            {/* Level Selection List */}
+            {!isSequentialProcessing && targetLevels.length > 0 && (
+              <div className="border border-gray-700 rounded-lg overflow-hidden">
+                <div className="flex items-center px-3 py-2 bg-gray-700/50 text-xs text-gray-400">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setSelectedSequentialLevels(new Set(targetLevels.map(l => l.meta.level_number)));
+                        } else {
+                          setSelectedSequentialLevels(new Set());
+                        }
+                      }}
+                      className="w-3 h-3"
+                    />
+                    전체 선택
+                  </label>
+                  <span className="ml-auto">레벨</span>
+                  <span className="w-14 text-center">일치도</span>
+                  <span className="w-12 text-center">등급</span>
+                </div>
+                <div className="max-h-[150px] overflow-y-auto">
+                  {targetLevels.slice(0, 50).map(level => {
+                    const isUntested = !level.meta.match_score || level.meta.match_score === 0;
+                    return (
+                      <label
+                        key={level.meta.level_number}
+                        className="flex items-center px-3 py-1.5 hover:bg-gray-700/30 cursor-pointer text-xs"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selectedSequentialLevels.has(level.meta.level_number)}
+                          onChange={(e) => {
+                            setSelectedSequentialLevels(prev => {
+                              const next = new Set(prev);
+                              if (e.target.checked) next.add(level.meta.level_number);
+                              else next.delete(level.meta.level_number);
+                              return next;
+                            });
+                          }}
+                          className="w-3 h-3"
+                        />
+                        <span className="ml-2 flex-1 text-gray-300">Lv.{level.meta.level_number}</span>
+                        <span className={`w-14 text-center font-medium ${
+                          isUntested ? 'text-gray-500' :
+                          (level.meta.match_score || 0) >= 70 ? 'text-green-400' : 'text-red-400'
+                        }`}>
+                          {isUntested ? '미측정' : `${level.meta.match_score?.toFixed(0)}%`}
+                        </span>
+                        <span className={`w-12 text-center font-bold ${
+                          level.meta.grade === 'S' ? 'text-green-400' :
+                          level.meta.grade === 'A' ? 'text-blue-400' :
+                          level.meta.grade === 'B' ? 'text-yellow-400' :
+                          level.meta.grade === 'C' ? 'text-orange-400' : 'text-red-400'
+                        }`}>{level.meta.grade}</span>
+                      </label>
+                    );
+                  })}
+                  {targetLevels.length > 50 && (
+                    <div className="px-3 py-2 text-xs text-gray-500 text-center">
+                      ...외 {targetLevels.length - 50}개 더
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Results Summary */}
+            {!isSequentialProcessing && sequentialProgress.results.length > 0 && (
+              <div className="border border-gray-700 rounded-lg p-3 space-y-2">
+                <div className="text-xs text-gray-400">최근 처리 결과</div>
+                <div className="max-h-[100px] overflow-y-auto space-y-1">
+                  {sequentialProgress.results.slice(-10).map(r => (
+                    <div key={r.level_number} className={`flex items-center justify-between text-xs px-2 py-1 rounded ${
+                      r.success ? 'bg-green-900/30' : 'bg-red-900/30'
+                    }`}>
+                      <span className="text-gray-300">Lv.{r.level_number}</span>
+                      <span className={r.success ? 'text-green-400' : 'text-red-400'}>
+                        {r.final_score.toFixed(0)}% ({r.attempts}회 시도)
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : null;
+      })()}
 
       {/* Stored Low-Match Levels Regeneration */}
       {testMode === 'auto_batch' && (() => {
@@ -3084,13 +3411,17 @@ function TestTab({
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      {/* Match score indicator */}
-                      {level.meta.match_score !== undefined && (
+                      {/* Match score indicator or test button */}
+                      {level.meta.match_score !== undefined && level.meta.match_score > 0 ? (
                         <span className={`text-xs px-1.5 py-0.5 rounded ${
                           level.meta.match_score >= 70 ? 'bg-green-900/50 text-green-400' :
                           level.meta.match_score >= 50 ? 'bg-yellow-900/50 text-yellow-400' : 'bg-red-900/50 text-red-400'
                         }`}>
                           {level.meta.match_score.toFixed(0)}%
+                        </span>
+                      ) : (
+                        <span className="text-xs px-1.5 py-0.5 rounded bg-gray-700 text-gray-400">
+                          미측정
                         </span>
                       )}
                       <span className={`text-sm font-bold ${getGradeColor(level.meta.grade)}`}>

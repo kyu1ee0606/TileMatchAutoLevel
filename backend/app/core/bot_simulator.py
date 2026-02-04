@@ -10,11 +10,41 @@ import random
 import math
 from typing import Dict, List, Any, Optional, Tuple, Set
 from dataclasses import dataclass, field
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 import statistics
 from enum import Enum
+import os
 
 from ..models.bot_profile import BotProfile, BotType, BotTeam, get_profile
+
+
+# ============================================================
+# Module-level ProcessPoolExecutor for CPU-bound bot simulations
+# Enables true CPU parallelism (bypasses GIL)
+# ============================================================
+_process_pool: ProcessPoolExecutor | None = None
+
+def _get_process_pool() -> ProcessPoolExecutor:
+    """Get or create the module-level ProcessPoolExecutor for bot simulations."""
+    global _process_pool
+    if _process_pool is None:
+        workers = min(5, os.cpu_count() or 4)
+        _process_pool = ProcessPoolExecutor(max_workers=workers)
+    return _process_pool
+
+
+def _simulate_bot_process(args: Tuple[dict, str, int, int, Optional[int]]) -> 'BotSimulationResult':
+    """
+    Top-level function for ProcessPoolExecutor (must be picklable).
+    Runs a single bot simulation in a separate process for true CPU parallelism.
+    """
+    level_json, bot_type_value, iterations, max_moves, seed = args
+    simulator = BotSimulator()
+    profile = get_profile(BotType(bot_type_value))
+    result = simulator.simulate_with_profile(
+        level_json, profile, iterations=iterations, max_moves=max_moves, seed=seed
+    )
+    return result
 
 
 class TileEffectType(str, Enum):
@@ -159,6 +189,11 @@ class GameState:
     all_tile_type_counts: Dict[str, int] = field(default_factory=dict)  # tile_type -> total count
     # Performance optimization: cached max layer index
     _max_layer_idx: int = -1
+    # Performance optimization: blocking status cache (full_key -> is_blocked)
+    # Invalidated when tiles are picked
+    _blocking_cache: Dict[str, bool] = field(default_factory=dict)
+    # Performance optimization: accessible tiles cache
+    _accessible_cache: Optional[List['TileState']] = None
 
 
 @dataclass
@@ -352,22 +387,17 @@ class BotSimulator:
         bot_results: List[BotSimulationResult] = []
 
         if parallel and len(team.profiles) > 1:
-            with ThreadPoolExecutor(max_workers=min(5, len(team.profiles))) as executor:
-                futures = {
-                    executor.submit(
-                        self.simulate_with_profile,
-                        level_json,
-                        profile,
-                        team.iterations_per_bot,
-                        max_moves,
-                        seed + i if seed else None,
-                    ): profile
-                    for i, profile in enumerate(team.profiles)
-                }
+            # Use ProcessPoolExecutor for true CPU parallelism (bypasses GIL)
+            pool = _get_process_pool()
+            args_list = [
+                (level_json, profile.bot_type.value, team.iterations_per_bot, max_moves, seed + i if seed else None)
+                for i, profile in enumerate(team.profiles)
+            ]
+            futures = [pool.submit(_simulate_bot_process, args) for args in args_list]
 
-                for future in as_completed(futures):
-                    result = future.result()
-                    bot_results.append(result)
+            for future in as_completed(futures):
+                result = future.result()
+                bot_results.append(result)
         else:
             for i, profile in enumerate(team.profiles):
                 result = self.simulate_with_profile(
@@ -1720,15 +1750,23 @@ class BotSimulator:
         return moves
 
     def _get_accessible_tiles(self, state: GameState) -> List[TileState]:
-        """Get all tiles that are not picked yet."""
-        accessible = []
+        """Get all tiles that are not picked yet.
 
+        Performance: Results are cached and invalidated when tiles are picked.
+        """
+        # Check cache first
+        if state._accessible_cache is not None:
+            return state._accessible_cache
+
+        accessible = []
         for layer_idx in sorted(state.tiles.keys(), reverse=True):
             layer_tiles = state.tiles.get(layer_idx, {})
             for pos, tile_state in layer_tiles.items():
                 if not tile_state.picked:
                     accessible.append(tile_state)
 
+        # Cache the result
+        state._accessible_cache = accessible
         return accessible
 
     def _can_pick_tile(self, state: GameState, tile: TileState) -> bool:
@@ -1757,9 +1795,16 @@ class BotSimulator:
           - Upper layer col <= current layer col: Check (-1,-1), (0,-1), (-1,0), (0,0)
 
         Parity is determined by layer_idx % 2.
+
+        Performance: Results are cached per tile and invalidated when tiles are picked.
         """
         if not state.tiles:
             return False
+
+        # Check cache first (performance optimization)
+        cache_key = tile.full_key
+        if cache_key in state._blocking_cache:
+            return state._blocking_cache[cache_key]
 
         # Use cached max_layer for performance (avoid max() on each call)
         max_layer = state._max_layer_idx
@@ -1769,11 +1814,13 @@ class BotSimulator:
 
         # Early exit if tile is on top layer
         if tile.layer_idx >= max_layer:
+            state._blocking_cache[cache_key] = False
             return False
 
         tile_parity = tile.layer_idx % 2
         cur_layer_col = state.layer_cols.get(tile.layer_idx, 7)
 
+        result = False
         for upper_layer_idx in range(tile.layer_idx + 1, max_layer + 1):
             layer = state.tiles.get(upper_layer_idx, {})
             if not layer:
@@ -1802,9 +1849,13 @@ class BotSimulator:
                 by = tile.y_idx + dy
                 pos_key = f"{bx}_{by}"
                 if pos_key in layer and not layer[pos_key].picked:
-                    return True
+                    result = True
+                    break
+            if result:
+                break
 
-        return False
+        state._blocking_cache[cache_key] = result
+        return result
 
     def _apply_move(self, state: GameState, move: Move) -> int:
         """Apply a move to the game state. Returns number of tiles cleared."""
@@ -1855,6 +1906,10 @@ class BotSimulator:
 
         # Mark tile as picked
         tile_state.picked = True
+
+        # Invalidate blocking cache when tile is picked (performance optimization)
+        state._blocking_cache.clear()
+        state._accessible_cache = None
 
         # Remove bomb from tracking when picked (bomb is defused by picking it)
         if tile_state.effect_type == TileEffectType.BOMB:

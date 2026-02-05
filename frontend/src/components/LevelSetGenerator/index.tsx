@@ -176,6 +176,8 @@ export function LevelSetGenerator({ onLevelSetCreated }: LevelSetGeneratorProps)
 
       const baseParams: GenerationParams = {
         ...config.baseParams,
+        // level_number가 제공되면 tile_types를 제거하여 백엔드에서 자동 선택 (t0/톱니바퀴 패턴)
+        tile_types: config.useGimmickUnlock ? undefined : config.baseParams.tile_types,
         goals: effectiveGoals,
         target_difficulty: plan.targetDifficulty,
         pattern_index: config.baseParams.pattern_type === 'aesthetic' ? (setIndex % 50) : undefined,

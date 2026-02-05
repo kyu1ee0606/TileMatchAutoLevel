@@ -19,7 +19,7 @@ from ...models.schemas import (
     EnhanceLevelResponse,
 )
 from ...models.level import GenerationParams, LayerTileConfig, LayerObstacleConfig, LayerPatternConfig
-from ...core.generator import LevelGenerator
+from ...core.generator import LevelGenerator, get_tile_types_for_level
 from ...core.simulator import LevelSimulator
 from ...core.bot_simulator import BotSimulator
 from ...models.bot_profile import BotType, get_profile
@@ -1234,9 +1234,18 @@ def generate_validated_level(
     else:
         tile_type_count = 4   # minimum for all other levels
 
-    default_tile_types = sorted(random.sample(ALL_AVAILABLE_TILES, tile_type_count))
+    # Use get_tile_types_for_level when level_number is provided (supports t0 for client-side randomization)
+    # t0 = 랜덤 타일 플레이스홀더 (게임 시작 시 실제 타일로 변환)
+    if request.tile_types:
+        base_tile_types = list(request.tile_types)
+    elif request.level_number is not None:
+        # Use level-based tile type selection (may return t0 for client-side randomization)
+        base_tile_types = get_tile_types_for_level(request.level_number)
+    else:
+        # Fallback: random selection from available tiles (no level_number provided)
+        default_tile_types = sorted(random.sample(ALL_AVAILABLE_TILES, tile_type_count))
+        base_tile_types = default_tile_types
 
-    base_tile_types = list(request.tile_types) if request.tile_types else default_tile_types
     all_tile_types = ALL_AVAILABLE_TILES[:]  # t1~t15 전체 풀 (retry 시 랜덤 추가용)
     current_tile_types = base_tile_types.copy()
 
@@ -1506,16 +1515,26 @@ def generate_validated_level(
 
                 # PRIMARY Strategy: Tile type count (most effective for high difficulty)
                 # More tile types = harder to match before dock fills
-                # t1~t15 중 미사용 타일에서 랜덤 선택
+                # t0 사용 시: t0 추가 (useTileCount 증가)
+                # t1~t15 사용 시: 미사용 타일에서 랜덤 선택
                 if request.target_difficulty >= 0.7 and average_gap > 0.1:
                     # Add tile types more aggressively
                     types_to_add = 1 if avg_gap < 20 else 2
-                    unused_tiles = [t for t in all_tile_types if t not in current_tile_types]
-                    random.shuffle(unused_tiles)
-                    for t in unused_tiles[:types_to_add]:
-                        if len(current_tile_types) < 8:
-                            current_tile_types.append(t)
-                            current_tile_type_count = len(current_tile_types)
+                    uses_t0 = "t0" in current_tile_types
+                    if uses_t0:
+                        # t0 모드: t0 추가로 useTileCount 증가
+                        for _ in range(types_to_add):
+                            if len(current_tile_types) < 8:
+                                current_tile_types.append("t0")
+                                current_tile_type_count = len(current_tile_types)
+                    else:
+                        # 일반 모드: t1~t15 중 미사용 타일에서 랜덤 선택
+                        unused_tiles = [t for t in all_tile_types if t not in current_tile_types]
+                        random.shuffle(unused_tiles)
+                        for t in unused_tiles[:types_to_add]:
+                            if len(current_tile_types) < 8:
+                                current_tile_types.append(t)
+                                current_tile_type_count = len(current_tile_types)
 
                 # Strategy 2: Reduce moves ratio (tighter constraint)
                 if request.target_difficulty >= 0.7:

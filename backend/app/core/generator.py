@@ -89,18 +89,25 @@ def get_gboost_style_layer_config(level_number: int) -> Dict[str, Any]:
     """
     Get recommended layer configuration based on level number.
 
-    Based on analysis of GBoost production levels:
-    - Level 1-20: 1-2 layers, 7x7 grid, 9-25 tiles
-    - Level 21-50: 3-4 layers, 7x7 grid, 25-45 tiles
-    - Level 51-100: 4-5 layers, 10x10 grid, 50-80 tiles
-    - Level 101-150: 5 layers, 10x10 grid, 70-100 tiles
-    - Level 151+: 5-6 layers, 10x10 grid, 70-100 tiles
+    Based on analysis of GBoost production levels (221 human-designed levels)
+    and commercial games (Tile Explorer, Triple Tile, Tile Master 3D).
+
+    1500레벨 전체에 대한 점진적 설정:
+    - Level 1-10: Tutorial - 1-2 layers, 7x7, 9-18 tiles
+    - Level 11-30: Early - 2-3 layers, 7x7, 18-36 tiles
+    - Level 31-60: Early-Mid - 3-4 layers, 7x7, 30-50 tiles
+    - Level 61-100: Mid - 4-5 layers, 10x10, 50-80 tiles
+    - Level 101-225: Mid-Late - 4-5 layers, 10x10, 60-90 tiles
+    - Level 226-600: Standard - 4-5 layers, 10x10, 70-100 tiles
+    - Level 601-1125: Advanced - 5 layers, 10x10, 75-105 tiles
+    - Level 1126-1500: Expert - 5-6 layers, 10x10, 84-120 tiles
+    - Level 1501+: Master - 5-6 layers, 10x10, 96-120 tiles
 
     Args:
         level_number: The level number (1-based)
 
     Returns:
-        Dict with layer and grid configuration
+        Dict with layer and grid configuration including tile_types
     """
     if level_number <= 10:
         return {
@@ -109,24 +116,27 @@ def get_gboost_style_layer_config(level_number: int) -> Dict[str, Any]:
             "cols": 7,
             "rows": 7,
             "total_tile_range": (9, 18),
+            "tile_types": 4,  # 4종류 (튜토리얼)
             "description": "Tutorial - minimal complexity"
         }
-    elif level_number <= 20:
+    elif level_number <= 30:
         return {
             "min_layers": 2,
             "max_layers": 3,
             "cols": 7,
             "rows": 7,
-            "total_tile_range": (18, 30),
+            "total_tile_range": (18, 36),
+            "tile_types": 4,  # 4종류
             "description": "Early game - basic layering"
         }
-    elif level_number <= 50:
+    elif level_number <= 60:
         return {
             "min_layers": 3,
             "max_layers": 4,
             "cols": 7,
             "rows": 7,
             "total_tile_range": (30, 50),
+            "tile_types": 5,  # 5종류
             "description": "Early-mid game - moderate complexity"
         }
     elif level_number <= 100:
@@ -136,16 +146,48 @@ def get_gboost_style_layer_config(level_number: int) -> Dict[str, Any]:
             "cols": 10,
             "rows": 10,
             "total_tile_range": (50, 80),
+            "tile_types": 5,  # 5종류
             "description": "Mid game - larger grid"
         }
-    elif level_number <= 150:
+    elif level_number <= 225:
+        return {
+            "min_layers": 4,
+            "max_layers": 5,
+            "cols": 10,
+            "rows": 10,
+            "total_tile_range": (60, 90),
+            "tile_types": 5,  # 5종류
+            "description": "Mid-late game - S등급 마무리"
+        }
+    elif level_number <= 600:
         return {
             "min_layers": 4,
             "max_layers": 5,
             "cols": 10,
             "rows": 10,
             "total_tile_range": (70, 100),
-            "description": "Mid-late game - increased tiles"
+            "tile_types": 6,  # 6종류 (A등급)
+            "description": "Standard game - A등급 주력"
+        }
+    elif level_number <= 1125:
+        return {
+            "min_layers": 5,
+            "max_layers": 5,
+            "cols": 10,
+            "rows": 10,
+            "total_tile_range": (75, 105),
+            "tile_types": 6,  # 6종류 (B등급 ★핵심 재미 구간)
+            "description": "Advanced game - B등급 핵심 재미"
+        }
+    elif level_number <= 1500:
+        return {
+            "min_layers": 5,
+            "max_layers": 6,
+            "cols": 10,
+            "rows": 10,
+            "total_tile_range": (84, 120),
+            "tile_types": 7,  # 7종류 (C/D등급 - 7슬롯 독과 균형)
+            "description": "Expert game - C/D등급 도전"
         }
     else:
         return {
@@ -153,9 +195,84 @@ def get_gboost_style_layer_config(level_number: int) -> Dict[str, Any]:
             "max_layers": 6,
             "cols": 10,
             "rows": 10,
-            "total_tile_range": (70, 100),
-            "description": "Late game - maximum complexity"
+            "total_tile_range": (96, 120),
+            "tile_types": 8,  # 8종류 (엔드게임)
+            "description": "Master game - 엔드게임"
         }
+
+
+def get_tile_types_for_level(level_number: int) -> List[str]:
+    """
+    Get recommended tile types list based on level number.
+
+    톱니바퀴 패턴(10레벨 순환) 기반 타일 종류 선택:
+    - 순환의 첫 레벨(1, 11, 21, 31...): 특정 타일 세트 사용
+    - 나머지 레벨: t0 사용 (클라이언트에서 랜덤 결정)
+
+    타일 그룹 순환 (30레벨마다 전체 순환):
+    - 그룹 0: t1~t5 (레벨 1, 31, 61...)
+    - 그룹 1: t6~t10 (레벨 11, 41, 71...)
+    - 그룹 2: t11~t15 (레벨 21, 51, 81...)
+
+    [인게임 t0 시스템]
+    - t0 = 랜덤 타일 플레이스홀더 (게임 시작 시 실제 타일로 변환)
+    - useTileCount 설정값 기반으로 타일 종류 결정 (1~15)
+    - 3의 배수 보장, 균등 분배 (typeImbalance=0)
+
+    Args:
+        level_number: The level number (1-based)
+
+    Returns:
+        List of tile type strings
+    """
+    # 10레벨 순환에서의 위치 (0-9)
+    position_in_cycle = (level_number - 1) % 10
+
+    # 레벨에 따른 타일 종류 수 결정 (난이도 스케일링)
+    config = get_gboost_style_layer_config(level_number)
+    tile_count = config.get("tile_types", 5)
+
+    # 30레벨마다 타일 그룹 순환 (0, 1, 2)
+    group_index = ((level_number - 1) // 10) % 3
+
+    # 첫 번째 레벨(톱니바퀴 최저 난이도)은 특정 타일 세트 사용
+    if position_in_cycle == 0:
+        if group_index == 0:
+            base_tiles = ["t1", "t2", "t3", "t4", "t5"]
+        elif group_index == 1:
+            base_tiles = ["t6", "t7", "t8", "t9", "t10"]
+        else:
+            base_tiles = ["t11", "t12", "t13", "t14", "t15"]
+
+        # tile_count에 맞게 조정
+        return base_tiles[:tile_count]
+    else:
+        # 나머지 레벨은 t0 사용 (클라이언트에서 랜덤 결정)
+        # tile_count 개수만큼 t0 반복 (useTileCount 설정용)
+        return ["t0"] * tile_count
+
+
+def get_use_tile_count_for_level(level_number: int) -> int:
+    """
+    Get useTileCount setting for level.
+
+    레벨에 따른 타일 종류 수:
+    - Level 1-30: 4종류
+    - Level 31-60: 5종류
+    - Level 61-225: 5종류
+    - Level 226-600: 6종류
+    - Level 601-1125: 6종류
+    - Level 1126-1500: 7종류
+    - Level 1501+: 8종류
+
+    Args:
+        level_number: The level number (1-based)
+
+    Returns:
+        useTileCount value (1-15)
+    """
+    config = get_gboost_style_layer_config(level_number)
+    return config.get("tile_types", 5)
 
 from ..models.level import (
     GenerationParams,
@@ -871,8 +988,14 @@ class LevelGenerator:
         cols, rows = params.grid_size
 
         # Calculate useTileCount from tile_types
-        # Count ALL tile types including t0
-        tile_types = params.tile_types or self.DEFAULT_TILE_TYPES
+        # If tile_types not specified and level_number is provided, use auto-config
+        tile_types = params.tile_types
+        if not tile_types and params.level_number:
+            # Auto-select tile types based on level number (GBoost style)
+            tile_types = get_tile_types_for_level(params.level_number)
+        elif not tile_types:
+            tile_types = self.DEFAULT_TILE_TYPES
+
         # Filter to only valid tile types (t0~t15)
         valid_tile_types = [t for t in tile_types if t.startswith('t') and (t == 't0' or t[1:].isdigit())]
         if valid_tile_types:
@@ -1236,7 +1359,12 @@ class LevelGenerator:
         target = params.target_difficulty
         cols, rows = params.grid_size
 
-        tile_types = params.tile_types or self.DEFAULT_TILE_TYPES
+        # Auto-select tile types based on level number if not specified
+        tile_types = params.tile_types
+        if not tile_types and params.level_number:
+            tile_types = get_tile_types_for_level(params.level_number)
+        elif not tile_types:
+            tile_types = self.DEFAULT_TILE_TYPES
 
         # Check if per-layer tile configs are provided (they take priority)
         has_layer_tile_configs = bool(params.layer_tile_configs) and len(params.layer_tile_configs) > 0
@@ -5145,7 +5273,8 @@ class LevelGenerator:
                     available_tile_types.add(tile_type)
 
         if not available_tile_types:
-            available_tile_types = {"A", "B", "C", "D", "E"}  # Default tile types
+            # Fallback: use t0 to match the standard tile type format
+            available_tile_types = {"t0"}
 
         tile_types_list = list(available_tile_types)
 
@@ -8306,8 +8435,22 @@ class LevelGenerator:
 
         logger.info(f"[_ensure_minimum_tiles] Current: {current_tiles}, Min: {min_required}, Adding: {tiles_to_add}")
 
-        # Get available tile types
-        valid_tile_types = [f"t{i}" for i in range(1, use_tile_count + 1)]
+        # Get available tile types from existing tiles to preserve t0 if used
+        existing_tile_types = set()
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for tile_data in tiles.values():
+                if isinstance(tile_data, list) and tile_data:
+                    tile_type = tile_data[0]
+                    if tile_type.startswith("t") and not tile_type.startswith("craft_") and not tile_type.startswith("stack_"):
+                        existing_tile_types.add(tile_type)
+
+        # Use existing tile types if available (preserves t0), otherwise fallback to t1~t{useTileCount}
+        if existing_tile_types:
+            valid_tile_types = sorted(list(existing_tile_types))
+        else:
+            valid_tile_types = [f"t{i}" for i in range(1, use_tile_count + 1)]
 
         # Find positions to add tiles (prefer upper layers, avoid existing tiles)
         added = 0

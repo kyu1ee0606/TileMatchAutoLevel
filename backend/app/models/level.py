@@ -145,9 +145,15 @@ class GenerationParams:
     def __post_init__(self):
         """Set default values after initialization."""
         if self.tile_types is None:
-            # Default to t1~t5 (useTileCount=5)
-            # NOTE: t0 is excluded - causes issues with bot simulation
-            self.tile_types = ["t1", "t2", "t3", "t4", "t5"]
+            # Auto-select tile types based on level number if provided
+            if self.level_number is not None:
+                # Import here to avoid circular dependency
+                from ..core.generator import get_tile_types_for_level
+                self.tile_types = get_tile_types_for_level(self.level_number)
+            else:
+                # Default to t1~t5 (useTileCount=5)
+                # NOTE: t0 is excluded - causes issues with bot simulation
+                self.tile_types = ["t1", "t2", "t3", "t4", "t5"]
         if self.obstacle_types is None:
             self.obstacle_types = ["chain", "frog"]
         # Only set default goals if None, not if empty list (empty list means no goals)

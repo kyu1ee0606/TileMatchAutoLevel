@@ -249,72 +249,94 @@ PHASE_CONFIGS: Dict[LevelPhase, PhaseConfig] = {
     # D등급 (1426-1500, 5%): 심화/고수 - 난이도 0.78-0.92
     # =========================================================
 
+    # =========================================================
+    # GBoost 221레벨 분석 + 상용게임(Tile Explorer, Triple Tile) 기반 개선
+    # =========================================================
+    # [GBoost 분석 결과]
+    # - 레벨 1-30: 타일수 9-126(평균37), 레이어 1-9(평균4)
+    # - 레벨 31-60: 타일수 18-99(평균58), 레이어 2-7(평균4.6)
+    # - 레벨 61-100: 타일수 21-119(평균80), 레이어 2-6(평균4.7)
+    # - 레벨 101-150: 타일수 58-120(평균86), 레이어 4-5(평균4.8)
+    # - 레벨 151-200: 타일수 52-116(평균82), 레이어 5(고정)
+    # - 레벨 201+: 타일수 60-103(평균81), 레이어 2-5(평균4.9)
+    #
+    # [상용 게임 연구 - Room 8 Studio]
+    # - 튜토리얼: 1-3개 메카닉만 사용
+    # - 50레벨 동안 메카닉 반복 금지
+    # - 6종류 레벨 타입: Tutorial, Wow-effect, Fuu-effect, Procrastinating, Skill, Visualization
+    #
+    # [상용 게임 연구 - Triple Tile, Tile Explorer]
+    # - 초반 레벨: "거의 너무 쉬움"으로 성취감 제공
+    # - 레벨별 난이도와 타일 수 점진적 증가
+    # - 7슬롯 독에서 7개 타일이 차면 실패 메카닉
+    # =========================================================
+
     LevelPhase.TUTORIAL: PhaseConfig(
         phase=LevelPhase.TUTORIAL,
         level_range=(1, 225),  # S등급 15% (225개)
-        min_tile_types=4,      # 최소 4종류 (레벨1은 generate.py에서 3종류)
-        max_tile_types=5,
-        # [연구 근거] Triple Tile: 초반 레이어 1-3개 (가시 레이어 중심)
-        min_layers=1,          # 초반 1레이어부터 시작 (매우 쉬움)
-        max_layers=3,          # 최대 3레이어 (3-layer 시스템 기준)
+        min_tile_types=4,      # 최소 4종류 (GBoost 분석: 대부분 t0 랜덤 사용)
+        max_tile_types=5,      # 최대 5종류 (초반 복잡도 제한)
+        # [GBoost 분석] 레벨 1-30: 평균 4레이어, 최대 9레이어 → 점진적 증가
+        min_layers=1,          # 레벨 1-10: 1-2 레이어
+        max_layers=4,          # 레벨 21-225: 최대 4레이어 (GBoost 평균 기준)
         max_gimmick_types=2,   # 언락된 기믹 중 최대 2개 사용
-        # [연구 근거] Triple Tile: 초반 "거의 너무 쉬움"
+        # [Triple Tile 연구] 초반 "거의 너무 쉬움"
         base_difficulty=0.02,
         difficulty_increment=0.00071,  # 0.02 + 224*0.00071 ≈ 0.18
-        # [연구 근거] 초반 타일 18-45개 (Triple Tile 패턴)
-        min_tiles=18,
-        max_tiles=45,
+        # [GBoost 분석] 레벨 1-30: 평균 37타일 → 점진적 증가
+        min_tiles=9,           # 레벨 1-10: 9-18타일 (GBoost 최소)
+        max_tiles=60,          # 레벨 200+: 최대 60타일
         has_milestone=True,    # 100, 200레벨 마일스톤 포함
     ),
 
     LevelPhase.BASIC: PhaseConfig(
         phase=LevelPhase.BASIC,
         level_range=(226, 600),  # A등급 25% (375개)
-        min_tile_types=4,
-        max_tile_types=6,
-        # [연구 근거] 중간 단계에서 레이어 확장 (2-4레이어)
-        min_layers=2,
-        max_layers=4,
+        min_tile_types=5,        # 5종류로 시작 (복잡도 증가)
+        max_tile_types=6,        # 최대 6종류
+        # [GBoost 분석] 레벨 61-100: 평균 4.7레이어 → 4-5레이어
+        min_layers=3,
+        max_layers=5,
         max_gimmick_types=3,   # 언락된 기믹 중 최대 3개 사용
         base_difficulty=0.18,
         difficulty_increment=0.00053,  # 0.18 + 374*0.00053 ≈ 0.38
-        # [연구 근거] 타일 수 점진적 증가
-        min_tiles=36,
-        max_tiles=60,
+        # [GBoost 분석] 레벨 61-100: 평균 80타일
+        min_tiles=45,
+        max_tiles=84,
         has_milestone=True,    # 300, 400, 500, 600레벨 마일스톤
     ),
 
     LevelPhase.INTERMEDIATE: PhaseConfig(
         phase=LevelPhase.INTERMEDIATE,
         level_range=(601, 1125),  # B등급 35% (525개) ★핵심 재미 구간
-        min_tile_types=5,
-        max_tile_types=7,
-        # [연구 근거] 업계 표준 3-5레이어 + 히든 타일 본격 활용
-        min_layers=3,
+        min_tile_types=5,        # 5종류 유지 (복잡도 vs 플레이어빌리티 균형)
+        max_tile_types=7,        # 최대 7종류 (7슬롯 독과 균형)
+        # [GBoost 분석] 레벨 101-150: 평균 4.8레이어, 151-200: 5레이어 고정
+        min_layers=4,
         max_layers=5,
         max_gimmick_types=4,   # 언락된 기믹 중 최대 4개 사용
         base_difficulty=0.38,
         difficulty_increment=0.00038,  # 0.38 + 524*0.00038 ≈ 0.58
-        # [연구 근거] 타일 48-84개 (중급 구간)
-        min_tiles=48,
-        max_tiles=84,
+        # [GBoost 분석] 레벨 101-150: 평균 86타일
+        min_tiles=60,
+        max_tiles=100,
         has_milestone=True,    # 700, 800, 900, 1000, 1100레벨 마일스톤
     ),
 
     LevelPhase.ADVANCED: PhaseConfig(
         phase=LevelPhase.ADVANCED,
         level_range=(1126, 1425),  # C등급 20% (300개)
-        min_tile_types=6,
-        max_tile_types=8,
-        # [연구 근거] 후반 레이어 4-6 (히든 타일 비중 증가)
-        min_layers=4,
+        min_tile_types=6,         # 6종류 (난이도 상승)
+        max_tile_types=8,         # 최대 8종류
+        # [GBoost 분석] 후반 레이어 5 고정 → 5-6레이어
+        min_layers=5,
         max_layers=6,
         max_gimmick_types=5,   # 언락된 기믹 중 최대 5개 사용
         base_difficulty=0.58,
         difficulty_increment=0.00067,  # 0.58 + 299*0.00067 ≈ 0.78
-        # [연구 근거] 타일 66-105개 (도전 구간)
-        min_tiles=66,
-        max_tiles=105,
+        # [GBoost 분석] 후반 레벨: 80-100타일 유지
+        min_tiles=72,
+        max_tiles=108,
         has_milestone=True,    # 1200, 1300, 1400레벨 마일스톤
     ),
 
@@ -322,14 +344,14 @@ PHASE_CONFIGS: Dict[LevelPhase, PhaseConfig] = {
         phase=LevelPhase.EXPERT,
         level_range=(1426, 1500),  # D등급 5% (75개)
         min_tile_types=6,
-        max_tile_types=8,
-        # [연구 근거] 최대 6레이어 (업계 표준상 6레이어 초과는 과도)
+        max_tile_types=8,         # 최대 8종류 (7슬롯 독보다 많음 = 어려움)
+        # [업계 표준] 최대 6레이어 (과도한 복잡성 방지)
         min_layers=5,
         max_layers=6,
         max_gimmick_types=6,   # 모든 기믹 자유 조합 (최대 6개)
         base_difficulty=0.78,
         difficulty_increment=0.00187,  # 0.78 + 74*0.00187 ≈ 0.92
-        # [연구 근거] 타일 84-120개 (고난이도 구간)
+        # [고난이도] 타일 수 최대화
         min_tiles=84,
         max_tiles=120,
         has_milestone=True,    # 1500레벨 마일스톤
@@ -340,13 +362,13 @@ PHASE_CONFIGS: Dict[LevelPhase, PhaseConfig] = {
         level_range=(1501, 9999),  # 엔드게임 (무한 확장)
         min_tile_types=6,
         max_tile_types=8,
-        # [연구 근거] 엔드게임도 6레이어 유지 (과도한 복잡성 방지)
+        # [엔드게임] 6레이어 유지 (과도한 복잡성 방지)
         min_layers=5,
         max_layers=6,
         max_gimmick_types=6,   # 모든 기믹 자유 조합 (최대 6개)
         base_difficulty=0.92,  # 최고 난이도 유지
         difficulty_increment=0.0,  # 로그 곡선으로 0.96 수렴
-        # [연구 근거] 타일 96-120개 (엔드게임 일정 유지)
+        # [엔드게임] 타일 수 일정 유지
         min_tiles=96,
         max_tiles=120,
         has_milestone=True,

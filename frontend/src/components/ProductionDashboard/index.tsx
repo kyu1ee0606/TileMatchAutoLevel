@@ -361,26 +361,16 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             if (isEarlyLevel) { minLayers = 2; maxLayers = Math.min(4, maxLayers); }
             else if (isBossLevel) { minLayers = Math.max(3, Math.floor(2 + targetDifficulty * 2)); maxLayers = Math.min(7, 4 + Math.floor(targetDifficulty * 3)); }
 
-            // Tile types
-            let tileTypeCount: number;
-            if (isEarlyLevel) { tileTypeCount = Math.min(4, 3 + Math.floor(targetDifficulty * 2)); }
-            else if (isBossLevel) { tileTypeCount = Math.max(4, Math.min(6, 4 + Math.floor(targetDifficulty * 2))); }
-            else { tileTypeCount = 3 + Math.floor(targetDifficulty * 3); }
-            // t1~t15 풀에서 랜덤 N개 선택 (골고루 사용)
-            const allTiles = Array.from({ length: 15 }, (_, i) => `t${i + 1}`);
-            const shuffled = [...allTiles];
-            for (let i = shuffled.length - 1; i > 0; i--) {
-              const j = Math.floor(Math.random() * (i + 1));
-              [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-            }
-            const tileTypes = shuffled.slice(0, tileTypeCount).sort();
+            // Tile types: 백엔드에서 level_number 기반 자동 선택 (톱니바퀴 패턴 + t0)
+            // - 사이클 첫 레벨 (1, 11, 21...): 특정 타일 세트 (t1-t5, t6-t10, t11-t15)
+            // - 나머지 레벨: t0 (클라이언트에서 런타임 결정)
 
             const params: GenerationParams = {
               target_difficulty: targetDifficulty,
               grid_size: gridSize,
               min_layers: minLayers,
               max_layers: maxLayers,
-              tile_types: tileTypes,
+              tile_types: undefined, // 백엔드에서 level_number 기반 자동 선택
               obstacle_types: [],
               goals: [{ type: goalType, direction: goalDirection, count: Math.max(2, Math.floor(3 + targetDifficulty * 2)) }],
               symmetry_mode: symmetryMode,
@@ -1961,7 +1951,7 @@ function TestTab({
                 grid_size: gridSize,
                 min_layers: minLayers,
                 max_layers: maxLayers,
-                tile_types: [],
+                tile_types: undefined, // 백엔드에서 level_number 기반 자동 선택
                 obstacle_types: [],
                 goals: [{
                   type: goalType,
@@ -2216,7 +2206,7 @@ function TestTab({
                 grid_size: gridSize,
                 min_layers: minLayers,
                 max_layers: maxLayers,
-                tile_types: [],
+                tile_types: undefined, // 백엔드에서 level_number 기반 자동 선택
                 obstacle_types: [],
                 goals: [{ type: goalType, direction: goalDirection, count: Math.max(2, Math.floor(3 + targetDifficulty * 2)) }],
                 symmetry_mode: symmetryMode,

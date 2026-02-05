@@ -7,6 +7,156 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
+
+# ============ GBoost-Style Level Range Gimmick Configuration ============
+# Based on analysis of 221 human-designed levels (level_1 ~ level_221)
+# Gimmicks are progressively introduced to match the natural learning curve
+
+def get_gboost_style_gimmicks(level_number: int) -> Dict[str, Any]:
+    """
+    Get recommended gimmick configuration based on level number.
+
+    Based on analysis of GBoost production levels:
+    - Level 1-30: No gimmicks (tutorial/learning phase)
+    - Level 31-50: chain only (basic gimmick introduction)
+    - Level 51-80: chain, link_e (directional gimmick)
+    - Level 81-100: chain, link_e, link_w, bomb_5
+    - Level 101-130: chain, ice, link variants
+    - Level 131-160: chain, ice, curtain, grass
+    - Level 161-200: chain, ice, curtain, frog
+    - Level 201+: All gimmicks available
+
+    Args:
+        level_number: The level number (1-based)
+
+    Returns:
+        Dict with:
+        - obstacle_types: List of allowed gimmick types
+        - gimmick_intensity: Suggested intensity (0.0-1.5)
+        - description: Human-readable description
+    """
+    if level_number <= 30:
+        return {
+            "obstacle_types": [],
+            "gimmick_intensity": 0.0,
+            "description": "Tutorial phase - no gimmicks"
+        }
+    elif level_number <= 50:
+        return {
+            "obstacle_types": ["chain"],
+            "gimmick_intensity": 0.3,
+            "description": "Basic gimmick introduction - chain only"
+        }
+    elif level_number <= 80:
+        return {
+            "obstacle_types": ["chain", "link"],
+            "gimmick_intensity": 0.5,
+            "description": "Directional mechanics - chain + link"
+        }
+    elif level_number <= 100:
+        return {
+            "obstacle_types": ["chain", "link", "bomb"],
+            "gimmick_intensity": 0.6,
+            "description": "Explosive elements - chain + link + bomb"
+        }
+    elif level_number <= 130:
+        return {
+            "obstacle_types": ["chain", "link", "ice"],
+            "gimmick_intensity": 0.7,
+            "description": "Frozen challenges - chain + link + ice"
+        }
+    elif level_number <= 160:
+        return {
+            "obstacle_types": ["chain", "ice", "curtain", "grass"],
+            "gimmick_intensity": 0.8,
+            "description": "Hidden elements - chain + ice + curtain + grass"
+        }
+    elif level_number <= 200:
+        return {
+            "obstacle_types": ["chain", "ice", "curtain", "frog"],
+            "gimmick_intensity": 0.9,
+            "description": "Moving elements - chain + ice + curtain + frog"
+        }
+    else:
+        return {
+            "obstacle_types": ["chain", "frog", "link", "grass", "ice", "bomb", "curtain"],
+            "gimmick_intensity": 1.0,
+            "description": "All gimmicks available"
+        }
+
+
+def get_gboost_style_layer_config(level_number: int) -> Dict[str, Any]:
+    """
+    Get recommended layer configuration based on level number.
+
+    Based on analysis of GBoost production levels:
+    - Level 1-20: 1-2 layers, 7x7 grid, 9-25 tiles
+    - Level 21-50: 3-4 layers, 7x7 grid, 25-45 tiles
+    - Level 51-100: 4-5 layers, 10x10 grid, 50-80 tiles
+    - Level 101-150: 5 layers, 10x10 grid, 70-100 tiles
+    - Level 151+: 5-6 layers, 10x10 grid, 70-100 tiles
+
+    Args:
+        level_number: The level number (1-based)
+
+    Returns:
+        Dict with layer and grid configuration
+    """
+    if level_number <= 10:
+        return {
+            "min_layers": 1,
+            "max_layers": 2,
+            "cols": 7,
+            "rows": 7,
+            "total_tile_range": (9, 18),
+            "description": "Tutorial - minimal complexity"
+        }
+    elif level_number <= 20:
+        return {
+            "min_layers": 2,
+            "max_layers": 3,
+            "cols": 7,
+            "rows": 7,
+            "total_tile_range": (18, 30),
+            "description": "Early game - basic layering"
+        }
+    elif level_number <= 50:
+        return {
+            "min_layers": 3,
+            "max_layers": 4,
+            "cols": 7,
+            "rows": 7,
+            "total_tile_range": (30, 50),
+            "description": "Early-mid game - moderate complexity"
+        }
+    elif level_number <= 100:
+        return {
+            "min_layers": 4,
+            "max_layers": 5,
+            "cols": 10,
+            "rows": 10,
+            "total_tile_range": (50, 80),
+            "description": "Mid game - larger grid"
+        }
+    elif level_number <= 150:
+        return {
+            "min_layers": 4,
+            "max_layers": 5,
+            "cols": 10,
+            "rows": 10,
+            "total_tile_range": (70, 100),
+            "description": "Mid-late game - increased tiles"
+        }
+    else:
+        return {
+            "min_layers": 5,
+            "max_layers": 6,
+            "cols": 10,
+            "rows": 10,
+            "total_tile_range": (70, 100),
+            "description": "Late game - maximum complexity"
+        }
+
 from ..models.level import (
     GenerationParams,
     GenerationResult,
@@ -1238,29 +1388,62 @@ class LevelGenerator:
                     base_count = tiles_per_layer + (3 if layer_idx in extra_tile_layers else 0)
                     layer_tile_counts[layer_idx] = (base_count // 3) * 3
             else:
-                # Create varied distribution patterns (e.g., heavy top, heavy bottom, alternating)
-                distribution_pattern = random.choice(['uniform', 'top_heavy', 'bottom_heavy', 'alternating', 'random'])
+                # Create varied distribution patterns
+                # 'gboost_pyramid' is based on analysis of 221 human-designed GBoost levels:
+                # Layer 0: ~30%, Layer 1: ~29%, Layer 2: ~22%, Layer 3: ~14%, Layer 4: ~8%
+                # This creates a natural difficulty curve where bottom layers have more tiles
+                distribution_pattern = random.choices(
+                    ['gboost_pyramid', 'uniform', 'bottom_heavy', 'alternating', 'random'],
+                    weights=[0.50, 0.15, 0.15, 0.10, 0.10],  # 50% chance for gboost_pyramid
+                    k=1
+                )[0]
 
-                for layer_idx in active_layers:
-                    # More aggressive per-layer variation for diversity
-                    if distribution_pattern == 'uniform':
-                        layer_variation = random.choice([-6, -3, 0, 3, 6])
-                    elif distribution_pattern == 'top_heavy':
-                        # Higher layers get more tiles
-                        layer_variation = (layer_idx - len(active_layers) // 2) * 3
-                    elif distribution_pattern == 'bottom_heavy':
-                        # Lower layers get more tiles
-                        layer_variation = -(layer_idx - len(active_layers) // 2) * 3
-                    elif distribution_pattern == 'alternating':
-                        # Alternating heavy/light layers
-                        layer_variation = 6 if layer_idx % 2 == 0 else -6
-                    else:  # random
-                        layer_variation = random.randint(-3, 3) * 3
+                if distribution_pattern == 'gboost_pyramid':
+                    # GBoost human-designed level ratios (analyzed from level_1 ~ level_221)
+                    # These ratios create a natural difficulty progression
+                    pyramid_ratios = [0.30, 0.29, 0.22, 0.14, 0.08, 0.05, 0.03, 0.02]
+                    num_layers = len(active_layers)
 
-                    base_count = tiles_per_layer + (3 if layer_idx in extra_tile_layers else 0)
-                    final_count = max(6, base_count + layer_variation)  # Minimum 6 tiles per layer
-                    # Ensure divisible by 3
-                    layer_tile_counts[layer_idx] = (final_count // 3) * 3
+                    # Normalize ratios to match actual layer count
+                    used_ratios = pyramid_ratios[:num_layers]
+                    ratio_sum = sum(used_ratios)
+                    normalized_ratios = [r / ratio_sum for r in used_ratios]
+
+                    # Distribute tiles according to pyramid ratios
+                    remaining_tiles = total_target
+                    for i, layer_idx in enumerate(sorted(active_layers)):
+                        if i < len(active_layers) - 1:
+                            layer_count = int(total_target * normalized_ratios[i])
+                            # Ensure divisible by 3
+                            layer_count = (layer_count // 3) * 3
+                            layer_count = max(6, layer_count)  # Minimum 6 tiles
+                        else:
+                            # Last layer gets remaining tiles
+                            layer_count = remaining_tiles
+                            layer_count = (layer_count // 3) * 3
+                            layer_count = max(6, layer_count)
+
+                        layer_tile_counts[layer_idx] = layer_count
+                        remaining_tiles -= layer_count
+                else:
+                    # Original distribution patterns
+                    for layer_idx in active_layers:
+                        # More aggressive per-layer variation for diversity
+                        if distribution_pattern == 'uniform':
+                            layer_variation = random.choice([-6, -3, 0, 3, 6])
+                        elif distribution_pattern == 'bottom_heavy':
+                            # Lower layers get more tiles
+                            layer_variation = -(layer_idx - len(active_layers) // 2) * 3
+                        elif distribution_pattern == 'alternating':
+                            # Alternating heavy/light layers
+                            layer_variation = 6 if layer_idx % 2 == 0 else -6
+                        else:  # random
+                            layer_variation = random.randint(-3, 3) * 3
+
+                        base_count = tiles_per_layer + (3 if layer_idx in extra_tile_layers else 0)
+                        final_count = max(6, base_count + layer_variation)  # Minimum 6 tiles per layer
+                        # Ensure divisible by 3
+                        layer_tile_counts[layer_idx] = (final_count // 3) * 3
 
         # Collect all positions across all layers
         all_layer_positions: List[Tuple[int, str]] = []  # (layer_idx, pos)
@@ -1681,11 +1864,13 @@ class LevelGenerator:
             # User explicitly requested no symmetry - respect this for exact counts
             symmetry = "none"
         elif symmetry_mode is None:
-            # Default: weighted random symmetry for variety
-            # Include "none" for asymmetric interesting shapes
-            # Include "both" for occasional 4-way symmetry
+            # Default: weighted random symmetry based on GBoost level analysis
+            # Human-designed levels show 73% horizontal symmetry, 33% vertical symmetry
+            # This creates visually balanced and appealing tile arrangements
             symmetry_options = ["horizontal", "vertical", "none", "both"]
-            symmetry_weights = [0.30, 0.30, 0.25, 0.15]  # 30% h, 30% v, 25% none, 15% both
+            # 55% horizontal (primary), 15% vertical, 15% none, 15% both
+            # Combined h+both = 70% horizontal influence (close to 73% observed)
+            symmetry_weights = [0.55, 0.15, 0.15, 0.15]
             symmetry = random.choices(symmetry_options, weights=symmetry_weights, k=1)[0]
         else:
             symmetry = symmetry_mode
@@ -2801,6 +2986,207 @@ class LevelGenerator:
                         positions.append(f"{x}_{y}")
             return positions
 
+        # ============ Category 9: GBoost Human-Designed Patterns (56-63) ============
+        # These patterns are derived from analysis of 221 human-designed levels
+        # from the GBoost production server (level_1 ~ level_221)
+
+        # Pattern 56: GBoost Corner Blocks (inspired by level_200)
+        # Four symmetric corner blocks with connecting elements
+        def gboost_corner_blocks():
+            """Four corner blocks with symmetric arrangement (level_200 style)."""
+            positions = []
+            block_size = max(2, min(cols, rows) // 4)
+            margin = 1  # Edge margin
+
+            for x in range(cols):
+                for y in range(rows):
+                    # Top-left corner block
+                    in_tl = (margin <= x < margin + block_size and
+                             margin <= y < margin + block_size)
+                    # Top-right corner block
+                    in_tr = (cols - margin - block_size <= x < cols - margin and
+                             margin <= y < margin + block_size)
+                    # Bottom-left corner block
+                    in_bl = (margin <= x < margin + block_size and
+                             rows - margin - block_size <= y < rows - margin)
+                    # Bottom-right corner block
+                    in_br = (cols - margin - block_size <= x < cols - margin and
+                             rows - margin - block_size <= y < rows - margin)
+
+                    if in_tl or in_tr or in_bl or in_br:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 57: GBoost Octagon Ring (inspired by level_50)
+        # Octagonal ring shape with hollow center
+        def gboost_octagon_ring():
+            """Octagonal ring pattern with hollow center (level_50 style)."""
+            positions = []
+            outer_radius = min(cols, rows) * 0.45
+            inner_radius = outer_radius * 0.35
+
+            for x in range(cols):
+                for y in range(rows):
+                    dx = abs(x - center_x + 0.5)
+                    dy = abs(y - center_y + 0.5)
+                    # Octagon distance (Chebyshev-ish with corner cut)
+                    dist = max(dx, dy) + min(dx, dy) * 0.41
+
+                    if inner_radius <= dist <= outer_radius:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 58: GBoost Diagonal Staircase (inspired by level_150)
+        # Diagonal chain-like staircase pattern
+        def gboost_diagonal_staircase():
+            """Diagonal staircase pattern (level_150 chain style)."""
+            positions = []
+            step_size = max(2, min(cols, rows) // 5)
+
+            for x in range(cols):
+                for y in range(rows):
+                    # Diagonal index (which step we're on)
+                    step_idx = (x + y) // step_size
+                    # Position within step
+                    pos_in_step = (x + y) % step_size
+
+                    # Include tiles that form the staircase pattern
+                    if pos_in_step < step_size * 0.7:
+                        # Add some depth to the steps
+                        step_depth = abs(x - y) % step_size
+                        if step_depth < step_size * 0.6:
+                            positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 59: GBoost Symmetric Wings (inspired by level_100 diagonal mirror)
+        # Diagonally mirrored wing pattern
+        def gboost_symmetric_wings():
+            """Diagonal mirrored wing pattern (level_100 style)."""
+            positions = []
+            wing_width = max(3, cols // 3)
+
+            for x in range(cols):
+                for y in range(rows):
+                    # Distance from main diagonal
+                    diag_dist = abs(x - y)
+                    # Distance from anti-diagonal
+                    anti_diag_dist = abs(x + y - (cols - 1))
+
+                    # Create wings along both diagonals
+                    if diag_dist <= wing_width or anti_diag_dist <= wing_width:
+                        # Add some tapering toward edges
+                        edge_dist = min(x, y, cols - 1 - x, rows - 1 - y)
+                        if edge_dist >= 0 or diag_dist <= wing_width // 2:
+                            positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 60: GBoost Scattered Clusters (common in mid-late levels)
+        # Multiple small clusters distributed across the grid
+        def gboost_scattered_clusters():
+            """Multiple small clusters distributed across grid."""
+            positions = []
+            cluster_count = random.randint(4, 7)
+            cluster_radius = min(cols, rows) / 5
+
+            # Generate cluster centers with spacing
+            centers = []
+            for _ in range(cluster_count * 3):  # Try more times for better distribution
+                cx = random.uniform(cluster_radius, cols - cluster_radius)
+                cy = random.uniform(cluster_radius, rows - cluster_radius)
+
+                # Check distance from existing centers
+                too_close = False
+                for ecx, ecy in centers:
+                    if ((cx - ecx) ** 2 + (cy - ecy) ** 2) ** 0.5 < cluster_radius * 1.5:
+                        too_close = True
+                        break
+
+                if not too_close and len(centers) < cluster_count:
+                    centers.append((cx, cy))
+
+            for x in range(cols):
+                for y in range(rows):
+                    for cx, cy in centers:
+                        dist = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
+                        if dist <= cluster_radius * random.uniform(0.6, 1.0):
+                            positions.append(f"{x}_{y}")
+                            break
+
+            return positions
+
+        # Pattern 61: GBoost Cross Bridge (inspired by level_10)
+        # Alternating tiles forming a cross-bridge pattern
+        def gboost_cross_bridge():
+            """Alternating cross-bridge pattern (level_10 style)."""
+            positions = []
+
+            # Horizontal bridge
+            h_band_start = int(rows * 0.35)
+            h_band_end = int(rows * 0.65)
+
+            # Vertical bridge
+            v_band_start = int(cols * 0.35)
+            v_band_end = int(cols * 0.65)
+
+            for x in range(cols):
+                for y in range(rows):
+                    in_h_band = h_band_start <= y < h_band_end
+                    in_v_band = v_band_start <= x < v_band_end
+
+                    # Checkerboard-like pattern with offset
+                    checker = (x + y) % 3 != 0
+
+                    if (in_h_band or in_v_band) and checker:
+                        positions.append(f"{x}_{y}")
+
+            return positions
+
+        # Pattern 62: GBoost Triple Bar (horizontal bars pattern)
+        # Three horizontal bars with gaps
+        def gboost_triple_bar():
+            """Three horizontal bars pattern."""
+            positions = []
+            bar_height = max(2, rows // 5)
+            gap = max(1, rows // 7)
+
+            bar_positions = [
+                gap,
+                rows // 2 - bar_height // 2,
+                rows - gap - bar_height
+            ]
+
+            for x in range(cols):
+                for y in range(rows):
+                    for bar_y in bar_positions:
+                        if bar_y <= y < bar_y + bar_height:
+                            # Slight taper at edges
+                            edge_margin = max(0, 2 - min(x, cols - 1 - x))
+                            if edge_margin == 0:
+                                positions.append(f"{x}_{y}")
+                            break
+            return positions
+
+        # Pattern 63: GBoost Frame with Center (common frame + center dot)
+        def gboost_frame_center():
+            """Frame border with center cluster."""
+            positions = []
+            border_width = max(2, min(cols, rows) // 5)
+            center_radius = min(cols, rows) / 4
+
+            for x in range(cols):
+                for y in range(rows):
+                    # Border frame
+                    in_frame = (x < border_width or x >= cols - border_width or
+                                y < border_width or y >= rows - border_width)
+
+                    # Center cluster
+                    dist_from_center = ((x - center_x) ** 2 + (y - center_y) ** 2) ** 0.5
+                    in_center = dist_from_center <= center_radius
+
+                    if in_frame or in_center:
+                        positions.append(f"{x}_{y}")
+            return positions
+
         # ============ Build Pattern List ============
 
         all_patterns = [
@@ -2868,9 +3254,19 @@ class LevelGenerator:
             ("four_islands_grid", four_islands_grid),     # 53
             ("archipelago", archipelago),                 # 54
             ("hub_and_spokes", hub_and_spokes),           # 55
+            # Category 9: GBoost Human-Designed Patterns (56-63)
+            # Derived from analysis of 221 human-designed production levels
+            ("gboost_corner_blocks", gboost_corner_blocks),     # 56
+            ("gboost_octagon_ring", gboost_octagon_ring),       # 57
+            ("gboost_diagonal_staircase", gboost_diagonal_staircase),  # 58
+            ("gboost_symmetric_wings", gboost_symmetric_wings), # 59
+            ("gboost_scattered_clusters", gboost_scattered_clusters),  # 60
+            ("gboost_cross_bridge", gboost_cross_bridge),       # 61
+            ("gboost_triple_bar", gboost_triple_bar),           # 62
+            ("gboost_frame_center", gboost_frame_center),       # 63
         ]
 
-        TOTAL_PATTERNS = 56
+        TOTAL_PATTERNS = 64
 
         # If pattern_index is specified, use that specific pattern
         if pattern_index is not None and 0 <= pattern_index < TOTAL_PATTERNS:

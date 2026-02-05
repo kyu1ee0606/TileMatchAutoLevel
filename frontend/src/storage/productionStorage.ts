@@ -630,6 +630,16 @@ export async function exportProductionLevels(
 }
 
 /**
+ * 배치 이름 변경
+ */
+export async function renameProductionBatch(
+  batchId: string,
+  newName: string
+): Promise<void> {
+  await updateProductionBatch(batchId, { name: newName });
+}
+
+/**
  * 배치 삭제
  */
 export async function deleteProductionBatch(batchId: string): Promise<void> {

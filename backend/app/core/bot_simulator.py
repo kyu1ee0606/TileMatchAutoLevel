@@ -194,6 +194,8 @@ class GameState:
     _blocking_cache: Dict[str, bool] = field(default_factory=dict)
     # Performance optimization: accessible tiles cache
     _accessible_cache: Optional[List['TileState']] = None
+    # Performance optimization: accessible tile type counts cache
+    _accessible_type_counts: Optional[Dict[str, int]] = None
 
 
 @dataclass
@@ -1769,6 +1771,23 @@ class BotSimulator:
         state._accessible_cache = accessible
         return accessible
 
+    def _get_accessible_type_counts(self, state: GameState) -> Dict[str, int]:
+        """Get count of accessible (pickable) tiles by type.
+
+        Caches the result on state for reuse within the same turn.
+        """
+        if hasattr(state, '_accessible_type_counts') and state._accessible_type_counts is not None:
+            return state._accessible_type_counts
+
+        accessible = self._get_accessible_tiles(state)
+        type_counts: Dict[str, int] = {}
+        for tile in accessible:
+            if self._can_pick_tile(state, tile):
+                type_counts[tile.tile_type] = type_counts.get(tile.tile_type, 0) + 1
+
+        state._accessible_type_counts = type_counts
+        return type_counts
+
     def _can_pick_tile(self, state: GameState, tile: TileState) -> bool:
         """Check if a tile can be picked (not blocked, pickable)."""
         if tile.picked:
@@ -1910,6 +1929,7 @@ class BotSimulator:
         # Invalidate blocking cache when tile is picked (performance optimization)
         state._blocking_cache.clear()
         state._accessible_cache = None
+        state._accessible_type_counts = None  # Invalidate type counts cache too
 
         # Remove bomb from tracking when picked (bomb is defused by picking it)
         if tile_state.effect_type == TileEffectType.BOMB:
@@ -2334,7 +2354,10 @@ class BotSimulator:
     def _score_move_with_profile(
         self, move: Move, state: GameState, profile: BotProfile
     ) -> float:
-        """Score a move based on bot profile characteristics."""
+        """Score a move based on bot profile characteristics.
+
+        Optimized: Pre-compute expensive values only when needed.
+        """
         base_score = 1.0
         dock_count = len(state.dock_tiles)
 
@@ -2343,17 +2366,23 @@ class BotSimulator:
         if move.will_match:
             base_score += 100.0  # Very high - matching is always best
 
+        # Pre-compute dock tile type counts once (only if needed)
+        dock_type_counts = None
+        if move.match_count == 2 or (profile.pattern_recognition >= 1.0 and dock_count >= 4 and not move.will_match):
+            dock_type_counts = {}
+            for t in state.dock_tiles:
+                dock_type_counts[t.tile_type] = dock_type_counts.get(t.tile_type, 0) + 1
+
         # IMPORTANT: Tiles that bring us to 2-in-dock are valuable
         # because they set up the next match
+        # Lazy compute same_type_accessible - will be reused later
+        same_type_accessible = None
+
         if move.match_count == 2:
-            # Check if there's a 3rd tile of this type accessible
-            accessible = self._get_accessible_tiles(state)
-            same_type_accessible = sum(
-                1 for t in accessible
-                if t.tile_type == move.tile_type
-                and t.position_key != move.position
-                and self._can_pick_tile(state, t)
-            )
+            # Use cached type counts - subtract 1 for current tile
+            type_counts = self._get_accessible_type_counts(state)
+            count = type_counts.get(move.tile_type, 0)
+            same_type_accessible = max(0, count - 1)
             if same_type_accessible >= 1:
                 # Good setup - we can complete match next move
                 base_score += profile.pattern_recognition * 20.0
@@ -2363,7 +2392,7 @@ class BotSimulator:
                 if profile.pattern_recognition >= 1.0:
                     # Optimal bot knows ALL tile counts including hidden
                     total_of_type = state.all_tile_type_counts.get(move.tile_type, 0)
-                    in_dock = sum(1 for t in state.dock_tiles if t.tile_type == move.tile_type)
+                    in_dock = dock_type_counts.get(move.tile_type, 0)
                     # Total includes this tile we're about to pick, so subtract 1
                     remaining_hidden = total_of_type - same_type_accessible - in_dock - 1
                     if remaining_hidden >= 1:
@@ -2388,7 +2417,7 @@ class BotSimulator:
         # ENDGAME DOCK MANAGEMENT (for Optimal bot)
         # When dock is filling and we're not matching, prefer tiles that can SET UP matches
         if profile.pattern_recognition >= 1.0 and dock_count >= 4 and not move.will_match:
-            in_dock = sum(1 for t in state.dock_tiles if t.tile_type == move.tile_type)
+            in_dock = dock_type_counts.get(move.tile_type, 0)
 
             # IMPORTANT: For LINK tiles, also check the linked partner's type
             linked_in_dock = 0
@@ -2399,17 +2428,14 @@ class BotSimulator:
                     linked_tile = linked_layer.get(linked_pos)
                     if linked_tile and not linked_tile.picked:
                         linked_type = linked_tile.tile_type
-                        linked_count = sum(1 for t in state.dock_tiles if t.tile_type == linked_type)
+                        linked_count = dock_type_counts.get(linked_type, 0)
                         linked_in_dock += linked_count
                         if linked_count == 0:
                             linked_new_type = True
 
-            # Calculate remaining tiles for endgame detection
-            remaining_tiles = sum(
-                1 for layer in state.tiles.values()
-                for tile in layer.values()
-                if not tile.picked
-            )
+            # Calculate remaining tiles for endgame detection (use cached type counts)
+            type_counts = self._get_accessible_type_counts(state)
+            remaining_tiles = sum(type_counts.values())
 
             # Endgame: few tiles remaining and goals mostly complete
             goals_total = sum(state.goals_remaining.values()) if state.goals_remaining else 0
@@ -2446,19 +2472,20 @@ class BotSimulator:
 
         # Prefer tiles that exist multiple times on the board
         # For optimal bot, also consider hidden tiles in stack/craft
-        accessible = self._get_accessible_tiles(state)
-        same_type_on_board = sum(
-            1 for t in accessible
-            if t.tile_type == move.tile_type and t.position_key != move.position
-        )
+        # Compute same_type_on_board lazily only when needed
+        same_type_on_board = None  # Lazy computed
 
         # Optimal bot uses perfect information about total tile counts
         if profile.pattern_recognition >= 1.0:
             total_of_type = state.all_tile_type_counts.get(move.tile_type, 0)
-            in_dock = sum(1 for t in state.dock_tiles if t.tile_type == move.tile_type)
+            # Ensure dock_type_counts is computed for optimal bot
+            if dock_type_counts is None:
+                dock_type_counts = {}
+                for t in state.dock_tiles:
+                    dock_type_counts[t.tile_type] = dock_type_counts.get(t.tile_type, 0) + 1
+            in_dock = dock_type_counts.get(move.tile_type, 0)
             # Check if this type can form complete sets of 3
             remaining_after_pick = total_of_type - 1  # After picking this tile
-            remaining_in_dock = in_dock + 1 if not move.will_match else max(0, in_dock - 2)
 
             # If total remaining (board + dock) is divisible by 3, good
             total_remaining = remaining_after_pick
@@ -2467,13 +2494,30 @@ class BotSimulator:
             elif remaining_after_pick >= 2:
                 base_score += 3.0  # At least 2 more to potentially match
 
-        if same_type_on_board >= 2:
+        # Compute same_type_on_board only when pattern_recognition is high enough to use it
+        if profile.pattern_recognition > 0:
+            # Reuse same_type_accessible if already computed (from match_count == 2 block)
+            if same_type_accessible is not None:
+                # Already computed above - reuse it
+                same_type_on_board = same_type_accessible
+            else:
+                # Use cached type counts - subtract 1 for current tile
+                type_counts = self._get_accessible_type_counts(state)
+                count = type_counts.get(move.tile_type, 0)
+                # Subtract 1 because we want "other" tiles of same type (not including current tile)
+                same_type_on_board = max(0, count - 1)
+
+        if same_type_on_board is not None and same_type_on_board >= 2:
             base_score += profile.pattern_recognition * 2.0
-        elif same_type_on_board == 0 and move.match_count < 2:
+        elif same_type_on_board is not None and same_type_on_board == 0 and move.match_count < 2:
             # This type has no other accessible tiles - check hidden tiles for optimal bot
             if profile.pattern_recognition >= 1.0:
                 total_of_type = state.all_tile_type_counts.get(move.tile_type, 0)
-                in_dock = sum(1 for t in state.dock_tiles if t.tile_type == move.tile_type)
+                if dock_type_counts is None:
+                    dock_type_counts = {}
+                    for t in state.dock_tiles:
+                        dock_type_counts[t.tile_type] = dock_type_counts.get(t.tile_type, 0) + 1
+                in_dock = dock_type_counts.get(move.tile_type, 0)
                 hidden_remaining = total_of_type - in_dock - 1  # -1 for this tile
                 if hidden_remaining >= 2:
                     # There are hidden tiles that can complete a match
@@ -2766,14 +2810,21 @@ class BotSimulator:
         if profile.pattern_recognition >= 1.0:
             return self._optimal_perfect_information_strategy(sorted_moves, state, profile)
 
-        # For high-skill bots, use enhanced lookahead
+        # For high-skill bots, use enhanced lookahead with adaptive optimization
         if profile.lookahead_depth > 0 and len(sorted_moves) > 1:
-            candidates_count = min(5, len(sorted_moves))
-            best_move = sorted_moves[0]
-            best_future_score = self._estimate_future_score(state, best_move, profile.lookahead_depth)
+            # Apply adaptive depth (capped by profile's max depth)
+            adaptive_depth = min(self._get_adaptive_depth(state), profile.lookahead_depth)
 
-            for move in sorted_moves[1:candidates_count]:
-                future_score = self._estimate_future_score(state, move, profile.lookahead_depth)
+            # Apply candidate pruning for better performance
+            candidates = self._get_pruned_candidates(sorted_moves, state)
+            if not candidates:
+                return sorted_moves[0]
+
+            best_move = candidates[0]
+            best_future_score = self._estimate_future_score(state, best_move, adaptive_depth)
+
+            for move in candidates[1:]:
+                future_score = self._estimate_future_score(state, move, adaptive_depth)
                 if future_score > best_future_score:
                     best_move = move
                     best_future_score = future_score
@@ -2781,6 +2832,84 @@ class BotSimulator:
             return best_move
 
         return sorted_moves[0]
+
+    def _get_adaptive_depth(self, state: GameState) -> int:
+        """Calculate adaptive lookahead depth based on game state.
+
+        More aggressive depth reduction for better performance.
+        Considers both tile count and dock danger level.
+        """
+        remaining_tiles = sum(
+            1 for layer in state.tiles.values()
+            for tile in layer.values()
+            if not tile.picked
+        )
+        dock_size = len(state.dock_tiles)
+
+        # Base depth from remaining tiles (more aggressive reduction)
+        if remaining_tiles > 120:
+            base_depth = 2
+        elif remaining_tiles > 80:
+            base_depth = 3
+        elif remaining_tiles > 40:
+            base_depth = 4
+        else:
+            base_depth = 5
+
+        # Dock state adjustment
+        if dock_size <= 2:
+            # Safe dock - can afford less depth (less critical decisions)
+            return max(2, base_depth - 1)
+        elif dock_size >= 5:
+            # Dangerous dock - need more careful analysis
+            return min(6, base_depth + 1)
+
+        return base_depth
+
+    def _get_pruned_candidates(
+        self,
+        sorted_moves: List[Move],
+        state: GameState
+    ) -> List[Move]:
+        """Get pruned candidate moves for evaluation.
+
+        Uses score-based filtering and dock state for smarter pruning.
+        """
+        if not sorted_moves:
+            return []
+
+        if len(sorted_moves) == 1:
+            return sorted_moves
+
+        # If there are matching moves, prioritize them strongly
+        matching_moves = [m for m in sorted_moves if m.will_match]
+        if matching_moves:
+            # Only consider matching moves (max 3)
+            return matching_moves[:3]
+
+        dock_size = len(state.dock_tiles)
+        best_score = sorted_moves[0].score
+
+        # Determine max candidates based on dock danger
+        if dock_size >= 5:
+            max_candidates = 3  # Critical - minimize exploration
+        elif dock_size >= 3:
+            max_candidates = 5  # Moderate danger
+        else:
+            max_candidates = 7  # Safe - can explore more
+
+        # Score-based threshold (exclude moves significantly worse than best)
+        if best_score > 0:
+            threshold = best_score * 0.5
+        else:
+            threshold = best_score - 50
+
+        candidates = []
+        for move in sorted_moves[:max_candidates]:
+            if move.score >= threshold or len(candidates) < 3:
+                candidates.append(move)
+
+        return candidates if candidates else sorted_moves[:3]
 
     def _optimal_perfect_information_strategy(
         self,
@@ -2792,36 +2921,31 @@ class BotSimulator:
 
         Uses adaptive lookahead depth based on level complexity.
         Explores top candidates rather than all moves for performance.
+
+        Optimizations:
+        - Adaptive depth based on tile count AND dock state
+        - Smart candidate pruning (score-based + dock-aware)
+        - Early termination for matching moves
         """
         if len(sorted_moves) <= 1:
             return sorted_moves[0]
 
-        # Adaptive depth based on remaining tiles (performance optimization)
-        remaining_tiles = sum(
-            1 for layer in state.tiles.values()
-            for tile in layer.values()
-            if not tile.picked
-        )
-        # Reduce depth for large levels to maintain performance
-        if remaining_tiles > 150:
-            depth = 2
-        elif remaining_tiles > 100:
-            depth = 3
-        elif remaining_tiles > 50:
-            depth = 4
-        else:
-            depth = 5
+        # Phase 1A: Adaptive depth calculation
+        depth = self._get_adaptive_depth(state)
 
-        # Limit candidates to top 10 moves (already sorted by score)
-        max_candidates = min(10, len(sorted_moves))
+        # Phase 1B: Smart candidate pruning
+        candidates = self._get_pruned_candidates(sorted_moves, state)
 
-        best_move = sorted_moves[0]
+        if not candidates:
+            return sorted_moves[0]
+
+        best_move = candidates[0]
         best_future_score = self._estimate_future_score_with_deadlock_detection(
             state, best_move, depth
         )
 
-        # Check top candidates only
-        for move in sorted_moves[1:max_candidates]:
+        # Check pruned candidates only (much fewer than before)
+        for move in candidates[1:]:
             future_score = self._estimate_future_score_with_deadlock_detection(
                 state, move, depth
             )
@@ -3668,19 +3792,12 @@ class BotSimulator:
         current_dock_count = sum(1 for t in state.dock_tiles if t.tile_type == dock_type)
         new_dock_count = current_dock_count + 1
 
-        # PERFORMANCE: Precompute pickable counts by type in single pass
-        pickable_by_type: Dict[str, int] = {}
-        for layer_tiles in state.tiles.values():
-            for pos, tile in layer_tiles.items():
-                if tile.picked or pos == move.position:
-                    continue
-                if tile.tile_type not in self.MATCHABLE_TYPES:
-                    continue
-                if not tile.can_pick():
-                    continue
-                if self._is_blocked_by_upper(state, tile):
-                    continue
-                pickable_by_type[tile.tile_type] = pickable_by_type.get(tile.tile_type, 0) + 1
+        # PERFORMANCE: Use cached type counts, adjust for current move
+        cached_type_counts = self._get_accessible_type_counts(state)
+        pickable_by_type = dict(cached_type_counts)  # Copy to avoid modifying cache
+        # Subtract 1 for current move tile (it will be picked)
+        if dock_type in pickable_by_type:
+            pickable_by_type[dock_type] = max(0, pickable_by_type[dock_type] - 1)
 
         same_type_pickable = pickable_by_type.get(dock_type, 0)
 

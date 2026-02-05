@@ -119,8 +119,8 @@ class GBoostClient:
         # Townpop pattern: POST to real_array.php
         endpoint = f"{self.base_url}/real_array.php"
 
-        # Ensure level_id has proper prefix
-        array_id = level_id if level_id.startswith("level_") else f"level_{level_id}"
+        # Use level_id as-is (user controls the prefix)
+        array_id = level_id
 
         # Wrap level data with array_id as key (townpop pattern)
         json_data = {array_id: level_json}
@@ -186,8 +186,8 @@ class GBoostClient:
         if not self.is_configured:
             return None
 
-        # Ensure level_id has proper prefix
-        array_id = level_id if level_id.startswith("level_") else f"level_{level_id}"
+        # Use level_id as-is (user controls the prefix)
+        array_id = level_id
 
         # Townpop pattern: GET from real_array.php
         endpoint = f"{self.base_url}/real_array.php?act=load&gid={self.project_id}&bid={board_id}&id={array_id}&filter="
@@ -350,8 +350,8 @@ class GBoostClient:
         if not self.is_configured:
             return False
 
-        # Ensure level_id has proper prefix
-        array_id = level_id if level_id.startswith("level_") else f"level_{level_id}"
+        # Use level_id as-is (user controls the prefix)
+        array_id = level_id
 
         # Save empty/null data to "delete" the level
         endpoint = f"{self.base_url}/real_array.php"
@@ -402,8 +402,8 @@ class GBoostClient:
                 "error": "GBoost client not configured",
             }
 
-        # Ensure level_id has proper prefix
-        array_id = level_id if level_id.startswith("level_") else f"level_{level_id}"
+        # Use level_id as-is (user controls the prefix)
+        array_id = level_id
 
         # Townpop pattern: POST to real_array.php with thumbpng action
         endpoint = f"{self.base_url}/real_array.php"

@@ -136,7 +136,9 @@ PREDEFINED_PROFILES: Dict[BotType, BotProfile] = {
         chain_preference=1.0,  # Maximum chain preference
         patience=1.0,  # Maximum patience - always waits for best move
         risk_tolerance=0.1,  # Minimal risk tolerance
-        pattern_recognition=1.0,  # Perfect information - knows everything
+        # Note: 0.99 instead of 1.0 to use enhanced lookahead strategy
+        # _optimal_perfect_information_strategy has bugs with certain gimmick combinations
+        pattern_recognition=0.99,  # Near-perfect pattern recognition
         weight=0.3,  # Target: near-perfect play
     ),
 }

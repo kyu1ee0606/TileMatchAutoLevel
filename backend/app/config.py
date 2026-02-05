@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     # GBoost settings
     gboost_url: Optional[str] = None
     gboost_api_key: Optional[str] = None
-    gboost_project_id: Optional[str] = None
+    gboost_project_id: Optional[str] = "6d126f4db852"
 
     model_config = SettingsConfigDict(
         env_file=".env",

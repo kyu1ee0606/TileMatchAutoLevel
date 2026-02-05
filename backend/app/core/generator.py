@@ -812,6 +812,9 @@ class LevelGenerator:
             [45, 46, 47],   # Artistic: butterfly, flower, islands
             [48, 49],       # Artistic: stripes, honeycomb
             [6, 7, 8, 9],   # Misc basic shapes
+            [50, 51],       # Bridge patterns: horizontal, vertical bridges
+            [52, 53],       # Multi-island: triangle, grid arrangements
+            [54, 55],       # Distributed: archipelago, hub-and-spokes
         ]
 
         # Flatten for random selection if needed
@@ -908,6 +911,9 @@ class LevelGenerator:
         - 'clustered': Grouped tiles (creates interesting visual clusters)
         - 'random': Natural, organic feel (good for middle layers)
 
+        IMPROVEMENT: Always use aesthetic patterns for top layer to maximize visual appeal
+        and create clear layer differentiation.
+
         Args:
             active_layers: List of layer indices that will be populated
             target_difficulty: Target difficulty (0.0-1.0)
@@ -923,24 +929,50 @@ class LevelGenerator:
         num_layers = len(active_layers)
         sorted_layers = sorted(active_layers, reverse=True)  # Top to bottom
 
-        # Boss level pattern sets (visually impressive)
-        boss_aesthetic_patterns = [8, 15, 16, 45, 46, 17, 18, 47]  # Stars, butterflies, etc.
+        # ===== ENHANCED PATTERN SETS FOR BETTER TOP LAYER VISIBILITY =====
 
-        # Easy level patterns (simple, clean)
-        easy_patterns = [0, 1, 2, 3, 20, 21]  # Basic shapes, simple letters
+        # Top layer special patterns (always aesthetic, visually distinctive)
+        # Priority: Star/Heart/Butterfly/Flower shapes that stand out
+        top_layer_patterns = [
+            8,   # star_five_point
+            15,  # heart_shape
+            45,  # butterfly
+            46,  # flower_pattern
+            16,  # crescent_moon
+            17,  # spiral_outward
+            50,  # bridge_horizontal
+            51,  # bridge_vertical
+            52,  # three_islands_triangle
+            53,  # four_islands_grid
+            54,  # archipelago
+            55,  # hub_and_spokes
+        ]
 
-        # Medium level patterns (balanced variety)
-        medium_patterns = [4, 5, 10, 11, 30, 31, 40, 41]  # Crosses, arrows, triangles
+        # Boss level extra impressive patterns
+        boss_top_patterns = [8, 15, 45, 46, 17, 18, 54, 55]
 
-        # Hard level patterns (complex, challenging visuals)
-        hard_patterns = [33, 34, 35, 45, 46, 47, 48, 49]  # Stairs, zigzag, artistic
+        # Easy level top patterns (simpler but still distinctive)
+        easy_top_patterns = [8, 15, 20, 21, 50, 51, 52]  # Stars, hearts, letters, bridges
 
-        # Determine pattern strategy based on level characteristics
+        # Medium level top patterns
+        medium_top_patterns = [8, 15, 45, 46, 40, 41, 50, 51, 52, 53]
+
+        # Hard level top patterns (complex)
+        hard_top_patterns = [45, 46, 47, 48, 49, 54, 55, 8, 15]
+
+        # Middle layer patterns (varied)
+        middle_patterns = [4, 5, 10, 11, 30, 31, 40, 41, 33, 34]
+
+        # Bottom layer patterns (structural base - can be simpler)
+        bottom_patterns = [0, 1, 2, 3, 4, 5, 20, 21]
+
+        # ===== PATTERN ASSIGNMENT LOGIC =====
+
         if is_boss_level:
-            # Boss levels: Impressive aesthetic on top, structured base
+            # Boss levels: Maximum visual impact on top
             for i, layer_idx in enumerate(sorted_layers):
-                if i == 0:  # Top layer - most visible
-                    pattern_idx = random.choice(boss_aesthetic_patterns)
+                if i == 0:  # Top layer - most visible, impressive
+                    pattern_idx = random.choice(boss_top_patterns)
                     configs.append(LayerPatternConfig(
                         layer=layer_idx,
                         pattern_type="aesthetic",
@@ -950,7 +982,7 @@ class LevelGenerator:
                     configs.append(LayerPatternConfig(
                         layer=layer_idx,
                         pattern_type="geometric",
-                        pattern_index=random.choice([0, 1, 2, 3, 4])
+                        pattern_index=random.choice(bottom_patterns)
                     ))
                 else:  # Middle layers - mix for variety
                     if i % 2 == 0:
@@ -963,37 +995,43 @@ class LevelGenerator:
                         configs.append(LayerPatternConfig(
                             layer=layer_idx,
                             pattern_type="aesthetic",
-                            pattern_index=random.choice(medium_patterns)
+                            pattern_index=random.choice(middle_patterns)
                         ))
         elif target_difficulty < 0.3:
-            # Easy levels: Simple, clean patterns
+            # Easy levels: Simple but still aesthetic on top for visibility
             for i, layer_idx in enumerate(sorted_layers):
-                if i == 0:  # Top layer
+                if i == 0:  # Top layer - ALWAYS aesthetic for distinction
                     configs.append(LayerPatternConfig(
                         layer=layer_idx,
-                        pattern_type="geometric",
-                        pattern_index=random.choice(easy_patterns)
+                        pattern_type="aesthetic",
+                        pattern_index=random.choice(easy_top_patterns)
                     ))
-                else:
+                elif i == len(sorted_layers) - 1:  # Bottom layer
                     configs.append(LayerPatternConfig(
                         layer=layer_idx,
                         pattern_type="geometric",
                         pattern_index=random.choice([0, 1, 2, 3])
                     ))
+                else:  # Middle layers
+                    configs.append(LayerPatternConfig(
+                        layer=layer_idx,
+                        pattern_type="geometric",
+                        pattern_index=random.choice(bottom_patterns)
+                    ))
         elif target_difficulty < 0.6:
-            # Medium difficulty: Balanced variety
+            # Medium difficulty: Balanced variety with aesthetic top
             for i, layer_idx in enumerate(sorted_layers):
                 if i == 0:  # Top layer - aesthetic
                     configs.append(LayerPatternConfig(
                         layer=layer_idx,
                         pattern_type="aesthetic",
-                        pattern_index=random.choice(medium_patterns)
+                        pattern_index=random.choice(medium_top_patterns)
                     ))
                 elif i == len(sorted_layers) - 1:  # Bottom - geometric
                     configs.append(LayerPatternConfig(
                         layer=layer_idx,
                         pattern_type="geometric",
-                        pattern_index=random.choice([0, 1, 2, 4, 5])
+                        pattern_index=random.choice(bottom_patterns)
                     ))
                 else:  # Middle - alternate
                     pattern_type = "clustered" if i % 2 == 0 else "random"
@@ -1003,18 +1041,27 @@ class LevelGenerator:
                         pattern_index=None
                     ))
         else:
-            # Hard levels: Complex, varied patterns
+            # Hard levels: Complex, varied patterns with impressive top
+            # Higher difficulty = more scattered patterns for increased challenge
+            # Scattered/Island patterns: 47 (scattered_islands), 52-55 (island patterns)
+            scattered_patterns = [47, 52, 53, 54, 55]  # More spread out patterns
+
             for i, layer_idx in enumerate(sorted_layers):
-                if i == 0:  # Top layer - impressive aesthetic
+                if i == 0:  # Top layer - use scattered patterns for high difficulty
+                    # 70% chance of scattered pattern, 30% other aesthetic
+                    if random.random() < 0.7:
+                        pattern_idx = random.choice(scattered_patterns)
+                    else:
+                        pattern_idx = random.choice(hard_top_patterns)
                     configs.append(LayerPatternConfig(
                         layer=layer_idx,
                         pattern_type="aesthetic",
-                        pattern_index=random.choice(hard_patterns)
+                        pattern_index=pattern_idx
                     ))
-                elif i == 1 and num_layers > 2:  # Second layer - clustered
+                elif i == 1 and num_layers > 2:  # Second layer - scattered/random
                     configs.append(LayerPatternConfig(
                         layer=layer_idx,
-                        pattern_type="clustered",
+                        pattern_type="random",  # More scattered than clustered
                         pattern_index=None
                     ))
                 elif i == len(sorted_layers) - 1:  # Bottom - geometric base
@@ -1023,19 +1070,12 @@ class LevelGenerator:
                         pattern_type="geometric",
                         pattern_index=random.choice([3, 4, 5, 30, 31])
                     ))
-                else:  # Other middle layers - mix aesthetic and random
-                    if i % 2 == 0:
-                        configs.append(LayerPatternConfig(
-                            layer=layer_idx,
-                            pattern_type="aesthetic",
-                            pattern_index=random.choice(medium_patterns + hard_patterns)
-                        ))
-                    else:
-                        configs.append(LayerPatternConfig(
-                            layer=layer_idx,
-                            pattern_type="random",
-                            pattern_index=None
-                        ))
+                else:  # Other middle layers - prefer random/scattered
+                    configs.append(LayerPatternConfig(
+                        layer=layer_idx,
+                        pattern_type="random",  # All middle layers use random for scatter
+                        pattern_index=None
+                    ))
 
         return configs
 
@@ -1284,13 +1324,41 @@ class LevelGenerator:
                         return (config.pattern_type, config.pattern_index)
             return None
 
+        # Layer scaling disabled - all layers use full dimensions
+        max_layer_idx = max(active_layers) if active_layers else 0
+        layer_shrink_rate = 1.0  # No shrink - preserve pattern shapes
+
         for layer_idx in active_layers:
             layer_key = f"layer_{layer_idx}"
             is_odd_layer = layer_idx % 2 == 1
 
-            # Calculate layer dimensions
-            layer_cols = cols if is_odd_layer else cols + 1
-            layer_rows = rows if is_odd_layer else rows + 1
+            # Calculate base layer dimensions (original logic)
+            base_cols = cols if is_odd_layer else cols + 1
+            base_rows = rows if is_odd_layer else rows + 1
+
+            # Phase 1: Apply dynamic layer shrinking for pyramid/turtle effect
+            # Higher layers get progressively smaller to create visual depth
+            if max_layer_idx > 0 and layer_idx > 0:
+                # Calculate shrink factor based on layer position
+                # layer_idx 0 = full size, higher = smaller
+                shrink_factor = layer_shrink_rate ** layer_idx
+
+                # Apply shrink factor but ensure minimum viable size (at least 4x4)
+                layer_cols = max(4, int(base_cols * shrink_factor))
+                layer_rows = max(4, int(base_rows * shrink_factor))
+
+                # Ensure dimensions stay within original grid bounds
+                layer_cols = min(layer_cols, base_cols)
+                layer_rows = min(layer_rows, base_rows)
+            else:
+                layer_cols = base_cols
+                layer_rows = base_rows
+
+            # Phase 2: Calculate center offset for depth emphasis
+            # Higher layers are visually centered within the lower layer's footprint
+            # This creates the turtle/pyramid depth effect
+            layer_offset_x = (base_cols - layer_cols) // 2
+            layer_offset_y = (base_rows - layer_rows) // 2
 
             # Get target tile count for this layer
             target_count = layer_tile_counts.get(layer_idx, 0)
@@ -1311,12 +1379,26 @@ class LevelGenerator:
                 layer_pattern_index = layer_pattern_indices.get(layer_idx, params.pattern_index)
 
             # Generate positions for this layer with symmetry and pattern options
+            # Note: positions are generated within the shrunk layer dimensions
             positions = self._generate_layer_positions_for_count(
                 layer_cols, layer_rows, target_count,
                 symmetry_mode=effective_symmetry_mode,
                 pattern_type=layer_pattern_type,
                 pattern_index=layer_pattern_index  # Use varied pattern per layer
             )
+
+            # Phase 2: Apply center offset to positions so higher layers appear centered
+            if layer_offset_x > 0 or layer_offset_y > 0:
+                offset_positions = []
+                for pos in positions:
+                    parts = pos.split("_")
+                    x, y = int(parts[0]), int(parts[1])
+                    new_x = x + layer_offset_x
+                    new_y = y + layer_offset_y
+                    # Ensure within original grid bounds
+                    if 0 <= new_x < base_cols and 0 <= new_y < base_rows:
+                        offset_positions.append(f"{new_x}_{new_y}")
+                positions = offset_positions
 
             for pos in positions:
                 all_layer_positions.append((layer_idx, pos))
@@ -1364,23 +1446,31 @@ class LevelGenerator:
         if len(tile_assignments) > len(all_layer_positions):
             tile_assignments = tile_assignments[:len(all_layer_positions)]
 
-        # Shuffle assignments for random distribution
-        random.shuffle(tile_assignments)
-
         # Initialize tiles dict for each layer
         for layer_idx in active_layers:
             level[f"layer_{layer_idx}"]["tiles"] = {}
 
-        # Assign tiles to positions
-        for i, (layer_idx, pos) in enumerate(all_layer_positions):
-            if i < len(tile_assignments):
-                tile_type = tile_assignments[i]
-            else:
-                # Fallback (shouldn't happen)
-                tile_type = random.choice(tile_types)
+        # HIGH DIFFICULTY: Spread same-type tiles apart for increased challenge
+        # Low/Medium difficulty: Random distribution (original behavior)
+        if target >= 0.6:
+            # Spread assignment: same type tiles are placed far apart
+            self._assign_tiles_with_spread(
+                level, all_layer_positions, tile_assignments, tile_types, target
+            )
+        else:
+            # Original random shuffle for easy/medium levels
+            random.shuffle(tile_assignments)
 
-            layer_key = f"layer_{layer_idx}"
-            level[layer_key]["tiles"][pos] = [tile_type, ""]
+            # Assign tiles to positions
+            for i, (layer_idx, pos) in enumerate(all_layer_positions):
+                if i < len(tile_assignments):
+                    tile_type = tile_assignments[i]
+                else:
+                    # Fallback (shouldn't happen)
+                    tile_type = random.choice(tile_types)
+
+                layer_key = f"layer_{layer_idx}"
+                level[layer_key]["tiles"][pos] = [tile_type, ""]
 
         # Update tile counts
         for layer_idx in active_layers:
@@ -1388,6 +1478,121 @@ class LevelGenerator:
             level[layer_key]["num"] = str(len(level[layer_key]["tiles"]))
 
         return level
+
+    def _assign_tiles_with_spread(
+        self,
+        level: Dict[str, Any],
+        all_layer_positions: List[Tuple[int, str]],
+        tile_assignments: List[str],
+        tile_types: List[str],
+        target_difficulty: float
+    ) -> None:
+        """Assign tile types with same-type tiles spread apart for higher difficulty.
+
+        For hard levels, this places tiles of the same type as far apart as possible,
+        making it harder to find and match them.
+
+        Args:
+            level: Level dict to modify
+            all_layer_positions: List of (layer_idx, pos) tuples
+            tile_assignments: List of tile types to assign
+            tile_types: Available tile types
+            target_difficulty: Target difficulty (0.0-1.0)
+        """
+        from collections import defaultdict
+
+        def get_pos_coords(pos: str) -> Tuple[int, int]:
+            """Extract x, y from position string."""
+            parts = pos.split("_")
+            return int(parts[0]), int(parts[1])
+
+        def calc_distance(pos1: str, layer1: int, pos2: str, layer2: int) -> float:
+            """Calculate distance between two positions (including layer difference)."""
+            x1, y1 = get_pos_coords(pos1)
+            x2, y2 = get_pos_coords(pos2)
+            # Include layer difference as additional distance factor
+            layer_dist = abs(layer1 - layer2) * 2  # Layer separation adds distance
+            return ((x1 - x2) ** 2 + (y1 - y2) ** 2 + layer_dist ** 2) ** 0.5
+
+        def min_distance_to_same_type(
+            pos: str, layer: int, tile_type: str, placed: Dict[str, List[Tuple[int, str]]]
+        ) -> float:
+            """Calculate minimum distance from pos to any placed tile of same type."""
+            if tile_type not in placed or not placed[tile_type]:
+                return float('inf')  # No same-type tiles yet, maximum distance
+
+            min_dist = float('inf')
+            for placed_layer, placed_pos in placed[tile_type]:
+                dist = calc_distance(pos, layer, placed_pos, placed_layer)
+                min_dist = min(min_dist, dist)
+            return min_dist
+
+        # Count how many of each type we need
+        type_counts = defaultdict(int)
+        for t in tile_assignments:
+            type_counts[t] += 1
+
+        # Track placed tiles by type: {type: [(layer, pos), ...]}
+        placed_tiles: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
+
+        # Available positions (copy to modify)
+        available_positions = list(all_layer_positions)
+        random.shuffle(available_positions)  # Start with random order
+
+        # Spread intensity based on difficulty (0.6 = mild spread, 1.0 = maximum spread)
+        # Higher intensity = more strictly enforce distance
+        spread_intensity = (target_difficulty - 0.6) / 0.4  # 0.0 to 1.0 for difficulty 0.6-1.0
+        spread_intensity = max(0.0, min(1.0, spread_intensity))
+
+        # For each tile type, place tiles trying to maximize distance from same type
+        types_to_place = list(type_counts.keys())
+        random.shuffle(types_to_place)
+
+        for tile_type in types_to_place:
+            count = type_counts[tile_type]
+
+            for _ in range(count):
+                if not available_positions:
+                    break
+
+                # Find position with maximum distance from existing same-type tiles
+                best_pos = None
+                best_layer = None
+                best_score = -1
+
+                # Sample positions to check (for performance, don't check all)
+                sample_size = min(len(available_positions), max(10, int(len(available_positions) * 0.3)))
+                positions_to_check = random.sample(available_positions, sample_size)
+
+                for layer_idx, pos in positions_to_check:
+                    min_dist = min_distance_to_same_type(pos, layer_idx, tile_type, placed_tiles)
+
+                    # Score combines distance with some randomness (based on spread intensity)
+                    # Low intensity = more random, High intensity = strictly distance-based
+                    random_factor = random.random() * (1 - spread_intensity) * 5
+                    score = min_dist + random_factor
+
+                    if score > best_score:
+                        best_score = score
+                        best_pos = pos
+                        best_layer = layer_idx
+
+                if best_pos is not None:
+                    # Place tile
+                    layer_key = f"layer_{best_layer}"
+                    level[layer_key]["tiles"][best_pos] = [tile_type, ""]
+
+                    # Track placement
+                    placed_tiles[tile_type].append((best_layer, best_pos))
+
+                    # Remove from available
+                    available_positions.remove((best_layer, best_pos))
+
+        # If any positions left (shouldn't happen), fill with random types
+        for layer_idx, pos in available_positions:
+            tile_type = random.choice(tile_types)
+            layer_key = f"layer_{layer_idx}"
+            level[layer_key]["tiles"][pos] = [tile_type, ""]
 
     def _generate_layer_positions(
         self, cols: int, rows: int, density: float,
@@ -2354,6 +2559,248 @@ class LevelGenerator:
                         positions.append(f"{x}_{y}")
             return positions
 
+        # ============ Category 8: Bridge/Island Patterns (50-55) ============
+        # Inspired by Tile Explorer game's island+bridge level designs
+
+        # Helper function for bridge patterns - calculate point to line distance
+        def point_to_line_distance(px, py, x1, y1, x2, y2):
+            """Calculate perpendicular distance from point (px,py) to line segment (x1,y1)-(x2,y2)."""
+            line_len_sq = (x2 - x1) ** 2 + (y2 - y1) ** 2
+            if line_len_sq == 0:
+                return ((px - x1) ** 2 + (py - y1) ** 2) ** 0.5
+            t = max(0, min(1, ((px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)) / line_len_sq))
+            proj_x = x1 + t * (x2 - x1)
+            proj_y = y1 + t * (y2 - y1)
+            return ((px - proj_x) ** 2 + (py - proj_y) ** 2) ** 0.5
+
+        # Pattern 50: Two Islands with Bridge (horizontal)
+        def bridge_horizontal():
+            """Two circular islands connected by a horizontal bridge."""
+            positions = []
+            island_radius = min(cols, rows) / 3.5
+            bridge_width = max(2, rows // 5)
+
+            # Left island center
+            left_cx = cols / 4
+            left_cy = rows / 2
+
+            # Right island center
+            right_cx = cols * 3 / 4
+            right_cy = rows / 2
+
+            for x in range(cols):
+                for y in range(rows):
+                    # Left island
+                    left_dist = ((x - left_cx) ** 2 + (y - left_cy) ** 2) ** 0.5
+                    # Right island
+                    right_dist = ((x - right_cx) ** 2 + (y - right_cy) ** 2) ** 0.5
+                    # Bridge (horizontal connection in center)
+                    in_bridge = (left_cx <= x <= right_cx and
+                                 rows / 2 - bridge_width / 2 <= y <= rows / 2 + bridge_width / 2)
+
+                    if left_dist <= island_radius or right_dist <= island_radius or in_bridge:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 51: Two Islands with Bridge (vertical)
+        def bridge_vertical():
+            """Two circular islands connected by a vertical bridge."""
+            positions = []
+            island_radius = min(cols, rows) / 3.5
+            bridge_width = max(2, cols // 5)
+
+            # Top island center
+            top_cx = cols / 2
+            top_cy = rows / 4
+
+            # Bottom island center
+            bottom_cx = cols / 2
+            bottom_cy = rows * 3 / 4
+
+            for x in range(cols):
+                for y in range(rows):
+                    # Top island
+                    top_dist = ((x - top_cx) ** 2 + (y - top_cy) ** 2) ** 0.5
+                    # Bottom island
+                    bottom_dist = ((x - bottom_cx) ** 2 + (y - bottom_cy) ** 2) ** 0.5
+                    # Bridge (vertical connection in center)
+                    in_bridge = (top_cy <= y <= bottom_cy and
+                                 cols / 2 - bridge_width / 2 <= x <= cols / 2 + bridge_width / 2)
+
+                    if top_dist <= island_radius or bottom_dist <= island_radius or in_bridge:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 52: Three Islands Triangle (with bridges)
+        def three_islands_triangle():
+            """Three islands arranged in a triangle with connecting bridges."""
+            positions = []
+            island_radius = min(cols, rows) / 4.5
+            bridge_width = max(2, min(cols, rows) // 6)
+
+            # Island centers (triangle arrangement)
+            top_cx, top_cy = cols / 2, rows / 4
+            left_cx, left_cy = cols / 4, rows * 3 / 4
+            right_cx, right_cy = cols * 3 / 4, rows * 3 / 4
+
+            islands = [(top_cx, top_cy), (left_cx, left_cy), (right_cx, right_cy)]
+
+            for x in range(cols):
+                for y in range(rows):
+                    in_pattern = False
+
+                    # Check islands
+                    for cx, cy in islands:
+                        dist = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
+                        if dist <= island_radius:
+                            in_pattern = True
+                            break
+
+                    # Check bridges (connecting all islands)
+                    if not in_pattern:
+                        # Top to left bridge
+                        t_l_dist = point_to_line_distance(x, y, top_cx, top_cy, left_cx, left_cy)
+                        if t_l_dist <= bridge_width / 2 and min(top_cx, left_cx) - 1 <= x <= max(top_cx, left_cx) + 1:
+                            if min(top_cy, left_cy) - 1 <= y <= max(top_cy, left_cy) + 1:
+                                in_pattern = True
+
+                        # Top to right bridge
+                        t_r_dist = point_to_line_distance(x, y, top_cx, top_cy, right_cx, right_cy)
+                        if t_r_dist <= bridge_width / 2 and min(top_cx, right_cx) - 1 <= x <= max(top_cx, right_cx) + 1:
+                            if min(top_cy, right_cy) - 1 <= y <= max(top_cy, right_cy) + 1:
+                                in_pattern = True
+
+                        # Left to right bridge
+                        l_r_dist = point_to_line_distance(x, y, left_cx, left_cy, right_cx, right_cy)
+                        if l_r_dist <= bridge_width / 2 and min(left_cx, right_cx) - 1 <= x <= max(left_cx, right_cx) + 1:
+                            if min(left_cy, right_cy) - 1 <= y <= max(left_cy, right_cy) + 1:
+                                in_pattern = True
+
+                    if in_pattern:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 53: Four Islands Grid (with bridges)
+        def four_islands_grid():
+            """Four islands in a 2x2 grid with connecting bridges."""
+            positions = []
+            island_radius = min(cols, rows) / 4.5
+            bridge_width = max(2, min(cols, rows) // 7)
+
+            # Island centers (2x2 grid)
+            islands = [
+                (cols / 4, rows / 4),       # Top-left
+                (cols * 3 / 4, rows / 4),   # Top-right
+                (cols / 4, rows * 3 / 4),   # Bottom-left
+                (cols * 3 / 4, rows * 3 / 4)  # Bottom-right
+            ]
+
+            for x in range(cols):
+                for y in range(rows):
+                    in_pattern = False
+
+                    # Check islands
+                    for cx, cy in islands:
+                        dist = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
+                        if dist <= island_radius:
+                            in_pattern = True
+                            break
+
+                    # Check horizontal bridges
+                    if not in_pattern:
+                        # Top horizontal bridge
+                        if cols / 4 <= x <= cols * 3 / 4 and abs(y - rows / 4) <= bridge_width / 2:
+                            in_pattern = True
+                        # Bottom horizontal bridge
+                        if cols / 4 <= x <= cols * 3 / 4 and abs(y - rows * 3 / 4) <= bridge_width / 2:
+                            in_pattern = True
+                        # Left vertical bridge
+                        if rows / 4 <= y <= rows * 3 / 4 and abs(x - cols / 4) <= bridge_width / 2:
+                            in_pattern = True
+                        # Right vertical bridge
+                        if rows / 4 <= y <= rows * 3 / 4 and abs(x - cols * 3 / 4) <= bridge_width / 2:
+                            in_pattern = True
+
+                    if in_pattern:
+                        positions.append(f"{x}_{y}")
+            return positions
+
+        # Pattern 54: Archipelago (distributed islands without bridges)
+        def archipelago():
+            """Multiple small islands distributed across the grid - Tile Explorer style."""
+            positions = []
+            # Create a grid-based island distribution for more regular spacing
+            island_count_x = max(2, cols // 4)
+            island_count_y = max(2, rows // 4)
+
+            # Calculate spacing
+            spacing_x = cols / (island_count_x + 1)
+            spacing_y = rows / (island_count_y + 1)
+
+            # Generate island centers with slight randomization
+            islands = []
+            for ix in range(island_count_x):
+                for iy in range(island_count_y):
+                    # Base position with some randomness
+                    cx = spacing_x * (ix + 1) + random.uniform(-spacing_x * 0.2, spacing_x * 0.2)
+                    cy = spacing_y * (iy + 1) + random.uniform(-spacing_y * 0.2, spacing_y * 0.2)
+                    # Variable island size
+                    radius = random.uniform(1.5, min(spacing_x, spacing_y) * 0.45)
+                    islands.append((cx, cy, radius))
+
+            for x in range(cols):
+                for y in range(rows):
+                    for cx, cy, radius in islands:
+                        dist = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
+                        if dist <= radius:
+                            positions.append(f"{x}_{y}")
+                            break
+            return positions
+
+        # Pattern 55: Central Hub with Spokes
+        def hub_and_spokes():
+            """Central circular hub with radiating spoke connections."""
+            positions = []
+            hub_radius = min(cols, rows) / 4
+            spoke_width = max(2, min(cols, rows) // 6)
+            spoke_count = 4  # Four spokes
+
+            for x in range(cols):
+                for y in range(rows):
+                    in_pattern = False
+
+                    # Central hub
+                    dist_from_center = ((x - center_x) ** 2 + (y - center_y) ** 2) ** 0.5
+                    if dist_from_center <= hub_radius:
+                        in_pattern = True
+
+                    # Spokes (extending to edges)
+                    if not in_pattern:
+                        for i in range(spoke_count):
+                            angle = i * math.pi / 2  # 0, 90, 180, 270 degrees
+                            # Direction vector
+                            dx_dir = math.cos(angle)
+                            dy_dir = math.sin(angle)
+
+                            # Project point onto spoke direction
+                            px = x - center_x
+                            py = y - center_y
+
+                            # Distance along spoke direction
+                            proj = px * dx_dir + py * dy_dir
+
+                            # Distance perpendicular to spoke
+                            perp_dist = abs(px * (-dy_dir) + py * dx_dir)
+
+                            # In spoke if: beyond hub, within spoke width, and along spoke direction
+                            if proj > hub_radius * 0.8 and perp_dist <= spoke_width / 2:
+                                in_pattern = True
+                                break
+
+                    if in_pattern:
+                        positions.append(f"{x}_{y}")
+            return positions
+
         # ============ Build Pattern List ============
 
         all_patterns = [
@@ -2414,9 +2861,16 @@ class LevelGenerator:
             ("scattered_islands", scattered_islands),     # 47
             ("diagonal_stripes", diagonal_stripes),       # 48
             ("honeycomb", honeycomb),                     # 49
+            # Category 8: Bridge/Island Patterns (50-55) - Tile Explorer inspired
+            ("bridge_horizontal", bridge_horizontal),     # 50
+            ("bridge_vertical", bridge_vertical),         # 51
+            ("three_islands_triangle", three_islands_triangle),  # 52
+            ("four_islands_grid", four_islands_grid),     # 53
+            ("archipelago", archipelago),                 # 54
+            ("hub_and_spokes", hub_and_spokes),           # 55
         ]
 
-        TOTAL_PATTERNS = 50
+        TOTAL_PATTERNS = 56
 
         # If pattern_index is specified, use that specific pattern
         if pattern_index is not None and 0 <= pattern_index < TOTAL_PATTERNS:

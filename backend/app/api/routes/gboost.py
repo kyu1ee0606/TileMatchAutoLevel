@@ -836,10 +836,6 @@ async def upload_local_to_gboost(
         else:  # "keep"
             target_id = level_id
 
-        # Ensure target_id has proper prefix for GBoost
-        if not target_id.startswith("level_"):
-            target_id = f"level_{target_id}"
-
         # Load local level
         file_path = LOCAL_LEVELS_DIR / f"{level_id}.json"
         if not file_path.exists():

@@ -1350,7 +1350,7 @@ async def save_local_level(data: Dict[str, Any]):
             # Normalize difficulty to uppercase
             if difficulty:
                 difficulty = difficulty.upper()
-            use_tile_count = level_data.get("useTileCount", 5)
+            use_tile_count = level_data.get("useTileCount", 15)
 
             # Count only layers that have actual tiles
             total_layers = level_data.get("layer", 0)

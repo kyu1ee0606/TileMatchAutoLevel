@@ -20,13 +20,13 @@ export function GBoostPanel({ className }: GBoostPanelProps) {
   const [isHealthy, setIsHealthy] = useState<boolean | null>(null);
   const [configUrl, setConfigUrl] = useState('https://gameboost.cafe24.com/gameboost/');
   const [configApiKey, setConfigApiKey] = useState('');
-  const [configProjectId, setConfigProjectId] = useState('com.spcomes.townpop');
+  const [configProjectId, setConfigProjectId] = useState('6d126f4db852');
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [isTestingConnection, setIsTestingConnection] = useState(false);
 
   // Default values
   const DEFAULT_URL = 'https://gameboost.cafe24.com/gameboost/';
-  const DEFAULT_PROJECT_ID = 'com.spcomes.townpop';
+  const DEFAULT_PROJECT_ID = '6d126f4db852';
 
   // Load GBoost config on mount
   useEffect(() => {
@@ -172,10 +172,10 @@ export function GBoostPanel({ className }: GBoostPanelProps) {
             type="text"
             value={configProjectId}
             onChange={(e) => setConfigProjectId(e.target.value)}
-            placeholder="com.spcomes.townpop"
+            placeholder="6d126f4db852"
             className="w-full px-3 py-2 border border-gray-600 bg-gray-700 text-gray-100 rounded-md text-sm placeholder-gray-500"
           />
-          <p className="text-xs text-gray-500 mt-1">앱 ID (예: com.spcomes.townpop 또는 21ff4576052)</p>
+          <p className="text-xs text-gray-500 mt-1">앱 ID (예: 6d126f4db852)</p>
         </div>
 
         {/* Action Buttons */}

@@ -151,9 +151,9 @@ class GenerationParams:
                 from ..core.generator import get_tile_types_for_level
                 self.tile_types = get_tile_types_for_level(self.level_number)
             else:
-                # Default to t1~t5 (useTileCount=5)
+                # Default to t1~t15 (useTileCount=15, matches TownPop client)
                 # NOTE: t0 is excluded - causes issues with bot simulation
-                self.tile_types = ["t1", "t2", "t3", "t4", "t5"]
+                self.tile_types = ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9", "t10", "t11", "t12", "t13", "t14", "t15"]
         if self.obstacle_types is None:
             self.obstacle_types = ["chain", "frog"]
         # Only set default goals if None, not if empty list (empty list means no goals)

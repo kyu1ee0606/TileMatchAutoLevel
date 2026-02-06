@@ -101,7 +101,7 @@ class BenchmarkLevel:
         result = {
             "layer": max(layers.keys()) + 1 if layers else 1,
             "randSeed": simple.get("randSeed", 0),
-            "useTileCount": simple.get("useTileCount", 5),
+            "useTileCount": simple.get("useTileCount", 15),
         }
 
         # Add layer data

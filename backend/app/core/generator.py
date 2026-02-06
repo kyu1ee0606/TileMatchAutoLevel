@@ -9,22 +9,32 @@ logger = logging.getLogger(__name__)
 
 
 # ============ GBoost-Style Level Range Gimmick Configuration ============
-# Based on analysis of 221 human-designed levels (level_1 ~ level_221)
+# 인게임 확정 기믹 언락 스케줄 (2026.02 최종 확정 - 13개 기믹)
 # Gimmicks are progressively introduced to match the natural learning curve
 
 def get_gboost_style_gimmicks(level_number: int) -> Dict[str, Any]:
     """
     Get recommended gimmick configuration based on level number.
 
-    Based on analysis of GBoost production levels:
-    - Level 1-30: No gimmicks (tutorial/learning phase)
-    - Level 31-50: chain only (basic gimmick introduction)
-    - Level 51-80: chain, link_e (directional gimmick)
-    - Level 81-100: chain, link_e, link_w, bomb_5
-    - Level 101-130: chain, ice, link variants
-    - Level 131-160: chain, ice, curtain, grass
-    - Level 161-200: chain, ice, curtain, frog
-    - Level 201+: All gimmicks available
+    인게임 확정 기믹 언락 순서 (총 13개):
+    - Stage   1-9:   No gimmicks (tutorial/learning phase)
+    - Stage  10-19:  craft only (공예 - 첫 번째 기믹)
+    - Stage  20-29:  +stack (스택) [간격: 10]
+    - Stage  30-49:  +ice (얼음) [간격: 10]
+    - Stage  50-79:  +link (연결) [간격: 20]
+    - Stage  80-109: +chain (사슬) [간격: 30]
+    - Stage 110-149: +key (버퍼잠금) [간격: 30] ★신규
+    - Stage 150-189: +grass (풀) [간격: 40]
+    - Stage 190-239: +unknown (상자) [간격: 40]
+    - Stage 240-289: +curtain (커튼) [간격: 50]
+    - Stage 290-339: +bomb (폭탄) [간격: 50]
+    - Stage 340-389: +time_attack (타임어택) [간격: 50] ★신규
+    - Stage 390-439: +frog (개구리) [간격: 50]
+    - Stage 440+:    +teleport (텔레포터, 모든 기믹) [간격: 50]
+
+    특수 기믹 설정:
+    - key: unlockTile 필드로 버퍼 잠금 타일 수 설정
+    - time_attack: timea 필드로 제한 시간(초) 설정
 
     Args:
         level_number: The level number (1-based)
@@ -35,53 +45,89 @@ def get_gboost_style_gimmicks(level_number: int) -> Dict[str, Any]:
         - gimmick_intensity: Suggested intensity (0.0-1.5)
         - description: Human-readable description
     """
-    if level_number <= 30:
+    if level_number < 10:
         return {
             "obstacle_types": [],
             "gimmick_intensity": 0.0,
-            "description": "Tutorial phase - no gimmicks"
+            "description": "튜토리얼 - 기믹 없음"
         }
-    elif level_number <= 50:
+    elif level_number < 20:
         return {
-            "obstacle_types": ["chain"],
+            "obstacle_types": ["craft"],
+            "gimmick_intensity": 0.2,
+            "description": "첫 번째 기믹 - craft(공예)"
+        }
+    elif level_number < 30:
+        return {
+            "obstacle_types": ["craft", "stack"],
+            "gimmick_intensity": 0.25,
+            "description": "목표 기믹 - craft + stack"
+        }
+    elif level_number < 50:
+        return {
+            "obstacle_types": ["craft", "stack", "ice"],
             "gimmick_intensity": 0.3,
-            "description": "Basic gimmick introduction - chain only"
+            "description": "얼음 추가 - +ice"
         }
-    elif level_number <= 80:
+    elif level_number < 80:
         return {
-            "obstacle_types": ["chain", "link"],
+            "obstacle_types": ["craft", "stack", "ice", "link"],
+            "gimmick_intensity": 0.4,
+            "description": "연결 추가 - +link"
+        }
+    elif level_number < 110:
+        return {
+            "obstacle_types": ["craft", "stack", "ice", "link", "chain"],
             "gimmick_intensity": 0.5,
-            "description": "Directional mechanics - chain + link"
+            "description": "사슬 추가 - +chain"
         }
-    elif level_number <= 100:
+    elif level_number < 150:
         return {
-            "obstacle_types": ["chain", "link", "bomb"],
+            "obstacle_types": ["craft", "stack", "ice", "link", "chain", "key"],
+            "gimmick_intensity": 0.55,
+            "description": "버퍼잠금 추가 - +key"
+        }
+    elif level_number < 190:
+        return {
+            "obstacle_types": ["craft", "stack", "ice", "link", "chain", "key", "grass"],
             "gimmick_intensity": 0.6,
-            "description": "Explosive elements - chain + link + bomb"
+            "description": "풀 추가 - +grass"
         }
-    elif level_number <= 130:
+    elif level_number < 240:
         return {
-            "obstacle_types": ["chain", "link", "ice"],
+            "obstacle_types": ["craft", "stack", "ice", "link", "chain", "key", "grass", "unknown"],
+            "gimmick_intensity": 0.65,
+            "description": "상자 추가 - +unknown"
+        }
+    elif level_number < 290:
+        return {
+            "obstacle_types": ["craft", "stack", "ice", "link", "chain", "key", "grass", "unknown", "curtain"],
             "gimmick_intensity": 0.7,
-            "description": "Frozen challenges - chain + link + ice"
+            "description": "커튼 추가 - +curtain"
         }
-    elif level_number <= 160:
+    elif level_number < 340:
         return {
-            "obstacle_types": ["chain", "ice", "curtain", "grass"],
+            "obstacle_types": ["craft", "stack", "ice", "link", "chain", "key", "grass", "unknown", "curtain", "bomb"],
+            "gimmick_intensity": 0.75,
+            "description": "폭탄 추가 - +bomb"
+        }
+    elif level_number < 390:
+        return {
+            "obstacle_types": ["craft", "stack", "ice", "link", "chain", "key", "grass", "unknown", "curtain", "bomb", "time_attack"],
             "gimmick_intensity": 0.8,
-            "description": "Hidden elements - chain + ice + curtain + grass"
+            "description": "타임어택 추가 - +time_attack"
         }
-    elif level_number <= 200:
+    elif level_number < 440:
         return {
-            "obstacle_types": ["chain", "ice", "curtain", "frog"],
+            "obstacle_types": ["craft", "stack", "ice", "link", "chain", "key", "grass", "unknown", "curtain", "bomb", "time_attack", "frog"],
             "gimmick_intensity": 0.9,
-            "description": "Moving elements - chain + ice + curtain + frog"
+            "description": "개구리 추가 - +frog"
         }
     else:
         return {
-            "obstacle_types": ["chain", "frog", "link", "grass", "ice", "bomb", "curtain"],
+            "obstacle_types": ["craft", "stack", "ice", "link", "chain", "key", "grass", "unknown", "curtain", "bomb", "time_attack", "frog", "teleport"],
             "gimmick_intensity": 1.0,
-            "description": "All gimmicks available"
+            "description": "모든 기믹 사용 가능 (13개)"
         }
 
 
@@ -206,18 +252,16 @@ def get_tile_types_for_level(level_number: int) -> List[str]:
     Get recommended tile types list based on level number.
 
     톱니바퀴 패턴(10레벨 순환) 기반 타일 종류 선택:
-    - 순환의 첫 레벨(1, 11, 21, 31...): 특정 타일 세트 사용
-    - 나머지 레벨: t0 사용 (클라이언트에서 랜덤 결정)
+    모든 레벨에서 다양한 타일 타입 사용 (t0 단독 사용 금지)
 
     타일 그룹 순환 (30레벨마다 전체 순환):
-    - 그룹 0: t1~t5 (레벨 1, 31, 61...)
-    - 그룹 1: t6~t10 (레벨 11, 41, 71...)
-    - 그룹 2: t11~t15 (레벨 21, 51, 81...)
+    - 그룹 0: t1~t5 (레벨 1-10, 31-40, 61-70...)
+    - 그룹 1: t6~t10 (레벨 11-20, 41-50, 71-80...)
+    - 그룹 2: t11~t15 (레벨 21-30, 51-60, 81-90...)
 
-    [인게임 t0 시스템]
-    - t0 = 랜덤 타일 플레이스홀더 (게임 시작 시 실제 타일로 변환)
-    - useTileCount 설정값 기반으로 타일 종류 결정 (1~15)
-    - 3의 배수 보장, 균등 분배 (typeImbalance=0)
+    [수정 이유]
+    - 기존 t0 시스템은 클라이언트 랜덤화 용도였으나, 생성기에서 단일 타입으로 처리됨
+    - 모든 레벨에서 실제 다양한 타일 타입 사용하여 시각적 다양성 보장
 
     Args:
         level_number: The level number (1-based)
@@ -225,9 +269,6 @@ def get_tile_types_for_level(level_number: int) -> List[str]:
     Returns:
         List of tile type strings
     """
-    # 10레벨 순환에서의 위치 (0-9)
-    position_in_cycle = (level_number - 1) % 10
-
     # 레벨에 따른 타일 종류 수 결정 (난이도 스케일링)
     config = get_gboost_style_layer_config(level_number)
     tile_count = config.get("tile_types", 5)
@@ -235,21 +276,17 @@ def get_tile_types_for_level(level_number: int) -> List[str]:
     # 30레벨마다 타일 그룹 순환 (0, 1, 2)
     group_index = ((level_number - 1) // 10) % 3
 
-    # 첫 번째 레벨(톱니바퀴 최저 난이도)은 특정 타일 세트 사용
-    if position_in_cycle == 0:
-        if group_index == 0:
-            base_tiles = ["t1", "t2", "t3", "t4", "t5"]
-        elif group_index == 1:
-            base_tiles = ["t6", "t7", "t8", "t9", "t10"]
-        else:
-            base_tiles = ["t11", "t12", "t13", "t14", "t15"]
-
-        # tile_count에 맞게 조정
-        return base_tiles[:tile_count]
+    # 그룹별 타일 풀 정의
+    if group_index == 0:
+        base_tiles = ["t1", "t2", "t3", "t4", "t5"]
+    elif group_index == 1:
+        base_tiles = ["t6", "t7", "t8", "t9", "t10"]
     else:
-        # 나머지 레벨은 t0 사용 (클라이언트에서 랜덤 결정)
-        # tile_count 개수만큼 t0 반복 (useTileCount 설정용)
-        return ["t0"] * tile_count
+        base_tiles = ["t11", "t12", "t13", "t14", "t15"]
+
+    # tile_count에 맞게 조정 (최소 3개 보장)
+    tile_count = max(3, min(tile_count, len(base_tiles)))
+    return base_tiles[:tile_count]
 
 
 def get_use_tile_count_for_level(level_number: int) -> int:
@@ -703,6 +740,49 @@ class LevelGenerator:
         # Auto-calculate max_moves based on total tiles
         level["max_moves"] = self._calculate_max_moves(level)
 
+        # Set special gimmick fields based on level number (레벨 전역 설정)
+        # key와 time_attack은 타일 레벨 기믹이 아닌 레벨 전역 설정
+        # 레벨 번호 기반으로 언락 여부 판단 (get_gboost_style_gimmicks 참조)
+        # 확률 기반 적용: 모든 레벨에 적용하면 과도하므로 30% 확률로 적용
+        level_number = params.level_number if params.level_number else 0
+        gimmick_intensity = getattr(params, 'gimmick_intensity', 1.0)
+
+        # key 기믹: unlockTile 필드 설정 (버퍼 잠금)
+        # 레벨 110 이상에서 언락, 30% 확률로 적용
+        # key 기믹: unlockTile 필드 설정 (버퍼 잠금)
+        # - 레벨 110 (튜토리얼): 100% 확률로 적용
+        # - 레벨 111+: 30% 확률로 적용
+        KEY_UNLOCK_LEVEL = 110
+        KEY_PROBABILITY = 0.3  # 30% 확률
+        if level_number >= KEY_UNLOCK_LEVEL and gimmick_intensity > 0:
+            # 튜토리얼 레벨(110)은 항상 적용, 그 외는 확률 적용
+            is_key_tutorial = (level_number == KEY_UNLOCK_LEVEL)
+            if is_key_tutorial or random.random() < KEY_PROBABILITY * gimmick_intensity:
+                # 난이도에 따라 잠금 슬롯 수 결정 (1-2)
+                unlock_tile_count = 1  # 기본값: 1칸 잠금
+                if params.target_difficulty >= 0.7 and not is_key_tutorial:
+                    unlock_tile_count = 2  # 고난이도: 2칸 잠금 (튜토리얼은 항상 1칸)
+                level["unlockTile"] = unlock_tile_count
+
+        # time_attack 기믹: timea 필드 설정 (제한 시간, 초)
+        # - 레벨 340 (튜토리얼): 100% 확률로 적용
+        # - 레벨 341+: 30% 확률로 적용
+        TIME_ATTACK_UNLOCK_LEVEL = 340
+        TIME_ATTACK_PROBABILITY = 0.3  # 30% 확률
+        if level_number >= TIME_ATTACK_UNLOCK_LEVEL and gimmick_intensity > 0:
+            # 튜토리얼 레벨(340)은 항상 적용, 그 외는 확률 적용
+            is_time_tutorial = (level_number == TIME_ATTACK_UNLOCK_LEVEL)
+            if is_time_tutorial or random.random() < TIME_ATTACK_PROBABILITY * gimmick_intensity:
+                # 난이도에 따라 제한 시간 결정 (60-120초)
+                # 튜토리얼은 넉넉하게 120초, 그 외는 난이도 기반
+                if is_time_tutorial:
+                    time_limit = 120  # 튜토리얼은 넉넉하게
+                else:
+                    base_time = 120
+                    difficulty_reduction = int(params.target_difficulty * 60)  # 최대 60초 감소
+                    time_limit = max(60, base_time - difficulty_reduction)
+                level["timea"] = time_limit
+
         generation_time_ms = int((time.time() - start_time) * 1000)
 
         return GenerationResult(
@@ -1003,13 +1083,14 @@ class LevelGenerator:
             tile_count = len(valid_tile_types)
             use_tile_count = min(self.MAX_USE_TILE_COUNT, tile_count)
         else:
-            # No valid tiles, use default of 5
-            use_tile_count = 5
+            # No valid tiles, use default of 15 (matches TownPop client - t1~t15 균등 분배)
+            use_tile_count = 15
 
         level = {
             "layer": params.max_layers,
             "useTileCount": use_tile_count,
             "randSeed": random.randint(1, 999999),
+            "autoCollectCount": 0,  # 암호화 설정 (0: 해제)
         }
 
         for i in range(params.max_layers):
@@ -7409,7 +7490,7 @@ class LevelGenerator:
         Only adds to layers that already have tiles (respects user's layer config).
         """
         num_layers = level.get("layer", 8)
-        use_tile_count = level.get("useTileCount", 5)
+        use_tile_count = level.get("useTileCount", 15)
 
         # Collect existing tile types from level to match user's selection
         # IMPORTANT: Exclude goal types (craft_s, stack_s, etc.) - they should only be added via _add_goals
@@ -7846,7 +7927,7 @@ class LevelGenerator:
         craft_s internal tile counts if necessary.
         """
         num_layers = level.get("layer", 8)
-        use_tile_count = level.get("useTileCount", 5)
+        use_tile_count = level.get("useTileCount", 15)
 
         # Collect existing tile types from level to match user's selection
         existing_tile_types = set()
@@ -8409,7 +8490,7 @@ class LevelGenerator:
             Updated level with minimum tiles ensured
         """
         num_layers = level.get("layer", 8)
-        use_tile_count = level.get("useTileCount", 5)
+        use_tile_count = level.get("useTileCount", 15)
 
         # Count current tiles
         current_tiles = 0

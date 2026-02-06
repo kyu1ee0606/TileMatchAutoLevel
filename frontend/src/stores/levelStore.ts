@@ -179,6 +179,7 @@ interface LevelState {
   setSelectedTileType: (tileType: string) => void;
   setSelectedAttribute: (attribute: string) => void;
   setTimeAttack: (seconds: number) => void;
+  setAutoCollectCount: (count: number) => void;
 
   // Tile operations (with validation)
   setTile: (layer: number, x: number, y: number, tileData: TileData) => ValidationResult;
@@ -230,6 +231,10 @@ export const useLevelStore = create<LevelState>((set, get) => ({
   setSelectedAttribute: (attribute) => set({ selectedAttribute: attribute }),
   setTimeAttack: (seconds) => set((state) => ({
     level: { ...state.level, timeAttack: seconds },
+    analysisResult: null,
+  })),
+  setAutoCollectCount: (count) => set((state) => ({
+    level: { ...state.level, autoCollectCount: count },
     analysisResult: null,
   })),
 

@@ -3475,6 +3475,35 @@ function TestTab({
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
+                      {/* Regenerate button with status */}
+                      {(() => {
+                        const levelProgress = regenProgressMap.get(level.meta.level_number);
+                        const isRegen = regeneratingLevels.has(level.meta.level_number);
+                        const isDone = levelProgress?.status === 'done';
+                        const isFailed = levelProgress?.status === 'failed';
+
+                        return (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleRegenerateLevel(level.meta.level_number);
+                            }}
+                            disabled={isRegen || isBatchRegenerating}
+                            className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${
+                              isRegen
+                                ? 'bg-yellow-600 text-white cursor-not-allowed animate-pulse'
+                                : isDone
+                                  ? 'bg-green-600 hover:bg-green-500 text-white'
+                                  : isFailed
+                                    ? 'bg-red-600 hover:bg-red-500 text-white'
+                                    : 'bg-blue-600 hover:bg-blue-500 text-white'
+                            }`}
+                            title={isRegen ? '재생성 중...' : isDone ? '재생성 완료 - 다시 재생성' : isFailed ? '재생성 실패 - 다시 시도' : '이 레벨만 재생성'}
+                          >
+                            {isRegen ? <span className="animate-spin inline-block">⟳</span> : isDone ? '✓' : isFailed ? '!' : '🔄'}
+                          </button>
+                        );
+                      })()}
                       {/* Match score indicator or test button */}
                       {level.meta.match_score !== undefined && level.meta.match_score > 0 ? (
                         <span className={`text-xs px-1.5 py-0.5 rounded ${

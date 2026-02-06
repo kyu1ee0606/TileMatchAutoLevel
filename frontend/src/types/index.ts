@@ -18,6 +18,9 @@ export interface LevelLayer {
 export interface LevelJSON {
   layer: number;
   timeAttack?: number;  // Time attack seconds (0 = disabled)
+  autoCollectCount?: number;  // 암호화 설정 (0 = 해제)
+  useTileCount?: number;  // 타일 종류 수 (1-15)
+  randSeed?: number;  // 랜덤 시드
   [key: `layer_${number}`]: LevelLayer;
 }
 

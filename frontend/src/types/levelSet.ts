@@ -106,50 +106,65 @@ export type GimmickUnlockLevels = Record<string, number>;
 export type LevelingMode = 'simple' | 'professional';
 
 /**
- * 기본 기믹 언락 레벨 (5단위) - 기존 심플 모드
- * 11개 기믹이 55레벨에 모두 언락됨
+ * 기본 기믹 언락 레벨 - 백엔드 DEFAULT_GIMMICK_UNLOCK_LEVELS와 동기화
+ * 13개 기믹 (v5 - key, time_attack 추가)
  */
 export const SIMPLE_GIMMICK_UNLOCK_LEVELS: GimmickUnlockLevels = {
-  chain: 5,
-  frog: 10,
-  ice: 15,
-  link: 20,
-  grass: 25,
-  bomb: 30,
-  curtain: 35,
-  teleport: 40,
-  unknown: 45,
-  craft: 50,
-  stack: 55,
+  craft: 10,
+  stack: 20,
+  ice: 30,
+  link: 50,
+  chain: 80,
+  key: 110,
+  grass: 150,
+  unknown: 190,
+  curtain: 240,
+  bomb: 290,
+  time_attack: 340,
+  frog: 390,
+  teleport: 440,
 };
 
 /**
- * 프로페셔널 기믹 언락 레벨 (시장 조사 기반)
+ * 프로페셔널 기믹 언락 레벨 (v5 - 인게임 설계 기반)
  *
- * [연구 근거]
- * - Tile Busters: 레벨 5-10에서 첫 장애물 등장
- * - Room 8 Studio: "50레벨 동안 메카닉 반복 금지"
- * - Room 8 Studio: 히든 타일(unknown)은 레벨 175+ 본격 도입
- * - 튜토리얼 원칙: 1-3개 메카닉만 사용, 3회 이하 움직임으로 해제
+ * [설계 원칙]
+ * - 레벨 1-9: 순수 매칭 학습 (기믹 없음)
+ * - 레벨 10: 첫 기믹(craft) 도입
+ * - 30~50레벨 간격으로 새 기믹 순차 언락
+ * - 13개 기믹이 레벨 440에서 모두 언락
  *
- * 특징:
- * - 레벨 1-5: 순수 매칭 학습
- * - 레벨 6: 첫 기믹(chain) 도입 (Tile Busters 참고)
- * - 이후 ~20레벨 간격으로 새 기믹 언락
+ * [기믹 순서 (난이도 순)]
+ * 1. craft(10) - 공예타일 ⭐⭐⭐
+ * 2. stack(20) - 스택 ⭐⭐⭐
+ * 3. ice(30) - 얼음 ⭐⭐⭐
+ * 4. link(50) - 연결 ⭐⭐⭐⭐
+ * 5. chain(80) - 사슬 ⭐⭐⭐
+ * 6. key(110) - 버퍼잠금 ⭐⭐⭐ (unlockTile 필드)
+ * 7. grass(150) - 풀 ⭐⭐⭐
+ * 8. unknown(190) - 상자 ⭐⭐
+ * 9. curtain(240) - 커튼 ⭐⭐
+ * 10. bomb(290) - 폭탄 ⭐⭐⭐⭐
+ * 11. time_attack(340) - 타임어택 ⭐⭐⭐⭐ (timea 필드)
+ * 12. frog(390) - 개구리 ⭐⭐⭐⭐⭐
+ * 13. teleport(440) - 텔레포터 ⭐⭐⭐
+ *
  * - 백엔드 DEFAULT_GIMMICK_UNLOCK_LEVELS와 동기화됨
  */
 export const PROFESSIONAL_GIMMICK_UNLOCK_LEVELS: GimmickUnlockLevels = {
-  chain: 6,       // 6-24: chain 연습 (Tile Busters: 5-10에서 첫 장애물)
-  ice: 25,        // 25-44: ice 연습
-  grass: 45,      // 45-64: grass 연습
-  frog: 65,       // 65-84: frog 연습
-  bomb: 85,       // 85-104: bomb 연습
-  curtain: 105,   // 105-124: curtain 연습
-  teleport: 125,  // 125-144: teleport 연습
-  link: 145,      // 145-174: link 연습
-  unknown: 175,   // 175-194: unknown 연습 (Room 8 Studio 연구)
-  craft: 195,     // 195-214: craft 연습
-  stack: 215,     // 215+: stack 연습
+  craft: 10,        // 1번째 기믹 - 공예
+  stack: 20,        // 2번째 기믹 - 스택
+  ice: 30,          // 3번째 기믹 - 얼음
+  link: 50,         // 4번째 기믹 - 연결
+  chain: 80,        // 5번째 기믹 - 사슬
+  key: 110,         // 6번째 기믹 - 버퍼잠금 (unlockTile)
+  grass: 150,       // 7번째 기믹 - 풀
+  unknown: 190,     // 8번째 기믹 - 상자
+  curtain: 240,     // 9번째 기믹 - 커튼
+  bomb: 290,        // 10번째 기믹 - 폭탄
+  time_attack: 340, // 11번째 기믹 - 타임어택 (timea)
+  frog: 390,        // 12번째 기믹 - 개구리
+  teleport: 440,    // 13번째 기믹 - 텔레포터
 };
 
 /**

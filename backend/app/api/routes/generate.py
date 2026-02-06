@@ -216,58 +216,61 @@ def get_tutorial_config(level_number: int | None) -> dict | None:
 
 
 # =========================================================
-# 10레벨 단위 기믹 언락 스케줄 (leveling_config.py와 동기화)
+# 기믹 언락 스케줄 (인게임 확정 - 2026.02 최종, 13개 기믹)
 # =========================================================
-# [연구 근거] Tile Busters/Triple Tile/Room 8 Studio 분석 결과:
-# - Tile Busters: 레벨 5-10에서 첫 장애물 등장
-# - Room 8 Studio: "50레벨 동안 메카닉 반복 금지"
-# - Room 8 Studio: 히든 타일(unknown)은 레벨 175+ 본격 도입
-# - 업계 공통: 장애물은 3무브 이하로 해제 가능해야 함
-# - 튜토리얼 원칙: 1-3개 메카닉만 사용
+# 인게임 확정 기믹 언락 순서:
+# - Stage   1-9:   기믹 없음 (순수 매칭 학습)
+# - Stage  10:     craft 언락 (공예) [첫 번째]
+# - Stage  20:     stack 언락 (스택) [간격: 10]
+# - Stage  30:     ice 언락 (얼음) [간격: 10]
+# - Stage  50:     link 언락 (연결) [간격: 20]
+# - Stage  80:     chain 언락 (사슬) [간격: 30]
+# - Stage 110:     key 언락 (버퍼잠금) [간격: 30] ★신규
+# - Stage 150:     grass 언락 (풀) [간격: 40]
+# - Stage 190:     unknown 언락 (상자) [간격: 40]
+# - Stage 240:     curtain 언락 (커튼) [간격: 50]
+# - Stage 290:     bomb 언락 (폭탄) [간격: 50]
+# - Stage 340:     time_attack 언락 (타임어택) [간격: 50] ★신규
+# - Stage 390:     frog 언락 (개구리) [간격: 50]
+# - Stage 440:     teleport 언락 (텔레포터) [간격: 50]
+# - Stage 441+:    모든 기믹 자유 조합
 #
-# 언락 스케줄 (시장 조사 기반, ~20레벨 간격):
-# - Level 1-5: 기믹 없음 (순수 매칭 학습)
-# - Level 6: chain 언락 (Tile Busters 참고)
-# - Level 25: ice 언락
-# - Level 45: grass 언락
-# - Level 65: frog 언락
-# - Level 85: bomb 언락
-# - Level 105: curtain 언락
-# - Level 125: teleport 언락
-# - Level 145: link 언락
-# - Level 175: unknown 언락 (히든 타일 - Room 8 Studio 연구)
-# - Level 195: craft 언락
-# - Level 215: stack 언락
-# - Level 216+: 모든 기믹 자유 조합
+# 특수 기믹 설정:
+# - key: unlockTile 필드로 버퍼 잠금 타일 수 설정
+# - time_attack: timea 필드로 제한 시간(초) 설정
 # =========================================================
 DEFAULT_GIMMICK_UNLOCK_LEVELS = {
-    "chain": 6,        # 첫 번째 기믹 - 기본 체인 (Tile Busters: 5-10)
-    "ice": 25,         # 두 번째 기믹 - 얼음
-    "grass": 45,       # 세 번째 기믹 - 풀
-    "frog": 65,        # 네 번째 기믹 - 개구리 (이동)
-    "bomb": 85,        # 다섯 번째 기믹 - 폭탄 (시간 압박)
-    "curtain": 105,    # 여섯 번째 기믹 - 커튼 (기억력)
-    "teleport": 125,   # 일곱 번째 기믹 - 텔레포트
-    "link": 145,       # 여덟 번째 기믹 - 링크 (연결)
-    "unknown": 175,    # 아홉 번째 기믹 - 히든 타일 (Room 8 Studio 연구)
-    "craft": 195,      # 열 번째 기믹 - 크래프트 목표
-    "stack": 215,      # 열한 번째 기믹 - 스택 목표
+    "craft": 10,        # 1번째 기믹 - 공예 (⭐⭐⭐)
+    "stack": 20,        # 2번째 기믹 - 스택 (⭐⭐⭐)
+    "ice": 30,          # 3번째 기믹 - 얼음 (⭐⭐⭐)
+    "link": 50,         # 4번째 기믹 - 연결 (⭐⭐⭐⭐)
+    "chain": 80,        # 5번째 기믹 - 사슬 (⭐⭐⭐)
+    "key": 110,         # 6번째 기믹 - 버퍼잠금 (⭐⭐⭐) ★신규
+    "grass": 150,       # 7번째 기믹 - 풀 (⭐⭐⭐)
+    "unknown": 190,     # 8번째 기믹 - 상자 (⭐⭐)
+    "curtain": 240,     # 9번째 기믹 - 커튼 (⭐⭐)
+    "bomb": 290,        # 10번째 기믹 - 폭탄 (⭐⭐⭐⭐)
+    "time_attack": 340, # 11번째 기믹 - 타임어택 (⭐⭐⭐⭐) ★신규
+    "frog": 390,        # 12번째 기믹 - 개구리 (⭐⭐⭐⭐⭐)
+    "teleport": 440,    # 13번째 기믹 - 텔레포터 (⭐⭐⭐)
 }
 
-# Legacy simple unlock levels (5-stage intervals)
-# All 11 gimmicks unlock by level 55
+# Legacy simple unlock levels - 이제 사용 안함 (호환성 유지용)
+# 새로운 언락 순서로 통일
 SIMPLE_GIMMICK_UNLOCK_LEVELS = {
-    "chain": 5,
-    "frog": 10,
-    "ice": 15,
-    "link": 20,
-    "grass": 25,
-    "bomb": 30,
-    "curtain": 35,
-    "teleport": 40,
-    "unknown": 45,
-    "craft": 50,
-    "stack": 55,
+    "craft": 10,
+    "stack": 20,
+    "ice": 30,
+    "link": 50,
+    "chain": 80,
+    "key": 110,
+    "grass": 150,
+    "unknown": 190,
+    "curtain": 240,
+    "bomb": 290,
+    "time_attack": 340,
+    "frog": 390,
+    "teleport": 440,
 }
 
 

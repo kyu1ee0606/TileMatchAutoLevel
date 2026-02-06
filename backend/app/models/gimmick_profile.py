@@ -13,15 +13,18 @@ from enum import Enum
 
 class GimmickType(str, Enum):
     """사용 가능한 기믹 타입"""
-    CHAIN = "chain"
-    FROG = "frog"
-    ICE = "ice"
-    LINK = "link"
-    GRASS = "grass"
-    BOMB = "bomb"
-    CURTAIN = "curtain"
-    TELEPORT = "teleport"
-    UNKNOWN = "unknown"  # 상위 타일에 가려지면 타일 종류가 숨겨짐
+    # 장애물 기믹
+    CHAIN = "chain"        # 사슬 - 인접 타일 클리어로 해제
+    FROG = "frog"          # 개구리 - 매 턴 이동
+    ICE = "ice"            # 얼음 - 인접 클리어로 녹임
+    LINK = "link"          # 연결 - 연결된 타일 동시 선택
+    GRASS = "grass"        # 풀 - 인접 클리어로 제거
+    BOMB = "bomb"          # 폭탄 - 카운트다운 후 폭발
+    CURTAIN = "curtain"    # 커튼 - 가려진 타일
+    TELEPORT = "teleport"  # 텔레포터 - 위치 변경
+    UNKNOWN = "unknown"    # 상자 - 상위 타일에 가려지면 타일 종류가 숨겨짐
+    KEY = "key"            # 버퍼잠금 - unlockTile 필드로 설정
+    TIME_ATTACK = "time_attack"  # 타임어택 - timea 필드로 설정
 
 
 @dataclass

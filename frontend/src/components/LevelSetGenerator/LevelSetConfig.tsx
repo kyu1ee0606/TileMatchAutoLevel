@@ -642,9 +642,9 @@ export function LevelSetConfig({
                 onClick={() => onConfigChange({
                   ...config,
                   gimmickUnlockLevels: {
-                    chain: 20, frog: 40, ice: 60, link: 80, grass: 100,
-                    bomb: 120, curtain: 140, teleport: 160, crate: 180,
-                    craft: 200, stack: 220
+                    craft: 20, stack: 40, ice: 60, link: 80, chain: 100,
+                    key: 120, grass: 140, unknown: 160, curtain: 180,
+                    bomb: 200, time_attack: 220, frog: 240, teleport: 260
                   }
                 })}
                 className="px-2 py-1 text-xs bg-amber-700 hover:bg-amber-600 text-white rounded"
@@ -656,9 +656,9 @@ export function LevelSetConfig({
                 onClick={() => onConfigChange({
                   ...config,
                   gimmickUnlockLevels: {
-                    chain: 1, frog: 1, ice: 1, link: 1, grass: 1,
-                    bomb: 1, curtain: 1, teleport: 1, crate: 1,
-                    craft: 1, stack: 1
+                    craft: 1, stack: 1, ice: 1, link: 1, chain: 1,
+                    key: 1, grass: 1, unknown: 1, curtain: 1,
+                    bomb: 1, time_attack: 1, frog: 1, teleport: 1
                   }
                 })}
                 className="px-2 py-1 text-xs bg-amber-700 hover:bg-amber-600 text-white rounded"

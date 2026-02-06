@@ -54,120 +54,155 @@ class GimmickUnlockConfig:
 
 
 # =========================================================
-# 프로급 기믹 언락 스케줄 (v3 - 시장 조사 기반)
+# 프로급 기믹 언락 스케줄 (v5 - 인게임 확정 스펙 + Key/TimeAttack)
 # =========================================================
-# [시장 조사 기반 개선]
-# - Tile Busters: 레벨 5-10에서 첫 장애물 등장
-# - Room 8 Studio: "50레벨 동안 메카닉 반복 금지"
-# - Room 8 Studio: 히든 타일(unknown)은 레벨 175+ 본격 도입
-# - 업계 공통: 장애물은 3무브 이하로 해제 가능해야 함
-# - 튜토리얼 원칙: 1-3개 메카닉만 사용
+# [인게임 기믹 언락 순서 - 2026.02 최종 확정]
 #
-# 개선된 스케줄 (~20레벨 간격, 레벨 6부터 시작):
-# - Level 1-5: 순수 매칭 학습 (기믹 없음)
-# - Level 6: chain 언락 (Tile Busters 참고)
-# - Level 25: ice 언락
-# - Level 45: grass 언락
-# - Level 65: frog 언락
-# - Level 85: bomb 언락
-# - Level 105: curtain 언락
-# - Level 125: teleport 언락
-# - Level 145: link 언락
-# - Level 175: unknown 언락 (히든 타일 - Room 8 Studio 연구)
-# - Level 195: craft 언락
-# - Level 215: stack 언락
-# - Level 216+: 모든 기믹 언락 완료
+# 언락 스케줄 (총 13개 기믹):
+# - Stage   1-9:   순수 매칭 학습 (기믹 없음)
+# - Stage  10:     craft 언락 (공예 - 첫 번째 기믹)
+# - Stage  20:     stack 언락 (스택) [간격: 10]
+# - Stage  30:     ice 언락 (얼음) [간격: 10]
+# - Stage  50:     link 언락 (연결) [간격: 20]
+# - Stage  80:     chain 언락 (사슬) [간격: 30]
+# - Stage 110:     key 언락 (버퍼잠금) [간격: 30] ★신규
+# - Stage 150:     grass 언락 (풀) [간격: 40]
+# - Stage 190:     unknown 언락 (상자) [간격: 40]
+# - Stage 240:     curtain 언락 (커튼) [간격: 50]
+# - Stage 290:     bomb 언락 (폭탄) [간격: 50]
+# - Stage 340:     time_attack 언락 (타임어택) [간격: 50] ★신규
+# - Stage 390:     frog 언락 (개구리) [간격: 50]
+# - Stage 440:     teleport 언락 (텔레포터) [간격: 50]
+# - Stage 441+:    모든 기믹 언락 완료
+#
+# 복잡도 기준 difficulty_weight:
+# - ⭐⭐ (낮음): 1.0
+# - ⭐⭐⭐ (보통): 1.1-1.2
+# - ⭐⭐⭐⭐ (높음): 1.3-1.4
+# - ⭐⭐⭐⭐⭐ (최고): 1.5
+#
+# 특수 기믹 설정:
+# - key: unlockTile 필드로 버퍼 잠금 타일 수 설정
+# - time_attack: timea 필드로 제한 시간(초) 설정
 # =========================================================
 
 PROFESSIONAL_GIMMICK_UNLOCK: Dict[str, GimmickUnlockConfig] = {
-    "chain": GimmickUnlockConfig(
-        gimmick="chain",
-        unlock_level=6,  # 첫 번째 기믹 (Tile Busters: 5-10에서 첫 장애물)
-        practice_levels=18,  # 6-24: 연습
-        integration_start=25,
-        difficulty_weight=1.0,
-        description="체인 - 가장 기본적인 기믹, 인접 타일로 해제"
-    ),
-    "ice": GimmickUnlockConfig(
-        gimmick="ice",
-        unlock_level=25,
-        practice_levels=19,  # 25-44: 연습
-        integration_start=45,
-        difficulty_weight=1.1,
-        description="얼음 - 인접 타일 클리어로 녹임"
-    ),
-    "grass": GimmickUnlockConfig(
-        gimmick="grass",
-        unlock_level=45,
-        practice_levels=19,  # 45-64: 연습
-        integration_start=65,
-        difficulty_weight=1.1,
-        description="풀 - 인접 타일 클리어로 제거"
-    ),
-    "frog": GimmickUnlockConfig(
-        gimmick="frog",
-        unlock_level=65,
-        practice_levels=19,  # 65-84: 연습
-        integration_start=85,
-        difficulty_weight=1.2,
-        description="개구리 - 매 턴 이동, 전략적 배치 필요"
-    ),
-    "bomb": GimmickUnlockConfig(
-        gimmick="bomb",
-        unlock_level=85,
-        practice_levels=19,  # 85-104: 연습
-        integration_start=105,
-        difficulty_weight=1.3,
-        description="폭탄 - 카운트다운 후 폭발, 시간 압박"
-    ),
-    "curtain": GimmickUnlockConfig(
-        gimmick="curtain",
-        unlock_level=105,
-        practice_levels=19,  # 105-124: 연습
-        integration_start=125,
-        difficulty_weight=1.2,
-        description="커튼 - 가려진 타일, 기억력 테스트"
-    ),
-    "teleport": GimmickUnlockConfig(
-        gimmick="teleport",
-        unlock_level=125,
-        practice_levels=19,  # 125-144: 연습
-        integration_start=145,
-        difficulty_weight=1.2,
-        description="텔레포트 - 타일 위치 변경"
-    ),
-    "link": GimmickUnlockConfig(
-        gimmick="link",
-        unlock_level=145,
-        practice_levels=29,  # 145-174: 연습
-        integration_start=175,
-        difficulty_weight=1.3,
-        description="링크 - 연결된 타일 동시 선택"
-    ),
-    # [Room 8 Studio 연구] 히든 타일은 레벨 175+ 본격 도입
-    "unknown": GimmickUnlockConfig(
-        gimmick="unknown",
-        unlock_level=175,
-        practice_levels=19,  # 175-194: 연습
-        integration_start=195,
-        difficulty_weight=1.4,
-        description="미스터리 - 상위 타일 제거 전까지 숨겨짐 (레벨 175+)"
-    ),
+    # 1번째 기믹: craft (공예) - Stage 10
     "craft": GimmickUnlockConfig(
         gimmick="craft",
-        unlock_level=195,
-        practice_levels=19,  # 195-214: 연습
-        integration_start=215,
-        difficulty_weight=1.4,
-        description="크래프트 목표 - 특정 방향으로 타일 수집"
+        unlock_level=10,
+        practice_levels=9,   # 10-19: 연습
+        integration_start=20,
+        difficulty_weight=1.2,  # ⭐⭐⭐
+        description="공예 - 특정 방향으로 타일 수집 목표"
     ),
+    # 2번째 기믹: stack (스택) - Stage 20
     "stack": GimmickUnlockConfig(
         gimmick="stack",
-        unlock_level=215,
-        practice_levels=19,  # 215+: 연습
-        integration_start=235,
-        difficulty_weight=1.5,
-        description="스택 목표 - 겹쳐진 타일 수집"
+        unlock_level=20,
+        practice_levels=9,   # 20-29: 연습
+        integration_start=30,
+        difficulty_weight=1.2,  # ⭐⭐⭐
+        description="스택 - 겹쳐진 타일 수집 목표"
+    ),
+    # 3번째 기믹: ice (얼음) - Stage 30
+    "ice": GimmickUnlockConfig(
+        gimmick="ice",
+        unlock_level=30,
+        practice_levels=19,  # 30-49: 연습
+        integration_start=50,
+        difficulty_weight=1.2,  # ⭐⭐⭐
+        description="얼음 - 인접 타일 클리어로 녹임"
+    ),
+    # 4번째 기믹: link (연결) - Stage 50
+    "link": GimmickUnlockConfig(
+        gimmick="link",
+        unlock_level=50,
+        practice_levels=29,  # 50-79: 연습
+        integration_start=80,
+        difficulty_weight=1.3,  # ⭐⭐⭐⭐
+        description="링크 - 연결된 타일 동시 선택 필요"
+    ),
+    # 5번째 기믹: chain (사슬) - Stage 80
+    "chain": GimmickUnlockConfig(
+        gimmick="chain",
+        unlock_level=80,
+        practice_levels=29,  # 80-109: 연습
+        integration_start=110,
+        difficulty_weight=1.2,  # ⭐⭐⭐
+        description="체인 - 인접 타일 클리어로 해제"
+    ),
+    # 6번째 기믹: key (버퍼잠금) - Stage 110 ★신규
+    "key": GimmickUnlockConfig(
+        gimmick="key",
+        unlock_level=110,
+        practice_levels=39,  # 110-149: 연습
+        integration_start=150,
+        difficulty_weight=1.2,  # ⭐⭐⭐
+        description="버퍼잠금 - unlockTile 필드로 설정"
+    ),
+    # 7번째 기믹: grass (풀) - Stage 150
+    "grass": GimmickUnlockConfig(
+        gimmick="grass",
+        unlock_level=150,
+        practice_levels=39,  # 150-189: 연습
+        integration_start=190,
+        difficulty_weight=1.2,  # ⭐⭐⭐
+        description="풀 - 인접 타일 클리어로 제거"
+    ),
+    # 8번째 기믹: unknown (상자) - Stage 190
+    "unknown": GimmickUnlockConfig(
+        gimmick="unknown",
+        unlock_level=190,
+        practice_levels=49,  # 190-239: 연습
+        integration_start=240,
+        difficulty_weight=1.0,  # ⭐⭐
+        description="상자 - 상위 타일 제거 전까지 숨겨짐"
+    ),
+    # 9번째 기믹: curtain (커튼) - Stage 240
+    "curtain": GimmickUnlockConfig(
+        gimmick="curtain",
+        unlock_level=240,
+        practice_levels=49,  # 240-289: 연습
+        integration_start=290,
+        difficulty_weight=1.0,  # ⭐⭐
+        description="커튼 - 가려진 타일, 기억력 테스트"
+    ),
+    # 10번째 기믹: bomb (폭탄) - Stage 290
+    "bomb": GimmickUnlockConfig(
+        gimmick="bomb",
+        unlock_level=290,
+        practice_levels=49,  # 290-339: 연습
+        integration_start=340,
+        difficulty_weight=1.3,  # ⭐⭐⭐⭐
+        description="폭탄 - 카운트다운 후 폭발, 시간 압박"
+    ),
+    # 11번째 기믹: time_attack (타임어택) - Stage 340 ★신규
+    "time_attack": GimmickUnlockConfig(
+        gimmick="time_attack",
+        unlock_level=340,
+        practice_levels=49,  # 340-389: 연습
+        integration_start=390,
+        difficulty_weight=1.3,  # ⭐⭐⭐⭐
+        description="타임어택 - timea 필드로 제한 시간(초) 설정"
+    ),
+    # 12번째 기믹: frog (개구리) - Stage 390
+    "frog": GimmickUnlockConfig(
+        gimmick="frog",
+        unlock_level=390,
+        practice_levels=49,  # 390-439: 연습
+        integration_start=440,
+        difficulty_weight=1.5,  # ⭐⭐⭐⭐⭐
+        description="개구리 - 매 턴 이동, 전략적 배치 필요"
+    ),
+    # 13번째 기믹: teleport (텔레포터) - Stage 440
+    "teleport": GimmickUnlockConfig(
+        gimmick="teleport",
+        unlock_level=440,
+        practice_levels=49,  # 440-489: 연습
+        integration_start=490,
+        difficulty_weight=1.2,  # ⭐⭐⭐
+        description="텔레포트 - 타일 위치 변경"
     ),
 }
 

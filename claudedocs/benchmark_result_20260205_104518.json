@@ -1,0 +1,150 @@
+{
+  "timestamp": "2026-02-05T10:45:18.896842",
+  "version": "1.0.0",
+  "iterations_per_bot": 20,
+  "total_time_seconds": 1.0811698750003416,
+  "avg_time_per_level_ms": 180.15522250008567,
+  "avg_time_per_simulation_ms": 2.251940281251071,
+  "slowest_level": "medium_05 (333.3ms)",
+  "fastest_level": "easy_01 (45.1ms)",
+  "results": [
+    {
+      "level_id": "easy_01",
+      "level_name": "기본 3종류",
+      "tier": "easy",
+      "tile_count": 9,
+      "layer_count": 1,
+      "total_time_ms": 45.10149999987334,
+      "avg_time_per_iteration_ms": 0.5637687499984168,
+      "iterations": 80,
+      "bot_times_ms": {
+        "casual": 7.235499999751482,
+        "average": 11.666082999909122,
+        "expert": 12.187207999886596,
+        "optimal": 14.006834000156232
+      },
+      "bot_clear_rates": {
+        "casual": 1.0,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "easy_05",
+      "level_name": "2레이어 + 4종류",
+      "tier": "easy",
+      "tile_count": 12,
+      "layer_count": 2,
+      "total_time_ms": 67.67308400003458,
+      "avg_time_per_iteration_ms": 0.8459135500004322,
+      "iterations": 80,
+      "bot_times_ms": {
+        "casual": 10.099999999965803,
+        "average": 18.163917000038055,
+        "expert": 18.432917000154703,
+        "optimal": 20.966000000044005
+      },
+      "bot_clear_rates": {
+        "casual": 1.0,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "easy_10",
+      "level_name": "EASY 최종 챌린지",
+      "tier": "easy",
+      "tile_count": 15,
+      "layer_count": 2,
+      "total_time_ms": 103.13762500027224,
+      "avg_time_per_iteration_ms": 1.289220312503403,
+      "iterations": 80,
+      "bot_times_ms": {
+        "casual": 14.82533299986244,
+        "average": 27.290832999824488,
+        "expert": 28.82224999984828,
+        "optimal": 32.19437500001732
+      },
+      "bot_clear_rates": {
+        "casual": 0.95,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "medium_01",
+      "level_name": "ICE + 2레이어",
+      "tier": "medium",
+      "tile_count": 18,
+      "layer_count": 2,
+      "total_time_ms": 304.96725000011793,
+      "avg_time_per_iteration_ms": 3.812090625001474,
+      "iterations": 80,
+      "bot_times_ms": {
+        "casual": 23.535333999916475,
+        "average": 47.59612499992727,
+        "expert": 89.74674999990384,
+        "optimal": 144.08237499992538
+      },
+      "bot_clear_rates": {
+        "casual": 0.75,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "medium_05",
+      "level_name": "GRASS + 8종류",
+      "tier": "medium",
+      "tile_count": 24,
+      "layer_count": 3,
+      "total_time_ms": 333.34370900001886,
+      "avg_time_per_iteration_ms": 4.166796362500236,
+      "iterations": 80,
+      "bot_times_ms": {
+        "casual": 42.14737500024057,
+        "average": 93.2519160000993,
+        "expert": 93.95108299986532,
+        "optimal": 103.98191700005555
+      },
+      "bot_clear_rates": {
+        "casual": 0.7,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "medium_10",
+      "level_name": "MEDIUM 최종 챌린지",
+      "tier": "medium",
+      "tile_count": 21,
+      "layer_count": 3,
+      "total_time_ms": 226.70816700019714,
+      "avg_time_per_iteration_ms": 2.833852087502464,
+      "iterations": 80,
+      "bot_times_ms": {
+        "casual": 30.767666999963694,
+        "average": 61.004457999843,
+        "expert": 63.87658299991017,
+        "optimal": 71.0556250000991
+      },
+      "bot_clear_rates": {
+        "casual": 0.95,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    }
+  ]
+}

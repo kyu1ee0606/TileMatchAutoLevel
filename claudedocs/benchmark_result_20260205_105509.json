@@ -1,0 +1,472 @@
+{
+  "timestamp": "2026-02-05T10:55:09.051525",
+  "version": "1.0.0",
+  "iterations_per_bot": 50,
+  "total_time_seconds": 6.371281416999864,
+  "avg_time_per_level_ms": 318.5183125000094,
+  "avg_time_per_simulation_ms": 1.592591562500047,
+  "slowest_level": "medium_05 (716.8ms)",
+  "fastest_level": "easy_04 (90.3ms)",
+  "results": [
+    {
+      "level_id": "easy_01",
+      "level_name": "기본 3종류",
+      "tier": "easy",
+      "tile_count": 9,
+      "layer_count": 1,
+      "total_time_ms": 102.04741600000489,
+      "avg_time_per_iteration_ms": 0.5102370800000244,
+      "iterations": 200,
+      "bot_times_ms": {
+        "casual": 18.05908400001499,
+        "average": 26.00070800008325,
+        "expert": 26.614207999955397,
+        "optimal": 31.36145899998155
+      },
+      "bot_clear_rates": {
+        "casual": 1.0,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "easy_02",
+      "level_name": "4종류 타일",
+      "tier": "easy",
+      "tile_count": 12,
+      "layer_count": 1,
+      "total_time_ms": 173.0924580001556,
+      "avg_time_per_iteration_ms": 0.865462290000778,
+      "iterations": 200,
+      "bot_times_ms": {
+        "casual": 29.904584000178147,
+        "average": 45.02087500031848,
+        "expert": 45.425541999975394,
+        "optimal": 52.729041000020516
+      },
+      "bot_clear_rates": {
+        "casual": 1.0,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "easy_03",
+      "level_name": "5종류 타일",
+      "tier": "easy",
+      "tile_count": 15,
+      "layer_count": 1,
+      "total_time_ms": 272.6870000001327,
+      "avg_time_per_iteration_ms": 1.3634350000006634,
+      "iterations": 200,
+      "bot_times_ms": {
+        "casual": 45.225291999940964,
+        "average": 73.30941700001858,
+        "expert": 72.30016599987721,
+        "optimal": 81.84429199991428
+      },
+      "bot_clear_rates": {
+        "casual": 1.0,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "easy_04",
+      "level_name": "2레이어 블로킹 기본",
+      "tier": "easy",
+      "tile_count": 9,
+      "layer_count": 2,
+      "total_time_ms": 90.34616600001755,
+      "avg_time_per_iteration_ms": 0.45173083000008774,
+      "iterations": 200,
+      "bot_times_ms": {
+        "casual": 16.405625000061264,
+        "average": 23.122624999814434,
+        "expert": 23.05020899984811,
+        "optimal": 27.76083299977472
+      },
+      "bot_clear_rates": {
+        "casual": 1.0,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "easy_05",
+      "level_name": "2레이어 + 4종류",
+      "tier": "easy",
+      "tile_count": 12,
+      "layer_count": 2,
+      "total_time_ms": 150.7101249999323,
+      "avg_time_per_iteration_ms": 0.7535506249996615,
+      "iterations": 200,
+      "bot_times_ms": {
+        "casual": 25.80587500006004,
+        "average": 39.01033299962364,
+        "expert": 39.662125000177184,
+        "optimal": 46.226083999954426
+      },
+      "bot_clear_rates": {
+        "casual": 1.0,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "easy_06",
+      "level_name": "2레이어 복잡",
+      "tier": "easy",
+      "tile_count": 12,
+      "layer_count": 2,
+      "total_time_ms": 141.93687499982843,
+      "avg_time_per_iteration_ms": 0.7096843749991422,
+      "iterations": 200,
+      "bot_times_ms": {
+        "casual": 25.28816700032621,
+        "average": 36.86470799993913,
+        "expert": 37.63720799997827,
+        "optimal": 42.140542000197456
+      },
+      "bot_clear_rates": {
+        "casual": 1.0,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "easy_07",
+      "level_name": "5종류 다양성",
+      "tier": "easy",
+      "tile_count": 15,
+      "layer_count": 1,
+      "total_time_ms": 272.4812500000553,
+      "avg_time_per_iteration_ms": 1.3624062500002765,
+      "iterations": 200,
+      "bot_times_ms": {
+        "casual": 45.55783300020266,
+        "average": 71.59712499969828,
+        "expert": 72.1579579999343,
+        "optimal": 83.16112500006057
+      },
+      "bot_clear_rates": {
+        "casual": 1.0,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "easy_08",
+      "level_name": "2레이어 + 5종류",
+      "tier": "easy",
+      "tile_count": 15,
+      "layer_count": 2,
+      "total_time_ms": 251.01791699989917,
+      "avg_time_per_iteration_ms": 1.2550895849994959,
+      "iterations": 200,
+      "bot_times_ms": {
+        "casual": 41.39316700002382,
+        "average": 64.83770799968624,
+        "expert": 66.89379099998405,
+        "optimal": 77.88491700011946
+      },
+      "bot_clear_rates": {
+        "casual": 1.0,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "easy_09",
+      "level_name": "2레이어 복잡 블로킹",
+      "tier": "easy",
+      "tile_count": 12,
+      "layer_count": 2,
+      "total_time_ms": 153.11454199991203,
+      "avg_time_per_iteration_ms": 0.7655727099995602,
+      "iterations": 200,
+      "bot_times_ms": {
+        "casual": 26.05325000013181,
+        "average": 39.262833000066166,
+        "expert": 40.41308300020319,
+        "optimal": 47.377625000081025
+      },
+      "bot_clear_rates": {
+        "casual": 1.0,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "easy_10",
+      "level_name": "EASY 최종 챌린지",
+      "tier": "easy",
+      "tile_count": 15,
+      "layer_count": 2,
+      "total_time_ms": 227.73370799995973,
+      "avg_time_per_iteration_ms": 1.1386685399997987,
+      "iterations": 200,
+      "bot_times_ms": {
+        "casual": 38.60458300005121,
+        "average": 60.156959000323695,
+        "expert": 60.26324999993449,
+        "optimal": 68.70100000014645
+      },
+      "bot_clear_rates": {
+        "casual": 0.98,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "medium_01",
+      "level_name": "ICE + 2레이어",
+      "tier": "medium",
+      "tile_count": 18,
+      "layer_count": 2,
+      "total_time_ms": 396.0415420001482,
+      "avg_time_per_iteration_ms": 1.980207710000741,
+      "iterations": 200,
+      "bot_times_ms": {
+        "casual": 59.83829200022228,
+        "average": 105.36258299998735,
+        "expert": 107.0025409999289,
+        "optimal": 123.83095799987132
+      },
+      "bot_clear_rates": {
+        "casual": 0.74,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "medium_02",
+      "level_name": "GRASS + 3레이어",
+      "tier": "medium",
+      "tile_count": 21,
+      "layer_count": 3,
+      "total_time_ms": 519.2257089997838,
+      "avg_time_per_iteration_ms": 2.596128544998919,
+      "iterations": 200,
+      "bot_times_ms": {
+        "casual": 78.77854200023648,
+        "average": 141.3971249999122,
+        "expert": 141.98116699981256,
+        "optimal": 157.05762499965203
+      },
+      "bot_clear_rates": {
+        "casual": 0.98,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "medium_03",
+      "level_name": "LINK + 3레이어",
+      "tier": "medium",
+      "tile_count": 18,
+      "layer_count": 3,
+      "total_time_ms": 344.1064170001482,
+      "avg_time_per_iteration_ms": 1.720532085000741,
+      "iterations": 200,
+      "bot_times_ms": {
+        "casual": 56.48812499975975,
+        "average": 92.2013340000376,
+        "expert": 91.58995799998593,
+        "optimal": 103.81516600000396
+      },
+      "bot_clear_rates": {
+        "casual": 1.0,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "medium_04",
+      "level_name": "ICE + 4레이어",
+      "tier": "medium",
+      "tile_count": 21,
+      "layer_count": 4,
+      "total_time_ms": 457.44033399978434,
+      "avg_time_per_iteration_ms": 2.2872016699989217,
+      "iterations": 200,
+      "bot_times_ms": {
+        "casual": 69.92429100000663,
+        "average": 122.01966700013145,
+        "expert": 123.8052499998048,
+        "optimal": 141.6827079997347
+      },
+      "bot_clear_rates": {
+        "casual": 1.0,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "medium_05",
+      "level_name": "GRASS + 8종류",
+      "tier": "medium",
+      "tile_count": 24,
+      "layer_count": 3,
+      "total_time_ms": 716.8081250001705,
+      "avg_time_per_iteration_ms": 3.5840406250008527,
+      "iterations": 200,
+      "bot_times_ms": {
+        "casual": 103.61850000026607,
+        "average": 195.61133300021538,
+        "expert": 198.28258300003654,
+        "optimal": 219.2853749997994
+      },
+      "bot_clear_rates": {
+        "casual": 0.9,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "medium_06",
+      "level_name": "LINK + 4레이어",
+      "tier": "medium",
+      "tile_count": 21,
+      "layer_count": 4,
+      "total_time_ms": 416.5729999999712,
+      "avg_time_per_iteration_ms": 2.082864999999856,
+      "iterations": 200,
+      "bot_times_ms": {
+        "casual": 65.6760420001774,
+        "average": 108.89504199985822,
+        "expert": 110.92558300015298,
+        "optimal": 131.06741699994018
+      },
+      "bot_clear_rates": {
+        "casual": 1.0,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "medium_07",
+      "level_name": "ICE + 4레이어 복잡",
+      "tier": "medium",
+      "tile_count": 18,
+      "layer_count": 4,
+      "total_time_ms": 315.84891600004994,
+      "avg_time_per_iteration_ms": 1.5792445800002497,
+      "iterations": 200,
+      "bot_times_ms": {
+        "casual": 51.281292000112444,
+        "average": 82.47920899975725,
+        "expert": 84.60758299997906,
+        "optimal": 97.47262500013676
+      },
+      "bot_clear_rates": {
+        "casual": 1.0,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "medium_08",
+      "level_name": "GRASS + 7종류",
+      "tier": "medium",
+      "tile_count": 21,
+      "layer_count": 3,
+      "total_time_ms": 532.2928750001665,
+      "avg_time_per_iteration_ms": 2.6614643750008327,
+      "iterations": 200,
+      "bot_times_ms": {
+        "casual": 79.35874999975567,
+        "average": 141.6457920004177,
+        "expert": 144.54320799995912,
+        "optimal": 166.733000000022
+      },
+      "bot_clear_rates": {
+        "casual": 0.98,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "medium_09",
+      "level_name": "GRASS + 6종류 + 3레이어",
+      "tier": "medium",
+      "tile_count": 18,
+      "layer_count": 3,
+      "total_time_ms": 344.9240420000024,
+      "avg_time_per_iteration_ms": 1.7246202100000119,
+      "iterations": 200,
+      "bot_times_ms": {
+        "casual": 54.627999999866006,
+        "average": 90.67674999960218,
+        "expert": 92.9193749998376,
+        "optimal": 106.68845799955307
+      },
+      "bot_clear_rates": {
+        "casual": 1.0,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    },
+    {
+      "level_id": "medium_10",
+      "level_name": "MEDIUM 최종 챌린지",
+      "tier": "medium",
+      "tile_count": 21,
+      "layer_count": 3,
+      "total_time_ms": 491.93783300006544,
+      "avg_time_per_iteration_ms": 2.459689165000327,
+      "iterations": 200,
+      "bot_times_ms": {
+        "casual": 75.18633300014699,
+        "average": 131.58883300002344,
+        "expert": 133.55187499973908,
+        "optimal": 151.60158300022886
+      },
+      "bot_clear_rates": {
+        "casual": 0.94,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0
+      },
+      "memory_mb": null
+    }
+  ]
+}

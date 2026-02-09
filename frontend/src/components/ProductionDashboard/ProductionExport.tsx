@@ -5,11 +5,89 @@
 
 import { useState, useEffect } from 'react';
 import { ProductionStats, ProductionExportConfig, ProductionLevel } from '../../types/production';
+import { TileData, LevelJSON } from '../../types';
 import { Button } from '../ui';
 import { useUIStore } from '../../stores/uiStore';
-import { exportProductionLevels, getProductionLevelsByBatch } from '../../storage/productionStorage';
+import { exportProductionLevels, getProductionLevelsByBatch, saveProductionLevel } from '../../storage/productionStorage';
 import { saveLevelSetToStorage, saveLocalLevelToStorage } from '../../storage/levelStorage';
 import { checkGBoostHealth, listFromGBoost, loadFromGBoost, saveToGBoost } from '../../api/gboost';
+
+// Migration helper: fix tile data format for Unity client compatibility
+function migrateTileData(tileData: TileData): { changed: boolean; data: TileData } {
+  if (!Array.isArray(tileData) || tileData.length < 2) {
+    return { changed: false, data: tileData };
+  }
+
+  const tileType = tileData[0];
+  const attribute = tileData[1] || '';
+  const extra = tileData.length > 2 ? tileData[2] : undefined;
+
+  // Skip craft/stack - they need extra field for count
+  if (tileType.startsWith('craft_') || tileType.startsWith('stack_')) {
+    return { changed: false, data: tileData };
+  }
+
+  let newAttribute = attribute;
+  let changed = false;
+
+  // Fix ice: "ice_1", "ice_2", "ice_3" → "ice"
+  if (attribute.startsWith('ice_')) {
+    newAttribute = 'ice';
+    changed = true;
+  }
+
+  // Fix bomb: "bomb" + [N] → "bomb_N"
+  if (attribute === 'bomb' && extra && Array.isArray(extra) && extra.length > 0) {
+    const countdown = extra[0];
+    if (typeof countdown === 'number') {
+      newAttribute = `bomb_${countdown}`;
+      changed = true;
+    }
+  }
+
+  // Fix teleport: "teleport" → "teleporter" (remove extra)
+  if (attribute === 'teleport') {
+    newAttribute = 'teleporter';
+    changed = true;
+  }
+
+  if (changed) {
+    // Return without extra field (except for craft/stack)
+    return { changed: true, data: [tileType, newAttribute] };
+  }
+
+  // Clear extra field if not craft/stack
+  if (extra !== undefined && !tileType.startsWith('craft_') && !tileType.startsWith('stack_')) {
+    return { changed: true, data: [tileType, attribute] };
+  }
+
+  return { changed: false, data: tileData };
+}
+
+// Migration helper: fix level JSON format
+function migrateLevelJson(levelJson: LevelJSON): { changed: boolean; level: LevelJSON } {
+  let totalChanged = false;
+  // Deep copy to avoid mutating original
+  const newLevel = JSON.parse(JSON.stringify(levelJson)) as LevelJSON;
+
+  const numLayers = levelJson.layer || 8;
+  for (let i = 0; i < numLayers; i++) {
+    const layerKey = `layer_${i}` as `layer_${number}`;
+    const layerData = newLevel[layerKey];
+    if (!layerData?.tiles) continue;
+
+    const newTiles: Record<string, TileData> = {};
+    for (const [pos, tileData] of Object.entries(layerData.tiles)) {
+      const { changed, data } = migrateTileData(tileData);
+      newTiles[pos] = data;
+      if (changed) totalChanged = true;
+    }
+
+    newLevel[layerKey] = { ...layerData, tiles: newTiles };
+  }
+
+  return { changed: totalChanged, level: newLevel };
+}
 
 type GBoostPhase = 'config' | 'checking' | 'conflict' | 'uploading' | 'complete';
 
@@ -62,6 +140,15 @@ export function ProductionExport({
   const [conflictingLevels, setConflictingLevels] = useState<ConflictInfo[]>([]);
   const [backupProgress, setBackupProgress] = useState({ current: 0, total: 0 });
   const [uploadResult, setUploadResult] = useState({ success: 0, failed: 0, skipped: 0 });
+
+  // Migration state
+  const [isMigrating, setIsMigrating] = useState(false);
+  const [migrationProgress, setMigrationProgress] = useState<{
+    current: number;
+    total: number;
+    fixed: number;
+    skipped: number;
+  } | null>(null);
 
   const readyCount = stats.by_status.approved;
   const exportedCount = stats.by_status.exported;
@@ -379,6 +466,69 @@ export function ProductionExport({
     setUploadResult({ success: 0, failed: 0, skipped: 0 });
   };
 
+  // Migrate gimmick formats in local production levels
+  const handleMigration = async () => {
+    if (isMigrating) return;
+
+    setIsMigrating(true);
+    setMigrationProgress({ current: 0, total: 0, fixed: 0, skipped: 0 });
+
+    try {
+      // Get all levels in this batch
+      const levels = await getProductionLevelsByBatch(batchId);
+
+      if (levels.length === 0) {
+        addNotification('warning', '마이그레이션할 레벨이 없습니다');
+        setIsMigrating(false);
+        setMigrationProgress(null);
+        return;
+      }
+
+      setMigrationProgress({ current: 0, total: levels.length, fixed: 0, skipped: 0 });
+
+      let fixed = 0;
+      let skipped = 0;
+
+      for (let i = 0; i < levels.length; i++) {
+        const level = levels[i];
+
+        try {
+          // Migrate the level JSON
+          const { changed, level: migratedLevel } = migrateLevelJson(level.level_json);
+
+          if (changed) {
+            // Save the migrated level back to IndexedDB
+            const updatedLevel: ProductionLevel = {
+              ...level,
+              level_json: migratedLevel,
+            };
+            await saveProductionLevel(batchId, updatedLevel);
+            fixed++;
+          } else {
+            skipped++;
+          }
+        } catch (err) {
+          console.error(`Failed to migrate level ${level.meta.level_number}:`, err);
+          skipped++;
+        }
+
+        setMigrationProgress({
+          current: i + 1,
+          total: levels.length,
+          fixed,
+          skipped,
+        });
+      }
+
+      addNotification('success', `마이그레이션 완료: ${fixed}개 수정, ${skipped}개 스킵`);
+    } catch (error) {
+      console.error('Migration failed:', error);
+      addNotification('error', '마이그레이션 중 오류 발생');
+    } finally {
+      setIsMigrating(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
       {/* Export Summary */}
@@ -398,6 +548,48 @@ export function ProductionExport({
             <div className="text-xs text-gray-400">총 출시 가능</div>
           </div>
         </div>
+      </div>
+
+      {/* Gimmick Format Migration */}
+      <div className="p-4 bg-gray-800 rounded-lg space-y-3">
+        <h3 className="text-sm font-medium text-white">기믹 포맷 마이그레이션</h3>
+        <p className="text-xs text-gray-400">
+          Unity 클라이언트 호환을 위해 기믹 포맷을 수정합니다.
+          <br />
+          • ice_1/2/3 → ice
+          <br />
+          • bomb + [N] → bomb_N
+          <br />
+          • teleport → teleporter
+        </p>
+
+        {migrationProgress && (
+          <div className="space-y-2">
+            <div className="flex justify-between text-xs text-gray-400">
+              <span>진행 중...</span>
+              <span>{migrationProgress.current} / {migrationProgress.total}</span>
+            </div>
+            <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-purple-500 transition-all"
+                style={{ width: `${(migrationProgress.current / migrationProgress.total) * 100}%` }}
+              />
+            </div>
+            <div className="flex gap-4 text-xs">
+              <span className="text-green-400">수정됨: {migrationProgress.fixed}</span>
+              <span className="text-gray-400">스킵: {migrationProgress.skipped}</span>
+            </div>
+          </div>
+        )}
+
+        <Button
+          onClick={handleMigration}
+          disabled={isMigrating || stats.total_levels === 0}
+          variant="secondary"
+          className="w-full"
+        >
+          {isMigrating ? '마이그레이션 중...' : `기믹 포맷 마이그레이션 (${stats.total_levels}개 레벨)`}
+        </Button>
       </div>
 
       {/* Local Level Export */}

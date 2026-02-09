@@ -816,20 +816,31 @@ class LevelGenerator:
         # time_attack 기믹: timea 필드 설정 (제한 시간, 초)
         # - 레벨 341 (튜토리얼): 100% 확률로 적용
         # - 레벨 342+: 30% 확률로 적용
+        # 제한 시간 (디자인 문서 기준):
+        # - 쉬움 (difficulty < 0.3): 120초
+        # - 보통 (0.3 <= difficulty < 0.5): 90초
+        # - 어려움 (0.5 <= difficulty < 0.7): 60초
+        # - 매우 어려움 (0.7 <= difficulty): 45초
         TIME_ATTACK_UNLOCK_LEVEL = 341  # 백엔드 leveling_config.py와 동기화
         TIME_ATTACK_PROBABILITY = 0.3  # 30% 확률
         if level_number >= TIME_ATTACK_UNLOCK_LEVEL and gimmick_intensity > 0:
             # 튜토리얼 레벨(341)은 항상 적용, 그 외는 확률 적용
             is_time_tutorial = (level_number == TIME_ATTACK_UNLOCK_LEVEL)
             if is_time_tutorial or random.random() < TIME_ATTACK_PROBABILITY * gimmick_intensity:
-                # 난이도에 따라 제한 시간 결정 (60-120초)
+                # 난이도에 따라 제한 시간 결정
                 # 튜토리얼은 넉넉하게 120초, 그 외는 난이도 기반
                 if is_time_tutorial:
                     time_limit = 120  # 튜토리얼은 넉넉하게
                 else:
-                    base_time = 120
-                    difficulty_reduction = int(params.target_difficulty * 60)  # 최대 60초 감소
-                    time_limit = max(60, base_time - difficulty_reduction)
+                    difficulty = params.target_difficulty
+                    if difficulty < 0.3:
+                        time_limit = 120  # 쉬움: 2분
+                    elif difficulty < 0.5:
+                        time_limit = 90   # 보통: 1분 30초
+                    elif difficulty < 0.7:
+                        time_limit = 60   # 어려움: 1분
+                    else:
+                        time_limit = 45   # 매우 어려움: 45초
                 level["timea"] = time_limit
 
         generation_time_ms = int((time.time() - start_time) * 1000)

@@ -216,6 +216,9 @@ export function GamePlayer({ levelData, levelInfo, onGameEnd, onBack }: GamePlay
       sourceCol: t.sourceCol,
     }));
     setSlots(uiSlots);
+
+    // Sync locked slots from engine (key 매칭으로 변경될 수 있음)
+    setLockedSlots(engine.getLockedSlots());
   }, []);
 
   // Handle tile click with animation

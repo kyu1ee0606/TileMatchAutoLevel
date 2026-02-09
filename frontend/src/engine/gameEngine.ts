@@ -73,6 +73,7 @@ export interface GameState {
   failed: boolean;
   maxMoves: number;
   maxDockSlots: number;
+  lockedSlots: number;  // key 기믹: 잠긴 슬롯 수 (key 타일 3개 매칭시 1 감소)
 
   // 기믹 추적
   linkPairs: Map<string, string>;
@@ -208,6 +209,7 @@ export class GameEngine {
       failed: false,
       maxMoves: 50,
       maxDockSlots: 7,
+      lockedSlots: 0,
       linkPairs: new Map(),
       frogPositions: new Set(),
       bombTiles: new Map(),
@@ -421,6 +423,11 @@ export class GameEngine {
     this.state.maxMoves = typeof levelJson.max_moves === 'number'
       ? levelJson.max_moves
       : 50;
+
+    // key 기믹: unlockTile 값 읽어 lockedSlots 설정
+    this.state.lockedSlots = typeof levelJson.unlockTile === 'number'
+      ? levelJson.unlockTile
+      : 0;
 
     // ========== 1단계: 타일 카운트 및 t0 위치 수집 ==========
     const existingTileCounts = new Map<string, number>();
@@ -1129,8 +1136,9 @@ export class GameEngine {
     if (this.isBlockedByUpper(tile)) return false;
     if (tile.isStackTile && this.isStackBlocked(tile)) return false;
 
-    // 덱이 가득 찼는지 확인
-    if (this.state.dockTiles.length >= this.state.maxDockSlots) return false;
+    // 덱이 가득 찼는지 확인 (잠긴 슬롯 제외한 사용 가능한 슬롯 기준)
+    const availableSlots = this.state.maxDockSlots - this.state.lockedSlots;
+    if (this.state.dockTiles.length >= availableSlots) return false;
 
     // 선택 전 노출된 얼음 타일 수집 (백엔드 로직과 동일)
     const unblockedIceBeforePick = new Set<string>();
@@ -1335,6 +1343,12 @@ export class GameEngine {
               console.log(`[GameEngine] Goal decreased: ${goalKey} ${oldVal} -> ${newVal}`);
             }
           }
+        }
+
+        // key 타일 3개 매칭 시 잠긴 슬롯 1개 해제
+        if (tileType === 'key' && this.state.lockedSlots > 0) {
+          this.state.lockedSlots--;
+          console.log(`[GameEngine] Key matched! Unlocked slot. Remaining locked: ${this.state.lockedSlots}`);
         }
       }
     }
@@ -1565,7 +1579,9 @@ export class GameEngine {
       remainingCount += count % 3;
     }
 
-    return remainingCount >= this.state.maxDockSlots;
+    // 잠긴 슬롯 제외한 사용 가능한 슬롯 기준
+    const availableSlots = this.state.maxDockSlots - this.state.lockedSlots;
+    return remainingCount >= availableSlots;
   }
 
   /**
@@ -1858,6 +1874,10 @@ export class GameEngine {
 
   getMovesUsed(): number {
     return this.state.movesUsed;
+  }
+
+  getLockedSlots(): number {
+    return this.state.lockedSlots;
   }
 
   /**

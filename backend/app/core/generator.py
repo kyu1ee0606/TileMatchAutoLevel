@@ -1122,9 +1122,18 @@ class LevelGenerator:
         # Filter to only valid tile types (t0~t15)
         valid_tile_types = [t for t in tile_types if t.startswith('t') and (t == 't0' or t[1:].isdigit())]
         if valid_tile_types:
-            # Use exactly what user specified (count all including t0)
-            tile_count = len(valid_tile_types)
-            use_tile_count = min(self.MAX_USE_TILE_COUNT, tile_count)
+            # Check if t0 is used (placeholder for client-side random tiles)
+            uses_t0 = 't0' in valid_tile_types
+            if uses_t0:
+                # t0 사용 시: 레벨에 맞는 useTileCount 사용 (클라이언트가 참조)
+                if params.level_number:
+                    use_tile_count = get_use_tile_count_for_level(params.level_number)
+                else:
+                    use_tile_count = 5  # default for t0 mode
+            else:
+                # 일반 타일 사용 시: 타일 개수가 useTileCount
+                tile_count = len(valid_tile_types)
+                use_tile_count = min(self.MAX_USE_TILE_COUNT, tile_count)
         else:
             # No valid tiles, use default of 15 (matches TownPop client - t1~t15 균등 분배)
             use_tile_count = 15

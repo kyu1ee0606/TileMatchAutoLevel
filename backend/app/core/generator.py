@@ -814,19 +814,22 @@ class LevelGenerator:
                 self._place_key_tiles(level, key_tiles_needed)
 
         # time_attack 기믹: timea 필드 설정 (제한 시간, 초)
-        # - 레벨 341 (튜토리얼): 100% 확률로 적용
-        # - 레벨 342+: 30% 확률로 적용
+        # 적용 규칙 (TileBuster 패턴):
+        # - 레벨 341 (튜토리얼): 최초 언락 레벨에 적용
+        # - 레벨 350, 360, 370...: 톱니바퀴 패턴의 보스 레벨(10번째)에만 적용
         # 제한 시간 (디자인 문서 기준):
         # - 쉬움 (difficulty < 0.3): 120초
         # - 보통 (0.3 <= difficulty < 0.5): 90초
         # - 어려움 (0.5 <= difficulty < 0.7): 60초
         # - 매우 어려움 (0.7 <= difficulty): 45초
         TIME_ATTACK_UNLOCK_LEVEL = 341  # 백엔드 leveling_config.py와 동기화
-        TIME_ATTACK_PROBABILITY = 0.3  # 30% 확률
         if level_number >= TIME_ATTACK_UNLOCK_LEVEL and gimmick_intensity > 0:
-            # 튜토리얼 레벨(341)은 항상 적용, 그 외는 확률 적용
             is_time_tutorial = (level_number == TIME_ATTACK_UNLOCK_LEVEL)
-            if is_time_tutorial or random.random() < TIME_ATTACK_PROBABILITY * gimmick_intensity:
+            # 톱니바퀴 패턴의 보스 레벨 (10번째 = 가장 어려운 레벨)
+            is_boss_level = (level_number % 10 == 0)
+
+            # 튜토리얼 레벨 또는 보스 레벨에만 적용
+            if is_time_tutorial or is_boss_level:
                 # 난이도에 따라 제한 시간 결정
                 # 튜토리얼은 넉넉하게 120초, 그 외는 난이도 기반
                 if is_time_tutorial:

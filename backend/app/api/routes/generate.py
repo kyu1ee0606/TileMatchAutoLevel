@@ -620,12 +620,23 @@ def calculate_match_score(actual_rates: Dict[str, float], target_rates: Dict[str
     - match_score: 0-100%, higher is better
     - avg_gap: average gap in percentage points
     - max_gap: maximum gap in percentage points
+
+    Note: "Too easy" (actual > target) is penalized less than "too hard" (actual < target)
+    because players prefer easier levels over frustratingly hard ones.
     """
     gaps = []
+    raw_gaps = []  # For reporting
     for bot_type in target_rates:
         actual = actual_rates.get(bot_type, 0)
         target = target_rates[bot_type]
-        gap = abs(actual - target) * 100  # Convert to percentage points
+        raw_gap = (actual - target) * 100  # Positive = too easy, negative = too hard
+        raw_gaps.append(raw_gap)
+
+        # Asymmetric penalty: "too easy" gets 50% penalty, "too hard" gets full penalty
+        if raw_gap > 0:  # Too easy (actual > target)
+            gap = raw_gap * 0.5  # Reduced penalty
+        else:  # Too hard (actual < target)
+            gap = abs(raw_gap)  # Full penalty
         gaps.append(gap)
 
     if not gaps:
@@ -636,7 +647,10 @@ def calculate_match_score(actual_rates: Dict[str, float], target_rates: Dict[str
     weighted_gap = avg_gap * 0.6 + max_gap * 0.4
     match_score = max(0, 100 - weighted_gap * 2)
 
-    return match_score, avg_gap, max_gap
+    # Report raw average gap for transparency
+    raw_avg_gap = sum(abs(g) for g in raw_gaps) / len(raw_gaps)
+
+    return match_score, raw_avg_gap, max(abs(g) for g in raw_gaps)
 
 router = APIRouter(prefix="/api", tags=["generate"])
 

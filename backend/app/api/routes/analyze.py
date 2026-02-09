@@ -53,39 +53,73 @@ def calculate_target_clear_rates(target_difficulty: float) -> Dict[str, float]:
     """
     Calculate target clear rates based on target difficulty.
 
-    target_difficulty=0.0: Very easy, all bots ~95-99%
-    target_difficulty=0.5: Balanced (base rates)
+    target_difficulty=0.0: Very easy, but realistic considering game randomness
+    target_difficulty=0.5: Balanced (moderate targets)
     target_difficulty=1.0: Very hard, lower rates based on game mechanics
 
-    NOTE: Hard targets are calibrated based on game simulation testing.
-    The tile matching game has limited variance between bot skill levels
-    when levels are mathematically solvable. Key difficulty drivers are:
-    - Tile type count (more types = harder to match before dock fills)
-    - Move constraint (tighter moves = less room for suboptimal play)
+    NOTE: Targets calibrated based on actual bot simulation results.
+    Even easy levels have inherent variance from tile distribution and gimmicks.
     """
     rates = {}
-    for bot_type, base_rate in BASE_TARGET_CLEAR_RATES.items():
-        if target_difficulty <= 0.5:
-            # Easier: interpolate from 0.99 to base_rate
-            t = target_difficulty / 0.5
-            rate = 0.99 - t * (0.99 - base_rate)
-        else:
-            # Harder: interpolate from base_rate to realistic hard targets
-            t = (target_difficulty - 0.5) / 0.5
-            # Adjusted hard targets based on game mechanics testing:
-            # - Novice/Casual are most affected by tile type count
-            # - Expert/Optimal almost always clear solvable levels (game mechanics limitation)
-            # - Target rates reflect achievable variance, not ideal distribution
-            hard_targets = {
-                "novice": 0.20,    # Strongly affected by tile type count
-                "casual": 0.40,    # Moderately affected
-                "average": 0.70,   # Good strategy limits variance
-                "expert": 0.90,    # Very good at solving, minor failures only
-                "optimal": 0.95,   # Near-perfect, only fails on edge cases
-            }
-            hard_rate = hard_targets.get(bot_type, 0.40)
-            rate = base_rate - t * (base_rate - hard_rate)
-        rates[bot_type] = max(0.01, min(0.99, rate))
+
+    # EASY levels (0-0.4): Realistic targets
+    if target_difficulty <= 0.4:
+        t = target_difficulty / 0.4
+        easy_rates = {
+            "novice": 0.90 - t * 0.25,    # 90% -> 65%
+            "casual": 0.92 - t * 0.20,    # 92% -> 72%
+            "average": 0.95 - t * 0.15,   # 95% -> 80%
+            "expert": 0.97 - t * 0.10,    # 97% -> 87%
+            "optimal": 0.99 - t * 0.04,   # 99% -> 95%
+        }
+        for bot_type in BASE_TARGET_CLEAR_RATES:
+            rates[bot_type] = easy_rates.get(bot_type, 0.85)
+    elif target_difficulty <= 0.6:
+        # MEDIUM levels (0.4-0.6): Transition zone
+        t = (target_difficulty - 0.4) / 0.2
+        medium_start = {
+            "novice": 0.65,
+            "casual": 0.72,
+            "average": 0.80,
+            "expert": 0.87,
+            "optimal": 0.95,
+        }
+        medium_end = {
+            "novice": 0.45,
+            "casual": 0.58,
+            "average": 0.72,
+            "expert": 0.82,
+            "optimal": 0.93,
+        }
+        for bot_type in BASE_TARGET_CLEAR_RATES:
+            start = medium_start.get(bot_type, 0.70)
+            end = medium_end.get(bot_type, 0.60)
+            rates[bot_type] = start - t * (start - end)
+    else:
+        # HARD levels (0.6-1.0): Significant difficulty
+        t = (target_difficulty - 0.6) / 0.4
+        hard_start = {
+            "novice": 0.45,
+            "casual": 0.58,
+            "average": 0.72,
+            "expert": 0.82,
+            "optimal": 0.93,
+        }
+        hard_end = {
+            "novice": 0.10,
+            "casual": 0.25,
+            "average": 0.50,
+            "expert": 0.70,
+            "optimal": 0.85,
+        }
+        for bot_type in BASE_TARGET_CLEAR_RATES:
+            start = hard_start.get(bot_type, 0.60)
+            end = hard_end.get(bot_type, 0.35)
+            rates[bot_type] = start - t * (start - end)
+
+    # Clamp all rates
+    for bot_type in rates:
+        rates[bot_type] = max(0.01, min(0.99, rates[bot_type]))
     return rates
 
 

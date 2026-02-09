@@ -548,39 +548,40 @@ def calculate_target_clear_rates(target_difficulty: float) -> Dict[str, float]:
     """
     rates = {}
 
-    # EASY levels (0-0.4): All bots should have very high clear rates
-    # This is realistic because easy levels give generous moves and few tile types
+    # EASY levels (0-0.4): Realistic targets considering game randomness
+    # Even easy levels have inherent variance from tile distribution and gimmicks
+    # Adjusted based on actual bot simulation results
     if target_difficulty <= 0.4:
         t = target_difficulty / 0.4  # 0 at difficulty 0, 1 at difficulty 0.4
         easy_rates = {
-            "novice": 0.99 - t * 0.20,    # 99% -> 79%
-            "casual": 0.99 - t * 0.15,    # 99% -> 84%
-            "average": 0.99 - t * 0.10,   # 99% -> 89%
-            "expert": 0.99 - t * 0.05,    # 99% -> 94%
-            "optimal": 0.99 - t * 0.01,   # 99% -> 98%
+            "novice": 0.90 - t * 0.25,    # 90% -> 65%
+            "casual": 0.92 - t * 0.20,    # 92% -> 72%
+            "average": 0.95 - t * 0.15,   # 95% -> 80%
+            "expert": 0.97 - t * 0.10,    # 97% -> 87%
+            "optimal": 0.99 - t * 0.04,   # 99% -> 95%
         }
         for bot_type in BASE_TARGET_RATES:
-            rates[bot_type] = easy_rates.get(bot_type, 0.95)
+            rates[bot_type] = easy_rates.get(bot_type, 0.85)
     elif target_difficulty <= 0.6:
         # MEDIUM levels (0.4-0.6): Transition zone
         t = (target_difficulty - 0.4) / 0.2  # 0 at 0.4, 1 at 0.6
         medium_start = {
-            "novice": 0.79,
-            "casual": 0.84,
-            "average": 0.89,
-            "expert": 0.94,
-            "optimal": 0.98,
+            "novice": 0.65,
+            "casual": 0.72,
+            "average": 0.80,
+            "expert": 0.87,
+            "optimal": 0.95,
         }
         medium_end = {
-            "novice": 0.55,
-            "casual": 0.70,
-            "average": 0.82,
-            "expert": 0.92,
-            "optimal": 0.98,
+            "novice": 0.45,
+            "casual": 0.58,
+            "average": 0.72,
+            "expert": 0.82,
+            "optimal": 0.93,
         }
         for bot_type in BASE_TARGET_RATES:
-            start = medium_start.get(bot_type, 0.80)
-            end = medium_end.get(bot_type, 0.70)
+            start = medium_start.get(bot_type, 0.70)
+            end = medium_end.get(bot_type, 0.60)
             rates[bot_type] = start - t * (start - end)
     else:
         # HARD levels (0.6-1.0): Significant difficulty for all but optimal

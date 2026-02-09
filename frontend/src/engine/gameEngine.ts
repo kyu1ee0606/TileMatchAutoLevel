@@ -136,6 +136,7 @@ const EFFECT_MAPPING: Record<string, TileEffectType> = {
   'curtain_close': TileEffectType.CURTAIN,
   'curtain_open': TileEffectType.CURTAIN,
   'teleport': TileEffectType.TELEPORT,
+  'teleporter': TileEffectType.TELEPORT,  // Client format
   'unknown': TileEffectType.UNKNOWN,
   'craft': TileEffectType.CRAFT,
   'stack_n': TileEffectType.STACK_NORTH,

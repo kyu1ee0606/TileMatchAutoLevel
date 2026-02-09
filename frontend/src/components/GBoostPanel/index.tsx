@@ -1,16 +1,95 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   checkGBoostHealth,
   getGBoostConfig,
   setGBoostConfig,
+  loadFromGBoost,
+  saveToGBoost,
 } from '../../api/gboost';
 import { CollapsiblePanel, Button } from '../ui';
 import { useUIStore } from '../../stores/uiStore';
-import { Save, Plug, Info, BookOpen, CheckCircle, AlertTriangle, XCircle } from 'lucide-react';
+import { Save, Plug, Info, BookOpen, CheckCircle, AlertTriangle, XCircle, Wrench, RefreshCw } from 'lucide-react';
 import clsx from 'clsx';
+import type { LevelJSON, TileData } from '../../types';
 
 interface GBoostPanelProps {
   className?: string;
+}
+
+// Migration helper: fix tile format for a single tile
+function migrateTileData(tileData: TileData): { changed: boolean; data: TileData } {
+  if (!Array.isArray(tileData) || tileData.length < 2) {
+    return { changed: false, data: tileData };
+  }
+
+  const tileType = tileData[0];
+  const attribute = tileData[1] || '';
+  const extra = tileData.length > 2 ? tileData[2] : undefined;
+
+  // Skip craft/stack - they need extra field for count
+  if (tileType.startsWith('craft_') || tileType.startsWith('stack_')) {
+    return { changed: false, data: tileData };
+  }
+
+  let newAttribute = attribute;
+  let changed = false;
+
+  // Fix ice: "ice_1", "ice_2", "ice_3" → "ice"
+  if (attribute.startsWith('ice_')) {
+    newAttribute = 'ice';
+    changed = true;
+  }
+
+  // Fix bomb: "bomb" + [N] → "bomb_N"
+  if (attribute === 'bomb' && extra && Array.isArray(extra) && extra.length > 0) {
+    const countdown = extra[0];
+    if (typeof countdown === 'number') {
+      newAttribute = `bomb_${countdown}`;
+      changed = true;
+    }
+  }
+
+  // Fix teleport: "teleport" → "teleporter" (remove extra)
+  if (attribute === 'teleport') {
+    newAttribute = 'teleporter';
+    changed = true;
+  }
+
+  if (changed) {
+    // Return without extra field (except for craft/stack)
+    return { changed: true, data: [tileType, newAttribute] };
+  }
+
+  // Clear extra field if not craft/stack
+  if (extra !== undefined && !tileType.startsWith('craft_') && !tileType.startsWith('stack_')) {
+    return { changed: true, data: [tileType, attribute] };
+  }
+
+  return { changed: false, data: tileData };
+}
+
+// Migration helper: fix level JSON format
+function migrateLevelJson(levelJson: LevelJSON): { changed: boolean; level: LevelJSON } {
+  let totalChanged = false;
+  const newLevel = { ...levelJson };
+
+  const numLayers = levelJson.layer || 8;
+  for (let i = 0; i < numLayers; i++) {
+    const layerKey = `layer_${i}` as `layer_${number}`;
+    const layerData = levelJson[layerKey];
+    if (!layerData?.tiles) continue;
+
+    const newTiles: Record<string, TileData> = {};
+    for (const [pos, tileData] of Object.entries(layerData.tiles)) {
+      const { changed, data } = migrateTileData(tileData);
+      newTiles[pos] = data;
+      if (changed) totalChanged = true;
+    }
+
+    newLevel[layerKey] = { ...layerData, tiles: newTiles };
+  }
+
+  return { changed: totalChanged, level: newLevel };
 }
 
 export function GBoostPanel({ className }: GBoostPanelProps) {
@@ -23,6 +102,20 @@ export function GBoostPanel({ className }: GBoostPanelProps) {
   const [configProjectId, setConfigProjectId] = useState('6d126f4db852');
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [isTestingConnection, setIsTestingConnection] = useState(false);
+
+  // Migration state
+  const [migrationBoardId, setMigrationBoardId] = useState('levels');
+  const [migrationPrefix, setMigrationPrefix] = useState('level_');
+  const [migrationStartLevel, setMigrationStartLevel] = useState(1);
+  const [migrationEndLevel, setMigrationEndLevel] = useState(500);
+  const [isMigrating, setIsMigrating] = useState(false);
+  const [migrationProgress, setMigrationProgress] = useState<{
+    current: number;
+    total: number;
+    fixed: number;
+    skipped: number;
+    errors: string[];
+  } | null>(null);
 
   // Default values
   const DEFAULT_URL = 'https://gameboost.cafe24.com/gameboost/';
@@ -96,6 +189,86 @@ export function GBoostPanel({ className }: GBoostPanelProps) {
       setIsTestingConnection(false);
     }
   };
+
+  // Migration handler
+  const handleMigrateLevels = useCallback(async () => {
+    if (!isConfigured || !isHealthy) {
+      addNotification('error', 'GBoost 서버에 먼저 연결하세요');
+      return;
+    }
+
+    setIsMigrating(true);
+    setMigrationProgress({ current: 0, total: 0, fixed: 0, skipped: 0, errors: [] });
+
+    try {
+      // Generate level IDs to migrate
+      const levelIds: string[] = [];
+      for (let i = migrationStartLevel; i <= migrationEndLevel; i++) {
+        levelIds.push(`${migrationPrefix}${i.toString().padStart(3, '0')}`);
+      }
+
+      setMigrationProgress(prev => ({ ...prev!, total: levelIds.length }));
+
+      let fixed = 0;
+      let skipped = 0;
+      const errors: string[] = [];
+
+      for (let i = 0; i < levelIds.length; i++) {
+        const levelId = levelIds[i];
+        setMigrationProgress(prev => ({ ...prev!, current: i + 1 }));
+
+        try {
+          // Load level from GBoost
+          const response = await loadFromGBoost(migrationBoardId, levelId);
+
+          // Check if level has map field (TownPop format)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const originalJson = response.level_json as any;
+          const hasTownPopWrapper = originalJson.map && typeof originalJson.map === 'object';
+          const levelJson = hasTownPopWrapper ? originalJson.map as LevelJSON : originalJson as LevelJSON;
+
+          // Migrate level format
+          const { changed, level: migratedLevel } = migrateLevelJson(levelJson);
+
+          if (changed) {
+            // Preserve original wrapper structure if it existed
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const levelToSave = hasTownPopWrapper
+              ? { ...originalJson, map: migratedLevel } as any
+              : migratedLevel;
+
+            // Save migrated level back to GBoost
+            await saveToGBoost(migrationBoardId, levelId, levelToSave);
+            fixed++;
+          } else {
+            skipped++;
+          }
+        } catch (err) {
+          // Level might not exist, skip silently
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          if (!errorMsg.includes('404') && !errorMsg.includes('not found')) {
+            errors.push(`${levelId}: ${errorMsg}`);
+          } else {
+            skipped++;
+          }
+        }
+
+        setMigrationProgress({ current: i + 1, total: levelIds.length, fixed, skipped, errors });
+
+        // Small delay to avoid overwhelming the server
+        if (i % 10 === 9) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
+
+      addNotification('success', `마이그레이션 완료: ${fixed}개 수정, ${skipped}개 스킵`);
+    } catch (error) {
+      console.error('Migration failed:', error);
+      addNotification('error', '마이그레이션 중 오류 발생');
+    } finally {
+      setIsMigrating(false);
+    }
+  }, [isConfigured, isHealthy, migrationBoardId, migrationPrefix, migrationStartLevel, migrationEndLevel, addNotification]);
 
   const StatusIcon = isConfigured && isHealthy ? CheckCircle : isConfigured ? AlertTriangle : XCircle;
   const statusBadge = isConfigured !== null && (
@@ -236,6 +409,99 @@ export function GBoostPanel({ className }: GBoostPanelProps) {
             <li>에디터 탭으로 이동하여 레벨을 불러오거나 저장합니다</li>
           </ol>
         </div>
+
+        {/* Level Migration Tool */}
+        {isConfigured && isHealthy && (
+          <div className="bg-amber-900/20 border border-amber-700 rounded-md p-3">
+            <h3 className="text-sm font-medium text-amber-300 mb-2 flex items-center gap-1.5">
+              <Wrench className="w-4 h-4" />
+              레벨 포맷 마이그레이션
+            </h3>
+            <p className="text-xs text-amber-200/70 mb-3">
+              기존 레벨의 기믹 포맷을 최신 클라이언트 형식으로 변환합니다.
+              <br />• ice_N → ice
+              <br />• bomb + [N] → bomb_N
+              <br />• teleport → teleporter
+            </p>
+
+            <div className="grid grid-cols-2 gap-2 mb-3">
+              <div>
+                <label className="text-xs text-gray-400 block mb-1">Board ID</label>
+                <input
+                  type="text"
+                  value={migrationBoardId}
+                  onChange={(e) => setMigrationBoardId(e.target.value)}
+                  className="w-full px-2 py-1 border border-gray-600 bg-gray-700 text-gray-100 rounded text-xs"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-400 block mb-1">Level Prefix</label>
+                <input
+                  type="text"
+                  value={migrationPrefix}
+                  onChange={(e) => setMigrationPrefix(e.target.value)}
+                  className="w-full px-2 py-1 border border-gray-600 bg-gray-700 text-gray-100 rounded text-xs"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-400 block mb-1">시작 레벨</label>
+                <input
+                  type="number"
+                  value={migrationStartLevel}
+                  onChange={(e) => setMigrationStartLevel(parseInt(e.target.value) || 1)}
+                  min={1}
+                  className="w-full px-2 py-1 border border-gray-600 bg-gray-700 text-gray-100 rounded text-xs"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-400 block mb-1">종료 레벨</label>
+                <input
+                  type="number"
+                  value={migrationEndLevel}
+                  onChange={(e) => setMigrationEndLevel(parseInt(e.target.value) || 500)}
+                  min={1}
+                  className="w-full px-2 py-1 border border-gray-600 bg-gray-700 text-gray-100 rounded text-xs"
+                />
+              </div>
+            </div>
+
+            <Button
+              onClick={handleMigrateLevels}
+              disabled={isMigrating}
+              isLoading={isMigrating}
+              variant="warning"
+              icon={<RefreshCw className="w-full h-full" />}
+              className="w-full"
+            >
+              {isMigrating ? '마이그레이션 중...' : '마이그레이션 실행'}
+            </Button>
+
+            {migrationProgress && (
+              <div className="mt-3 text-xs">
+                <div className="flex justify-between text-gray-400 mb-1">
+                  <span>진행: {migrationProgress.current}/{migrationProgress.total}</span>
+                  <span>수정: {migrationProgress.fixed} / 스킵: {migrationProgress.skipped}</span>
+                </div>
+                <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-amber-500 transition-all duration-200"
+                    style={{ width: `${(migrationProgress.current / Math.max(1, migrationProgress.total)) * 100}%` }}
+                  />
+                </div>
+                {migrationProgress.errors.length > 0 && (
+                  <div className="mt-2 text-red-400 text-[10px] max-h-20 overflow-y-auto">
+                    {migrationProgress.errors.slice(0, 5).map((err, i) => (
+                      <div key={i}>{err}</div>
+                    ))}
+                    {migrationProgress.errors.length > 5 && (
+                      <div>... +{migrationProgress.errors.length - 5} more errors</div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </CollapsiblePanel>
   );

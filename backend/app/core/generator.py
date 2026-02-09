@@ -4471,11 +4471,11 @@ class LevelGenerator:
             "ice": "ice",
             "frog": "frog",
             "grass": "grass",
-            "bomb": "bomb",
+            "bomb": "bomb",  # Note: bomb needs countdown, handled separately below
             "curtain": "curtain",
             "unknown": "unknown",
             "link": "link_e",  # Default to east direction for link
-            "teleport": "teleport",
+            "teleport": "teleporter",  # Client expects "teleporter"
         }
 
         # craft/stack are tile types, not attributes - skip tutorial gimmick placement
@@ -4701,10 +4701,10 @@ class LevelGenerator:
             "ice": "ice",
             "frog": "frog",
             "grass": "grass",
-            "bomb": "bomb",
+            "bomb": "bomb",  # Note: bomb needs countdown, handled separately
             "curtain": "curtain",
             "link": "link_e",
-            "teleport": "teleport",
+            "teleport": "teleporter",  # Client expects "teleporter"
         }
 
         gimmick_attr = GIMMICK_ATTRIBUTES.get(gimmick_type, gimmick_type)
@@ -4929,12 +4929,18 @@ class LevelGenerator:
                         if added >= needed:
                             break
                         tile_data = tiles[pos]
-                        if len(tile_data) == 1:
-                            tile_data.append(gimmick_attr)
+                        # Bomb needs countdown in attribute (format: "bomb_N")
+                        if gimmick_type == "bomb":
+                            countdown = random.randint(5, 10)
+                            attr_to_set = f"bomb_{countdown}"
                         else:
-                            tile_data[1] = gimmick_attr
+                            attr_to_set = gimmick_attr
+                        if len(tile_data) == 1:
+                            tile_data.append(attr_to_set)
+                        else:
+                            tile_data[1] = attr_to_set
                         added += 1
-                        logger.debug(f"Tutorial gimmick '{gimmick_attr}' ensured at layer {layer_idx}, pos {pos}")
+                        logger.debug(f"Tutorial gimmick '{attr_to_set}' ensured at layer {layer_idx}, pos {pos}")
 
         logger.info(f"Tutorial gimmick '{gimmick_type}' ensured: added {added}, total now {current_count + added}")
         return level
@@ -5871,9 +5877,8 @@ class LevelGenerator:
             if tile_data[0] in self.GOAL_TYPES or tile_data[1]:
                 continue
 
-            # Random ice level (1-3), weighted toward lower levels
-            ice_level = random.choices([1, 2, 3], weights=[0.5, 0.35, 0.15])[0]
-            tile_data[1] = f"ice_{ice_level}"
+            # Client only recognizes "ice" (not "ice_1", "ice_2", etc.)
+            tile_data[1] = "ice"
             added += 1
             counter["ice"] += 1
 
@@ -5909,13 +5914,13 @@ class LevelGenerator:
             if tile_data[0] in self.GOAL_TYPES or tile_data[1]:
                 continue
 
-            # Set bomb with countdown (stored in extra field)
+            # Set bomb with countdown (format: "bomb_N" where N is countdown)
+            # Client expects xEffect = "bomb_7" format, not separate extra array
             countdown = random.randint(5, 10)
-            tile_data[1] = "bomb"
-            if len(tile_data) < 3:
-                tile_data.append([countdown])
-            else:
-                tile_data[2] = [countdown]
+            tile_data[1] = f"bomb_{countdown}"
+            # Clear extra field if exists (countdown is now in attribute)
+            if len(tile_data) >= 3:
+                tile_data[2] = []
             added += 1
             counter["bomb"] += 1
 
@@ -6014,12 +6019,9 @@ class LevelGenerator:
             pos1 = available_positions[i]
             pos2 = available_positions[i + 1]
 
-            # Set teleport with pair ID using helper methods
-            self._set_tile_attribute(tiles[pos1], "teleport")
-            self._set_tile_extra(tiles[pos1], [pair_id])
-
-            self._set_tile_attribute(tiles[pos2], "teleport")
-            self._set_tile_extra(tiles[pos2], [pair_id])
+            # Set teleport attribute (no extra field - client handles pairing)
+            self._set_tile_attribute(tiles[pos1], "teleporter")
+            self._set_tile_attribute(tiles[pos2], "teleporter")
 
             added += 2
             counter["teleport"] += 2

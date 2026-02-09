@@ -318,6 +318,7 @@ class BotSimulator:
         "curtain_close": TileEffectType.CURTAIN,
         "curtain_open": TileEffectType.CURTAIN,
         "teleport": TileEffectType.TELEPORT,
+        "teleporter": TileEffectType.TELEPORT,  # Client format
         "unknown": TileEffectType.UNKNOWN,
         "craft": TileEffectType.CRAFT,
         # Stack gimmicks - push blocks in that direction

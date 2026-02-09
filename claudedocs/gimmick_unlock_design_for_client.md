@@ -11,19 +11,19 @@
 
 | 순서 | 기믹 ID | 한글명 | 언락 스테이지 | 간격 | 설정 필드 |
 |------|---------|--------|---------------|------|-----------|
-| 1 | `craft` | 공예 | 10 | - | goals |
-| 2 | `stack` | 스택 | 20 | 10 | goals |
-| 3 | `ice` | 얼음 | 30 | 10 | obstacle_types |
-| 4 | `link` | 연결 | 50 | 20 | obstacle_types |
-| 5 | `chain` | 사슬 | 80 | 30 | obstacle_types |
-| 6 | `key` | 버퍼잠금 | 110 | 30 | **unlockTile** |
-| 7 | `grass` | 풀 | 150 | 40 | obstacle_types |
-| 8 | `unknown` | 상자 | 190 | 40 | obstacle_types |
-| 9 | `curtain` | 커튼 | 240 | 50 | obstacle_types |
-| 10 | `bomb` | 폭탄 | 290 | 50 | obstacle_types |
-| 11 | `time_attack` | 타임어택 | 340 | 50 | **timea** |
-| 12 | `frog` | 개구리 | 390 | 50 | obstacle_types |
-| 13 | `teleport` | 텔레포터 | 440 | 50 | obstacle_types |
+| 1 | `craft` | 공예 | 11 | - | goals |
+| 2 | `stack` | 스택 | 21 | 10 | goals |
+| 3 | `ice` | 얼음 | 31 | 10 | obstacle_types |
+| 4 | `link` | 연결 | 51 | 20 | obstacle_types |
+| 5 | `chain` | 사슬 | 81 | 30 | obstacle_types |
+| 6 | `key` | 버퍼잠금 | 111 | 30 | **unlockTile** |
+| 7 | `grass` | 풀 | 151 | 40 | obstacle_types |
+| 8 | `unknown` | 상자 | 191 | 40 | obstacle_types |
+| 9 | `curtain` | 커튼 | 241 | 50 | obstacle_types |
+| 10 | `bomb` | 폭탄 | 291 | 50 | obstacle_types |
+| 11 | `time_attack` | 타임어택 | 341 | 50 | **timea** (보스 레벨만) |
+| 12 | `frog` | 개구리 | 391 | 50 | obstacle_types |
+| 13 | `teleport` | 텔레포터 | 441 | 50 | obstacle_types |
 
 ---
 
@@ -72,13 +72,18 @@
 - `timea=60` → 60초 제한 시간
 - `timea=N` → N초 제한 시간
 
-**권장 설정:**
-| 난이도 | timea 값 | 설명 |
-|--------|----------|------|
-| 쉬움 | 120 | 2분 |
-| 보통 | 90 | 1분 30초 |
-| 어려움 | 60 | 1분 |
-| 매우 어려움 | 45 | 45초 |
+**적용 패턴 (TileBuster 기준):**
+- Stage 341: 최초 언락 레벨 (튜토리얼) - 항상 적용
+- Stage 350, 360, 370...: 톱니바퀴 패턴의 보스 레벨(10번째)에만 적용
+- 결과적으로 약 10% 빈도 (10레벨에 1번)로 고정 패턴 등장
+
+**제한 시간 설정 (난이도 기반):**
+| 난이도 | difficulty 범위 | timea 값 | 설명 |
+|--------|-----------------|----------|------|
+| 쉬움 | < 0.3 | 120 | 2분 |
+| 보통 | 0.3 ~ 0.5 | 90 | 1분 30초 |
+| 어려움 | 0.5 ~ 0.7 | 60 | 1분 |
+| 매우 어려움 | >= 0.7 | 45 | 45초 |
 
 ---
 
@@ -87,21 +92,21 @@
 ### 4.1 핵심 언락 타이밍표
 
 ```
-Stage   1-9   : 기믹 없음 (순수 매칭 학습)
-Stage  10     : craft 언락 ⭐ 첫 번째 기믹 (공예)
-Stage  20     : stack 언락 (스택) [간격: 10]
-Stage  30     : ice 언락 (얼음) [간격: 10]
-Stage  50     : link 언락 (연결) [간격: 20]
-Stage  80     : chain 언락 (사슬) [간격: 30]
-Stage 110     : key 언락 (버퍼잠금) [간격: 30] ★신규
-Stage 150     : grass 언락 (풀) [간격: 40]
-Stage 190     : unknown 언락 (상자) [간격: 40]
-Stage 240     : curtain 언락 (커튼) [간격: 50]
-Stage 290     : bomb 언락 (폭탄) [간격: 50]
-Stage 340     : time_attack 언락 (타임어택) [간격: 50] ★신규
-Stage 390     : frog 언락 (개구리) [간격: 50]
-Stage 440     : teleport 언락 (텔레포터) [간격: 50]
-Stage 441+    : 모든 기믹 언락 완료
+Stage   1-10  : 기믹 없음 (순수 매칭 학습)
+Stage  11     : craft 언락 ⭐ 첫 번째 기믹 (공예)
+Stage  21     : stack 언락 (스택) [간격: 10]
+Stage  31     : ice 언락 (얼음) [간격: 10]
+Stage  51     : link 언락 (연결) [간격: 20]
+Stage  81     : chain 언락 (사슬) [간격: 30]
+Stage 111     : key 언락 (버퍼잠금) [간격: 30] ★신규
+Stage 151     : grass 언락 (풀) [간격: 40]
+Stage 191     : unknown 언락 (상자) [간격: 40]
+Stage 241     : curtain 언락 (커튼) [간격: 50]
+Stage 291     : bomb 언락 (폭탄) [간격: 50]
+Stage 341     : time_attack 언락 (타임어택) [간격: 50] ★신규
+Stage 391     : frog 언락 (개구리) [간격: 50]
+Stage 441     : teleport 언락 (텔레포터) [간격: 50]
+Stage 442+    : 모든 기믹 언락 완료
 ```
 
 ### 4.2 상세 언락 데이터 (JSON 형식)
@@ -110,83 +115,84 @@ Stage 441+    : 모든 기믹 언락 완료
 {
   "gimmick_unlock_schedule": {
     "craft": {
-      "unlock_level": 10,
+      "unlock_level": 11,
       "practice_levels": 9,
-      "integration_start": 20,
+      "integration_start": 21,
       "description": "공예 - 특정 방향으로 타일 수집 목표"
     },
     "stack": {
-      "unlock_level": 20,
+      "unlock_level": 21,
       "practice_levels": 9,
-      "integration_start": 30,
+      "integration_start": 31,
       "description": "스택 - 겹쳐진 타일 수집 목표"
     },
     "ice": {
-      "unlock_level": 30,
+      "unlock_level": 31,
       "practice_levels": 19,
-      "integration_start": 50,
+      "integration_start": 51,
       "description": "얼음 - 인접 타일 클리어로 녹임"
     },
     "link": {
-      "unlock_level": 50,
+      "unlock_level": 51,
       "practice_levels": 29,
-      "integration_start": 80,
+      "integration_start": 81,
       "description": "연결 - 연결된 타일 동시 선택 필요"
     },
     "chain": {
-      "unlock_level": 80,
+      "unlock_level": 81,
       "practice_levels": 29,
-      "integration_start": 110,
+      "integration_start": 111,
       "description": "사슬 - 인접 타일 클리어로 해제"
     },
     "key": {
-      "unlock_level": 110,
+      "unlock_level": 111,
       "practice_levels": 39,
-      "integration_start": 150,
+      "integration_start": 151,
       "field": "unlockTile",
       "description": "버퍼잠금 - unlockTile 필드로 잠금 칸 수 설정"
     },
     "grass": {
-      "unlock_level": 150,
+      "unlock_level": 151,
       "practice_levels": 39,
-      "integration_start": 190,
+      "integration_start": 191,
       "description": "풀 - 인접 타일 클리어로 제거"
     },
     "unknown": {
-      "unlock_level": 190,
+      "unlock_level": 191,
       "practice_levels": 49,
-      "integration_start": 240,
+      "integration_start": 241,
       "description": "상자 - 상위 타일 제거 전까지 숨겨짐"
     },
     "curtain": {
-      "unlock_level": 240,
+      "unlock_level": 241,
       "practice_levels": 49,
-      "integration_start": 290,
+      "integration_start": 291,
       "description": "커튼 - 가려진 타일, 기억력 테스트"
     },
     "bomb": {
-      "unlock_level": 290,
+      "unlock_level": 291,
       "practice_levels": 49,
-      "integration_start": 340,
+      "integration_start": 341,
       "description": "폭탄 - 카운트다운 후 폭발, 시간 압박"
     },
     "time_attack": {
-      "unlock_level": 340,
+      "unlock_level": 341,
       "practice_levels": 49,
-      "integration_start": 390,
+      "integration_start": 391,
       "field": "timea",
-      "description": "타임어택 - timea 필드로 제한 시간(초) 설정"
+      "apply_pattern": "boss_level_only",
+      "description": "타임어택 - 보스 레벨(10번째)에만 적용, timea 필드로 제한 시간(초) 설정"
     },
     "frog": {
-      "unlock_level": 390,
+      "unlock_level": 391,
       "practice_levels": 49,
-      "integration_start": 440,
+      "integration_start": 441,
       "description": "개구리 - 매 턴 이동, 전략적 배치 필요"
     },
     "teleport": {
-      "unlock_level": 440,
+      "unlock_level": 441,
       "practice_levels": 49,
-      "integration_start": 490,
+      "integration_start": 491,
       "description": "텔레포터 - 타일 위치 변경"
     }
   }
@@ -212,19 +218,19 @@ Stage 441+    : 모든 기믹 언락 완료
 
 | 기믹 | TUTORIAL | PRACTICE | INTEGRATION | MASTERY |
 |------|----------|----------|-------------|---------|
-| craft | 10 | 11-19 | 20-29 | 30+ |
-| stack | 20 | 21-29 | 30-49 | 50+ |
-| ice | 30 | 31-49 | 50-79 | 80+ |
-| link | 50 | 51-79 | 80-109 | 110+ |
-| chain | 80 | 81-109 | 110-149 | 150+ |
-| key | 110 | 111-149 | 150-189 | 190+ |
-| grass | 150 | 151-189 | 190-239 | 240+ |
-| unknown | 190 | 191-239 | 240-289 | 290+ |
-| curtain | 240 | 241-289 | 290-339 | 340+ |
-| bomb | 290 | 291-339 | 340-389 | 390+ |
-| time_attack | 340 | 341-389 | 390-439 | 440+ |
-| frog | 390 | 391-439 | 440-489 | 490+ |
-| teleport | 440 | 441-489 | 490+ | - |
+| craft | 11 | 12-20 | 21-30 | 31+ |
+| stack | 21 | 22-30 | 31-50 | 51+ |
+| ice | 31 | 32-50 | 51-80 | 81+ |
+| link | 51 | 52-80 | 81-110 | 111+ |
+| chain | 81 | 82-110 | 111-150 | 151+ |
+| key | 111 | 112-150 | 151-190 | 191+ |
+| grass | 151 | 152-190 | 191-240 | 241+ |
+| unknown | 191 | 192-240 | 241-290 | 291+ |
+| curtain | 241 | 242-290 | 291-340 | 341+ |
+| bomb | 291 | 292-340 | 341-390 | 391+ |
+| time_attack | 341 | 보스 레벨만 | 391-440 | 441+ |
+| frog | 391 | 392-440 | 441-490 | 491+ |
+| teleport | 441 | 442-490 | 491+ | - |
 
 ---
 
@@ -234,20 +240,20 @@ Stage 441+    : 모든 기믹 언락 완료
 
 | 레벨 범위 | 사용 가능 기믹 | 기믹 수 |
 |-----------|---------------|---------|
-| 1-9 | 없음 | 0 |
-| 10-19 | craft | 1 |
-| 20-29 | craft, stack | 2 |
-| 30-49 | craft, stack, ice | 3 |
-| 50-79 | craft, stack, ice, link | 4 |
-| 80-109 | +chain | 5 |
-| 110-149 | +key | 6 |
-| 150-189 | +grass | 7 |
-| 190-239 | +unknown | 8 |
-| 240-289 | +curtain | 9 |
-| 290-339 | +bomb | 10 |
-| 340-389 | +time_attack | 11 |
-| 390-439 | +frog | 12 |
-| 440+ | +teleport (전체) | 13 |
+| 1-10 | 없음 | 0 |
+| 11-20 | craft | 1 |
+| 21-30 | craft, stack | 2 |
+| 31-50 | craft, stack, ice | 3 |
+| 51-80 | craft, stack, ice, link | 4 |
+| 81-110 | +chain | 5 |
+| 111-150 | +key | 6 |
+| 151-190 | +grass | 7 |
+| 191-240 | +unknown | 8 |
+| 241-290 | +curtain | 9 |
+| 291-340 | +bomb | 10 |
+| 341-390 | +time_attack (보스 레벨만) | 11 |
+| 391-440 | +frog | 12 |
+| 441+ | +teleport (전체) | 13 |
 
 ---
 
@@ -260,19 +266,19 @@ Stage 441+    : 모든 기믹 언락 완료
 ```json
 {
   "tutorial_levels": {
-    "10": {"gimmick": "craft", "name": "공예"},
-    "20": {"gimmick": "stack", "name": "스택"},
-    "30": {"gimmick": "ice", "name": "얼음"},
-    "50": {"gimmick": "link", "name": "연결"},
-    "80": {"gimmick": "chain", "name": "사슬"},
-    "110": {"gimmick": "key", "name": "버퍼잠금", "field": "unlockTile"},
-    "150": {"gimmick": "grass", "name": "풀"},
-    "190": {"gimmick": "unknown", "name": "상자"},
-    "240": {"gimmick": "curtain", "name": "커튼"},
-    "290": {"gimmick": "bomb", "name": "폭탄"},
-    "340": {"gimmick": "time_attack", "name": "타임어택", "field": "timea"},
-    "390": {"gimmick": "frog", "name": "개구리"},
-    "440": {"gimmick": "teleport", "name": "텔레포터"}
+    "11": {"gimmick": "craft", "name": "공예"},
+    "21": {"gimmick": "stack", "name": "스택"},
+    "31": {"gimmick": "ice", "name": "얼음"},
+    "51": {"gimmick": "link", "name": "연결"},
+    "81": {"gimmick": "chain", "name": "사슬"},
+    "111": {"gimmick": "key", "name": "버퍼잠금", "field": "unlockTile"},
+    "151": {"gimmick": "grass", "name": "풀"},
+    "191": {"gimmick": "unknown", "name": "상자"},
+    "241": {"gimmick": "curtain", "name": "커튼"},
+    "291": {"gimmick": "bomb", "name": "폭탄"},
+    "341": {"gimmick": "time_attack", "name": "타임어택", "field": "timea", "apply_pattern": "boss_level_only"},
+    "391": {"gimmick": "frog", "name": "개구리"},
+    "441": {"gimmick": "teleport", "name": "텔레포터"}
   }
 }
 ```
@@ -310,7 +316,7 @@ interface LevelData {
 | unknown | obstacle_types | ? 마크 표시 | 상위 타일 제거 시 공개 |
 | curtain | obstacle_types | 커튼 오버레이 | 탭 시 열림/닫힘 토글 |
 | bomb | obstacle_types | 카운트다운 숫자 | 턴마다 감소, 0 시 폭발 |
-| **time_attack** | **timea** | 타이머 UI | 시간 내 클리어 필요 |
+| **time_attack** | **timea** | 타이머 UI | 시간 내 클리어 필요 (보스 레벨만 적용) |
 | frog | obstacle_types | 개구리 스프라이트 | 매 턴 이동 애니메이션 |
 | teleport | obstacle_types | 포탈 이펙트 | 클리어 시 위치 변경 |
 
@@ -376,20 +382,20 @@ GET /api/leveling/unlocked-gimmicks/{level_number}
 ### 10.1 구간별 기믹 설정 (인게임 확정)
 
 ```
-Stage   1-9   : 기믹 없음 (튜토리얼)
-Stage  10-19  : craft만
-Stage  20-29  : craft, stack
-Stage  30-49  : craft, stack, ice
-Stage  50-79  : craft, stack, ice, link
-Stage  80-109 : +chain
-Stage 110-149 : +key (unlockTile 필드)
-Stage 150-189 : +grass
-Stage 190-239 : +unknown
-Stage 240-289 : +curtain
-Stage 290-339 : +bomb
-Stage 340-389 : +time_attack (timea 필드)
-Stage 390-439 : +frog
-Stage 440+    : 모든 기믹 (teleport 추가)
+Stage   1-10  : 기믹 없음 (튜토리얼)
+Stage  11-20  : craft만
+Stage  21-30  : craft, stack
+Stage  31-50  : craft, stack, ice
+Stage  51-80  : craft, stack, ice, link
+Stage  81-110 : +chain
+Stage 111-150 : +key (unlockTile 필드)
+Stage 151-190 : +grass
+Stage 191-240 : +unknown
+Stage 241-290 : +curtain
+Stage 291-340 : +bomb
+Stage 341-390 : +time_attack (timea 필드, 보스 레벨만)
+Stage 391-440 : +frog
+Stage 441+    : 모든 기믹 (teleport 추가)
 ```
 
 ---
@@ -400,10 +406,10 @@ Stage 440+    : 모든 기믹 (teleport 추가)
 def get_unlocked_gimmicks(level_number: int) -> List[str]:
     """해당 레벨에서 사용 가능한 기믹 목록"""
     schedule = {
-        "craft": 10, "stack": 20, "ice": 30, "link": 50,
-        "chain": 80, "key": 110, "grass": 150, "unknown": 190,
-        "curtain": 240, "bomb": 290, "time_attack": 340,
-        "frog": 390, "teleport": 440
+        "craft": 11, "stack": 21, "ice": 31, "link": 51,
+        "chain": 81, "key": 111, "grass": 151, "unknown": 191,
+        "curtain": 241, "bomb": 291, "time_attack": 341,
+        "frog": 391, "teleport": 441
     }
     return [gimmick for gimmick, unlock in schedule.items()
             if unlock <= level_number]
@@ -411,12 +417,20 @@ def get_unlocked_gimmicks(level_number: int) -> List[str]:
 def is_tutorial_level(level_number: int) -> Optional[str]:
     """튜토리얼 레벨이면 해당 기믹 반환, 아니면 None"""
     tutorial_levels = {
-        10: "craft", 20: "stack", 30: "ice", 50: "link",
-        80: "chain", 110: "key", 150: "grass", 190: "unknown",
-        240: "curtain", 290: "bomb", 340: "time_attack",
-        390: "frog", 440: "teleport"
+        11: "craft", 21: "stack", 31: "ice", 51: "link",
+        81: "chain", 111: "key", 151: "grass", 191: "unknown",
+        241: "curtain", 291: "bomb", 341: "time_attack",
+        391: "frog", 441: "teleport"
     }
     return tutorial_levels.get(level_number)
+
+def should_apply_time_attack(level_number: int) -> bool:
+    """타임어택 적용 여부 (튜토리얼 또는 보스 레벨)"""
+    TIME_ATTACK_UNLOCK = 341
+    if level_number < TIME_ATTACK_UNLOCK:
+        return False
+    # 튜토리얼 레벨 또는 보스 레벨(10번째)
+    return level_number == TIME_ATTACK_UNLOCK or level_number % 10 == 0
 ```
 
 ---
@@ -428,6 +442,8 @@ def is_tutorial_level(level_number: int) -> Optional[str]:
 | 1.0 | 2026-02-06 | 초안 작성 (11개 기믹) |
 | 2.0 | 2026-02-06 | 인게임 확정 스펙 반영 |
 | 3.0 | 2026-02-06 | Key, TimeAttack 기믹 추가 (13개) + 언락 레벨 조정 |
+| 4.0 | 2026-02-09 | 언락 레벨 +1 동기화 (백엔드 leveling_config.py 기준) |
+| 4.1 | 2026-02-09 | 타임어택 적용 패턴 변경: 확률 → 보스 레벨(10번째)만 |
 
 ---
 

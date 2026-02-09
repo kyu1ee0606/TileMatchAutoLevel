@@ -3635,6 +3635,42 @@ function TestTab({
                 );
               })()}
 
+              {/* Bot Clear Rate Gauges - Horizontal compact layout */}
+              {selectedLevel.meta.bot_clear_rates && (
+                <div className="mt-3 p-2 bg-gray-700/30 rounded">
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs text-gray-400 shrink-0">봇 클리어율:</span>
+                    <div className="flex-1 flex items-center gap-2">
+                      {(['novice', 'casual', 'average', 'expert', 'optimal'] as const).map(bot => {
+                        const rate = selectedLevel.meta.bot_clear_rates?.[bot] ?? 0;
+                        const percentage = Math.round(rate * 100);
+                        const botLabels: Record<string, string> = { novice: '초', casual: '캐', average: '보', expert: '전', optimal: '최' };
+                        const botColors: Record<string, string> = {
+                          novice: 'bg-red-500', casual: 'bg-orange-500', average: 'bg-yellow-500', expert: 'bg-green-500', optimal: 'bg-blue-500'
+                        };
+                        return (
+                          <div key={bot} className="flex items-center gap-1" title={`${bot}: ${percentage}%`}>
+                            <span className="text-[10px] text-gray-500 w-3">{botLabels[bot]}</span>
+                            <div className="w-12 h-2 bg-gray-600 rounded-full overflow-hidden">
+                              <div className={`h-full ${botColors[bot]}`} style={{ width: `${percentage}%` }} />
+                            </div>
+                            <span className="text-[10px] text-gray-300 w-7">{percentage}%</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {selectedLevel.meta.match_score !== undefined && (
+                      <span className={`text-xs font-bold px-2 py-0.5 rounded ${
+                        selectedLevel.meta.match_score >= 70 ? 'bg-green-900/50 text-green-400' :
+                        selectedLevel.meta.match_score >= 50 ? 'bg-yellow-900/50 text-yellow-400' : 'bg-red-900/50 text-red-400'
+                      }`}>
+                        일치: {selectedLevel.meta.match_score.toFixed(0)}%
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {/* Previous playtest results */}
               {selectedLevel.meta.playtest_results && selectedLevel.meta.playtest_results.length > 0 && (
                 <div className="mt-3 p-2 bg-gray-700/50 rounded">
@@ -3860,6 +3896,42 @@ function TestTab({
                         }`}>
                           {selectedLevel.meta.match_score.toFixed(0)}%
                         </span>
+                      </div>
+                    )}
+                    {/* Bot Clear Rate Gauges */}
+                    {selectedLevel?.meta.bot_clear_rates && (
+                      <div className="w-full max-w-xs space-y-2 mt-2">
+                        <div className="text-xs text-gray-400 text-center mb-2">봇별 클리어율</div>
+                        {(['novice', 'casual', 'average', 'expert', 'optimal'] as const).map(bot => {
+                          const rate = selectedLevel.meta.bot_clear_rates?.[bot] ?? 0;
+                          const percentage = Math.round(rate * 100);
+                          const botLabels: Record<string, string> = {
+                            novice: '초보',
+                            casual: '캐주얼',
+                            average: '보통',
+                            expert: '전문가',
+                            optimal: '최적'
+                          };
+                          const botColors: Record<string, string> = {
+                            novice: 'bg-red-500',
+                            casual: 'bg-orange-500',
+                            average: 'bg-yellow-500',
+                            expert: 'bg-green-500',
+                            optimal: 'bg-blue-500'
+                          };
+                          return (
+                            <div key={bot} className="flex items-center gap-2">
+                              <span className="text-xs text-gray-400 w-14 text-right">{botLabels[bot]}</span>
+                              <div className="flex-1 h-3 bg-gray-700 rounded-full overflow-hidden">
+                                <div
+                                  className={`h-full ${botColors[bot]} transition-all duration-300`}
+                                  style={{ width: `${percentage}%` }}
+                                />
+                              </div>
+                              <span className="text-xs text-white w-10 text-right">{percentage}%</span>
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>

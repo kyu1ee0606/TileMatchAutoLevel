@@ -89,6 +89,10 @@ const getTileImagePath = (type: string, skinId: number = 0): string => {
     const dir = type.split('_')[1] || 's';
     return `/tiles/special/stack_${dir}.png`;
   }
+  // key 타일은 special 폴더의 item_key.png 사용
+  if (type === 'key') {
+    return '/tiles/special/item_key.png';
+  }
   return `/tiles/skin${skinId}/s${skinId}_${type}.png`;
 };
 

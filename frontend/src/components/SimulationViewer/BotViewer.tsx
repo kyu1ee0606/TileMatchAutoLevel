@@ -10,6 +10,10 @@ const getTileImage = (tileType: string): string => {
   if (tileType.startsWith('t')) {
     return `/tiles/skin0/s0_${tileType}.png`;
   }
+  // key 타일은 item_key.png 사용
+  if (tileType === 'key') {
+    return '/tiles/special/item_key.png';
+  }
   return `/tiles/special/${tileType}.png`;
 };
 

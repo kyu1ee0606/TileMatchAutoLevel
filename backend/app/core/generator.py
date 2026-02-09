@@ -6455,12 +6455,43 @@ class LevelGenerator:
                 return (-1, 0)  # output leftward
             return (0, 1)  # default: south
 
+        def has_adjacent_gimmick(col: int, row: int, gimmick_types: List[str]) -> bool:
+            """Check if any adjacent position (4-way) has specified gimmicks.
+
+            Chain and grass gimmicks need adjacent tiles to be cleared.
+            Placing craft/stack next to them would block the clearing mechanism.
+            """
+            adjacent_offsets = [(0, 1), (0, -1), (1, 0), (-1, 0)]  # 4-way adjacency
+
+            for dc, dr in adjacent_offsets:
+                adj_col, adj_row = col + dc, row + dr
+                if adj_col < 0 or adj_col >= cols or adj_row < 0 or adj_row >= rows:
+                    continue
+
+                adj_pos = f"{adj_col}_{adj_row}"
+
+                # Check ALL layers for gimmicks at adjacent position
+                for i in range(num_layers):
+                    layer_key_i = f"layer_{i}"
+                    layer_tiles = level.get(layer_key_i, {}).get("tiles", {})
+                    if adj_pos in layer_tiles:
+                        tile_data = layer_tiles[adj_pos]
+                        if isinstance(tile_data, list) and len(tile_data) > 1:
+                            attribute = tile_data[1] or ""
+                            # Check for chain or grass gimmicks
+                            for gimmick in gimmick_types:
+                                if attribute == gimmick or attribute.startswith(f"{gimmick}_"):
+                                    return True
+            return False
+
         def is_valid_goal_position(col: int, row: int, goal_type: str) -> bool:
             """Check if position is valid for goal considering output direction.
 
             Rules for craft/stack goals:
             1. Output position must be within bounds
             2. Output position must be empty across ALL layers (both craft and stack)
+            3. Goal position must NOT be adjacent to chain/grass gimmicks
+               (chain/grass need adjacent tiles cleared, craft/stack blocks this)
 
             NOTE: Goal position having tiles in lower layers is handled by clearing them
             during placement.
@@ -6486,6 +6517,16 @@ class LevelGenerator:
                     layer_tiles = level.get(layer_key_i, {}).get("tiles", {})
                     if output_pos in layer_tiles:
                         return False
+
+                # CRITICAL: Craft/Stack must NOT be adjacent to chain or grass gimmicks
+                # Chain/grass need adjacent tiles cleared to be removed.
+                # Craft/stack tiles are permanent until goal is met, blocking clearance.
+                if has_adjacent_gimmick(col, row, ["chain", "grass"]):
+                    return False
+
+                # Also check output position - don't output next to chain/grass
+                if has_adjacent_gimmick(output_col, output_row, ["chain", "grass"]):
+                    return False
 
             return True
 

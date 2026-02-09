@@ -116,6 +116,11 @@ GIMMICK_PROFILES: Dict[str, GimmickProfile] = {
 # 1.4 = 어려움 (동시 조건 또는 시간 압박)
 # 1.5 = 매우 어려움 (무작위성 또는 게임오버 위험)
 # =========================================================
+
+# 기믹 점수 계산 시 기본 배율 (analyzer.py에서 사용)
+# 기믹 개수 × 개별 가중치 × GIMMICK_BASE_WEIGHT = 난이도 점수 기여분
+GIMMICK_BASE_WEIGHT: float = 4.0
+
 GIMMICK_DIFFICULTY_WEIGHTS: Dict[str, float] = {
     # 기본 기믹 (1.0 ~ 1.2)
     "chain": 1.2,      # 인접 타일 클리어로 해제, 단순하지만 배치에 따라 난이도 상승

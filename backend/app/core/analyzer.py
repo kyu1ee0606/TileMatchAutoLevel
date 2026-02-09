@@ -6,15 +6,11 @@ from ..models.level import (
     DifficultyGrade,
     ATTRIBUTES,
 )
-from ..models.gimmick_profile import GIMMICK_DIFFICULTY_WEIGHTS
+from ..models.gimmick_profile import GIMMICK_DIFFICULTY_WEIGHTS, GIMMICK_BASE_WEIGHT
 
 
 class LevelAnalyzer:
     """Analyzes level difficulty based on various metrics."""
-
-    # Base weight for gimmick score calculation
-    # 기믹 개수에 GIMMICK_DIFFICULTY_WEIGHTS를 곱한 후 이 값을 곱함
-    GIMMICK_BASE_WEIGHT = 4.0
 
     # Weight configuration for difficulty calculation
     # Score is normalized to 0-100 by dividing by 3.0
@@ -206,39 +202,30 @@ class LevelAnalyzer:
         """Calculate weighted gimmick difficulty score using unified weights."""
         score = 0.0
 
-        # 기본 기믹들 (LevelMetrics에 직접 있는 필드)
+        # 모든 기믹 카운트 (LevelMetrics에 정의된 필드들)
         gimmick_data = {
             "chain": metrics.chain_count,
             "frog": metrics.frog_count,
             "link": metrics.link_count,
             "ice": metrics.ice_count,
+            "grass": metrics.grass_count,
+            "bomb": metrics.bomb_count,
+            "curtain": metrics.curtain_count,
+            "teleport": metrics.teleport_count,
+            "unknown": metrics.unknown_count,
         }
 
-        # 확장 기믹들 (hasattr로 안전하게 접근)
-        if hasattr(metrics, 'grass_count'):
-            gimmick_data["grass"] = metrics.grass_count
-        if hasattr(metrics, 'bomb_count'):
-            gimmick_data["bomb"] = metrics.bomb_count
-        if hasattr(metrics, 'curtain_count'):
-            gimmick_data["curtain"] = metrics.curtain_count
-        if hasattr(metrics, 'teleport_count'):
-            gimmick_data["teleport"] = metrics.teleport_count
-        if hasattr(metrics, 'unknown_count'):
-            gimmick_data["unknown"] = metrics.unknown_count
-
-        # key와 time_attack은 개수가 아닌 존재 여부로 계산
-        if hasattr(metrics, 'has_key_gimmick') and metrics.has_key_gimmick:
-            # key 기믹이 있으면 가중치 적용 (1개로 간주)
-            score += GIMMICK_DIFFICULTY_WEIGHTS.get("key", 1.0) * self.GIMMICK_BASE_WEIGHT
-        if hasattr(metrics, 'has_time_attack') and metrics.has_time_attack:
-            # time_attack 기믹이 있으면 가중치 적용 (1개로 간주)
-            score += GIMMICK_DIFFICULTY_WEIGHTS.get("time_attack", 1.0) * self.GIMMICK_BASE_WEIGHT
+        # key와 time_attack은 존재 여부로 계산 (1개로 간주)
+        if metrics.has_key_gimmick:
+            score += GIMMICK_DIFFICULTY_WEIGHTS.get("key", 1.0) * GIMMICK_BASE_WEIGHT
+        if metrics.has_time_attack:
+            score += GIMMICK_DIFFICULTY_WEIGHTS.get("time_attack", 1.0) * GIMMICK_BASE_WEIGHT
 
         # 각 기믹에 통합 가중치 적용
         for gimmick_name, count in gimmick_data.items():
             if count > 0:
                 weight = GIMMICK_DIFFICULTY_WEIGHTS.get(gimmick_name, 1.0)
-                score += count * weight * self.GIMMICK_BASE_WEIGHT
+                score += count * weight * GIMMICK_BASE_WEIGHT
 
         return score
 
@@ -339,10 +326,9 @@ class LevelAnalyzer:
             )
 
         # 추가 기믹 권장사항
-        bomb_count = getattr(metrics, 'bomb_count', 0)
-        if bomb_count > 5:
+        if metrics.bomb_count > 5:
             recommendations.append(
-                f"폭탄이 {bomb_count}개로 많습니다. "
+                f"폭탄이 {metrics.bomb_count}개로 많습니다. "
                 "시간 압박이 심해 스트레스를 줄 수 있습니다."
             )
 

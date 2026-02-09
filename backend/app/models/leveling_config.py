@@ -61,26 +61,26 @@ class GimmickUnlockConfig:
 
 
 # =========================================================
-# 프로급 기믹 언락 스케줄 (v5 - 인게임 확정 스펙 + Key/TimeAttack)
+# 프로급 기믹 언락 스케줄 (v6 - 모든 기믹 +1 적용)
 # =========================================================
 # [인게임 기믹 언락 순서 - 2026.02 최종 확정]
 #
 # 언락 스케줄 (총 13개 기믹):
-# - Stage   1-9:   순수 매칭 학습 (기믹 없음)
-# - Stage  10:     craft 언락 (공예 - 첫 번째 기믹)
-# - Stage  20:     stack 언락 (스택) [간격: 10]
-# - Stage  30:     ice 언락 (얼음) [간격: 10]
-# - Stage  50:     link 언락 (연결) [간격: 20]
-# - Stage  80:     chain 언락 (사슬) [간격: 30]
-# - Stage 110:     key 언락 (버퍼잠금) [간격: 30] ★신규
-# - Stage 150:     grass 언락 (풀) [간격: 40]
-# - Stage 190:     unknown 언락 (상자) [간격: 40]
-# - Stage 240:     curtain 언락 (커튼) [간격: 50]
-# - Stage 290:     bomb 언락 (폭탄) [간격: 50]
-# - Stage 340:     time_attack 언락 (타임어택) [간격: 50] ★신규
-# - Stage 390:     frog 언락 (개구리) [간격: 50]
-# - Stage 440:     teleport 언락 (텔레포터) [간격: 50]
-# - Stage 441+:    모든 기믹 언락 완료
+# - Stage   1-10:  순수 매칭 학습 (기믹 없음)
+# - Stage  11:     craft 언락 (공예 - 첫 번째 기믹)
+# - Stage  21:     stack 언락 (스택) [간격: 10]
+# - Stage  31:     ice 언락 (얼음) [간격: 10]
+# - Stage  51:     link 언락 (연결) [간격: 20]
+# - Stage  81:     chain 언락 (사슬) [간격: 30]
+# - Stage 111:     key 언락 (버퍼잠금) [간격: 30]
+# - Stage 151:     grass 언락 (풀) [간격: 40]
+# - Stage 191:     unknown 언락 (상자) [간격: 40]
+# - Stage 241:     curtain 언락 (커튼) [간격: 50]
+# - Stage 291:     bomb 언락 (폭탄) [간격: 50]
+# - Stage 341:     time_attack 언락 (타임어택) [간격: 50]
+# - Stage 391:     frog 언락 (개구리) [간격: 50]
+# - Stage 441:     teleport 언락 (텔레포터) [간격: 50]
+# - Stage 442+:    모든 기믹 언락 완료
 #
 # 복잡도 기준 difficulty_weight:
 # - ⭐⭐ (낮음): 1.0
@@ -94,108 +94,108 @@ class GimmickUnlockConfig:
 # =========================================================
 
 PROFESSIONAL_GIMMICK_UNLOCK: Dict[str, GimmickUnlockConfig] = {
-    # 1번째 기믹: craft (공예) - Stage 10
+    # 1번째 기믹: craft (공예) - Stage 11
     "craft": GimmickUnlockConfig(
         gimmick="craft",
-        unlock_level=10,
-        practice_levels=9,   # 10-19: 연습
-        integration_start=20,
+        unlock_level=11,
+        practice_levels=9,   # 11-20: 연습
+        integration_start=21,
         description="공예 - 특정 방향으로 타일 수집 목표"
     ),
-    # 2번째 기믹: stack (스택) - Stage 20
+    # 2번째 기믹: stack (스택) - Stage 21
     "stack": GimmickUnlockConfig(
         gimmick="stack",
-        unlock_level=20,
-        practice_levels=9,   # 20-29: 연습
-        integration_start=30,
+        unlock_level=21,
+        practice_levels=9,   # 21-30: 연습
+        integration_start=31,
         description="스택 - 겹쳐진 타일 수집 목표"
     ),
-    # 3번째 기믹: ice (얼음) - Stage 30
+    # 3번째 기믹: ice (얼음) - Stage 31
     "ice": GimmickUnlockConfig(
         gimmick="ice",
-        unlock_level=30,
-        practice_levels=19,  # 30-49: 연습
-        integration_start=50,
+        unlock_level=31,
+        practice_levels=19,  # 31-50: 연습
+        integration_start=51,
         description="얼음 - 인접 타일 클리어로 녹임"
     ),
-    # 4번째 기믹: link (연결) - Stage 50
+    # 4번째 기믹: link (연결) - Stage 51
     "link": GimmickUnlockConfig(
         gimmick="link",
-        unlock_level=50,
-        practice_levels=29,  # 50-79: 연습
-        integration_start=80,
+        unlock_level=51,
+        practice_levels=29,  # 51-80: 연습
+        integration_start=81,
         description="링크 - 연결된 타일 동시 선택 필요"
     ),
-    # 5번째 기믹: chain (사슬) - Stage 80
+    # 5번째 기믹: chain (사슬) - Stage 81
     "chain": GimmickUnlockConfig(
         gimmick="chain",
-        unlock_level=80,
-        practice_levels=29,  # 80-109: 연습
-        integration_start=110,
+        unlock_level=81,
+        practice_levels=29,  # 81-110: 연습
+        integration_start=111,
         description="체인 - 인접 타일 클리어로 해제"
     ),
-    # 6번째 기믹: key (버퍼잠금) - Stage 110 ★신규
+    # 6번째 기믹: key (버퍼잠금) - Stage 111
     "key": GimmickUnlockConfig(
         gimmick="key",
-        unlock_level=110,
-        practice_levels=39,  # 110-149: 연습
-        integration_start=150,
+        unlock_level=111,
+        practice_levels=39,  # 111-150: 연습
+        integration_start=151,
         description="버퍼잠금 - unlockTile 필드로 설정"
     ),
-    # 7번째 기믹: grass (풀) - Stage 150
+    # 7번째 기믹: grass (풀) - Stage 151
     "grass": GimmickUnlockConfig(
         gimmick="grass",
-        unlock_level=150,
-        practice_levels=39,  # 150-189: 연습
-        integration_start=190,
+        unlock_level=151,
+        practice_levels=39,  # 151-190: 연습
+        integration_start=191,
         description="풀 - 인접 타일 클리어로 제거"
     ),
-    # 8번째 기믹: unknown (상자) - Stage 190
+    # 8번째 기믹: unknown (상자) - Stage 191
     "unknown": GimmickUnlockConfig(
         gimmick="unknown",
-        unlock_level=190,
-        practice_levels=49,  # 190-239: 연습
-        integration_start=240,
+        unlock_level=191,
+        practice_levels=49,  # 191-240: 연습
+        integration_start=241,
         description="상자 - 상위 타일 제거 전까지 숨겨짐"
     ),
-    # 9번째 기믹: curtain (커튼) - Stage 240
+    # 9번째 기믹: curtain (커튼) - Stage 241
     "curtain": GimmickUnlockConfig(
         gimmick="curtain",
-        unlock_level=240,
-        practice_levels=49,  # 240-289: 연습
-        integration_start=290,
+        unlock_level=241,
+        practice_levels=49,  # 241-290: 연습
+        integration_start=291,
         description="커튼 - 가려진 타일, 기억력 테스트"
     ),
-    # 10번째 기믹: bomb (폭탄) - Stage 290
+    # 10번째 기믹: bomb (폭탄) - Stage 291
     "bomb": GimmickUnlockConfig(
         gimmick="bomb",
-        unlock_level=290,
-        practice_levels=49,  # 290-339: 연습
-        integration_start=340,
+        unlock_level=291,
+        practice_levels=49,  # 291-340: 연습
+        integration_start=341,
         description="폭탄 - 카운트다운 후 폭발, 시간 압박"
     ),
-    # 11번째 기믹: time_attack (타임어택) - Stage 340 ★신규
+    # 11번째 기믹: time_attack (타임어택) - Stage 341
     "time_attack": GimmickUnlockConfig(
         gimmick="time_attack",
-        unlock_level=340,
-        practice_levels=49,  # 340-389: 연습
-        integration_start=390,
+        unlock_level=341,
+        practice_levels=49,  # 341-390: 연습
+        integration_start=391,
         description="타임어택 - timea 필드로 제한 시간(초) 설정"
     ),
-    # 12번째 기믹: frog (개구리) - Stage 390
+    # 12번째 기믹: frog (개구리) - Stage 391
     "frog": GimmickUnlockConfig(
         gimmick="frog",
-        unlock_level=390,
-        practice_levels=49,  # 390-439: 연습
-        integration_start=440,
+        unlock_level=391,
+        practice_levels=49,  # 391-440: 연습
+        integration_start=441,
         description="개구리 - 매 턴 이동, 전략적 배치 필요"
     ),
-    # 13번째 기믹: teleport (텔레포터) - Stage 440
+    # 13번째 기믹: teleport (텔레포터) - Stage 441
     "teleport": GimmickUnlockConfig(
         gimmick="teleport",
-        unlock_level=440,
-        practice_levels=49,  # 440-489: 연습
-        integration_start=490,
+        unlock_level=441,
+        practice_levels=49,  # 441-490: 연습
+        integration_start=491,
         description="텔레포트 - 타일 위치 변경"
     ),
 }

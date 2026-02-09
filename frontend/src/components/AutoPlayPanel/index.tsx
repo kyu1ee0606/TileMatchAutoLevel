@@ -33,10 +33,16 @@ const GRADE_COLORS: Record<string, string> = {
 };
 
 // Calculate difficulty match score (0-100%)
+// Uses asymmetric penalty: "too easy" (actual > target) gets 50% penalty, "too hard" gets full penalty
 function calculateMatchScore(botStats: BotClearStats[]): { score: number; avgGap: number; maxGap: number } {
   if (!botStats.length) return { score: 0, avgGap: 0, maxGap: 0 };
 
-  const gaps = botStats.map(s => Math.abs((s.clear_rate - s.target_clear_rate) * 100));
+  const gaps = botStats.map(s => {
+    const rawGap = (s.clear_rate - s.target_clear_rate) * 100; // Positive = too easy
+    // Asymmetric penalty: too easy = 50% penalty, too hard = full penalty
+    return rawGap > 0 ? rawGap * 0.5 : Math.abs(rawGap);
+  });
+  const rawGaps = botStats.map(s => Math.abs((s.clear_rate - s.target_clear_rate) * 100));
   const avgGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
   const maxGap = Math.max(...gaps);
 
@@ -45,7 +51,8 @@ function calculateMatchScore(botStats: BotClearStats[]): { score: number; avgGap
   const weightedGap = (avgGap * 0.75 + maxGap * 0.25);
   const score = Math.max(0, 100 - weightedGap * 1.5);
 
-  return { score, avgGap, maxGap };
+  // Return raw gaps for display purposes
+  return { score, avgGap: rawGaps.reduce((a, b) => a + b, 0) / rawGaps.length, maxGap: Math.max(...rawGaps) };
 }
 
 // Get match status based on score

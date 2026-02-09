@@ -282,10 +282,13 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
         const generateOneLevel = async (task: LevelTask): Promise<ProductionLevel | null> => {
           const { localIdx, levelNumber, targetDifficulty } = task;
 
-          // Local helper: Calculate match score from bot stats
+          // Local helper: Calculate match score from bot stats (asymmetric penalty)
           const calcMatchScore = (botStats: { clear_rate: number; target_clear_rate: number }[]) => {
             if (!botStats.length) return 0;
-            const gaps = botStats.map(s => Math.abs((s.clear_rate - s.target_clear_rate) * 100));
+            const gaps = botStats.map(s => {
+              const rawGap = (s.clear_rate - s.target_clear_rate) * 100;
+              return rawGap > 0 ? rawGap * 0.5 : Math.abs(rawGap); // Too easy = 50% penalty
+            });
             const avgGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
             const maxGap = Math.max(...gaps);
             const weightedGap = (avgGap * 0.6 + maxGap * 0.4);
@@ -1666,9 +1669,14 @@ function TestTab({
   };
 
   // Calculate match score from bot stats (aligned with backend formula for consistency)
+  // Uses asymmetric penalty: "too easy" (actual > target) gets 50% penalty, "too hard" gets full penalty
   const calculateMatchScoreFromBots = (botStats: { clear_rate: number; target_clear_rate: number }[]) => {
     if (!botStats.length) return 0;
-    const gaps = botStats.map(s => Math.abs((s.clear_rate - s.target_clear_rate) * 100));
+    const gaps = botStats.map(s => {
+      const rawGap = (s.clear_rate - s.target_clear_rate) * 100; // Positive = too easy
+      // Asymmetric penalty: too easy = 50% penalty, too hard = full penalty
+      return rawGap > 0 ? rawGap * 0.5 : Math.abs(rawGap);
+    });
     const avgGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
     const maxGap = Math.max(...gaps);
     // Aligned with backend: avg_gap * 0.6 + max_gap * 0.4, penalty * 2

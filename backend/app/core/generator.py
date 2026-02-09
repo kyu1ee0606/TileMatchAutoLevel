@@ -790,15 +790,17 @@ class LevelGenerator:
         level_number = params.level_number if params.level_number else 0
         gimmick_intensity = getattr(params, 'gimmick_intensity', 1.0)
 
-        # key 기믹: unlockTile 필드 설정 (버퍼 잠금)
-        # 레벨 110 이상에서 언락, 30% 확률로 적용
-        # key 기믹: unlockTile 필드 설정 (버퍼 잠금)
-        # - 레벨 110 (튜토리얼): 100% 확률로 적용
-        # - 레벨 111+: 30% 확률로 적용
-        KEY_UNLOCK_LEVEL = 110
+        # key 기믹: unlockTile 필드 설정 (버퍼 잠금) + key 타일 배치
+        # - 레벨 111 (튜토리얼): 100% 확률로 적용
+        # - 레벨 112+: 30% 확률로 적용
+        # key 기믹 작동 방식:
+        # 1. unlockTile: N → N개 버퍼 슬롯 잠금
+        # 2. "key" 타일 ID를 가진 타일 N*3개 배치 필요
+        # 3. key 타일 3개 모을 때마다 잠금 해제
+        KEY_UNLOCK_LEVEL = 111  # 백엔드 leveling_config.py와 동기화
         KEY_PROBABILITY = 0.3  # 30% 확률
         if level_number >= KEY_UNLOCK_LEVEL and gimmick_intensity > 0:
-            # 튜토리얼 레벨(110)은 항상 적용, 그 외는 확률 적용
+            # 튜토리얼 레벨(111)은 항상 적용, 그 외는 확률 적용
             is_key_tutorial = (level_number == KEY_UNLOCK_LEVEL)
             if is_key_tutorial or random.random() < KEY_PROBABILITY * gimmick_intensity:
                 # 난이도에 따라 잠금 슬롯 수 결정 (1-2)
@@ -807,13 +809,17 @@ class LevelGenerator:
                     unlock_tile_count = 2  # 고난이도: 2칸 잠금 (튜토리얼은 항상 1칸)
                 level["unlockTile"] = unlock_tile_count
 
+                # key 타일 배치: unlockTile * 3개의 "key" 타일 필요
+                key_tiles_needed = unlock_tile_count * 3
+                self._place_key_tiles(level, key_tiles_needed)
+
         # time_attack 기믹: timea 필드 설정 (제한 시간, 초)
-        # - 레벨 340 (튜토리얼): 100% 확률로 적용
-        # - 레벨 341+: 30% 확률로 적용
-        TIME_ATTACK_UNLOCK_LEVEL = 340
+        # - 레벨 341 (튜토리얼): 100% 확률로 적용
+        # - 레벨 342+: 30% 확률로 적용
+        TIME_ATTACK_UNLOCK_LEVEL = 341  # 백엔드 leveling_config.py와 동기화
         TIME_ATTACK_PROBABILITY = 0.3  # 30% 확률
         if level_number >= TIME_ATTACK_UNLOCK_LEVEL and gimmick_intensity > 0:
-            # 튜토리얼 레벨(340)은 항상 적용, 그 외는 확률 적용
+            # 튜토리얼 레벨(341)은 항상 적용, 그 외는 확률 적용
             is_time_tutorial = (level_number == TIME_ATTACK_UNLOCK_LEVEL)
             if is_time_tutorial or random.random() < TIME_ATTACK_PROBABILITY * gimmick_intensity:
                 # 난이도에 따라 제한 시간 결정 (60-120초)
@@ -834,6 +840,57 @@ class LevelGenerator:
             grade=report.grade,
             generation_time_ms=generation_time_ms,
         )
+
+    def _place_key_tiles(self, level: Dict[str, Any], count: int) -> None:
+        """
+        Place 'key' tiles in the level by converting existing tiles.
+
+        key 기믹 작동 방식:
+        - key 타일 3개를 모으면 잠긴 버퍼 슬롯 1개가 해제됨
+        - unlockTile * 3개의 key 타일이 필요
+
+        Args:
+            level: Level JSON to modify
+            count: Number of key tiles to place (should be unlockTile * 3)
+        """
+        if count <= 0:
+            return
+
+        # Collect all tile positions from all layers
+        all_positions = []
+        max_layer = level.get("layer", 5)
+
+        for layer_idx in range(max_layer):
+            layer_key = f"layer_{layer_idx}"
+            if layer_key not in level:
+                continue
+
+            tiles = level[layer_key].get("tiles", {})
+            for pos, tile_data in tiles.items():
+                if tile_data and len(tile_data) >= 2:
+                    tile_type = tile_data[0]
+                    gimmick = tile_data[1] if len(tile_data) > 1 else ""
+                    # Only convert regular tiles (t0~t15) without gimmicks
+                    if tile_type.startswith("t") and not gimmick:
+                        all_positions.append((layer_idx, pos))
+
+        # Randomly select positions to convert to key tiles
+        if len(all_positions) < count:
+            # Not enough tiles, use what we have
+            positions_to_convert = all_positions
+        else:
+            positions_to_convert = random.sample(all_positions, count)
+
+        # Convert selected tiles to key tiles
+        for layer_idx, pos in positions_to_convert:
+            layer_key = f"layer_{layer_idx}"
+            tiles = level[layer_key]["tiles"]
+            if pos in tiles:
+                original_tile = tiles[pos]
+                # Keep original tile type but set ID to "key"
+                # Format: [tile_type, gimmick, extras...]
+                # For key tiles: the tile ID becomes "key"
+                tiles[pos] = ["key", original_tile[1] if len(original_tile) > 1 else ""]
 
     def reshuffle_positions(self, level: Dict[str, Any], params: Optional[GenerationParams] = None) -> Dict[str, Any]:
         """

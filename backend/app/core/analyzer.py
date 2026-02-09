@@ -116,19 +116,48 @@ class LevelAnalyzer:
                     tile_types[tile_type] = tile_types.get(tile_type, 0) + 1
 
                     # Count all gimmick attributes
+                    # NOTE: ice_2, ice_3, grass_2 require multiple adjacent matches
+                    # Count them proportionally to their required hits
                     if attribute:
                         if attribute == "chain":
                             gimmick_counts["chain"] += 1
                         elif attribute == "frog":
                             gimmick_counts["frog"] += 1
                         elif attribute == "ice" or attribute.startswith("ice_"):
-                            gimmick_counts["ice"] += 1
+                            # ice_1 = 1 hit, ice_2 = 2 hits, ice_3 = 3 hits
+                            if attribute.startswith("ice_"):
+                                try:
+                                    level = int(attribute.split("_")[1])
+                                    gimmick_counts["ice"] += level
+                                except (IndexError, ValueError):
+                                    gimmick_counts["ice"] += 1
+                            else:
+                                gimmick_counts["ice"] += 1
                         elif attribute == "grass" or attribute.startswith("grass_"):
-                            gimmick_counts["grass"] += 1
+                            # grass_1 = 1 hit, grass_2 = 2 hits
+                            if attribute.startswith("grass_"):
+                                try:
+                                    level = int(attribute.split("_")[1])
+                                    gimmick_counts["grass"] += level
+                                except (IndexError, ValueError):
+                                    gimmick_counts["grass"] += 1
+                            else:
+                                gimmick_counts["grass"] += 1
                         elif attribute.startswith("link_"):
                             gimmick_counts["link"] += 1
                         elif attribute == "bomb" or attribute.startswith("bomb_"):
-                            gimmick_counts["bomb"] += 1
+                            # bomb countdown: lower = harder (less time to defuse)
+                            # bomb_3 = 3 points, bomb_4 = 2 points, bomb_5 = 1 point
+                            if attribute.startswith("bomb_"):
+                                try:
+                                    countdown = int(attribute.split("_")[1])
+                                    # Invert: 3 turns = 3 points, 5 turns = 1 point
+                                    difficulty = max(1, 6 - countdown)
+                                    gimmick_counts["bomb"] += difficulty
+                                except (IndexError, ValueError):
+                                    gimmick_counts["bomb"] += 2  # Default middle value
+                            else:
+                                gimmick_counts["bomb"] += 2  # Default: assume bomb_4
                         elif attribute == "curtain" or attribute.startswith("curtain_"):
                             gimmick_counts["curtain"] += 1
                         elif attribute == "teleport":
@@ -226,6 +255,29 @@ class LevelAnalyzer:
             if count > 0:
                 weight = GIMMICK_DIFFICULTY_WEIGHTS.get(gimmick_name, 1.0)
                 score += count * weight * GIMMICK_BASE_WEIGHT
+
+        # 기믹 시너지 효과 (조합 시 난이도 상승)
+        # 시너지 점수는 정규화 전 raw score에 추가되므로 적당히 조절
+        # bomb + ice: 시간 압박 + 선택지 제한 = 매우 어려움
+        if gimmick_data["bomb"] > 0 and gimmick_data["ice"] > 0:
+            synergy = min(gimmick_data["bomb"], gimmick_data["ice"]) * 0.5 * GIMMICK_BASE_WEIGHT
+            score += synergy
+
+        # bomb + frog: 시간 압박 + 예측 불가능 = 매우 어려움
+        if gimmick_data["bomb"] > 0 and gimmick_data["frog"] > 0:
+            synergy = min(gimmick_data["bomb"], gimmick_data["frog"]) * 0.6 * GIMMICK_BASE_WEIGHT
+            score += synergy
+
+        # ice + frog: 블로킹 + 예측 불가능
+        if gimmick_data["ice"] > 0 and gimmick_data["frog"] > 0:
+            synergy = min(gimmick_data["ice"], gimmick_data["frog"]) * 0.4 * GIMMICK_BASE_WEIGHT
+            score += synergy
+
+        # link + ice/chain: 연결 해제 + 블로킹 조합
+        if gimmick_data["link"] > 0 and (gimmick_data["ice"] > 0 or gimmick_data["chain"] > 0):
+            blocking_count = gimmick_data["ice"] + gimmick_data["chain"]
+            synergy = min(gimmick_data["link"], blocking_count) * 0.4 * GIMMICK_BASE_WEIGHT
+            score += synergy
 
         return score
 

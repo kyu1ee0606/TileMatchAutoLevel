@@ -95,9 +95,15 @@ export function ProductionExport({
     }
   }, [gboostBoardId, gboostLevelPrefix, gboostStartIndex, useRange, rangeStart, rangeEnd]);
 
-  // Get target level ID
-  const getTargetLevelId = (index: number): string => {
-    return `${gboostLevelPrefix}${gboostStartIndex + index}`;
+  // Get target level ID from actual level number
+  const getTargetLevelId = (levelNumber: number): string => {
+    // gboostStartIndex는 GBoost에서 시작할 번호 (기본 1)
+    // levelNumber는 실제 레벨 번호 (예: 35)
+    // useRange가 활성화되면 레벨 번호를 그대로 사용하거나, 오프셋 적용
+    // 예: 레벨 35를 level_35로 업로드하려면 gboostStartIndex를 레벨번호와 일치시키거나
+    //     또는 레벨 35를 level_1로 업로드하려면 오프셋 계산 필요
+    // 현재 로직: 레벨 번호를 ID에 직접 반영 (더 직관적)
+    return `${gboostLevelPrefix}${levelNumber}`;
   };
 
   // JSON 파일 내보내기
@@ -242,9 +248,10 @@ export function ProductionExport({
       // Get target IDs
       const targetIds: ConflictInfo[] = [];
       for (let i = 0; i < effectiveCount; i++) {
+        const levelNum = effectiveStart + i;
         targetIds.push({
-          targetId: getTargetLevelId(i),
-          levelNumber: effectiveStart + i,
+          targetId: getTargetLevelId(levelNum),
+          levelNumber: levelNum,
         });
       }
 
@@ -324,7 +331,7 @@ export function ProductionExport({
 
       for (let i = 0; i < exportableLevels.length; i++) {
         const level = exportableLevels[i];
-        const targetId = getTargetLevelId(i);
+        const targetId = getTargetLevelId(level.meta.level_number);
 
         // overwrite=false이고 충돌이 있으면 건너뛰기
         if (!overwrite && conflictIds.has(targetId)) {

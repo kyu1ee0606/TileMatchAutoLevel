@@ -23,6 +23,9 @@ from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 
+# 기믹 가중치는 gimmick_profile.py에서 Single Source of Truth로 관리
+from .gimmick_profile import GIMMICK_DIFFICULTY_WEIGHTS
+
 
 class LevelPhase(str, Enum):
     """레벨 진행 단계"""
@@ -49,8 +52,12 @@ class GimmickUnlockConfig:
     unlock_level: int           # 언락되는 레벨
     practice_levels: int        # 연습 레벨 수 (이 기믹만 사용)
     integration_start: int      # 이전 기믹과 통합 시작 레벨
-    difficulty_weight: float    # 난이도 가중치 (1.0 = 기본)
     description: str            # 기믹 설명
+
+    @property
+    def difficulty_weight(self) -> float:
+        """난이도 가중치 (GIMMICK_DIFFICULTY_WEIGHTS에서 동적으로 가져옴)"""
+        return GIMMICK_DIFFICULTY_WEIGHTS.get(self.gimmick, 1.0)
 
 
 # =========================================================
@@ -93,7 +100,6 @@ PROFESSIONAL_GIMMICK_UNLOCK: Dict[str, GimmickUnlockConfig] = {
         unlock_level=10,
         practice_levels=9,   # 10-19: 연습
         integration_start=20,
-        difficulty_weight=1.2,  # ⭐⭐⭐
         description="공예 - 특정 방향으로 타일 수집 목표"
     ),
     # 2번째 기믹: stack (스택) - Stage 20
@@ -102,7 +108,6 @@ PROFESSIONAL_GIMMICK_UNLOCK: Dict[str, GimmickUnlockConfig] = {
         unlock_level=20,
         practice_levels=9,   # 20-29: 연습
         integration_start=30,
-        difficulty_weight=1.2,  # ⭐⭐⭐
         description="스택 - 겹쳐진 타일 수집 목표"
     ),
     # 3번째 기믹: ice (얼음) - Stage 30
@@ -111,7 +116,6 @@ PROFESSIONAL_GIMMICK_UNLOCK: Dict[str, GimmickUnlockConfig] = {
         unlock_level=30,
         practice_levels=19,  # 30-49: 연습
         integration_start=50,
-        difficulty_weight=1.2,  # ⭐⭐⭐
         description="얼음 - 인접 타일 클리어로 녹임"
     ),
     # 4번째 기믹: link (연결) - Stage 50
@@ -120,7 +124,6 @@ PROFESSIONAL_GIMMICK_UNLOCK: Dict[str, GimmickUnlockConfig] = {
         unlock_level=50,
         practice_levels=29,  # 50-79: 연습
         integration_start=80,
-        difficulty_weight=1.3,  # ⭐⭐⭐⭐
         description="링크 - 연결된 타일 동시 선택 필요"
     ),
     # 5번째 기믹: chain (사슬) - Stage 80
@@ -129,7 +132,6 @@ PROFESSIONAL_GIMMICK_UNLOCK: Dict[str, GimmickUnlockConfig] = {
         unlock_level=80,
         practice_levels=29,  # 80-109: 연습
         integration_start=110,
-        difficulty_weight=1.2,  # ⭐⭐⭐
         description="체인 - 인접 타일 클리어로 해제"
     ),
     # 6번째 기믹: key (버퍼잠금) - Stage 110 ★신규
@@ -138,7 +140,6 @@ PROFESSIONAL_GIMMICK_UNLOCK: Dict[str, GimmickUnlockConfig] = {
         unlock_level=110,
         practice_levels=39,  # 110-149: 연습
         integration_start=150,
-        difficulty_weight=1.2,  # ⭐⭐⭐
         description="버퍼잠금 - unlockTile 필드로 설정"
     ),
     # 7번째 기믹: grass (풀) - Stage 150
@@ -147,7 +148,6 @@ PROFESSIONAL_GIMMICK_UNLOCK: Dict[str, GimmickUnlockConfig] = {
         unlock_level=150,
         practice_levels=39,  # 150-189: 연습
         integration_start=190,
-        difficulty_weight=1.2,  # ⭐⭐⭐
         description="풀 - 인접 타일 클리어로 제거"
     ),
     # 8번째 기믹: unknown (상자) - Stage 190
@@ -156,7 +156,6 @@ PROFESSIONAL_GIMMICK_UNLOCK: Dict[str, GimmickUnlockConfig] = {
         unlock_level=190,
         practice_levels=49,  # 190-239: 연습
         integration_start=240,
-        difficulty_weight=1.0,  # ⭐⭐
         description="상자 - 상위 타일 제거 전까지 숨겨짐"
     ),
     # 9번째 기믹: curtain (커튼) - Stage 240
@@ -165,7 +164,6 @@ PROFESSIONAL_GIMMICK_UNLOCK: Dict[str, GimmickUnlockConfig] = {
         unlock_level=240,
         practice_levels=49,  # 240-289: 연습
         integration_start=290,
-        difficulty_weight=1.0,  # ⭐⭐
         description="커튼 - 가려진 타일, 기억력 테스트"
     ),
     # 10번째 기믹: bomb (폭탄) - Stage 290
@@ -174,7 +172,6 @@ PROFESSIONAL_GIMMICK_UNLOCK: Dict[str, GimmickUnlockConfig] = {
         unlock_level=290,
         practice_levels=49,  # 290-339: 연습
         integration_start=340,
-        difficulty_weight=1.3,  # ⭐⭐⭐⭐
         description="폭탄 - 카운트다운 후 폭발, 시간 압박"
     ),
     # 11번째 기믹: time_attack (타임어택) - Stage 340 ★신규
@@ -183,7 +180,6 @@ PROFESSIONAL_GIMMICK_UNLOCK: Dict[str, GimmickUnlockConfig] = {
         unlock_level=340,
         practice_levels=49,  # 340-389: 연습
         integration_start=390,
-        difficulty_weight=1.3,  # ⭐⭐⭐⭐
         description="타임어택 - timea 필드로 제한 시간(초) 설정"
     ),
     # 12번째 기믹: frog (개구리) - Stage 390
@@ -192,7 +188,6 @@ PROFESSIONAL_GIMMICK_UNLOCK: Dict[str, GimmickUnlockConfig] = {
         unlock_level=390,
         practice_levels=49,  # 390-439: 연습
         integration_start=440,
-        difficulty_weight=1.5,  # ⭐⭐⭐⭐⭐
         description="개구리 - 매 턴 이동, 전략적 배치 필요"
     ),
     # 13번째 기믹: teleport (텔레포터) - Stage 440
@@ -201,7 +196,6 @@ PROFESSIONAL_GIMMICK_UNLOCK: Dict[str, GimmickUnlockConfig] = {
         unlock_level=440,
         practice_levels=49,  # 440-489: 연습
         integration_start=490,
-        difficulty_weight=1.2,  # ⭐⭐⭐
         description="텔레포트 - 타일 위치 변경"
     ),
 }
@@ -215,16 +209,16 @@ PROFESSIONAL_GIMMICK_UNLOCK: Dict[str, GimmickUnlockConfig] = {
 # =========================================================
 
 SAWTOOTH_PATTERN_10: List[float] = [
-    0.0,   # 레벨 1: 새 시작, 매우 쉬움
-    0.1,   # 레벨 2: 여전히 쉬움
-    0.2,   # 레벨 3: 약간 증가
-    0.35,  # 레벨 4: 중간으로 진입
-    0.45,  # 레벨 5: 중간
-    0.55,  # 레벨 6: 중간 약간 위
-    0.7,   # 레벨 7: 어려워지기 시작
-    0.85,  # 레벨 8: 어려움
-    0.75,  # 레벨 9: 보스 전 휴식
-    1.0,   # 레벨 10: 보스 레벨 (해당 구간 최고 난이도)
+    0.20,  # 레벨 1 (S등급): 매우 쉬움 ← 실제 타일 사용
+    0.52,  # 레벨 2: 중간
+    0.55,  # 레벨 3 (B등급): 중간
+    0.35,  # 레벨 4 (A등급): 쉬움 ← 실제 타일 사용
+    0.55,  # 레벨 5: 중간
+    0.75,  # 레벨 6 (C등급): 어려움
+    0.55,  # 레벨 7: 중간
+    0.50,  # 레벨 8 (B등급): 중간 휴식 ← 실제 타일 사용
+    0.55,  # 레벨 9: 중간
+    0.85,  # 레벨 10 (D등급): 보스 레벨
 ]
 
 

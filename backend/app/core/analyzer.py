@@ -6,10 +6,15 @@ from ..models.level import (
     DifficultyGrade,
     ATTRIBUTES,
 )
+from ..models.gimmick_profile import GIMMICK_DIFFICULTY_WEIGHTS
 
 
 class LevelAnalyzer:
     """Analyzes level difficulty based on various metrics."""
+
+    # Base weight for gimmick score calculation
+    # 기믹 개수에 GIMMICK_DIFFICULTY_WEIGHTS를 곱한 후 이 값을 곱함
+    GIMMICK_BASE_WEIGHT = 4.0
 
     # Weight configuration for difficulty calculation
     # Score is normalized to 0-100 by dividing by 3.0
@@ -17,10 +22,6 @@ class LevelAnalyzer:
     WEIGHTS = {
         "total_tiles": 0.5,       # 30-120 tiles → 15-60 points
         "active_layers": 4.0,     # 3-8 layers → 12-32 points
-        "chain_count": 5.0,       # 0-15 chains → 0-75 points (increased from 3.0)
-        "frog_count": 6.0,        # 0-10 frogs → 0-60 points (increased from 4.0)
-        "link_count": 3.0,        # 0-10 links → 0-30 points (increased from 2.0)
-        "ice_count": 4.0,         # 0-15 ice → 0-60 points (increased from 2.5)
         "goal_amount": 1.5,       # 3-10 goals → 4.5-15 points
         "layer_blocking": 0.15,   # Reduced: blocking can be 0-300 → 0-45 points
         # New weights for better bot simulation correlation
@@ -67,17 +68,34 @@ class LevelAnalyzer:
         """Extract all metrics from level JSON."""
         total_tiles = 0
         active_layers = 0
-        chain_count = 0
-        frog_count = 0
-        link_count = 0
-        ice_count = 0
         goal_amount = 0
         tile_types: Dict[str, int] = {}
         goals: List[Dict[str, Any]] = []
         layer_positions: Dict[int, Set[str]] = {}
 
+        # 모든 기믹 카운트 초기화
+        gimmick_counts: Dict[str, int] = {
+            "chain": 0,
+            "grass": 0,
+            "ice": 0,
+            "link": 0,
+            "frog": 0,
+            "bomb": 0,
+            "curtain": 0,
+            "teleport": 0,
+            "unknown": 0,
+        }
+
         num_layers = level_json.get("layer", 8)
         max_moves = level_json.get("max_moves", 30)  # 기본값 30
+
+        # key 기믹 체크 (레벨 필드에서)
+        unlock_tile = level_json.get("unlockTile", 0)
+        has_key_gimmick = unlock_tile > 0
+
+        # time_attack 기믹 체크 (레벨 필드에서)
+        time_attack = level_json.get("timea", 0)
+        has_time_attack = time_attack > 0
 
         for i in range(num_layers):
             layer_key = f"layer_{i}"
@@ -101,16 +119,26 @@ class LevelAnalyzer:
                     # Count tile types
                     tile_types[tile_type] = tile_types.get(tile_type, 0) + 1
 
-                    # Count attributes (skip if None)
+                    # Count all gimmick attributes
                     if attribute:
                         if attribute == "chain":
-                            chain_count += 1
+                            gimmick_counts["chain"] += 1
                         elif attribute == "frog":
-                            frog_count += 1
-                        elif attribute == "ice":
-                            ice_count += 1
+                            gimmick_counts["frog"] += 1
+                        elif attribute == "ice" or attribute.startswith("ice_"):
+                            gimmick_counts["ice"] += 1
+                        elif attribute == "grass" or attribute.startswith("grass_"):
+                            gimmick_counts["grass"] += 1
                         elif attribute.startswith("link_"):
-                            link_count += 1
+                            gimmick_counts["link"] += 1
+                        elif attribute == "bomb" or attribute.startswith("bomb_"):
+                            gimmick_counts["bomb"] += 1
+                        elif attribute == "curtain" or attribute.startswith("curtain_"):
+                            gimmick_counts["curtain"] += 1
+                        elif attribute == "teleport":
+                            gimmick_counts["teleport"] += 1
+                        elif attribute == "unknown":
+                            gimmick_counts["unknown"] += 1
 
                     # Extract goals (support all direction variants: s, n, e, w)
                     if tile_type.startswith(("craft_", "stack_")):
@@ -128,10 +156,10 @@ class LevelAnalyzer:
         return LevelMetrics(
             total_tiles=total_tiles,
             active_layers=active_layers,
-            chain_count=chain_count,
-            frog_count=frog_count,
-            link_count=link_count,
-            ice_count=ice_count,
+            chain_count=gimmick_counts["chain"],
+            frog_count=gimmick_counts["frog"],
+            link_count=gimmick_counts["link"],
+            ice_count=gimmick_counts["ice"],
             goal_amount=goal_amount,
             layer_blocking=layer_blocking,
             tile_types=tile_types,
@@ -139,6 +167,14 @@ class LevelAnalyzer:
             tile_type_count=tile_type_count,
             max_moves=max_moves,
             move_ratio=move_ratio,
+            # 추가 기믹 카운트 (확장 필드로 저장)
+            grass_count=gimmick_counts["grass"],
+            bomb_count=gimmick_counts["bomb"],
+            curtain_count=gimmick_counts["curtain"],
+            teleport_count=gimmick_counts["teleport"],
+            unknown_count=gimmick_counts["unknown"],
+            has_key_gimmick=has_key_gimmick,
+            has_time_attack=has_time_attack,
         )
 
     def _calculate_layer_blocking(
@@ -166,20 +202,58 @@ class LevelAnalyzer:
 
         return blocking_score
 
+    def _calculate_gimmick_score(self, metrics: LevelMetrics) -> float:
+        """Calculate weighted gimmick difficulty score using unified weights."""
+        score = 0.0
+
+        # 기본 기믹들 (LevelMetrics에 직접 있는 필드)
+        gimmick_data = {
+            "chain": metrics.chain_count,
+            "frog": metrics.frog_count,
+            "link": metrics.link_count,
+            "ice": metrics.ice_count,
+        }
+
+        # 확장 기믹들 (hasattr로 안전하게 접근)
+        if hasattr(metrics, 'grass_count'):
+            gimmick_data["grass"] = metrics.grass_count
+        if hasattr(metrics, 'bomb_count'):
+            gimmick_data["bomb"] = metrics.bomb_count
+        if hasattr(metrics, 'curtain_count'):
+            gimmick_data["curtain"] = metrics.curtain_count
+        if hasattr(metrics, 'teleport_count'):
+            gimmick_data["teleport"] = metrics.teleport_count
+        if hasattr(metrics, 'unknown_count'):
+            gimmick_data["unknown"] = metrics.unknown_count
+
+        # key와 time_attack은 개수가 아닌 존재 여부로 계산
+        if hasattr(metrics, 'has_key_gimmick') and metrics.has_key_gimmick:
+            # key 기믹이 있으면 가중치 적용 (1개로 간주)
+            score += GIMMICK_DIFFICULTY_WEIGHTS.get("key", 1.0) * self.GIMMICK_BASE_WEIGHT
+        if hasattr(metrics, 'has_time_attack') and metrics.has_time_attack:
+            # time_attack 기믹이 있으면 가중치 적용 (1개로 간주)
+            score += GIMMICK_DIFFICULTY_WEIGHTS.get("time_attack", 1.0) * self.GIMMICK_BASE_WEIGHT
+
+        # 각 기믹에 통합 가중치 적용
+        for gimmick_name, count in gimmick_data.items():
+            if count > 0:
+                weight = GIMMICK_DIFFICULTY_WEIGHTS.get(gimmick_name, 1.0)
+                score += count * weight * self.GIMMICK_BASE_WEIGHT
+
+        return score
+
     def _calculate_score(self, metrics: LevelMetrics) -> float:
         """Calculate difficulty score from metrics."""
         score = 0.0
 
         score += metrics.total_tiles * self.WEIGHTS["total_tiles"]
         score += metrics.active_layers * self.WEIGHTS["active_layers"]
-        score += metrics.chain_count * self.WEIGHTS["chain_count"]
-        score += metrics.frog_count * self.WEIGHTS["frog_count"]
-        score += metrics.link_count * self.WEIGHTS["link_count"]
-        score += metrics.ice_count * self.WEIGHTS["ice_count"]
         score += metrics.goal_amount * self.WEIGHTS["goal_amount"]
         score += metrics.layer_blocking * self.WEIGHTS["layer_blocking"]
 
-        # New metrics for better bot simulation correlation
+        # 통합 기믹 가중치 시스템 사용
+        score += self._calculate_gimmick_score(metrics)
+
         # 타일 종류 다양성: 3종류 기준, 초과 시 급격히 어려워짐
         tile_type_penalty = max(0, metrics.tile_type_count - 3)
         score += tile_type_penalty * self.WEIGHTS["tile_type_count"]
@@ -262,6 +336,20 @@ class LevelAnalyzer:
             recommendations.append(
                 f"링크 타일이 {metrics.link_count}개 있습니다. "
                 "연결된 타일은 동시에 처리해야 하므로 전략적 배치가 중요합니다."
+            )
+
+        # 추가 기믹 권장사항
+        bomb_count = getattr(metrics, 'bomb_count', 0)
+        if bomb_count > 5:
+            recommendations.append(
+                f"폭탄이 {bomb_count}개로 많습니다. "
+                "시간 압박이 심해 스트레스를 줄 수 있습니다."
+            )
+
+        frog_count = metrics.frog_count
+        if frog_count > 0 and metrics.total_tiles < 50:
+            recommendations.append(
+                "개구리와 적은 타일 수 조합은 매우 어려울 수 있습니다."
             )
 
         return recommendations

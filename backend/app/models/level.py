@@ -44,6 +44,14 @@ class LevelMetrics:
     tile_type_count: int = 0       # 타일 종류 다양성 (덱 큐 막힘 확률)
     max_moves: int = 30            # 최대 무브 수
     move_ratio: float = 0.0        # total_tiles / max_moves (높을수록 어려움)
+    # 추가 기믹 카운트 (통합 가중치 시스템용)
+    grass_count: int = 0           # 풀 기믹 개수
+    bomb_count: int = 0            # 폭탄 기믹 개수
+    curtain_count: int = 0         # 커튼 기믹 개수
+    teleport_count: int = 0        # 텔레포트 기믹 개수
+    unknown_count: int = 0         # 상자 기믹 개수
+    has_key_gimmick: bool = False  # key 기믹 사용 여부
+    has_time_attack: bool = False  # time_attack 기믹 사용 여부
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -61,6 +69,14 @@ class LevelMetrics:
             "tile_type_count": self.tile_type_count,
             "max_moves": self.max_moves,
             "move_ratio": round(self.move_ratio, 2),
+            # 추가 기믹 카운트
+            "grass_count": self.grass_count,
+            "bomb_count": self.bomb_count,
+            "curtain_count": self.curtain_count,
+            "teleport_count": self.teleport_count,
+            "unknown_count": self.unknown_count,
+            "has_key_gimmick": self.has_key_gimmick,
+            "has_time_attack": self.has_time_attack,
         }
 
 

@@ -247,46 +247,89 @@ def get_gboost_style_layer_config(level_number: int) -> Dict[str, Any]:
         }
 
 
+def get_lowest_difficulty_positions(count: int = 3) -> Set[int]:
+    """
+    톱니바퀴 패턴에서 가장 낮은 난이도의 position들을 동적으로 찾습니다.
+
+    Args:
+        count: 찾을 position 개수 (기본 3개)
+
+    Returns:
+        가장 낮은 난이도의 position 집합
+    """
+    from ..models.leveling_config import SAWTOOTH_PATTERN_10
+
+    # (position, difficulty) 튜플 리스트 생성 후 난이도 기준 정렬
+    indexed_difficulties = [(i, diff) for i, diff in enumerate(SAWTOOTH_PATTERN_10)]
+    sorted_by_difficulty = sorted(indexed_difficulties, key=lambda x: x[1])
+
+    # 가장 낮은 count개의 position 반환
+    return {pos for pos, _ in sorted_by_difficulty[:count]}
+
+
+# 캐시: 톱니바퀴 패턴에서 가장 낮은 3개 난이도 position (lazy 초기화)
+_LOWEST_DIFFICULTY_POSITIONS_CACHE: Optional[Set[int]] = None
+
+
+def _get_lowest_positions() -> Set[int]:
+    """캐시된 lowest difficulty positions 반환 (lazy 초기화)"""
+    global _LOWEST_DIFFICULTY_POSITIONS_CACHE
+    if _LOWEST_DIFFICULTY_POSITIONS_CACHE is None:
+        _LOWEST_DIFFICULTY_POSITIONS_CACHE = get_lowest_difficulty_positions(3)
+    return _LOWEST_DIFFICULTY_POSITIONS_CACHE
+
+
 def get_tile_types_for_level(level_number: int) -> List[str]:
     """
     Get recommended tile types list based on level number.
 
     톱니바퀴 패턴(10레벨 순환) 기반 타일 종류 선택:
-    모든 레벨에서 다양한 타일 타입 사용 (t0 단독 사용 금지)
+    - 10레벨 주기 내 가장 낮은 난이도 3개 레벨: 실제 타일 타입 5가지 사용
+    - 나머지 7개 레벨: t0 사용 (클라이언트에서 랜덤 타일로 변환)
 
-    타일 그룹 순환 (30레벨마다 전체 순환):
+    타일 그룹 순환 (30레벨마다 전체 순환, 쉬운 레벨에만 적용):
     - 그룹 0: t1~t5 (레벨 1-10, 31-40, 61-70...)
     - 그룹 1: t6~t10 (레벨 11-20, 41-50, 71-80...)
     - 그룹 2: t11~t15 (레벨 21-30, 51-60, 81-90...)
 
-    [수정 이유]
-    - 기존 t0 시스템은 클라이언트 랜덤화 용도였으나, 생성기에서 단일 타입으로 처리됨
-    - 모든 레벨에서 실제 다양한 타일 타입 사용하여 시각적 다양성 보장
+    [동적 난이도 기반 선택]
+    SAWTOOTH_PATTERN_10에서 가장 낮은 난이도 3개 position을 동적으로 찾아 적용.
+    현재 패턴 기준: position 0, 1, 2 (난이도 0.0, 0.1, 0.2)
+    패턴이 변경되면 자동으로 새로운 가장 낮은 position들이 선택됨.
 
     Args:
         level_number: The level number (1-based)
 
     Returns:
-        List of tile type strings
+        List of tile type strings (t0 for random, or t1~t15 for fixed)
     """
-    # 레벨에 따른 타일 종류 수 결정 (난이도 스케일링)
-    config = get_gboost_style_layer_config(level_number)
-    tile_count = config.get("tile_types", 5)
+    # 10레벨 주기 내 위치 (0~9)
+    position_in_10 = (level_number - 1) % 10
 
-    # 30레벨마다 타일 그룹 순환 (0, 1, 2)
-    group_index = ((level_number - 1) // 10) % 3
+    # 톱니바퀴 패턴에서 가장 낮은 난이도 3개 position에 해당하면 실제 타일 사용
+    lowest_positions = _get_lowest_positions()
+    if position_in_10 in lowest_positions:
+        # 레벨에 따른 타일 종류 수 결정 (난이도 스케일링)
+        config = get_gboost_style_layer_config(level_number)
+        tile_count = config.get("tile_types", 5)
 
-    # 그룹별 타일 풀 정의
-    if group_index == 0:
-        base_tiles = ["t1", "t2", "t3", "t4", "t5"]
-    elif group_index == 1:
-        base_tiles = ["t6", "t7", "t8", "t9", "t10"]
+        # 30레벨마다 타일 그룹 순환 (0, 1, 2)
+        group_index = ((level_number - 1) // 10) % 3
+
+        # 그룹별 타일 풀 정의
+        if group_index == 0:
+            base_tiles = ["t1", "t2", "t3", "t4", "t5"]
+        elif group_index == 1:
+            base_tiles = ["t6", "t7", "t8", "t9", "t10"]
+        else:
+            base_tiles = ["t11", "t12", "t13", "t14", "t15"]
+
+        # tile_count에 맞게 조정 (최소 3개 보장)
+        tile_count = max(3, min(tile_count, len(base_tiles)))
+        return base_tiles[:tile_count]
     else:
-        base_tiles = ["t11", "t12", "t13", "t14", "t15"]
-
-    # tile_count에 맞게 조정 (최소 3개 보장)
-    tile_count = max(3, min(tile_count, len(base_tiles)))
-    return base_tiles[:tile_count]
+        # 나머지 7개 레벨은 t0 사용 (클라이언트에서 랜덤 타일로 변환)
+        return ["t0"]
 
 
 def get_use_tile_count_for_level(level_number: int) -> int:

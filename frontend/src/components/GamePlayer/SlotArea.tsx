@@ -10,6 +10,7 @@ interface SlotAreaProps {
   maxSlots: number;
   tileSize?: number;
   onSlotClick?: (index: number) => void;
+  lockedSlots?: number;  // unlockTile: 잠긴 슬롯 수 (뒤에서부터)
 }
 
 // 타일 이미지 경로
@@ -29,7 +30,10 @@ export function SlotArea({
   maxSlots,
   tileSize = 48,
   onSlotClick,
+  lockedSlots = 0,
 }: SlotAreaProps) {
+  // 실제 사용 가능한 슬롯 수 (잠긴 슬롯 제외)
+  const availableSlots = maxSlots - lockedSlots;
   // Group consecutive same-type tiles for visual feedback
   const groupedSlots = React.useMemo(() => {
     const groups: { type: string; count: number; startIndex: number }[] = [];
@@ -72,7 +76,7 @@ export function SlotArea({
   };
 
   const slotsUsed = slots.length;
-  const isFull = slotsUsed >= maxSlots;
+  const isFull = slotsUsed >= availableSlots;  // 잠긴 슬롯 제외한 사용 가능 슬롯 기준
 
   return (
     <div className="slot-area">
@@ -93,13 +97,15 @@ export function SlotArea({
           const isEmpty = !slot;
           const matching = slot && isInMatchingGroup(index);
           const almostMatching = slot && isAboutToMatch(index);
+          const isLocked = index >= availableSlots;  // 뒤에서부터 잠긴 슬롯
 
           return (
             <div
               key={index}
               className={`
                 relative rounded-lg overflow-hidden transition-all duration-150
-                ${isEmpty ? 'bg-gray-700/50 border-2 border-dashed border-gray-600' : 'bg-gray-700'}
+                ${isLocked ? 'bg-amber-900/60 border-2 border-amber-600' :
+                  isEmpty ? 'bg-gray-700/50 border-2 border-dashed border-gray-600' : 'bg-gray-700'}
                 ${matching ? 'ring-2 ring-green-400 animate-pulse' : ''}
                 ${almostMatching ? 'ring-2 ring-yellow-400' : ''}
               `}
@@ -107,9 +113,24 @@ export function SlotArea({
                 width: tileSize,
                 height: tileSize,
               }}
-              onClick={() => onSlotClick?.(index)}
+              onClick={() => !isLocked && onSlotClick?.(index)}
             >
-              {slot && (
+              {/* 잠긴 슬롯 표시 */}
+              {isLocked && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center">
+                  <img
+                    src="/tiles/special/item_key.png"
+                    alt="locked"
+                    className="w-6 h-6 opacity-60"
+                    onError={(e) => {
+                      (e.target as HTMLImageElement).style.display = 'none';
+                    }}
+                  />
+                  <div className="text-amber-400 text-[10px] mt-0.5">🔒</div>
+                </div>
+              )}
+
+              {slot && !isLocked && (
                 <>
                   {/* Base background */}
                   <img
@@ -155,8 +176,8 @@ export function SlotArea({
                 </>
               )}
 
-              {/* Empty slot number */}
-              {isEmpty && (
+              {/* Empty slot number (not locked) */}
+              {isEmpty && !isLocked && (
                 <div className="absolute inset-0 flex items-center justify-center text-gray-500 text-xs">
                   {index + 1}
                 </div>
@@ -170,6 +191,11 @@ export function SlotArea({
       <div className="text-center mt-2 text-sm">
         {isFull ? (
           <span className="text-red-400 font-bold">Slots Full! Game Over</span>
+        ) : lockedSlots > 0 ? (
+          <span className="text-gray-400">
+            {slotsUsed} / {availableSlots} slots used
+            <span className="text-amber-400 ml-2">🔒 {lockedSlots} locked</span>
+          </span>
         ) : (
           <span className="text-gray-400">
             {slotsUsed} / {maxSlots} slots used

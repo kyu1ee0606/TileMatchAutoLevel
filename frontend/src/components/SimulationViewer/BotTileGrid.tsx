@@ -1148,6 +1148,7 @@ export function BotTileGrid({
 
     // t0 is random tile, t1+ shows t0 background + tile icon (same as editor)
     const isRandomTile = tileType === 't0';
+    const isKeyTile = tileType === 'key';
     const t0Info = TILE_TYPES['t0'];
 
     return (
@@ -1166,10 +1167,10 @@ export function BotTileGrid({
           border: hasActiveGimmick ? `2px solid ${getGimmickBorderColor()}` : undefined,
           backgroundColor: 'transparent',
         }}
-        title={gimmickEffect?.description}
+        title={isKeyTile ? '열쇠 타일 - 버퍼 잠금 해제' : gimmickEffect?.description}
       >
-        {/* t0 background layer (for t1+ tiles) - same as editor */}
-        {!isRandomTile && t0Info?.image && (
+        {/* t0 background layer (for t1+ tiles and key tiles) - same as editor */}
+        {(!isRandomTile || isKeyTile) && t0Info?.image && (
           <div className="absolute inset-0">
             <img
               src={t0Info.image}
@@ -1180,27 +1181,41 @@ export function BotTileGrid({
           </div>
         )}
 
-        {/* Current tile icon - same as editor */}
-        <div className="absolute inset-0 flex items-center justify-center">
-          {tileInfo?.image ? (
+        {/* Key tile icon - smaller centered key overlay */}
+        {isKeyTile && (
+          <div className="absolute inset-0 flex items-center justify-center z-10">
             <img
-              src={tileInfo.image}
-              alt={tileInfo.name}
-              className="w-full h-full object-cover pointer-events-none"
+              src="/tiles/special/item_key.png"
+              alt="key"
+              className="w-3/4 h-3/4 object-contain pointer-events-none"
               draggable={false}
             />
-          ) : (
-            /* Fallback color block when no image - same as editor */
-            <div
-              className="w-full h-full flex items-center justify-center"
-              style={{ backgroundColor: tileInfo?.color || '#888' }}
-            >
-              <span className="text-white text-[8px] font-bold">
-                {tileType.replace('_s', '')}
-              </span>
-            </div>
-          )}
-        </div>
+          </div>
+        )}
+
+        {/* Current tile icon - same as editor (skip for key tiles) */}
+        {!isKeyTile && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            {tileInfo?.image ? (
+              <img
+                src={tileInfo.image}
+                alt={tileInfo.name}
+                className="w-full h-full object-cover pointer-events-none"
+                draggable={false}
+              />
+            ) : (
+              /* Fallback color block when no image - same as editor */
+              <div
+                className="w-full h-full flex items-center justify-center"
+                style={{ backgroundColor: tileInfo?.color || '#888' }}
+              >
+                <span className="text-white text-[8px] font-bold">
+                  {tileType.replace('_s', '')}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Attribute image overlay - same as editor */}
         {attrImage && (
@@ -1321,6 +1336,17 @@ export function BotTileGrid({
             title="Unknown - 상위 타일 제거 시 타일 종류 표시"
           >
             <span className="text-[9px]">❓</span>
+          </div>
+        )}
+
+        {/* Key tile badge */}
+        {isKeyTile && (
+          <div
+            className="absolute bottom-0 left-0 flex items-center justify-center rounded-tr bg-amber-500/90 text-white"
+            style={{ width: 16, height: 14 }}
+            title="열쇠 타일 - 버퍼 잠금 해제"
+          >
+            <span className="text-[9px]">🔑</span>
           </div>
         )}
 

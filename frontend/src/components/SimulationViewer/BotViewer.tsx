@@ -205,44 +205,59 @@ export function BotViewer({
         convertedTiles={convertedTiles}
       />
 
-      {/* Dock Buffer (7 slots) */}
-      <div className="mt-2 flex items-center gap-0.5">
-        <span className="text-[9px] text-gray-500 mr-1">독:</span>
-        <div className="flex gap-0.5">
-          {Array.from({ length: 7 }).map((_, idx) => {
-            const tileType = currentDock[idx];
-            const isFilled = !!tileType;
-            const isDanger = currentDock.length >= 6;
-            return (
-              <div
-                key={idx}
-                className={clsx(
-                  'w-5 h-5 rounded border flex items-center justify-center',
-                  isFilled
-                    ? isDanger
-                      ? 'border-red-500 bg-red-900/30'
-                      : 'border-gray-500 bg-gray-700'
-                    : 'border-gray-600 bg-gray-800/50'
-                )}
-              >
-                {tileType && (
-                  <img
-                    src={getTileImage(tileType)}
-                    alt={tileType}
-                    className="w-4 h-4 object-contain"
-                  />
-                )}
-              </div>
-            );
-          })}
-        </div>
-        <span className={clsx(
-          'text-[9px] ml-1',
-          currentDock.length >= 6 ? 'text-red-400' : 'text-gray-500'
-        )}>
-          {currentDock.length}/7
-        </span>
-      </div>
+      {/* Dock Buffer (7 slots with locked slots support) */}
+      {(() => {
+        const maxSlots = 7;
+        const lockedSlots = typeof levelJson.unlockTile === 'number' ? levelJson.unlockTile : 0;
+        const availableSlots = maxSlots - lockedSlots;
+        const isDanger = currentDock.length >= availableSlots - 1;
+
+        return (
+          <div className="mt-2 flex items-center gap-0.5">
+            <span className="text-[9px] text-gray-500 mr-1">독:</span>
+            <div className="flex gap-0.5">
+              {Array.from({ length: maxSlots }).map((_, idx) => {
+                const tileType = currentDock[idx];
+                const isFilled = !!tileType;
+                const isLocked = idx >= availableSlots;
+
+                return (
+                  <div
+                    key={idx}
+                    className={clsx(
+                      'w-5 h-5 rounded border flex items-center justify-center',
+                      isLocked
+                        ? 'border-amber-600 bg-amber-900/40'
+                        : isFilled
+                          ? isDanger
+                            ? 'border-red-500 bg-red-900/30'
+                            : 'border-gray-500 bg-gray-700'
+                          : 'border-gray-600 bg-gray-800/50'
+                    )}
+                  >
+                    {isLocked ? (
+                      <span className="text-[8px] text-amber-400">🔒</span>
+                    ) : tileType ? (
+                      <img
+                        src={getTileImage(tileType)}
+                        alt={tileType}
+                        className="w-4 h-4 object-contain"
+                      />
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+            <span className={clsx(
+              'text-[9px] ml-1',
+              currentDock.length >= availableSlots - 1 ? 'text-red-400' : 'text-gray-500'
+            )}>
+              {currentDock.length}/{availableSlots}
+              {lockedSlots > 0 && <span className="text-amber-400 ml-0.5">🔒{lockedSlots}</span>}
+            </span>
+          </div>
+        );
+      })()}
 
       {/* Progress bar */}
       <div className="mt-2">

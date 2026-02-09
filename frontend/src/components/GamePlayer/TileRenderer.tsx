@@ -22,6 +22,10 @@ const getTileImagePath = (type: string, skinId: number = 0): string => {
     const dir = type.split('_')[1] || 's';
     return `/tiles/special/stack_${dir}.png`;
   }
+  // key 타일은 배경 타일 사용 (열쇠 아이콘은 별도 오버레이)
+  if (type === 'key') {
+    return `/tiles/skin${skinId}/s${skinId}_t0.png`;
+  }
   return `/tiles/skin${skinId}/s${skinId}_${type}.png`;
 };
 
@@ -89,6 +93,9 @@ export function TileRenderer({ tile, size, showDebug }: TileRendererProps) {
 
   // Teleport gimmick
   const isTeleport = attribute === 'teleport';
+
+  // Key tile (special matchable tile that unlocks buffer slots)
+  const isKeyTile = tile.type === 'key';
 
   // Stack tile visual info - ONLY for stack tiles, NOT craft tiles
   // Craft tiles should only show badge on the craft BOX, not on spawned tiles
@@ -509,6 +516,39 @@ export function TileRenderer({ tile, size, showDebug }: TileRendererProps) {
           title="텔레포트"
         >
           🌀
+        </div>
+      )}
+
+      {/* Key tile overlay - 열쇠 아이콘 (버퍼 잠금 해제용) */}
+      {isKeyTile && (
+        <img
+          src="/tiles/special/item_key.png"
+          alt="key"
+          style={{
+            ...tileImageStyle,
+            width: '70%',
+            height: '70%',
+            top: '15%',
+            left: '15%',
+            zIndex: 15,
+          }}
+          onError={(e) => {
+            (e.target as HTMLImageElement).style.display = 'none';
+          }}
+        />
+      )}
+
+      {/* Key tile badge */}
+      {isKeyTile && (
+        <div
+          style={{
+            ...badgeStyle,
+            backgroundColor: 'rgba(234, 179, 8, 0.9)',
+            color: 'white',
+          }}
+          title="열쇠 타일"
+        >
+          🔑
         </div>
       )}
 

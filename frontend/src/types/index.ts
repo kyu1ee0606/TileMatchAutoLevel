@@ -21,6 +21,8 @@ export interface LevelJSON {
   autoCollectCount?: number;  // 암호화 설정 (0 = 해제)
   useTileCount?: number;  // 타일 종류 수 (1-15)
   randSeed?: number;  // 랜덤 시드
+  unlockTile?: number;  // key 기믹: 버퍼 잠금 슬롯 수 (key 타일 3개로 1칸 해제)
+  timea?: number;  // time_attack 기믹: 제한 시간 (초)
   [key: `layer_${number}`]: LevelLayer;
 }
 
@@ -158,6 +160,8 @@ export const TILE_TYPES: Record<string, { name: string; color: string; image?: s
   stack_nw: { name: 'Stack NorthWest', color: '#8b5cf6', image: '/tiles/special/stack_nw.png' },
   stack_se: { name: 'Stack SouthEast', color: '#8b5cf6', image: '/tiles/special/stack_se.png' },
   stack_sw: { name: 'Stack SouthWest', color: '#8b5cf6', image: '/tiles/special/stack_sw.png' },
+  // Key tile (버퍼 잠금 해제용 - 배경은 t0, 아이콘은 열쇠)
+  key: { name: '열쇠 타일', color: '#eab308', image: '/tiles/special/item_key.png' },
 };
 
 // Special tile images for attributes and obstacles
@@ -199,6 +203,9 @@ export const SPECIAL_IMAGES: Record<string, string> = {
   craft_e: '/tiles/special/tile_craft.png',
   craft_w: '/tiles/special/tile_craft.png',
   craft_n: '/tiles/special/tile_craft.png',
+  // Key tile (버퍼 잠금 해제용)
+  key: '/tiles/special/item_key.png',
+  item_key: '/tiles/special/item_key.png',
 };
 
 // Gimmick effect definitions for visualization

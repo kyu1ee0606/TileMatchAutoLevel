@@ -106,6 +106,7 @@ export function GamePlayer({ levelData, levelInfo, onGameEnd, onBack }: GamePlay
   const [gameState, setGameState] = useState<GameState>('idle');
   const [stats, setStats] = useState<GameStats>(INITIAL_GAME_STATS);
   const [settings] = useState(DEFAULT_GAME_SETTINGS);
+  const [lockedSlots, setLockedSlots] = useState<number>(0);  // unlockTile: 버퍼 잠금 수
 
   // Animation state
   const [animatingTile, setAnimatingTile] = useState<AnimatingTile | null>(null);
@@ -166,6 +167,10 @@ export function GamePlayer({ levelData, levelInfo, onGameEnd, onBack }: GamePlay
 
     // Update UI state from engine
     updateUIFromEngine(engine);
+
+    // Read unlockTile (버퍼 잠금 슬롯 수)
+    const unlockTile = typeof levelToUse.unlockTile === 'number' ? levelToUse.unlockTile : 0;
+    setLockedSlots(unlockTile);
 
     setStats(INITIAL_GAME_STATS);
     setGameState('playing');
@@ -376,6 +381,7 @@ export function GamePlayer({ levelData, levelInfo, onGameEnd, onBack }: GamePlay
             slots={slots}
             maxSlots={settings.maxSlots}
             tileSize={tileSize}
+            lockedSlots={lockedSlots}
           />
         </div>
       </div>

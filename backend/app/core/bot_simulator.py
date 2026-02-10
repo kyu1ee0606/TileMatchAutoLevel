@@ -196,6 +196,9 @@ class GameState:
     _accessible_cache: Optional[List['TileState']] = None
     # Performance optimization: accessible tile type counts cache
     _accessible_type_counts: Optional[Dict[str, int]] = None
+    # Phase 5: Curtain memory system - tracks what player remembers about curtain states
+    # key: curtain_key (layerIdx_x_y), value: (remembered_is_open, moves_since_seen)
+    curtain_memory: Dict[str, Tuple[bool, int]] = field(default_factory=dict)
 
 
 @dataclass
@@ -262,6 +265,58 @@ class MultiBotAssessmentResult:
             "recommended_moves": self.recommended_moves,
             "analysis_summary": self.analysis_summary,
         }
+
+
+class BotSimulatorConfig:
+    """Feature flags for bot simulation accuracy improvements.
+
+    Each flag can be toggled independently for A/B testing and rollback.
+    See: claudedocs/bot_simulation_accuracy_improvement_plan.md
+    """
+    # Phase 1: Attention Zone - filter moves by player visibility
+    ENABLE_ATTENTION_ZONE = True
+
+    # Phase 2: Gimmick notice rates
+    ENABLE_GIMMICK_NOTICE = True
+
+    # Phase 3: Block hidden tile info - make optimal bot more realistic
+    ENABLE_HIDDEN_INFO_BLOCK = True
+
+    # Phase 4: Dock panic mechanism - increased mistakes under pressure
+    ENABLE_DOCK_PANIC = True
+
+    # Phase 5: Curtain memory limitation - imperfect curtain state tracking
+    ENABLE_CURTAIN_MEMORY = True
+
+
+# Phase 2: Gimmick notice rates by bot type
+# Format: {TileEffectType: (NOVICE, CASUAL, AVERAGE, EXPERT, OPTIMAL)}
+# Values represent probability of noticing and correctly handling the gimmick
+GIMMICK_NOTICE_RATES = {
+    # Passive gimmicks - visually obvious, easy to notice
+    "ice": (0.9, 0.95, 1.0, 1.0, 1.0),
+    "chain": (0.9, 0.95, 1.0, 1.0, 1.0),
+    "grass": (0.85, 0.92, 0.98, 1.0, 1.0),
+
+    # Active gimmicks - require attention and understanding
+    "bomb": (0.35, 0.55, 0.80, 0.95, 1.0),      # Bomb countdown - often missed
+    "curtain": (0.40, 0.60, 0.80, 0.95, 1.0),   # State tracking required
+    "frog": (0.45, 0.65, 0.85, 0.95, 1.0),      # Movement prediction
+    "teleporter": (0.40, 0.55, 0.75, 0.90, 1.0),  # Shuffle prediction hard
+
+    # Link gimmicks - need to understand pairing
+    "link_e": (0.55, 0.70, 0.88, 0.98, 1.0),
+    "link_w": (0.55, 0.70, 0.88, 0.98, 1.0),
+    "link_s": (0.55, 0.70, 0.88, 0.98, 1.0),
+    "link_n": (0.55, 0.70, 0.88, 0.98, 1.0),
+
+    # Craft/Stack - complex mechanics
+    "craft": (0.60, 0.75, 0.90, 0.98, 1.0),
+    "stack_n": (0.60, 0.75, 0.90, 0.98, 1.0),
+    "stack_s": (0.60, 0.75, 0.90, 0.98, 1.0),
+    "stack_e": (0.60, 0.75, 0.90, 0.98, 1.0),
+    "stack_w": (0.60, 0.75, 0.90, 0.98, 1.0),
+}
 
 
 class BotSimulator:
@@ -1436,6 +1491,9 @@ class BotSimulator:
     def _play_game(self, state: GameState, profile: BotProfile) -> GameState:
         """Play through a game with the given bot profile."""
         while not self._is_game_over(state):
+            # Phase 5: Update curtain memory at start of each turn
+            self._update_curtain_memory(state, profile)
+
             moves = self._get_available_moves(state)
 
             if not moves:
@@ -2389,9 +2447,10 @@ class BotSimulator:
                 base_score += profile.pattern_recognition * 20.0
             else:
                 # For optimal bot: check if there are hidden tiles of this type
-                # that will become available later (perfect information)
-                if profile.pattern_recognition >= 1.0:
-                    # Optimal bot knows ALL tile counts including hidden
+                # that will become available later
+                # Phase 3: Block hidden info if enabled (more realistic)
+                if profile.pattern_recognition >= 1.0 and not BotSimulatorConfig.ENABLE_HIDDEN_INFO_BLOCK:
+                    # Optimal bot uses perfect information (legacy behavior)
                     total_of_type = state.all_tile_type_counts.get(move.tile_type, 0)
                     in_dock = dock_type_counts.get(move.tile_type, 0)
                     # Total includes this tile we're about to pick, so subtract 1
@@ -2403,6 +2462,7 @@ class BotSimulator:
                         # No hidden tiles either - this is truly risky
                         base_score -= 10.0
                 else:
+                    # Phase 3 enabled or non-optimal bot: no hidden info
                     # Risky - might fill dock without completing match
                     base_score += profile.pattern_recognition * 3.0
 
@@ -2477,7 +2537,8 @@ class BotSimulator:
         same_type_on_board = None  # Lazy computed
 
         # Optimal bot uses perfect information about total tile counts
-        if profile.pattern_recognition >= 1.0:
+        # Phase 3: Only allow if ENABLE_HIDDEN_INFO_BLOCK is disabled (legacy behavior)
+        if profile.pattern_recognition >= 1.0 and not BotSimulatorConfig.ENABLE_HIDDEN_INFO_BLOCK:
             total_of_type = state.all_tile_type_counts.get(move.tile_type, 0)
             # Ensure dock_type_counts is computed for optimal bot
             if dock_type_counts is None:
@@ -2512,7 +2573,8 @@ class BotSimulator:
             base_score += profile.pattern_recognition * 2.0
         elif same_type_on_board is not None and same_type_on_board == 0 and move.match_count < 2:
             # This type has no other accessible tiles - check hidden tiles for optimal bot
-            if profile.pattern_recognition >= 1.0:
+            # Phase 3: Only allow if ENABLE_HIDDEN_INFO_BLOCK is disabled (legacy behavior)
+            if profile.pattern_recognition >= 1.0 and not BotSimulatorConfig.ENABLE_HIDDEN_INFO_BLOCK:
                 total_of_type = state.all_tile_type_counts.get(move.tile_type, 0)
                 if dock_type_counts is None:
                     dock_type_counts = {}
@@ -2532,7 +2594,7 @@ class BotSimulator:
                     # Just give neutral score - the filtering will handle safety
                     pass  # No penalty - let the safe move filtering handle it
             else:
-                # Non-optimal bot doesn't know about hidden tiles
+                # Phase 3 enabled OR Non-optimal bot: doesn't know about hidden tiles
                 base_score -= profile.blocking_awareness * 3.0
 
         # Goal priority bonus
@@ -2706,51 +2768,57 @@ class BotSimulator:
             # 5. BOMB tiles: CRITICAL - Must pick before explosion!
             # Bombs explode when their countdown reaches 0
             # Countdown decreases each move while bomb is exposed
+            # Phase 2: Low-skill bots may not notice bombs
             if state.bomb_tiles:
-                # Find exposed bombs and their urgency
-                critical_bomb_move = False
-                min_bomb_remaining = float('inf')
+                # Phase 2: Check if player notices bomb danger
+                bomb_noticed = self._is_gimmick_noticed(TileEffectType.BOMB, profile)
 
-                for bomb_key, remaining in state.bomb_tiles.items():
-                    # Parse bomb key: layerIdx_x_y
-                    parts = bomb_key.split('_')
-                    if len(parts) >= 3:
-                        layer_idx = int(parts[0])
-                        pos = f"{parts[1]}_{parts[2]}"
-                        layer = state.tiles.get(layer_idx, {})
-                        if pos in layer and not layer[pos].picked:
-                            bomb_tile = layer[pos]
-                            # Check if bomb is exposed (not blocked by upper layer)
-                            if not self._is_blocked_by_upper(state, bomb_tile):
-                                min_bomb_remaining = min(min_bomb_remaining, remaining)
+                if bomb_noticed:
+                    # Find exposed bombs and their urgency
+                    critical_bomb_move = False
+                    min_bomb_remaining = float('inf')
 
-                                # Check if THIS move is picking this bomb tile
-                                if (tile_state and
-                                    tile_state.layer_idx == layer_idx and
-                                    tile_state.position_key == pos):
-                                    critical_bomb_move = True
+                    for bomb_key, remaining in state.bomb_tiles.items():
+                        # Parse bomb key: layerIdx_x_y
+                        parts = bomb_key.split('_')
+                        if len(parts) >= 3:
+                            layer_idx = int(parts[0])
+                            pos = f"{parts[1]}_{parts[2]}"
+                            layer = state.tiles.get(layer_idx, {})
+                            if pos in layer and not layer[pos].picked:
+                                bomb_tile = layer[pos]
+                                # Check if bomb is exposed (not blocked by upper layer)
+                                if not self._is_blocked_by_upper(state, bomb_tile):
+                                    min_bomb_remaining = min(min_bomb_remaining, remaining)
 
-                # Score adjustment based on bomb urgency
-                if min_bomb_remaining != float('inf'):
-                    if critical_bomb_move:
-                        # THIS move picks a bomb - MASSIVE BONUS
-                        if min_bomb_remaining <= 1:
-                            base_score += 500.0  # About to explode - MUST pick
-                        elif min_bomb_remaining <= 2:
-                            base_score += 200.0  # Very urgent
-                        elif min_bomb_remaining <= 3:
-                            base_score += 100.0  # Urgent
+                                    # Check if THIS move is picking this bomb tile
+                                    if (tile_state and
+                                        tile_state.layer_idx == layer_idx and
+                                        tile_state.position_key == pos):
+                                        critical_bomb_move = True
+
+                    # Score adjustment based on bomb urgency
+                    if min_bomb_remaining != float('inf'):
+                        if critical_bomb_move:
+                            # THIS move picks a bomb - MASSIVE BONUS
+                            if min_bomb_remaining <= 1:
+                                base_score += 500.0  # About to explode - MUST pick
+                            elif min_bomb_remaining <= 2:
+                                base_score += 200.0  # Very urgent
+                            elif min_bomb_remaining <= 3:
+                                base_score += 100.0  # Urgent
+                            else:
+                                base_score += 50.0   # Moderate priority
                         else:
-                            base_score += 50.0   # Moderate priority
-                    else:
-                        # This move does NOT pick a bomb - penalize if bomb is critical
-                        if min_bomb_remaining <= 1:
-                            # Bomb explodes next move if not picked NOW!
-                            base_score -= 300.0  # Severe penalty - almost game over
-                        elif min_bomb_remaining <= 2:
-                            base_score -= 100.0  # High penalty
-                        elif min_bomb_remaining <= 3:
-                            base_score -= 30.0   # Moderate penalty
+                            # This move does NOT pick a bomb - penalize if bomb is critical
+                            if min_bomb_remaining <= 1:
+                                # Bomb explodes next move if not picked NOW!
+                                base_score -= 300.0  # Severe penalty - almost game over
+                            elif min_bomb_remaining <= 2:
+                                base_score -= 100.0  # High penalty
+                            elif min_bomb_remaining <= 3:
+                                base_score -= 30.0   # Moderate penalty
+                # else: bomb_noticed=False - bot doesn't notice bomb, no score adjustment
 
             # 6. General effect tile deadlock detection
             # If many effect tiles remain and accessible tiles are limited
@@ -2779,6 +2847,279 @@ class BotSimulator:
 
         return base_score
 
+    def _filter_by_attention(
+        self,
+        moves: List[Move],
+        state: GameState,
+        profile: BotProfile,
+    ) -> List[Move]:
+        """Filter moves by attention zone - low skill bots miss deep layer opportunities.
+
+        Phase 1 of accuracy improvements (v1.4 - layer filtering approach).
+        See: claudedocs/bot_simulation_accuracy_improvement_plan.md
+
+        Key Insight:
+        Low skill players focus on TOP layers and miss opportunities in deeper layers.
+        This makes them worse because they:
+        1. Don't see optimal moves hidden in lower layers
+        2. Make suboptimal choices from limited visible options
+
+        The filter works by REMOVING deep layer moves for low-skill bots,
+        forcing them to choose from a limited (often worse) set of options.
+
+        Args:
+            moves: Available moves
+            state: Game state
+            profile: Bot profile
+
+        Returns:
+            Filtered moves based on attention span
+        """
+        # Optimal/Expert bots see all layers
+        if profile.pattern_recognition >= 0.85:
+            return moves
+
+        if not moves:
+            return moves
+
+        max_layer = state._max_layer_idx if state._max_layer_idx >= 0 else 0
+
+        # Determine how many layers this bot can "see"
+        # NOVICE (0.2): 1-2 layers, CASUAL (0.4): 2-3 layers, AVERAGE (0.6): 3-4 layers
+        visible_depth = int(1 + profile.pattern_recognition * 5)  # 1-4 layers
+
+        # Always keep matching moves
+        matching_moves = [m for m in moves if m.will_match]
+
+        # Filter by layer depth
+        visible_moves = []
+        dock_types = {t.tile_type for t in state.dock_tiles}
+
+        for move in moves:
+            if move.will_match:
+                visible_moves.append(move)
+                continue
+
+            layer_depth = max_layer - move.layer_idx
+
+            # Within visible depth - always see
+            if layer_depth < visible_depth:
+                visible_moves.append(move)
+                continue
+
+            # Beyond visible depth - probabilistic visibility
+            # Dock-matching tiles are more noticeable even in deep layers
+            base_prob = 0.1  # 10% base chance to notice deep tiles
+
+            if move.tile_type in dock_types:
+                base_prob += 0.2 * profile.pattern_recognition
+
+            if move.match_count == 2:
+                base_prob += 0.15
+
+            if self._rng.random() < base_prob:
+                visible_moves.append(move)
+
+        # Ensure at least one move is available
+        if not visible_moves and moves:
+            # Pick random from top layer
+            top_layer_moves = [m for m in moves if m.layer_idx == max_layer]
+            if top_layer_moves:
+                visible_moves = [self._rng.choice(top_layer_moves)]
+            else:
+                visible_moves = [self._rng.choice(moves)]
+
+        return visible_moves
+
+    def _get_gimmick_notice_rate(
+        self,
+        effect_type: TileEffectType,
+        profile: BotProfile,
+    ) -> float:
+        """Get probability of noticing and correctly handling a gimmick.
+
+        Phase 2: Gimmick notice rates.
+        See: claudedocs/bot_simulation_accuracy_improvement_plan.md
+
+        Args:
+            effect_type: Type of gimmick effect
+            profile: Bot profile
+
+        Returns:
+            Probability (0.0-1.0) of correctly handling this gimmick
+        """
+        # Map effect type to string key
+        effect_key = effect_type.value if hasattr(effect_type, 'value') else str(effect_type)
+
+        # Get rates tuple (NOVICE, CASUAL, AVERAGE, EXPERT, OPTIMAL)
+        rates = GIMMICK_NOTICE_RATES.get(effect_key, (1.0, 1.0, 1.0, 1.0, 1.0))
+
+        # Map bot type to index
+        bot_type_index = {
+            BotType.NOVICE: 0,
+            BotType.CASUAL: 1,
+            BotType.AVERAGE: 2,
+            BotType.EXPERT: 3,
+            BotType.OPTIMAL: 4,
+        }.get(profile.bot_type, 4)
+
+        return rates[bot_type_index]
+
+    def _is_gimmick_noticed(
+        self,
+        effect_type: TileEffectType,
+        profile: BotProfile,
+    ) -> bool:
+        """Check if player notices and correctly handles a gimmick.
+
+        Phase 2: Probabilistic gimmick awareness.
+
+        Args:
+            effect_type: Type of gimmick
+            profile: Bot profile
+
+        Returns:
+            True if gimmick is noticed, False if missed
+        """
+        if not BotSimulatorConfig.ENABLE_GIMMICK_NOTICE:
+            return True  # Always notice if feature disabled
+
+        notice_rate = self._get_gimmick_notice_rate(effect_type, profile)
+        return self._rng.random() < notice_rate
+
+    def _apply_dock_panic(
+        self,
+        profile: BotProfile,
+        dock_count: int,
+    ) -> Tuple[float, int]:
+        """Phase 4: Apply dock panic - increased mistakes when dock is filling.
+
+        As dock fills up, players (especially lower-skill) tend to:
+        1. Make more mistakes due to pressure
+        2. Think less deeply (reduced lookahead)
+
+        Args:
+            profile: Current bot profile
+            dock_count: Number of tiles in dock
+
+        Returns:
+            Tuple of (adjusted_mistake_rate, adjusted_lookahead_depth)
+        """
+        if not BotSimulatorConfig.ENABLE_DOCK_PANIC:
+            return profile.mistake_rate, profile.lookahead_depth
+
+        # Panic thresholds vary by skill level
+        # Higher skill players panic earlier (more aware of danger)
+        panic_thresholds = {
+            BotType.NOVICE: 6,    # Already makes many mistakes, less panic effect
+            BotType.CASUAL: 5,
+            BotType.AVERAGE: 4,
+            BotType.EXPERT: 3,
+            BotType.OPTIMAL: 7,   # Optimal bot doesn't panic
+        }
+
+        threshold = panic_thresholds.get(profile.bot_type, 5)
+
+        if dock_count < threshold:
+            return profile.mistake_rate, profile.lookahead_depth
+
+        # Calculate panic level (0.0 ~ 1.0)
+        max_dock = 7
+        panic_level = min(1.0, (dock_count - threshold + 1) / (max_dock - threshold + 1))
+
+        # Increase mistake rate (up to 2x)
+        panic_mistake_multiplier = 1 + panic_level
+        adjusted_mistake = min(0.6, profile.mistake_rate * panic_mistake_multiplier)
+
+        # Reduce lookahead depth
+        depth_reduction = int(panic_level * 2)
+        adjusted_depth = max(0, profile.lookahead_depth - depth_reduction)
+
+        return adjusted_mistake, adjusted_depth
+
+    def _update_curtain_memory(
+        self,
+        state: GameState,
+        profile: BotProfile,
+    ) -> None:
+        """Phase 5: Update curtain memory based on visibility.
+
+        Players don't perfectly remember curtain states when they can't see them.
+        Memory duration varies by skill level.
+        """
+        if not BotSimulatorConfig.ENABLE_CURTAIN_MEMORY:
+            return
+
+        # Memory duration in moves (how long before forgetting)
+        memory_duration = {
+            BotType.NOVICE: 1,
+            BotType.CASUAL: 2,
+            BotType.AVERAGE: 3,
+            BotType.EXPERT: 5,
+            BotType.OPTIMAL: 100,  # Optimal has perfect memory
+        }.get(profile.bot_type, 3)
+
+        # Update memory for each curtain tile
+        for curtain_key, is_open in state.curtain_tiles.items():
+            parts = curtain_key.split('_')
+            if len(parts) < 3:
+                continue
+            layer_idx = int(parts[0])
+            pos = f"{parts[1]}_{parts[2]}"
+
+            layer = state.tiles.get(layer_idx, {})
+            tile = layer.get(pos)
+
+            if tile and not tile.picked:
+                # Check if curtain is visible (not blocked)
+                is_visible = not self._is_blocked_by_upper(state, tile)
+
+                if is_visible:
+                    # Visible curtain - update memory with current state
+                    state.curtain_memory[curtain_key] = (is_open, 0)
+                else:
+                    # Not visible - age the memory
+                    if curtain_key in state.curtain_memory:
+                        remembered, age = state.curtain_memory[curtain_key]
+                        if age >= memory_duration:
+                            # Memory expired - forget
+                            del state.curtain_memory[curtain_key]
+                        else:
+                            # Age the memory
+                            state.curtain_memory[curtain_key] = (remembered, age + 1)
+
+    def _get_perceived_curtain_state(
+        self,
+        state: GameState,
+        curtain_key: str,
+        profile: BotProfile,
+    ) -> Optional[bool]:
+        """Phase 5: Get what player thinks the curtain state is.
+
+        May differ from actual state due to imperfect memory.
+
+        Returns:
+            True if player thinks curtain is open
+            False if player thinks curtain is closed
+            None if player doesn't remember
+        """
+        if not BotSimulatorConfig.ENABLE_CURTAIN_MEMORY:
+            # Legacy behavior - perfect information
+            return state.curtain_tiles.get(curtain_key)
+
+        if curtain_key in state.curtain_memory:
+            remembered, age = state.curtain_memory[curtain_key]
+
+            # Memory accuracy depends on pattern_recognition and age
+            accuracy = profile.pattern_recognition * (1.0 - age * 0.1)
+
+            if self._rng.random() < accuracy:
+                return remembered  # Correct memory
+            else:
+                return not remembered  # Incorrect memory
+
+        return None  # No memory of this curtain
+
     def _select_move_with_profile(
         self,
         moves: List[Move],
@@ -2789,8 +3130,16 @@ class BotSimulator:
         if not moves:
             return None
 
-        # Check for mistake (random wrong choice)
-        if self._rng.random() < profile.mistake_rate:
+        # Phase 1: Apply attention zone filtering
+        if BotSimulatorConfig.ENABLE_ATTENTION_ZONE:
+            moves = self._filter_by_attention(moves, state, profile)
+
+        # Phase 4: Apply dock panic effect
+        dock_count = len(state.dock_tiles)
+        adjusted_mistake_rate, adjusted_lookahead = self._apply_dock_panic(profile, dock_count)
+
+        # Check for mistake (random wrong choice) - using adjusted rate
+        if self._rng.random() < adjusted_mistake_rate:
             return self._rng.choice(moves)
 
         # CRITICAL: Always prefer moves that complete a match (3-in-dock)
@@ -2812,9 +3161,10 @@ class BotSimulator:
             return self._optimal_perfect_information_strategy(sorted_moves, state, profile)
 
         # For high-skill bots, use enhanced lookahead with adaptive optimization
-        if profile.lookahead_depth > 0 and len(sorted_moves) > 1:
-            # Apply adaptive depth (capped by profile's max depth)
-            adaptive_depth = min(self._get_adaptive_depth(state), profile.lookahead_depth)
+        # Phase 4: Use adjusted lookahead depth
+        if adjusted_lookahead > 0 and len(sorted_moves) > 1:
+            # Apply adaptive depth (capped by adjusted max depth)
+            adaptive_depth = min(self._get_adaptive_depth(state), adjusted_lookahead)
 
             # Apply candidate pruning for better performance
             candidates = self._get_pruned_candidates(sorted_moves, state)
@@ -3234,10 +3584,17 @@ class BotSimulator:
             dock_counts[t.tile_type] = dock_counts.get(t.tile_type, 0) + 1
 
         # Helper function to check if move is safe
+        # Phase 3: When ENABLE_HIDDEN_INFO_BLOCK is enabled, use accessible tiles only
         def is_safe_move(move: Move) -> bool:
             tile_type = move.tile_type
             dock_has = dock_counts.get(tile_type, 0)
-            total_remaining = state.all_tile_type_counts.get(tile_type, 0)
+            if BotSimulatorConfig.ENABLE_HIDDEN_INFO_BLOCK:
+                # Use only accessible (visible) tile counts
+                type_counts = self._get_accessible_type_counts(state)
+                total_remaining = type_counts.get(tile_type, 0)
+            else:
+                # Legacy behavior: use all tile counts (hidden info)
+                total_remaining = state.all_tile_type_counts.get(tile_type, 0)
             after_pick = dock_has + 1
             needed_for_match = 3 - after_pick
             return total_remaining - 1 >= needed_for_match
@@ -3358,8 +3715,13 @@ class BotSimulator:
             # If we have goal tiles underneath and a blocking tile on top
             if has_goal_tiles and topmost_tile and topmost_tile.tile_type != "craft_s":
                 # Check if the blocking tile can eventually be matched
+                # Phase 3: When ENABLE_HIDDEN_INFO_BLOCK is enabled, use accessible tiles only
                 blocking_type = topmost_tile.tile_type
-                total_count = state.all_tile_type_counts.get(blocking_type, 0)
+                if BotSimulatorConfig.ENABLE_HIDDEN_INFO_BLOCK:
+                    type_counts = self._get_accessible_type_counts(state)
+                    total_count = type_counts.get(blocking_type, 0)
+                else:
+                    total_count = state.all_tile_type_counts.get(blocking_type, 0)
                 in_dock = dock_counts.get(blocking_type, 0)
 
                 # Need at least 3 total to make a match eventually
@@ -3403,8 +3765,13 @@ class BotSimulator:
             # If we have goal tiles underneath and topmost is blocking
             if has_goal_tiles and topmost_tile.tile_type != "stack_s":
                 # Check if the blocking tile can eventually be matched
+                # Phase 3: When ENABLE_HIDDEN_INFO_BLOCK is enabled, use accessible tiles only
                 blocking_type = topmost_tile.tile_type
-                total_count = state.all_tile_type_counts.get(blocking_type, 0)
+                if BotSimulatorConfig.ENABLE_HIDDEN_INFO_BLOCK:
+                    type_counts = self._get_accessible_type_counts(state)
+                    total_count = type_counts.get(blocking_type, 0)
+                else:
+                    total_count = state.all_tile_type_counts.get(blocking_type, 0)
 
                 # Need at least 3 total to make a match eventually
                 if total_count >= 3:
@@ -3570,7 +3937,13 @@ class BotSimulator:
                     pickable_tiles[tile_type] = pickable_tiles.get(tile_type, 0) + 1
 
         # Copy all_tile_type_counts and decrement the picked tile
-        all_tile_counts = dict(state.all_tile_type_counts)
+        # Phase 3: When ENABLE_HIDDEN_INFO_BLOCK is enabled, use accessible tiles only
+        if BotSimulatorConfig.ENABLE_HIDDEN_INFO_BLOCK:
+            # Use accessible tile counts only (no hidden info)
+            all_tile_counts = dict(self._get_accessible_type_counts(state))
+        else:
+            # Legacy behavior: use all tile counts (hidden info)
+            all_tile_counts = dict(state.all_tile_type_counts)
         if move_type in all_tile_counts:
             all_tile_counts[move_type] = max(0, all_tile_counts[move_type] - 1)
         # Also decrement for matched tiles
@@ -3808,39 +4181,53 @@ class BotSimulator:
                 score += 30.0  # Excellent - can complete match next turn
             else:
                 # Check hidden tiles (perfect information for optimal bot)
-                total_of_type = state.all_tile_type_counts.get(dock_type, 0)
-                # Hidden = total - pickable - in_dock - this_tile
-                hidden_of_type = total_of_type - same_type_pickable - new_dock_count
-                if hidden_of_type >= 1:
-                    # 3rd tile exists but is hidden - will appear later
-                    score += 15.0  # Still good - can complete eventually
+                # Phase 3: When ENABLE_HIDDEN_INFO_BLOCK is enabled, skip hidden tile analysis
+                if not BotSimulatorConfig.ENABLE_HIDDEN_INFO_BLOCK:
+                    total_of_type = state.all_tile_type_counts.get(dock_type, 0)
+                    # Hidden = total - pickable - in_dock - this_tile
+                    hidden_of_type = total_of_type - same_type_pickable - new_dock_count
+                    if hidden_of_type >= 1:
+                        # 3rd tile exists but is hidden - will appear later
+                        score += 15.0  # Still good - can complete eventually
+                    else:
+                        # 2 in dock but no 3rd anywhere - very dangerous!
+                        score -= 25.0
                 else:
-                    # 2 in dock but no 3rd anywhere - very dangerous!
-                    score -= 25.0
+                    # Phase 3: No hidden info - just penalize based on accessible tiles
+                    score -= 15.0  # Risky - no visible 3rd tile
 
         elif new_dock_count == 1 and not move.will_match:
             # Starting a new type in dock - check if we can complete it
             if same_type_pickable >= 2:
                 score += 10.0  # Good - 2 more available
             elif same_type_pickable == 1:
-                # Check for hidden tiles
-                total_of_type = state.all_tile_type_counts.get(dock_type, 0)
-                hidden_of_type = total_of_type - same_type_pickable - 1  # -1 for this tile
-                if hidden_of_type >= 1:
-                    score += 5.0  # One pickable + one hidden = can match
+                # Phase 3: When ENABLE_HIDDEN_INFO_BLOCK is enabled, skip hidden tile analysis
+                if not BotSimulatorConfig.ENABLE_HIDDEN_INFO_BLOCK:
+                    # Check for hidden tiles
+                    total_of_type = state.all_tile_type_counts.get(dock_type, 0)
+                    hidden_of_type = total_of_type - same_type_pickable - 1  # -1 for this tile
+                    if hidden_of_type >= 1:
+                        score += 5.0  # One pickable + one hidden = can match
+                    else:
+                        score += 2.0  # Only one more - risky
                 else:
-                    score += 2.0  # Only one more - risky
+                    score += 2.0  # Phase 3: Only one visible - slightly risky
             else:
                 # No more pickable - check hidden
-                total_of_type = state.all_tile_type_counts.get(dock_type, 0)
-                hidden_of_type = total_of_type - 1  # -1 for this tile
-                if hidden_of_type >= 2:
-                    score += 3.0  # 2 hidden tiles can complete match
-                elif hidden_of_type >= 1:
-                    score -= 5.0  # Only 1 hidden - partial match risk
+                # Phase 3: When ENABLE_HIDDEN_INFO_BLOCK is enabled, skip hidden tile analysis
+                if not BotSimulatorConfig.ENABLE_HIDDEN_INFO_BLOCK:
+                    total_of_type = state.all_tile_type_counts.get(dock_type, 0)
+                    hidden_of_type = total_of_type - 1  # -1 for this tile
+                    if hidden_of_type >= 2:
+                        score += 3.0  # 2 hidden tiles can complete match
+                    elif hidden_of_type >= 1:
+                        score -= 5.0  # Only 1 hidden - partial match risk
+                    else:
+                        # No more of this type anywhere - very risky
+                        score -= 20.0
                 else:
-                    # No more of this type anywhere - very risky
-                    score -= 20.0
+                    # Phase 3: No visible tiles of this type - risky
+                    score -= 15.0
 
         # Dock fill danger assessment
         current_dock_size = len(state.dock_tiles)
@@ -3859,7 +4246,15 @@ class BotSimulator:
         for t in state.dock_tiles:
             dock_type_counts[t.tile_type] = dock_type_counts.get(t.tile_type, 0) + 1
 
-        for tile_type, total_count in state.all_tile_type_counts.items():
+        # Phase 3: When ENABLE_HIDDEN_INFO_BLOCK is enabled, use accessible tiles only
+        if BotSimulatorConfig.ENABLE_HIDDEN_INFO_BLOCK:
+            # Use only accessible (visible) tile counts
+            tile_counts_to_iterate = pickable_by_type
+        else:
+            # Legacy behavior: use all tile counts (hidden info)
+            tile_counts_to_iterate = state.all_tile_type_counts
+
+        for tile_type, total_count in tile_counts_to_iterate.items():
             if tile_type not in self.MATCHABLE_TYPES:
                 continue
 
@@ -3868,8 +4263,13 @@ class BotSimulator:
 
             # Total available = on board (pickable) + in dock
             available_now = pickable_count + dock_has
-            # Hidden = total - available_now
-            hidden_count = total_count - available_now
+
+            if BotSimulatorConfig.ENABLE_HIDDEN_INFO_BLOCK:
+                # Phase 3: No hidden info - only use available tiles
+                hidden_count = 0
+            else:
+                # Hidden = total - available_now
+                hidden_count = total_count - available_now
 
             # Check if this type can form complete matches
             if total_count >= 3:

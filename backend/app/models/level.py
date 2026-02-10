@@ -173,8 +173,12 @@ class GenerationParams:
         if self.obstacle_types is None:
             self.obstacle_types = ["chain", "frog"]
         # Only set default goals if None, not if empty list (empty list means no goals)
+        # Fixed layout levels (2, 3) are early tutorial levels without craft/stack goals
         if self.goals is None:
-            self.goals = [{"type": "craft_s", "count": 3}]
+            if self.level_number in (2, 3):
+                self.goals = []  # No goals for fixed layout levels
+            else:
+                self.goals = [{"type": "craft_s", "count": 3}]
         # If goals is empty list, keep it as empty (user explicitly wants no goals)
 
     def get_obstacle_count(self, obstacle_type: str, total_tiles: int, difficulty: float) -> Tuple[int, int]:

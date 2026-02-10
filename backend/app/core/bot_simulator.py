@@ -19,6 +19,295 @@ from ..models.bot_profile import BotProfile, BotType, BotTeam, get_profile
 
 
 # ============================================================
+# zWellRandom - WELL512 Algorithm Port from Unity C#
+# Ported from: sp_template/Assets/09.zMyLib/zWellRandom.cs
+# This ensures identical random sequences with the same seed as in-game
+# ============================================================
+class zWellRandom:
+    """WELL512 random number generator - exact port from Unity C# version.
+
+    This class generates the same random sequence as the in-game zWellRandom,
+    ensuring t0 tile distribution matches exactly with the same randSeed.
+    """
+    WELL512_STATE_SIZE = 16
+
+    def __init__(self, seed: int = 0):
+        self._state = [0] * self.WELL512_STATE_SIZE
+        self._index = 0
+        self.cur_seed = 0
+        self.seed(seed)
+
+    def seed(self, seed: int = 0) -> None:
+        """Initialize state array with seed (matches C# implementation)."""
+        if seed == 0:
+            # In C#, it uses DateTime. For Python, we use a default.
+            import time
+            seed = int(time.time()) & 0xFFFFFFFF
+
+        # Ensure seed is unsigned 32-bit
+        seed = seed & 0xFFFFFFFF
+
+        self._state[0] = seed
+        for i in range(1, self.WELL512_STATE_SIZE):
+            prev = self._state[i - 1]
+            # Match C# arithmetic: 1812433253 * (prev ^ (prev >> 30)) + i
+            self._state[i] = (1812433253 * (prev ^ (prev >> 30)) + i) & 0xFFFFFFFF
+
+        self._index = 0
+        self.cur_seed = seed
+
+    def _mat0(self, v: int, t: int) -> int:
+        """MAT0 helper function."""
+        return (v ^ (v << t)) & 0xFFFFFFFF
+
+    def _rand(self) -> int:
+        """Generate next random uint32 (matches C# _rand())."""
+        a = self._state[self._index]
+        c = self._state[(self._index + 13) & 15]
+
+        # b = a ^ c ^ (a << 16) ^ (c << 15)
+        b = (a ^ c ^ ((a << 16) & 0xFFFFFFFF) ^ ((c << 15) & 0xFFFFFFFF)) & 0xFFFFFFFF
+
+        c = self._state[(self._index + 9) & 15]
+        c = (c ^ (c >> 11)) & 0xFFFFFFFF
+
+        a = (b ^ c) & 0xFFFFFFFF
+        self._state[self._index] = a
+
+        self._index = (self._index + 15) & 15
+        z0 = self._state[self._index]
+
+        # _state[_index] = MAT0(z0, 2) ^ MAT0(b, 18) ^ (c << 28) ^ (a ^ ((a << 5) & 0xDA442D24))
+        result = (
+            self._mat0(z0, 2) ^
+            self._mat0(b, 18) ^
+            ((c << 28) & 0xFFFFFFFF) ^
+            (a ^ ((a << 5) & 0xDA442D24))
+        ) & 0xFFFFFFFF
+
+        self._state[self._index] = result
+        return result
+
+    def rand(self, s: int, e: int = -999999) -> int:
+        """Generate random int in range [s, e] (matches C# Rand()).
+
+        If e is default (-999999), range is [0, s-1] (matches C# behavior).
+        """
+        if e == -999999:
+            e = s - 1
+            s = 0
+
+        range_size = e - s + 1
+        if range_size <= 0:
+            return 0
+
+        return s + (self._rand() % range_size)
+
+
+# ============================================================
+# TileDistributor - t0 Tile Distribution Logic Port from Unity C#
+# Ported from: sp_template/Assets/08.Scripts/Tile_Script/InGame/DB_Level.cs
+# Functions: DistributeTiles(), ShuffleEmptyTiles()
+# ============================================================
+class TileDistributor:
+    """Handles t0 tile type assignment matching in-game logic.
+
+    Ported from DB_Level.cs to ensure identical tile distribution
+    when given the same randSeed and useTileCount.
+    """
+
+    IMBALANCE_FACTOR = 3.0  # 불균형 강도 (matches C#)
+    KEY_TILE_INDEX = 16     # 키타일 인덱스
+
+    @staticmethod
+    def distribute_tiles(
+        set_length: int,
+        tile_type_count: int,
+        specified_count: int = 0,
+        imbalance_slider_value: float = 0.0
+    ) -> List[int]:
+        """Distribute tile type indices matching C# DistributeTiles().
+
+        Args:
+            set_length: Number of tile sets (total t0 tiles / 3)
+            tile_type_count: Number of tile types to use (useTileCount)
+            specified_count: Number of key tile (t16) sets
+            imbalance_slider_value: Imbalance factor (0.0 = balanced, 1.0 = imbalanced)
+
+        Returns:
+            List of tile type indices (e.g., [1, 1, 1, 2, 2, 2, 3, ...])
+        """
+        if set_length <= 0 or tile_type_count <= 0:
+            return []
+
+        specified_index = TileDistributor.KEY_TILE_INDEX
+
+        # 1. Calculate non-specified total
+        non_specified_total = set_length - specified_count
+
+        # 1-1. Allocate minimum 1 set per tile type
+        non_specified_counts = [1] * tile_type_count
+
+        # 2. Distribute remaining sets based on imbalance setting
+        if imbalance_slider_value > 0:
+            # Imbalanced distribution
+            remaining_sets = non_specified_total - tile_type_count
+            if remaining_sets > 0:
+                base_count = remaining_sets / tile_type_count
+
+                for i in range(tile_type_count):
+                    # Normalization factor: (2*i - (tileTypeCount-1)) / (tileTypeCount-1)
+                    if tile_type_count > 1:
+                        normalization_factor = (2 * i - (tile_type_count - 1)) / (tile_type_count - 1)
+                    else:
+                        normalization_factor = 0
+
+                    calculated_set_count = base_count * (
+                        imbalance_slider_value * TileDistributor.IMBALANCE_FACTOR * normalization_factor
+                    )
+                    non_specified_counts[i] += max(0, round(calculated_set_count))
+        else:
+            # Balanced distribution (round-robin)
+            remaining_sets = non_specified_total - tile_type_count
+            if remaining_sets > 0:
+                for i in range(remaining_sets):
+                    target_index = i % tile_type_count
+                    non_specified_counts[target_index] += 1
+
+        # 3. Adjust if total doesn't match
+        current_total = sum(non_specified_counts)
+        difference = non_specified_total - current_total
+
+        if difference != 0:
+            # Sort by count to find tiles to adjust
+            indexed_counts = [(count, idx) for idx, count in enumerate(non_specified_counts)]
+
+            for _ in range(abs(difference)):
+                if difference > 0:
+                    # Add to tile with lowest count
+                    indexed_counts.sort(key=lambda x: x[0])
+                    min_idx = indexed_counts[0][1]
+                    non_specified_counts[min_idx] += 1
+                    indexed_counts = [(count, idx) for idx, count in enumerate(non_specified_counts)]
+                else:
+                    # Remove from tile with highest count
+                    indexed_counts.sort(key=lambda x: -x[0])
+                    max_idx = indexed_counts[0][1]
+                    non_specified_counts[max_idx] -= 1
+                    indexed_counts = [(count, idx) for idx, count in enumerate(non_specified_counts)]
+
+        # 4. Generate final list (tile type indices)
+        result_list = []
+        for i, count in enumerate(non_specified_counts):
+            # Tile indices are 1-based (t1, t2, ..., t15)
+            tile_index = i + 1
+            result_list.extend([tile_index] * count)
+
+        # Add specified (key tile) sets
+        for _ in range(specified_count):
+            result_list.append(specified_index)
+
+        return result_list
+
+    @staticmethod
+    def shuffle_tile_assignments(
+        assignments: List[str],
+        rng: zWellRandom,
+        shuffle_count: int
+    ) -> List[str]:
+        """Shuffle tile assignments matching C# ShuffleEmptyTiles() shuffle logic.
+
+        Args:
+            assignments: List of tile type strings (e.g., ["t1", "t1", "t1", "t2", ...])
+            rng: zWellRandom instance (already seeded)
+            shuffle_count: Number of swap operations (emptyTileCount + xShuffleTile)
+
+        Returns:
+            Shuffled list of tile type strings
+        """
+        if not assignments or shuffle_count <= 0:
+            return assignments
+
+        result = assignments.copy()
+        n = len(result)
+
+        for _ in range(shuffle_count):
+            idx1 = rng.rand(0, n - 1)
+            idx2 = rng.rand(0, n - 1)
+
+            # Swap
+            result[idx1], result[idx2] = result[idx2], result[idx1]
+
+        return result
+
+    @staticmethod
+    def assign_t0_tiles(
+        t0_count: int,
+        use_tile_count: int,
+        rand_seed: int,
+        shuffle_tile: int = 0,
+        type_imbalance: int = 0,
+        unlock_tile: int = 0
+    ) -> List[str]:
+        """Complete t0 tile assignment matching in-game logic.
+
+        This is the main entry point that combines:
+        1. DistributeTiles() - Generate tile type index list
+        2. ShuffleEmptyTiles() - Shuffle tile positions
+
+        Args:
+            t0_count: Total number of t0 tiles to assign
+            use_tile_count: Number of tile types (useTileCount from level JSON)
+            rand_seed: Random seed (randSeed from level JSON)
+            shuffle_tile: Additional shuffle count (xShuffleTile from level, default 0)
+            type_imbalance: Imbalance setting (xTypeImbalance from level, 0-10)
+            unlock_tile: Number of key tile sets (xUnlockTile from level)
+
+        Returns:
+            List of tile type strings in shuffled order (e.g., ["t3", "t1", "t2", ...])
+        """
+        if t0_count <= 0 or use_tile_count <= 0:
+            return []
+
+        # Initialize zWellRandom with seed
+        rng = zWellRandom(rand_seed if rand_seed > 0 else 0)
+
+        # Calculate set count (3 tiles per set)
+        set_count = t0_count // 3
+
+        # Imbalance slider value (0.0 - 1.0)
+        imbalance_value = type_imbalance / 10.0
+
+        # Generate tile type indices
+        type_indices = TileDistributor.distribute_tiles(
+            set_length=set_count,
+            tile_type_count=use_tile_count,
+            specified_count=unlock_tile,
+            imbalance_slider_value=imbalance_value
+        )
+
+        # Convert to tile type strings and expand to individual tiles
+        # Each index in type_indices represents 3 tiles
+        assignments = []
+        for type_idx in type_indices:
+            tile_type = f"t{type_idx}"
+            assignments.extend([tile_type] * 3)
+
+        # Handle remainder tiles (if t0_count % 3 != 0)
+        remainder = t0_count % 3
+        if remainder > 0 and type_indices:
+            # Add remaining tiles of the last type
+            last_type = f"t{type_indices[-1]}"
+            assignments.extend([last_type] * remainder)
+
+        # Shuffle tile positions
+        shuffle_count = t0_count + shuffle_tile
+        assignments = TileDistributor.shuffle_tile_assignments(assignments, rng, shuffle_count)
+
+        return assignments
+
+
+# ============================================================
 # Module-level ProcessPoolExecutor for CPU-bound bot simulations
 # Enables true CPU parallelism (bypasses GIL)
 # ============================================================
@@ -199,6 +488,11 @@ class GameState:
     # Phase 5: Curtain memory system - tracks what player remembers about curtain states
     # key: curtain_key (layerIdx_x_y), value: (remembered_is_open, moves_since_seen)
     curtain_memory: Dict[str, Tuple[bool, int]] = field(default_factory=dict)
+    # Performance optimization: Precomputed blocking relationships
+    # blocking_map: tile_key -> set of upper tile keys blocking it
+    _blocking_map: Optional[Dict[str, Set[str]]] = None
+    # reverse_blocking_map: tile_key -> set of lower tile keys it blocks
+    _reverse_blocking_map: Optional[Dict[str, Set[str]]] = None
 
 
 @dataclass
@@ -394,7 +688,12 @@ class BotSimulator:
         max_moves: Optional[int] = None,
         seed: Optional[int] = None,
     ) -> BotSimulationResult:
-        """Run simulation with a specific bot profile."""
+        """Run simulation with a specific bot profile.
+
+        Performance optimizations:
+        1. Create base_state once, then fast-copy for each iteration
+        2. Precompute blocking map for O(1) blocking checks
+        """
         if seed is not None:
             self._rng.seed(seed)
 
@@ -402,13 +701,20 @@ class BotSimulator:
         if max_moves is None:
             max_moves = level_json.get("max_moves", 30)
 
+        # OPTIMIZATION 1: Create base state once and precompute blocking map
+        base_state = self._create_initial_state(level_json, max_moves)
+
+        # OPTIMIZATION 2: Precompute all blocking relationships
+        self._precompute_blocking_map(base_state)
+
         results: List[GameState] = []
 
         for i in range(iterations):
             if seed is not None:
                 self._rng.seed(seed + i)
 
-            state = self._create_initial_state(level_json, max_moves)
+            # OPTIMIZATION 3: Fast copy instead of full re-parse
+            state = self._fast_copy_state(base_state)
             final_state = self._play_game(state, profile)
             results.append(final_state)
 
@@ -496,6 +802,11 @@ class BotSimulator:
         # Even if level JSON specifies more types, limit to prevent impossible levels
         use_tile_count = min(use_tile_count, self.MAX_USE_TILE_COUNT)
 
+        # Additional level settings for exact in-game t0 distribution matching
+        shuffle_tile = level_json.get("xShuffleTile", 0)
+        type_imbalance = level_json.get("xTypeImbalance", 0)
+        unlock_tile = level_json.get("xUnlockTile", 0)
+
         # First pass: collect ALL t0 tiles AND count existing t1~t15 tiles
         # This includes:
         # 1. Regular t0 tiles on the board
@@ -538,10 +849,14 @@ class BotSimulator:
                             existing_tile_counts[tile_type] = existing_tile_counts.get(tile_type, 0) + 1
 
         # Generate tile type assignments for ALL t0 tiles
-        # CRITICAL: Must consider existing t1~t15 counts so that final total per type is divisible by 3
-        # Following sp_template's DistributeTiles logic with enhancement
-        t0_assignments = self._distribute_t0_tiles(
-            len(t0_tiles), use_tile_count, rand_seed, existing_tile_counts
+        # Use TileDistributor for exact in-game matching (zWellRandom + original algorithm)
+        t0_assignments = TileDistributor.assign_t0_tiles(
+            t0_count=len(t0_tiles),
+            use_tile_count=use_tile_count,
+            rand_seed=rand_seed,
+            shuffle_tile=shuffle_tile,
+            type_imbalance=type_imbalance,
+            unlock_tile=unlock_tile
         )
 
         # Create a mapping for quick lookup
@@ -767,368 +1082,6 @@ class BotSimulator:
                 counts[tile_type] = counts.get(tile_type, 0) + 1
 
         state.all_tile_type_counts = counts
-
-    def _distribute_t0_tiles(
-        self, t0_count: int, use_tile_count: int, rand_seed: int = 0,
-        existing_tile_counts: Optional[Dict[str, int]] = None
-    ) -> List[str]:
-        """Distribute t0 tiles so that (existing + t0) per type is divisible by 3.
-
-        CRITICAL FIX: Must consider existing t1~t15 tile counts!
-        - If t1 already has 4 tiles, we need to add 2 more t1 from t0 to make 6 (divisible by 3)
-        - If t2 already has 6 tiles, we can add 0 or 3 or 6... t2 from t0
-
-        Args:
-            t0_count: Total number of t0 tiles to assign
-            use_tile_count: Number of tile types to use (1-15)
-            rand_seed: Seed for random distribution
-            existing_tile_counts: Existing t1~t15 tile counts in level
-
-        Returns:
-            List of tile type strings (e.g., ["t1", "t1", "t1", "t2", "t2", "t2", ...])
-        """
-        if t0_count == 0:
-            return []
-
-        existing_tile_counts = existing_tile_counts or {}
-
-        # DEBUG
-        import os
-        if os.environ.get('DEBUG_DISTRIBUTE'):
-            print(f"[DEBUG] _distribute_t0_tiles: t0_count={t0_count}, use_tile_count={use_tile_count}, existing={existing_tile_counts}")
-
-        # Use a separate random instance with the seed to avoid state pollution
-        import random
-        dist_rng = random.Random(rand_seed if rand_seed > 0 else 42)
-
-        # Limit tile types to available pool
-        # CRITICAL FIX: When existing tiles are present, use only those tile types
-        # to avoid adding t5 when the level only has t1-t4
-        use_tile_count = min(use_tile_count, len(self.RANDOM_TILE_POOL))
-
-        if existing_tile_counts:
-            # Use only tile types that already exist in the level
-            available_types = sorted(
-                [t for t in existing_tile_counts.keys() if t.startswith('t') and t[1:].isdigit()],
-                key=lambda x: int(x[1:])
-            )
-            # If no valid types found, fallback to RANDOM_TILE_POOL
-            if not available_types:
-                # For new levels or levels with only t0, use use_tile_count - 1
-                # (since t0 is counted as one of the use_tile_count types)
-                actual_types = max(1, use_tile_count - 1)
-                available_types = self.RANDOM_TILE_POOL[:actual_types]
-        else:
-            # No existing tiles - use use_tile_count - 1 types (excluding t0)
-            actual_types = max(1, use_tile_count - 1)
-            available_types = self.RANDOM_TILE_POOL[:actual_types]
-
-        # Step 1: Calculate how many tiles each type NEEDS to become divisible by 3
-        # existing % 3 = 0 -> need 0 or 3 or 6...
-        # existing % 3 = 1 -> need 2 or 5 or 8...
-        # existing % 3 = 2 -> need 1 or 4 or 7...
-        type_needs: Dict[str, int] = {}  # tiles needed to reach next multiple of 3
-        for tile_type in available_types:
-            existing = existing_tile_counts.get(tile_type, 0)
-            remainder = existing % 3
-            if remainder == 0:
-                type_needs[tile_type] = 0  # Already divisible, can add 0/3/6...
-            else:
-                type_needs[tile_type] = 3 - remainder  # Need this many to complete
-
-        # Step 2: First, fulfill the "needs" for each type
-        assignments: List[str] = []
-        remaining_t0 = t0_count
-
-        # Priority: types that need 1 or 2 tiles to complete
-        types_needing = [(t, n) for t, n in type_needs.items() if n > 0]
-        # Sort by need (smaller first for efficiency)
-        types_needing.sort(key=lambda x: x[1])
-
-        for tile_type, need in types_needing:
-            if remaining_t0 >= need:
-                assignments.extend([tile_type] * need)
-                remaining_t0 -= need
-                type_needs[tile_type] = 0  # Fulfilled
-
-        # Step 3: Distribute remaining t0 tiles in complete sets of 3
-        if remaining_t0 > 0:
-            # Distribute evenly across all available types
-            complete_sets = remaining_t0 // 3
-            final_remainder = remaining_t0 % 3
-
-            if complete_sets > 0:
-                # Distribute complete sets evenly
-                # CRITICAL FIX: Use len(available_types) instead of use_tile_count
-                num_types = len(available_types)
-                sets_per_type = complete_sets // num_types
-                extra_sets = complete_sets % num_types
-
-                for i, tile_type in enumerate(available_types):
-                    sets_for_this_type = sets_per_type + (1 if i < extra_sets else 0)
-                    assignments.extend([tile_type] * (sets_for_this_type * 3))
-
-            # Step 4: Handle final remainder (0, 1, or 2 tiles)
-            # CRITICAL FIX: Remainder tiles break 3-divisibility
-            # Solution: "Borrow" tiles from existing assignments to form complete sets of 3
-            if final_remainder > 0:
-                # Count current assignments per type
-                assign_counts: Dict[str, int] = {}
-                for t in assignments:
-                    assign_counts[t] = assign_counts.get(t, 0) + 1
-
-                # Find a type that has at least 3 tiles (one complete set) to borrow from
-                borrow_from_type = None
-                borrow_to_type = None
-                tiles_to_borrow = 3 - final_remainder  # If remainder=1, borrow 2; if remainder=2, borrow 1
-
-                for tile_type in available_types:
-                    current = assign_counts.get(tile_type, 0)
-                    if current >= tiles_to_borrow:
-                        borrow_from_type = tile_type
-                        break
-
-                # Find a different type to receive the complete set
-                for tile_type in available_types:
-                    if tile_type != borrow_from_type:
-                        borrow_to_type = tile_type
-                        break
-
-                if borrow_from_type and borrow_to_type:
-                    # Remove tiles_to_borrow from borrow_from_type
-                    removed = 0
-                    new_assignments = []
-                    for t in assignments:
-                        if t == borrow_from_type and removed < tiles_to_borrow:
-                            removed += 1
-                            continue  # Skip this tile (borrow it)
-                        new_assignments.append(t)
-                    assignments = new_assignments
-
-                    # Add a complete set of 3 to borrow_to_type
-                    # (final_remainder + tiles_to_borrow = 3)
-                    assignments.extend([borrow_to_type] * 3)
-                else:
-                    # Fallback: if we can't borrow, just skip the remainder tiles
-                    # This means some t0 tiles won't be assigned, but types stay divisible by 3
-                    if os.environ.get('DEBUG_DISTRIBUTE'):
-                        print(f"[WARN] Cannot redistribute remainder={final_remainder}, skipping")
-
-        # Step 5: Final verification and fix - ensure ALL types end up divisible by 3
-        # This is a critical step that runs iteratively until all types are fixed or we can't improve
-        max_iterations = 10  # Prevent infinite loops
-        for iteration in range(max_iterations):
-            # Calculate final counts (existing + assignments)
-            assign_counts: Dict[str, int] = {}
-            for t in assignments:
-                assign_counts[t] = assign_counts.get(t, 0) + 1
-
-            final_counts: Dict[str, int] = {}
-            for tile_type in available_types:
-                existing = existing_tile_counts.get(tile_type, 0)
-                assigned = assign_counts.get(tile_type, 0)
-                final_counts[tile_type] = existing + assigned
-
-            # Check for types with non-divisible counts
-            broken_types = [(t, c % 3) for t, c in final_counts.items() if c % 3 != 0]
-
-            if not broken_types:
-                break  # All types are divisible by 3, we're done
-
-            # Strategy 1: Pair types with remainder 1 and 2 (move 1 tile between them)
-            rem1_types = [t for t, r in broken_types if r == 1]
-            rem2_types = [t for t, r in broken_types if r == 2]
-
-            made_change = False
-
-            # Move 1 tile from rem1 type to rem2 type
-            while rem1_types and rem2_types:
-                from_type = rem1_types.pop()
-                to_type = rem2_types.pop()
-
-                # Find one instance of from_type in assignments and change to to_type
-                for i, t in enumerate(assignments):
-                    if t == from_type:
-                        assignments[i] = to_type
-                        made_change = True
-                        break
-
-            if made_change:
-                continue  # Recalculate and check again
-
-            # Strategy 2: For unpaired types, use unused types to absorb remainder
-            # Find types not currently used
-            used_types = set(assign_counts.keys()) | set(existing_tile_counts.keys())
-            unused_types = [t for t in available_types if t not in used_types]
-
-            # Handle remaining rem1 types (need 2 more tiles)
-            for rem_type in rem1_types[:]:
-                if unused_types:
-                    # Use an unused type: move 1 tile from rem_type to unused_type (creates 1)
-                    # Then add 3 more of unused_type to make it divisible
-                    # This reduces rem_type by 1 (now remainder 0) and adds 4 to unused (4 % 3 = 1 still bad)
-                    # Better: redistribute 3 tiles from rem_type to unused_type
-                    # rem_type: loses 3, remainder goes 1-3 = -2 = 1 (mod 3)... still bad
-                    # Actually, we need to think about this differently
-
-                    # For rem_type with remainder 1: we need to add 2 or remove 1
-                    # If we remove 1 tile and it goes to unused_type which gets 1, that's bad (1 % 3 = 1)
-                    # If we remove 4 tiles and give 4 to unused... unused gets 4 (4 % 3 = 1) still bad
-
-                    # The key insight: any transfer between types preserves the sum of remainders (mod 3)
-                    # If we have only rem1 types (total remainder = len(rem1) mod 3),
-                    # we can't fix it by redistribution alone
-
-                    # Solution: add tiles to an unused type to absorb the total remainder
-                    # If we have 1 type with remainder 1, we need to add 2 to some unused type
-                    # and transfer 3 from the rem1 type (net: rem1-3=-2%3=1, bad!)
-
-                    # Actually, the REAL solution is to adjust the total assignments:
-                    # If sum of all remainders is X, we need X more tiles to make everything divisible
-                    pass
-
-            # Strategy 3: Last resort - drop some tiles to make remaining divisible
-            # Calculate total remainder
-            total_rem = sum(r for _, r in broken_types) % 3
-
-            if total_rem == 0:
-                # Sum of remainders is 0, should be fixable by redistribution
-                # But if we're here, pairing didn't work, which means odd number of same remainder types
-                # E.g., 3 types with remainder 1: can pair 2, but 1 left over
-                # Move 2 tiles from leftover rem1 to make it remainder 2, then pair with new rem2?
-                # Actually, move 2 tiles from rem1_type to another rem1_type:
-                # from: -2 = 1 (mod 3) -> 1-2 = -1 = 2 (mod 3)
-                # to: +2 -> 1+2 = 0 (mod 3)
-                # So moving 2 tiles from one rem1 to another rem1 fixes the receiver and makes sender rem2
-                if len(rem1_types) >= 2:
-                    from_type = rem1_types[0]
-                    to_type = rem1_types[1]
-                    moved = 0
-                    for i, t in enumerate(assignments):
-                        if t == from_type and moved < 2:
-                            assignments[i] = to_type
-                            moved += 1
-                    if moved == 2:
-                        made_change = True
-                        continue
-
-                if len(rem2_types) >= 2:
-                    # Move 1 tile from one rem2 to another
-                    from_type = rem2_types[0]
-                    to_type = rem2_types[1]
-                    for i, t in enumerate(assignments):
-                        if t == from_type:
-                            assignments[i] = to_type
-                            made_change = True
-                            break
-                    if made_change:
-                        continue
-
-                # Special case: 1 rem2 type and no rem1 types
-                # Move 1 tile from rem2 to a divisible type, creating 2 rem1 types
-                if len(rem2_types) == 1 and len(rem1_types) == 0:
-                    from_type = rem2_types[0]
-                    # Find a divisible type (rem 0) to receive
-                    for tile_type in available_types:
-                        if tile_type == from_type:
-                            continue
-                        final_count = final_counts.get(tile_type, 0)
-                        if final_count % 3 == 0 and final_count > 0:
-                            # Move 1 tile from rem2 to this rem0 type
-                            for i, t in enumerate(assignments):
-                                if t == from_type:
-                                    assignments[i] = tile_type
-                                    made_change = True
-                                    break
-                            break
-                    if made_change:
-                        continue
-            else:
-                # Total remainder is 1 or 2, meaning we have an impossible distribution
-                # CRITICAL: Don't drop tiles! Instead, redistribute to minimize damage
-                if len(rem1_types) >= 2:
-                    # Move 2 from one rem1 to another (fixes one, creates rem2 on other)
-                    from_type = rem1_types[0]
-                    to_type = rem1_types[1]
-                    moved = 0
-                    for i, t in enumerate(assignments):
-                        if t == from_type and moved < 2:
-                            assignments[i] = to_type
-                            moved += 1
-                    if moved == 2:
-                        made_change = True
-                        continue
-                elif len(rem2_types) >= 2:
-                    # Move 1 from one rem2 to another (fixes one, creates rem1 on other)
-                    from_type = rem2_types[0]
-                    to_type = rem2_types[1]
-                    for i, t in enumerate(assignments):
-                        if t == from_type:
-                            assignments[i] = to_type
-                            made_change = True
-                            break
-                    if made_change:
-                        continue
-                elif len(rem2_types) == 1 and len(rem1_types) == 0:
-                    # Special case: 1 rem2 type and no rem1 types
-                    # Move 1 tile from rem2 to a divisible type, creating 2 rem1 types
-                    from_type = rem2_types[0]
-                    for tile_type in available_types:
-                        if tile_type == from_type:
-                            continue
-                        final_count = final_counts.get(tile_type, 0)
-                        if final_count % 3 == 0 and final_count > 0:
-                            for i, t in enumerate(assignments):
-                                if t == from_type:
-                                    assignments[i] = tile_type
-                                    made_change = True
-                                    break
-                            break
-                    if made_change:
-                        continue
-                elif len(rem1_types) == 1 and len(rem2_types) == 0:
-                    # Special case: 1 rem1 type and no rem2 types
-                    # Move 2 tiles from rem1 to a divisible type, creating 2 rem2 types
-                    from_type = rem1_types[0]
-                    for tile_type in available_types:
-                        if tile_type == from_type:
-                            continue
-                        final_count = final_counts.get(tile_type, 0)
-                        if final_count % 3 == 0 and final_count > 0:
-                            moved = 0
-                            for i, t in enumerate(assignments):
-                                if t == from_type and moved < 2:
-                                    assignments[i] = tile_type
-                                    moved += 1
-                            if moved == 2:
-                                made_change = True
-                            break
-                    if made_change:
-                        continue
-
-                # If we still can't fix, just accept the imperfect distribution
-                # At least all tiles are assigned, which is better than dropping
-
-            if not made_change:
-                break  # Can't improve further
-
-        # DEBUG: Show assignment counts before shuffle
-        if os.environ.get('DEBUG_DISTRIBUTE'):
-            assign_counts = {}
-            for t in assignments:
-                assign_counts[t] = assign_counts.get(t, 0) + 1
-            final_check = {}
-            for tile_type in available_types:
-                existing = existing_tile_counts.get(tile_type, 0)
-                assigned = assign_counts.get(tile_type, 0)
-                total = existing + assigned
-                final_check[tile_type] = f"{existing}+{assigned}={total}" + ("✓" if total % 3 == 0 else "✗")
-            print(f"[DEBUG] Final distribution: {final_check}")
-
-        # Shuffle assignments for random placement across board
-        dist_rng.shuffle(assignments)
-
-        return assignments
 
     def _process_stack_craft_tiles(
         self,
@@ -1863,6 +1816,189 @@ class BotSimulator:
             return False
         return True
 
+    def _precompute_blocking_map(self, state: GameState) -> None:
+        """Precompute all blocking relationships for faster lookup.
+
+        Creates:
+        - blocking_map: tile_key -> set of upper tile keys that block it
+        - reverse_blocking_map: tile_key -> set of lower tile keys it blocks
+
+        This allows O(1) blocking checks and efficient incremental updates.
+        """
+        blocking_map: Dict[str, Set[str]] = {}
+        reverse_blocking_map: Dict[str, Set[str]] = {}
+
+        max_layer = max(state.tiles.keys()) if state.tiles else 0
+        state._max_layer_idx = max_layer
+
+        # Initialize empty sets for all tiles
+        for layer_idx in state.tiles:
+            for pos, tile in state.tiles[layer_idx].items():
+                blocking_map[tile.full_key] = set()
+                reverse_blocking_map[tile.full_key] = set()
+
+        # Compute blocking relationships
+        for layer_idx in state.tiles:
+            for pos, tile in state.tiles[layer_idx].items():
+                if tile.layer_idx >= max_layer:
+                    continue
+
+                tile_parity = tile.layer_idx % 2
+                cur_layer_col = state.layer_cols.get(tile.layer_idx, 7)
+
+                for upper_layer_idx in range(tile.layer_idx + 1, max_layer + 1):
+                    upper_layer = state.tiles.get(upper_layer_idx, {})
+                    if not upper_layer:
+                        continue
+
+                    upper_parity = upper_layer_idx % 2
+                    upper_layer_col = state.layer_cols.get(upper_layer_idx, 7)
+
+                    # Determine blocking offsets
+                    if tile_parity == upper_parity:
+                        blocking_offsets = BotSimulator.BLOCKING_OFFSETS_SAME_PARITY
+                    elif upper_layer_col > cur_layer_col:
+                        blocking_offsets = BotSimulator.BLOCKING_OFFSETS_UPPER_BIGGER
+                    else:
+                        blocking_offsets = BotSimulator.BLOCKING_OFFSETS_UPPER_SMALLER
+
+                    for dx, dy in blocking_offsets:
+                        bx = tile.x_idx + dx
+                        by = tile.y_idx + dy
+                        pos_key = f"{bx}_{by}"
+
+                        if pos_key in upper_layer:
+                            upper_tile = upper_layer[pos_key]
+                            blocking_map[tile.full_key].add(upper_tile.full_key)
+                            reverse_blocking_map[upper_tile.full_key].add(tile.full_key)
+
+        state._blocking_map = blocking_map
+        state._reverse_blocking_map = reverse_blocking_map
+
+        # Pre-populate blocking cache from precomputed map
+        for tile_key, blockers in blocking_map.items():
+            # Check if any blocker is not picked
+            is_blocked = False
+            for blocker_key in blockers:
+                # Parse blocker_key to check if picked
+                parts = blocker_key.split('_')
+                if len(parts) >= 3:
+                    b_layer = int(parts[0])
+                    b_pos = f"{parts[1]}_{parts[2]}"
+                    blocker_tile = state.tiles.get(b_layer, {}).get(b_pos)
+                    if blocker_tile and not blocker_tile.picked:
+                        is_blocked = True
+                        break
+            state._blocking_cache[tile_key] = is_blocked
+
+    def _fast_copy_state(self, base_state: GameState) -> GameState:
+        """Create a fast copy of game state for simulation iteration.
+
+        Uses shallow copy for immutable/shared data and deep copy only for mutable parts.
+        """
+        import copy
+
+        # Deep copy tiles (they will be modified during play)
+        new_tiles: Dict[int, Dict[str, TileState]] = {}
+        for layer_idx, layer in base_state.tiles.items():
+            new_tiles[layer_idx] = {}
+            for pos, tile in layer.items():
+                # Copy tile state with all attributes
+                new_tile = TileState(
+                    tile_type=tile.tile_type,
+                    layer_idx=tile.layer_idx,
+                    x_idx=tile.x_idx,
+                    y_idx=tile.y_idx,
+                    effect_type=tile.effect_type,
+                    effect_data=copy.copy(tile.effect_data) if tile.effect_data else {},
+                    picked=tile.picked,
+                    is_stack_tile=tile.is_stack_tile,
+                    is_craft_tile=tile.is_craft_tile,
+                    is_crafted=tile.is_crafted,
+                    stack_index=tile.stack_index,
+                    stack_max_index=tile.stack_max_index,
+                    upper_stacked_tile_key=tile.upper_stacked_tile_key,
+                    under_stacked_tile_key=tile.under_stacked_tile_key,
+                    root_stacked_tile_key=tile.root_stacked_tile_key,
+                    craft_direction=tile.craft_direction,
+                    origin_goal_type=tile.origin_goal_type,
+                    original_full_key=tile.original_full_key,
+                )
+                new_tiles[layer_idx][pos] = new_tile
+
+        # Create new state with copied mutable data
+        new_state = GameState()
+        new_state.tiles = new_tiles
+        new_state.layer_cols = base_state.layer_cols.copy()  # Shallow - doesn't change
+        new_state.dock = [DockSlot(index=i) for i in range(7)]
+        new_state.dock_tiles = []
+        new_state.goals_remaining = base_state.goals_remaining.copy()
+        new_state.moves_used = 0
+        new_state.cleared = False
+        new_state.failed = False
+        new_state.max_moves = base_state.max_moves
+        new_state.combo_count = 0
+        new_state.total_tiles_cleared = 0
+        new_state.max_dock_slots = base_state.max_dock_slots
+        new_state.link_pairs = base_state.link_pairs.copy()
+        new_state.frog_positions = base_state.frog_positions.copy()
+        new_state.bomb_tiles = base_state.bomb_tiles.copy()
+        new_state.curtain_tiles = base_state.curtain_tiles.copy()
+        new_state.ice_tiles = base_state.ice_tiles.copy()
+        new_state.stacked_tiles = {}  # Will be rebuilt if needed
+        new_state.craft_boxes = copy.deepcopy(base_state.craft_boxes) if base_state.craft_boxes else {}
+        new_state.teleport_click_count = 0
+        new_state.teleport_tiles = base_state.teleport_tiles.copy() if base_state.teleport_tiles else []
+        new_state.tile_type_overrides = base_state.tile_type_overrides.copy()
+        new_state.all_tile_type_counts = base_state.all_tile_type_counts.copy()
+        new_state._max_layer_idx = base_state._max_layer_idx
+        new_state.curtain_memory = {}
+
+        # Copy stacked tiles with proper references
+        for key, stacked_tile in base_state.stacked_tiles.items():
+            new_stacked = TileState(
+                tile_type=stacked_tile.tile_type,
+                layer_idx=stacked_tile.layer_idx,
+                x_idx=stacked_tile.x_idx,
+                y_idx=stacked_tile.y_idx,
+                effect_type=stacked_tile.effect_type,
+                effect_data=copy.copy(stacked_tile.effect_data) if stacked_tile.effect_data else {},
+                picked=stacked_tile.picked,
+                is_stack_tile=stacked_tile.is_stack_tile,
+                is_craft_tile=stacked_tile.is_craft_tile,
+                is_crafted=stacked_tile.is_crafted,
+                stack_index=stacked_tile.stack_index,
+                stack_max_index=stacked_tile.stack_max_index,
+                upper_stacked_tile_key=stacked_tile.upper_stacked_tile_key,
+                under_stacked_tile_key=stacked_tile.under_stacked_tile_key,
+                root_stacked_tile_key=stacked_tile.root_stacked_tile_key,
+                craft_direction=stacked_tile.craft_direction,
+                origin_goal_type=stacked_tile.origin_goal_type,
+                original_full_key=stacked_tile.original_full_key,
+            )
+            new_state.stacked_tiles[key] = new_stacked
+
+        # Copy precomputed blocking maps (shallow - structure doesn't change)
+        if base_state._blocking_map is not None:
+            new_state._blocking_map = {k: v.copy() for k, v in base_state._blocking_map.items()}
+            new_state._reverse_blocking_map = {k: v.copy() for k, v in base_state._reverse_blocking_map.items()}
+            # Recompute blocking cache from current picked states
+            new_state._blocking_cache = {}
+            for tile_key, blockers in new_state._blocking_map.items():
+                is_blocked = False
+                for blocker_key in blockers:
+                    parts = blocker_key.split('_')
+                    if len(parts) >= 3:
+                        b_layer = int(parts[0])
+                        b_pos = f"{parts[1]}_{parts[2]}"
+                        blocker_tile = new_state.tiles.get(b_layer, {}).get(b_pos)
+                        if blocker_tile and not blocker_tile.picked:
+                            is_blocked = True
+                            break
+                new_state._blocking_cache[tile_key] = is_blocked
+
+        return new_state
+
     def _is_blocked_by_upper(self, state: GameState, tile: TileState) -> bool:
         """Check if a tile is blocked by tiles in upper layers.
 
@@ -1874,23 +2010,44 @@ class BotSimulator:
 
         Parity is determined by layer_idx % 2.
 
-        Performance: Results are cached per tile and invalidated when tiles are picked.
+        Performance: Uses precomputed blocking map when available for O(1) lookup.
         """
         if not state.tiles:
             return False
 
-        # Check cache first (performance optimization)
         cache_key = tile.full_key
+
+        # Check cache first (performance optimization)
         if cache_key in state._blocking_cache:
             return state._blocking_cache[cache_key]
 
-        # Use cached max_layer for performance (avoid max() on each call)
+        # Fast path: Use precomputed blocking map if available
+        if state._blocking_map is not None and cache_key in state._blocking_map:
+            blockers = state._blocking_map[cache_key]
+            if not blockers:
+                state._blocking_cache[cache_key] = False
+                return False
+
+            # Check if any blocker is still unpicked
+            for blocker_key in blockers:
+                parts = blocker_key.split('_')
+                if len(parts) >= 3:
+                    b_layer = int(parts[0])
+                    b_pos = f"{parts[1]}_{parts[2]}"
+                    blocker_tile = state.tiles.get(b_layer, {}).get(b_pos)
+                    if blocker_tile and not blocker_tile.picked:
+                        state._blocking_cache[cache_key] = True
+                        return True
+
+            state._blocking_cache[cache_key] = False
+            return False
+
+        # Fallback: Compute blocking dynamically (for states without precomputed map)
         max_layer = state._max_layer_idx
         if max_layer < 0:
-            max_layer = max(state.tiles.keys())
+            max_layer = max(state.tiles.keys()) if state.tiles else 0
             state._max_layer_idx = max_layer
 
-        # Early exit if tile is on top layer
         if tile.layer_idx >= max_layer:
             state._blocking_cache[cache_key] = False
             return False
@@ -1907,19 +2064,12 @@ class BotSimulator:
             upper_parity = upper_layer_idx % 2
             upper_layer_col = state.layer_cols.get(upper_layer_idx, 7)
 
-            # Determine blocking positions based on parity and layer size
-            # This matches sp_template TileGroup.FindAllUpperTiles exactly
-            # Using precomputed class constants for performance
             if tile_parity == upper_parity:
-                # Same parity (odd-odd or even-even): only check same position
                 blocking_offsets = BotSimulator.BLOCKING_OFFSETS_SAME_PARITY
             else:
-                # Different parity: compare layer col sizes
                 if upper_layer_col > cur_layer_col:
-                    # Upper layer is bigger (has more columns)
                     blocking_offsets = BotSimulator.BLOCKING_OFFSETS_UPPER_BIGGER
                 else:
-                    # Upper layer is smaller or same size
                     blocking_offsets = BotSimulator.BLOCKING_OFFSETS_UPPER_SMALLER
 
             for dx, dy in blocking_offsets:

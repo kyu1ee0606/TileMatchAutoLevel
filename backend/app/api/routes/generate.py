@@ -181,25 +181,25 @@ TUTORIAL_LEVEL_CONFIGS = {
         "target_difficulty": 0.05,
     },
     2: {
-        "description": "두 번째 레벨: 3종류 타일 × 6개 = 18타일, 2레이어",
+        "description": "두 번째 레벨: 고정 레이아웃 4×3(12) + 3×3(9) = 21타일, 2레이어",
         "tile_types": ["t1", "t2", "t3"],
-        "total_tiles": 18,  # 6 sets of 3
-        "grid_size": (5, 5),
+        "total_tiles": 21,  # Fixed layout: 4×3 + 3×3
+        "grid_size": (7, 7),  # Standard grid for fixed layout
         "max_layers": 2,
         "goals": [],
         "obstacle_types": [],
-        "symmetry_mode": "none",  # Exact tile count required
+        "symmetry_mode": "none",
         "target_difficulty": 0.08,
     },
     3: {
-        "description": "세 번째 레벨: 4종류 타일 × 6개 = 24타일, 2-3레이어",
+        "description": "세 번째 레벨: 고정 레이아웃 6×3(18) + 섬모양 2×3×2(12) = 30타일, 2레이어",
         "tile_types": ["t1", "t2", "t3", "t4"],
-        "total_tiles": 24,  # 8 sets of 3
-        "grid_size": (5, 5),
-        "max_layers": 3,
+        "total_tiles": 30,  # Fixed layout: 6×3 + two 2×3 islands
+        "grid_size": (7, 7),  # Standard grid for fixed layout
+        "max_layers": 2,
         "goals": [],
         "obstacle_types": [],
-        "symmetry_mode": "none",  # Exact tile count required
+        "symmetry_mode": "none",
         "target_difficulty": 0.10,
     },
 }
@@ -777,6 +777,7 @@ def generate_level(
             )
 
         # Other tutorial levels (2, 3): use generator with fixed parameters
+        # level_number is passed to enable fixed layout for levels 2 and 3
         params = GenerationParams(
             target_difficulty=tutorial_config["target_difficulty"],
             grid_size=tuple(tutorial_config["grid_size"]),
@@ -787,6 +788,7 @@ def generate_level(
             total_tile_count=tutorial_config["total_tiles"],
             symmetry_mode=tutorial_config["symmetry_mode"],
             pattern_type="geometric",
+            level_number=request.level_number,  # Enable fixed layout for levels 2, 3
         )
 
         result = generator.generate(params)
@@ -1115,6 +1117,7 @@ def generate_validated_level(
         logger.info(f"[TUTORIAL_LEVEL] Generating validated level {request.level_number}: {tutorial_config['description']}")
 
         # Generate tutorial level with fixed parameters - no validation needed
+        # level_number is passed to enable fixed layout for levels 2 and 3
         params = GenerationParams(
             target_difficulty=tutorial_config["target_difficulty"],
             grid_size=tuple(tutorial_config["grid_size"]),
@@ -1125,6 +1128,7 @@ def generate_validated_level(
             total_tile_count=tutorial_config["total_tiles"],
             symmetry_mode=tutorial_config["symmetry_mode"],
             pattern_type="geometric",
+            level_number=request.level_number,  # Enable fixed layout for levels 2, 3
         )
 
         result = generator.generate(params)

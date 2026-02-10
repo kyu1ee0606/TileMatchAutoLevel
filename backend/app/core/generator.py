@@ -652,7 +652,10 @@ class LevelGenerator:
 
         # Check if user has specified per-layer tile configs OR total_tile_count (strict mode)
         # In strict mode, we respect user's tile counts exactly without adjustment
+        # Also treat fixed layout levels (2, 3) as strict to preserve exact layout
+        is_fixed_layout_level = params.level_number in (2, 3)
         has_strict_tile_config = (
+            is_fixed_layout_level or
             (bool(params.layer_tile_configs) and len(params.layer_tile_configs) > 0) or
             (params.total_tile_count is not None)
         )
@@ -661,7 +664,11 @@ class LevelGenerator:
         # Goal tiles are visual tiles that CONTAIN inner tiles, not replace them
         # Example: 21+21 tiles + craft_s(3) = 42 visual tiles + 3 inner tiles = 45 actual tiles
         goal_inner_tiles = 0
-        goals = params.goals if params.goals is not None else [{"type": "craft_s", "count": 3}]
+        # Fixed layout levels (2, 3) are early tutorial levels without craft/stack goals
+        if is_fixed_layout_level:
+            goals = params.goals if params.goals is not None else []
+        else:
+            goals = params.goals if params.goals is not None else [{"type": "craft_s", "count": 3}]
         if goals:
             for goal in goals:
                 # Handle both dict and GoalConfig objects
@@ -1556,10 +1563,128 @@ class LevelGenerator:
 
         return configs
 
+    def _create_fixed_layout_level_2(
+        self, level: Dict[str, Any], params: GenerationParams
+    ) -> Dict[str, Any]:
+        """Create fixed layout for level 2.
+
+        Layout:
+        - layer_0 (bottom): 4×3 rectangle (12 tiles)
+        - layer_1 (top): 3×3 rectangle centered (9 tiles)
+        - Total: 21 tiles (divisible by 3)
+
+        The 3×3 layer is positioned on top-left area of the 4×3 base.
+        """
+        tile_types = params.tile_types
+        if not tile_types and params.level_number:
+            tile_types = get_tile_types_for_level(params.level_number)
+        elif not tile_types:
+            tile_types = self.DEFAULT_TILE_TYPES
+
+        # Set level to 2 layers
+        level["layer"] = 2
+
+        # Layer 0: 4×3 rectangle (4 columns, 3 rows) = 12 tiles
+        # col=5: TownPop blocking logic uses col comparison between layers
+        # Upper layer col < lower layer col → pyramid blocking behavior
+        level["layer_0"] = {
+            "col": "5",  # Base layer col (must be > layer_1 col for pyramid blocking)
+            "row": "4",  # Row based on actual tile range + 1
+            "tiles": {},
+            "num": "0",
+        }
+        for x in range(4):
+            for y in range(3):
+                pos_key = f"{x}_{y}"
+                level["layer_0"]["tiles"][pos_key] = ["t0", ""]
+
+        # Layer 1: 3×3 rectangle = 9 tiles
+        # col=4: Smaller than layer_0 for proper pyramid blocking
+        level["layer_1"] = {
+            "col": "4",  # Upper layer col < lower layer col
+            "row": "4",
+            "tiles": {},
+            "num": "0",
+        }
+        for x in range(3):
+            for y in range(3):
+                pos_key = f"{x}_{y}"
+                level["layer_1"]["tiles"][pos_key] = ["t0", ""]
+
+        return level
+
+    def _create_fixed_layout_level_3(
+        self, level: Dict[str, Any], params: GenerationParams
+    ) -> Dict[str, Any]:
+        """Create fixed layout for level 3.
+
+        Layout:
+        - layer_0 (bottom): 6×3 rectangle (18 tiles)
+        - layer_1 (top): Two 2×3 islands on left and right sides (12 tiles)
+        - Total: 30 tiles (divisible by 3)
+
+        Island layout on layer_1:
+        [##  ##]  <- Two 2×3 rectangles with gap in middle
+        [##  ##]
+        [##  ##]
+        """
+        tile_types = params.tile_types
+        if not tile_types and params.level_number:
+            tile_types = get_tile_types_for_level(params.level_number)
+        elif not tile_types:
+            tile_types = self.DEFAULT_TILE_TYPES
+
+        # Set level to 2 layers
+        level["layer"] = 2
+
+        # Layer 0: 6×3 rectangle = 18 tiles
+        # col=7: Base layer col (must be > layer_1 col for pyramid blocking)
+        # TownPop blocking: col comparison determines offset check behavior
+        level["layer_0"] = {
+            "col": "7",  # Base layer col (6 tiles wide → col=7)
+            "row": "4",  # Row based on actual tile range (3 rows → row=4)
+            "tiles": {},
+            "num": "0",
+        }
+        for x in range(6):
+            for y in range(3):
+                pos_key = f"{x}_{y}"
+                level["layer_0"]["tiles"][pos_key] = ["t0", ""]
+
+        # Layer 1: Two 2×3 islands = 12 tiles
+        # Left island: x=0,1, y=0,1,2
+        # Right island: x=3,4, y=0,1,2 (with gap at x=2)
+        # col=6: Smaller than layer_0 for proper pyramid blocking
+        level["layer_1"] = {
+            "col": "6",  # Upper layer col < lower layer col
+            "row": "4",
+            "tiles": {},
+            "num": "0",
+        }
+        # Left island (2×3)
+        for x in range(2):
+            for y in range(3):
+                pos_key = f"{x}_{y}"
+                level["layer_1"]["tiles"][pos_key] = ["t0", ""]
+
+        # Right island (2×3) - offset by 1 for the gap
+        for x in range(3, 5):  # x=3,4 (leaving x=2 as gap)
+            for y in range(3):
+                pos_key = f"{x}_{y}"
+                level["layer_1"]["tiles"][pos_key] = ["t0", ""]
+
+        return level
+
     def _populate_layers(
         self, level: Dict[str, Any], params: GenerationParams
     ) -> Dict[str, Any]:
         """Populate layers with tiles based on difficulty and user configuration."""
+        # SPECIAL CASE: Fixed layouts for specific levels (production requirement)
+        if params.level_number == 2:
+            return self._create_fixed_layout_level_2(level, params)
+        elif params.level_number == 3:
+            return self._create_fixed_layout_level_3(level, params)
+
         target = params.target_difficulty
         cols, rows = params.grid_size
 
@@ -6498,7 +6623,12 @@ class LevelGenerator:
         Stack additional rule: output position must not overlap with existing tiles
         """
         # Use None check instead of falsy check to allow empty list
-        goals = params.goals if params.goals is not None else [{"type": "craft_s", "count": 3}]
+        # Fixed layout levels (2, 3) are early tutorial levels without craft/stack goals
+        is_fixed_layout_level = params.level_number in (2, 3)
+        if is_fixed_layout_level:
+            goals = params.goals if params.goals is not None else []
+        else:
+            goals = params.goals if params.goals is not None else [{"type": "craft_s", "count": 3}]
 
         # If goals is empty list, skip adding goals
         if not goals:

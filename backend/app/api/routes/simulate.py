@@ -25,6 +25,7 @@ from ...core.bot_simulator import (
     TileState,
     TileEffectType,
     Move,
+    TileDistributor,
 )
 from ...models.benchmark_level import (
     DifficultyTier,
@@ -104,6 +105,7 @@ class VisualSimulator:
         """Get t0 tile assignments for visualization.
 
         Returns a mapping of (layer_idx, pos) -> converted tile type.
+        Uses TileDistributor for exact in-game matching.
         """
         if seed is not None:
             self._rng.seed(seed)
@@ -113,6 +115,11 @@ class VisualSimulator:
         use_tile_count = level_json.get("useTileCount", self.DEFAULT_USE_TILE_COUNT)
         if use_tile_count <= 0:
             use_tile_count = self.DEFAULT_USE_TILE_COUNT
+
+        # Get additional level settings for exact matching
+        shuffle_tile = level_json.get("xShuffleTile", 0)
+        type_imbalance = level_json.get("xTypeImbalance", 0)
+        unlock_tile = level_json.get("xUnlockTile", 0)
 
         # Collect all t0 tiles
         t0_tiles: List[Tuple[int, str]] = []
@@ -128,9 +135,14 @@ class VisualSimulator:
         if not t0_tiles:
             return {}
 
-        # Use core's distribution logic
-        assignments = self._core._distribute_t0_tiles(
-            len(t0_tiles), use_tile_count, rand_seed
+        # Use TileDistributor for exact in-game matching
+        assignments = TileDistributor.assign_t0_tiles(
+            t0_count=len(t0_tiles),
+            use_tile_count=use_tile_count,
+            rand_seed=rand_seed,
+            shuffle_tile=shuffle_tile,
+            type_imbalance=type_imbalance,
+            unlock_tile=unlock_tile
         )
 
         # Build mapping

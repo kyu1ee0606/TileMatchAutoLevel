@@ -2,6 +2,19 @@ import { create } from 'zustand';
 
 type Tool = 'paint' | 'erase' | 'fill' | 'inspect';
 type Panel = 'editor' | 'generator' | 'gboost' | 'production';
+export type TabId = 'editor' | 'simulation' | 'generator' | 'gboost' | 'local' | 'play' | 'production';
+
+// Generation result for display in result card
+interface GenerationResultInfo {
+  grade: string;
+  actualDifficulty: number;
+  targetDifficulty: number;
+  matchScore?: number;
+  validationPassed?: boolean;
+  gridSize: [number, number];
+  tileCount: number;
+  generatedAt: number;
+}
 
 interface UIState {
   // Tool state
@@ -11,6 +24,14 @@ interface UIState {
   // Panel visibility
   activePanel: Panel;
   setActivePanel: (panel: Panel) => void;
+
+  // Tab state (for cross-component navigation)
+  activeTab: TabId;
+  setActiveTab: (tab: TabId) => void;
+
+  // Generation result (for result card display)
+  lastGenerationResult: GenerationResultInfo | null;
+  setLastGenerationResult: (result: GenerationResultInfo | null) => void;
 
   // Modal state
   isJsonModalOpen: boolean;
@@ -70,6 +91,14 @@ export const useUIStore = create<UIState>((set, get) => ({
   // Panel visibility
   activePanel: 'editor',
   setActivePanel: (panel) => set({ activePanel: panel }),
+
+  // Tab state
+  activeTab: 'editor',
+  setActiveTab: (tab) => set({ activeTab: tab }),
+
+  // Generation result
+  lastGenerationResult: null,
+  setLastGenerationResult: (result) => set({ lastGenerationResult: result }),
 
   // Modal state
   isJsonModalOpen: false,

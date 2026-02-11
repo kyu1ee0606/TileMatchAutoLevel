@@ -9,32 +9,174 @@ import { TILE_TYPES } from '../../types';
 import type { GenerationParams, GoalConfig, ObstacleCountConfig, LayerTileConfig, LayerObstacleConfig } from '../../types';
 import { Button, Tooltip } from '../ui';
 import clsx from 'clsx';
+import { Pencil, Play, RotateCcw, CheckCircle, AlertCircle } from 'lucide-react';
 
 type GeneratorTab = 'single' | 'set';
 
-// Obstacle type definitions for UI
+// Obstacle type definitions for UI with unlock levels
 const OBSTACLE_TYPES = [
-  { id: 'chain', label: '⛓️ Chain', name: 'chain' },
-  { id: 'frog', label: '🐸 Frog', name: 'frog' },
-  { id: 'link', label: '🔗 Link', name: 'link' },
-  { id: 'grass', label: '🌿 Grass', name: 'grass' },
-  { id: 'ice', label: '❄️ Ice', name: 'ice' },
-  { id: 'bomb', label: '💣 Bomb', name: 'bomb' },
-  { id: 'curtain', label: '🎭 Curtain', name: 'curtain' },
-  { id: 'teleport', label: '🌀 Teleport', name: 'teleport' },
-  { id: 'unknown', label: '❓ Unknown', name: 'unknown' },
+  { id: 'ice', label: '❄️ Ice', name: 'ice', unlockLevel: 31 },
+  { id: 'link', label: '🔗 Link', name: 'link', unlockLevel: 51 },
+  { id: 'chain', label: '⛓️ Chain', name: 'chain', unlockLevel: 81 },
+  { id: 'grass', label: '🌿 Grass', name: 'grass', unlockLevel: 151 },
+  { id: 'unknown', label: '❓ Unknown', name: 'unknown', unlockLevel: 191 },
+  { id: 'curtain', label: '🎭 Curtain', name: 'curtain', unlockLevel: 241 },
+  { id: 'bomb', label: '💣 Bomb', name: 'bomb', unlockLevel: 291 },
+  { id: 'frog', label: '🐸 Frog', name: 'frog', unlockLevel: 391 },
+  { id: 'teleport', label: '🌀 Teleport', name: 'teleport', unlockLevel: 441 },
 ] as const;
 
 interface GeneratorPanelProps {
   className?: string;
 }
 
+// Generation Result Card Component
+interface GenerationResultCardProps {
+  result: {
+    grade: string;
+    actualDifficulty: number;
+    targetDifficulty: number;
+    matchScore?: number;
+    validationPassed?: boolean;
+    gridSize: [number, number];
+    tileCount: number;
+  };
+  onOpenInEditor: () => void;
+  onRegenerate: () => void;
+  onSimulate: () => void;
+  isGenerating: boolean;
+}
+
+function GenerationResultCard({ result, onOpenInEditor, onRegenerate, onSimulate, isGenerating }: GenerationResultCardProps) {
+  const gradeColors: Record<string, string> = {
+    S: 'text-green-400 bg-green-900/30 border-green-600',
+    A: 'text-blue-400 bg-blue-900/30 border-blue-600',
+    B: 'text-yellow-400 bg-yellow-900/30 border-yellow-600',
+    C: 'text-orange-400 bg-orange-900/30 border-orange-600',
+    D: 'text-red-400 bg-red-900/30 border-red-600',
+  };
+
+  const gradeStyle = gradeColors[result.grade] || 'text-gray-400 bg-gray-900/30 border-gray-600';
+  const diffGap = (result.actualDifficulty - result.targetDifficulty) * 100;
+  const isClose = Math.abs(diffGap) <= 10;
+
+  return (
+    <div className={clsx('rounded-xl border-2 p-4 mb-4', gradeStyle.split(' ').slice(1).join(' '))}>
+      {/* Header */}
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-3">
+          <div className={clsx('text-4xl font-bold', gradeStyle.split(' ')[0])}>
+            {result.grade}
+          </div>
+          <div>
+            <div className="text-sm text-gray-400">생성 완료</div>
+            <div className="text-lg font-semibold text-white">
+              난이도 {(result.actualDifficulty * 100).toFixed(0)}%
+            </div>
+          </div>
+        </div>
+        {result.validationPassed !== undefined && (
+          <div className={clsx(
+            'flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium',
+            result.validationPassed
+              ? 'bg-green-900/50 text-green-400'
+              : 'bg-yellow-900/50 text-yellow-400'
+          )}>
+            {result.validationPassed ? (
+              <><CheckCircle className="w-3 h-3" /> 검증 통과</>
+            ) : (
+              <><AlertCircle className="w-3 h-3" /> 최선 결과</>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Stats */}
+      <div className="grid grid-cols-3 gap-2 mb-4 text-sm">
+        <div className="bg-gray-800/50 rounded-lg p-2 text-center">
+          <div className="text-gray-500 text-xs">목표</div>
+          <div className="text-white font-medium">{(result.targetDifficulty * 100).toFixed(0)}%</div>
+        </div>
+        <div className="bg-gray-800/50 rounded-lg p-2 text-center">
+          <div className="text-gray-500 text-xs">차이</div>
+          <div className={clsx('font-medium', isClose ? 'text-green-400' : 'text-yellow-400')}>
+            {diffGap >= 0 ? '+' : ''}{diffGap.toFixed(0)}%p
+          </div>
+        </div>
+        <div className="bg-gray-800/50 rounded-lg p-2 text-center">
+          <div className="text-gray-500 text-xs">그리드</div>
+          <div className="text-white font-medium">{result.gridSize[0]}×{result.gridSize[1]}</div>
+        </div>
+      </div>
+
+      {result.matchScore !== undefined && (
+        <div className="mb-4 p-2 bg-gray-800/50 rounded-lg">
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-gray-400">난이도 일치도</span>
+            <span className={clsx(
+              'font-bold',
+              result.matchScore >= 80 ? 'text-green-400' :
+              result.matchScore >= 60 ? 'text-yellow-400' : 'text-orange-400'
+            )}>
+              {result.matchScore.toFixed(0)}%
+            </span>
+          </div>
+          <div className="mt-1 h-2 bg-gray-700 rounded-full overflow-hidden">
+            <div
+              className={clsx(
+                'h-full rounded-full transition-all',
+                result.matchScore >= 80 ? 'bg-green-500' :
+                result.matchScore >= 60 ? 'bg-yellow-500' : 'bg-orange-500'
+              )}
+              style={{ width: `${result.matchScore}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Action Buttons */}
+      <div className="flex gap-2">
+        <Button
+          onClick={onOpenInEditor}
+          variant="primary"
+          size="sm"
+          className="flex-1"
+          icon={<Pencil className="w-4 h-4" />}
+        >
+          에디터로 열기
+        </Button>
+        <Button
+          onClick={onSimulate}
+          variant="secondary"
+          size="sm"
+          className="flex-1"
+          icon={<Play className="w-4 h-4" />}
+        >
+          시뮬레이션
+        </Button>
+        <Tooltip content="같은 설정으로 다시 생성">
+          <Button
+            onClick={onRegenerate}
+            variant="ghost"
+            size="sm"
+            disabled={isGenerating}
+            icon={<RotateCcw className={clsx('w-4 h-4', isGenerating && 'animate-spin')} />}
+          />
+        </Tooltip>
+      </div>
+    </div>
+  );
+}
+
 export function GeneratorPanel({ className }: GeneratorPanelProps) {
   const { setLevel } = useLevelStore();
-  const { isGenerating, setIsGenerating, addNotification } = useUIStore();
+  const { isGenerating, setIsGenerating, addNotification, setActiveTab: setGlobalTab, lastGenerationResult, setLastGenerationResult } = useUIStore();
 
-  // Tab state
-  const [activeTab, setActiveTab] = useState<GeneratorTab>('single');
+  // Tab state (local generator tab: single/set)
+  const [generatorTab, setGeneratorTab] = useState<GeneratorTab>('single');
+
+  // Current level number for gimmick unlock validation
+  const [currentLevelNumber, setCurrentLevelNumber] = useState<number>(100);
 
   // Generation parameters
   const [targetDifficulty, setTargetDifficulty] = useState(0.5);
@@ -248,6 +390,27 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
         const result = await generateLevel(params);
         setLevel(result.level_json);
 
+        // Calculate tile count from level_json
+        let tileCount = 0;
+        for (let i = 0; i < (result.level_json.layer || 8); i++) {
+          const layerData = (result.level_json as any)[`layer_${i}`];
+          if (layerData?.tiles) {
+            tileCount += Object.keys(layerData.tiles).length;
+          }
+        }
+
+        // Save generation result for result card display
+        setLastGenerationResult({
+          grade: result.grade,
+          actualDifficulty: result.actual_difficulty,
+          targetDifficulty: targetDifficulty,
+          matchScore: (result as any).match_score,
+          validationPassed: (result as any).validation_passed,
+          gridSize: gridSize,
+          tileCount: tileCount,
+          generatedAt: Date.now(),
+        });
+
         // Save to local storage
         try {
           const timestamp = Date.now();
@@ -265,13 +428,13 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
           });
           addNotification(
             'success',
-            `레벨 생성 완료! (난이도: ${(result.actual_difficulty * 100).toFixed(0)}%, 등급: ${result.grade}) - 로컬 레벨에 저장됨`
+            `레벨 생성 완료! (등급: ${result.grade}, 난이도: ${(result.actual_difficulty * 100).toFixed(0)}%)`
           );
         } catch (saveError) {
           console.error('Failed to save to local storage:', saveError);
           addNotification(
             'warning',
-            `레벨은 생성되었으나 로컬 저장 실패 (난이도: ${(result.actual_difficulty * 100).toFixed(0)}%, 등급: ${result.grade})`
+            `레벨 생성됨 (등급: ${result.grade}) - 로컬 저장 실패`
           );
         }
       } else {
@@ -326,37 +489,37 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
       {/* Tab Navigation */}
       <div className="flex border-b border-gray-600">
         <button
-          onClick={() => setActiveTab('single')}
+          onClick={() => setGeneratorTab('single')}
           className={clsx(
             'flex-1 py-2.5 px-4 text-sm font-medium transition-colors relative',
-            activeTab === 'single'
+            generatorTab === 'single'
               ? 'text-blue-400'
               : 'text-gray-400 hover:text-gray-200'
           )}
         >
           🎯 개별 생성
-          {activeTab === 'single' && (
+          {generatorTab === 'single' && (
             <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-500" />
           )}
         </button>
         <button
-          onClick={() => setActiveTab('set')}
+          onClick={() => setGeneratorTab('set')}
           className={clsx(
             'flex-1 py-2.5 px-4 text-sm font-medium transition-colors relative',
-            activeTab === 'set'
+            generatorTab === 'set'
               ? 'text-purple-400'
               : 'text-gray-400 hover:text-gray-200'
           )}
         >
           📊 세트 생성
-          {activeTab === 'set' && (
+          {generatorTab === 'set' && (
             <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-purple-500" />
           )}
         </button>
       </div>
 
       {/* Single Level Generation Tab */}
-      {activeTab === 'single' && (
+      {generatorTab === 'single' && (
         <>
           {/* Difficulty Slider */}
           <DifficultySlider value={targetDifficulty} onChange={setTargetDifficulty} />
@@ -432,42 +595,99 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
         </div>
       </div>
 
+      {/* Current Level Number Input */}
+      <div className="p-3 bg-blue-900/20 border border-blue-600/50 rounded-lg">
+        <div className="flex items-center justify-between">
+          <div>
+            <label className="text-sm font-medium text-blue-300 block">
+              🎮 현재 레벨 번호
+            </label>
+            <p className="text-xs text-gray-500 mt-0.5">
+              레벨에 맞는 기믹만 사용 가능합니다
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setCurrentLevelNumber(Math.max(1, currentLevelNumber - 10))}
+              className="w-8 h-8 flex items-center justify-center bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-l-md border border-gray-600 text-sm"
+            >
+              -10
+            </button>
+            <input
+              type="number"
+              value={currentLevelNumber}
+              onChange={(e) => setCurrentLevelNumber(Math.max(1, Math.min(1500, Number(e.target.value))))}
+              className="w-20 h-8 px-2 text-center bg-gray-800 border-y border-gray-600 text-gray-100 text-sm"
+              min={1}
+              max={1500}
+            />
+            <button
+              onClick={() => setCurrentLevelNumber(Math.min(1500, currentLevelNumber + 10))}
+              className="w-8 h-8 flex items-center justify-center bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-r-md border border-gray-600 text-sm"
+            >
+              +10
+            </button>
+          </div>
+        </div>
+      </div>
+
       {/* Obstacles with count settings - Button-based UI */}
       <div>
         <label className="text-sm font-medium text-gray-300 block mb-2">
           장애물 설정
           <span className="ml-2 text-xs text-gray-500">
-            ({selectedObstacles.length}개 선택)
+            ({selectedObstacles.length}개 선택 / {OBSTACLE_TYPES.filter(o => o.unlockLevel <= currentLevelNumber).length}개 사용 가능)
           </span>
         </label>
         <div className="space-y-1.5">
           {OBSTACLE_TYPES.map((obstacle) => {
             const isSelected = selectedObstacles.includes(obstacle.name);
             const counts = obstacleCounts[obstacle.name] || { min: 0, max: 5 };
+            const isUnlocked = obstacle.unlockLevel <= currentLevelNumber;
+            const isNewlyUnlocked = obstacle.unlockLevel <= currentLevelNumber && obstacle.unlockLevel > currentLevelNumber - 10;
 
             return (
               <div
                 key={obstacle.id}
                 className={clsx(
                   'flex items-center gap-2 p-1.5 rounded-lg transition-colors',
+                  !isUnlocked ? 'bg-gray-800/50 border border-gray-700 opacity-50' :
+                  isNewlyUnlocked ? 'bg-green-900/30 border border-green-600' :
                   isSelected ? 'bg-orange-900/30 border border-orange-600' : 'bg-gray-700/30 border border-gray-600'
                 )}
               >
                 {/* Toggle button */}
-                <button
-                  onClick={() => toggleObstacle(obstacle.name)}
-                  className={clsx(
-                    'px-2 py-1 text-xs rounded-md transition-colors min-w-[80px] font-medium',
-                    isSelected
-                      ? 'bg-orange-500 text-white'
-                      : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
-                  )}
-                >
-                  {obstacle.label}
-                </button>
+                <Tooltip content={!isUnlocked ? `Lv.${obstacle.unlockLevel}에서 해금` : isNewlyUnlocked ? '최근 해금!' : ''}>
+                  <button
+                    onClick={() => isUnlocked && toggleObstacle(obstacle.name)}
+                    disabled={!isUnlocked}
+                    className={clsx(
+                      'px-2 py-1 text-xs rounded-md transition-colors min-w-[80px] font-medium',
+                      !isUnlocked
+                        ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                        : isSelected
+                          ? 'bg-orange-500 text-white'
+                          : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                    )}
+                  >
+                    {obstacle.label}
+                  </button>
+                </Tooltip>
 
-                {/* Count range controls - only show when selected */}
-                {isSelected && (
+                {/* Unlock level badge */}
+                <span className={clsx(
+                  'text-[10px] px-1.5 py-0.5 rounded',
+                  !isUnlocked ? 'bg-gray-700 text-gray-500' :
+                  isNewlyUnlocked ? 'bg-green-600 text-green-100' :
+                  'bg-gray-600 text-gray-400'
+                )}>
+                  {!isUnlocked ? `🔒 Lv.${obstacle.unlockLevel}` :
+                   isNewlyUnlocked ? `✨ Lv.${obstacle.unlockLevel}` :
+                   `Lv.${obstacle.unlockLevel}`}
+                </span>
+
+                {/* Count range controls - only show when selected and unlocked */}
+                {isSelected && isUnlocked && (
                   <div className="flex items-center gap-1 ml-auto">
                     {/* Min controls */}
                     <div className="flex items-center">
@@ -907,11 +1127,27 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
           10개 일괄
         </Button>
       </div>
+
+      {/* Generation Result Card */}
+      {lastGenerationResult && (
+        <GenerationResultCard
+          result={lastGenerationResult}
+          onOpenInEditor={() => {
+            setGlobalTab('editor');
+            addNotification('info', '에디터에서 레벨을 수정할 수 있습니다');
+          }}
+          onRegenerate={() => handleGenerate(1)}
+          onSimulate={() => {
+            setGlobalTab('simulation');
+          }}
+          isGenerating={isGenerating}
+        />
+      )}
         </>
       )}
 
       {/* Level Set Generation Tab */}
-      {activeTab === 'set' && (
+      {generatorTab === 'set' && (
         <div className="mt-2">
           <LevelSetGenerator />
         </div>

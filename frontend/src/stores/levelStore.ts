@@ -161,12 +161,23 @@ function createEmptyLevel(layers: number = 8, gridSize: [number, number] = [7, 7
   return level;
 }
 
+// Maximum history size to prevent memory issues
+const MAX_HISTORY_SIZE = 50;
+
 interface LevelState {
   // Current level data
   level: LevelJSON;
   selectedLayer: number;
   selectedTileType: string;
   selectedAttribute: string;
+
+  // Level modification tracking
+  levelVersion: number; // Increments on every level change
+  lastVerifiedVersion: number; // Version when last verification was done
+
+  // Undo/Redo history
+  history: LevelJSON[];
+  historyIndex: number;
 
   // Analysis results
   analysisResult: DifficultyReport | null;
@@ -187,13 +198,28 @@ interface LevelState {
   clearLayer: (layer: number) => void;
   fillLayer: (layer: number, tileData: TileData) => void;
 
+  // Undo/Redo
+  undo: () => void;
+  redo: () => void;
+  canUndo: () => boolean;
+  canRedo: () => boolean;
+
   // Analysis
   setAnalysisResult: (result: DifficultyReport | null) => void;
   setIsAnalyzing: (isAnalyzing: boolean) => void;
 
+  // Verification tracking
+  markAsVerified: () => void;
+  needsReverification: () => boolean;
+
   // Import/Export
   importJson: (json: string) => boolean;
   exportJson: () => string;
+}
+
+// Helper to deep clone level for history
+function cloneLevel(level: LevelJSON): LevelJSON {
+  return JSON.parse(JSON.stringify(level));
 }
 
 export const useLevelStore = create<LevelState>((set, get) => ({
@@ -202,6 +228,10 @@ export const useLevelStore = create<LevelState>((set, get) => ({
   selectedLayer: 7,
   selectedTileType: 't0',
   selectedAttribute: '',
+  levelVersion: 0,
+  lastVerifiedVersion: -1,
+  history: [],
+  historyIndex: -1,
   analysisResult: null,
   isAnalyzing: false,
 
@@ -217,14 +247,20 @@ export const useLevelStore = create<LevelState>((set, get) => ({
         break;
       }
     }
-    set({ level, analysisResult: null, selectedLayer: topLayerWithTiles });
+    set((state) => ({
+      level,
+      analysisResult: null,
+      selectedLayer: topLayerWithTiles,
+      levelVersion: state.levelVersion + 1,
+    }));
   },
 
   resetLevel: (layers = 8, gridSize = [7, 7]) =>
-    set({
+    set((state) => ({
       level: createEmptyLevel(layers, gridSize),
       analysisResult: null,
-    }),
+      levelVersion: state.levelVersion + 1,
+    })),
 
   setSelectedLayer: (layer) => set({ selectedLayer: layer }),
   setSelectedTileType: (tileType) => set({ selectedTileType: tileType }),
@@ -240,7 +276,7 @@ export const useLevelStore = create<LevelState>((set, get) => ({
 
   // Tile operations with validation
   setTile: (layer, x, y, tileData) => {
-    const { level } = get();
+    const { level, history, historyIndex } = get();
     const layerKey = `layer_${layer}` as `layer_${number}`;
     const layerData = level[layerKey];
 
@@ -290,7 +326,10 @@ export const useLevelStore = create<LevelState>((set, get) => ({
       }
     }
 
-    set({
+    // Save current state to history before making changes
+    const newHistory = [...history.slice(0, historyIndex + 1), cloneLevel(level)].slice(-MAX_HISTORY_SIZE);
+
+    set((state) => ({
       level: {
         ...level,
         [layerKey]: {
@@ -299,14 +338,17 @@ export const useLevelStore = create<LevelState>((set, get) => ({
           num: String(Object.keys(newTiles).length),
         },
       },
+      history: newHistory,
+      historyIndex: newHistory.length - 1,
       analysisResult: null,
-    });
+      levelVersion: state.levelVersion + 1,
+    }));
 
     return { valid: true };
   },
 
   removeTile: (layer, x, y) => {
-    const { level } = get();
+    const { level, history, historyIndex } = get();
     const layerKey = `layer_${layer}` as `layer_${number}`;
     const layerData = level[layerKey];
 
@@ -335,7 +377,10 @@ export const useLevelStore = create<LevelState>((set, get) => ({
     const newTiles = { ...layerData.tiles };
     delete newTiles[position];
 
-    set({
+    // Save current state to history before making changes
+    const newHistory = [...history.slice(0, historyIndex + 1), cloneLevel(level)].slice(-MAX_HISTORY_SIZE);
+
+    set((state) => ({
       level: {
         ...level,
         [layerKey]: {
@@ -344,20 +389,26 @@ export const useLevelStore = create<LevelState>((set, get) => ({
           num: String(Object.keys(newTiles).length),
         },
       },
+      history: newHistory,
+      historyIndex: newHistory.length - 1,
       analysisResult: null,
-    });
+      levelVersion: state.levelVersion + 1,
+    }));
 
     return { valid: true };
   },
 
   clearLayer: (layer) => {
-    const { level } = get();
+    const { level, history, historyIndex } = get();
     const layerKey = `layer_${layer}` as `layer_${number}`;
     const layerData = level[layerKey];
 
     if (!layerData) return;
 
-    set({
+    // Save current state to history before making changes
+    const newHistory = [...history.slice(0, historyIndex + 1), cloneLevel(level)].slice(-MAX_HISTORY_SIZE);
+
+    set((state) => ({
       level: {
         ...level,
         [layerKey]: {
@@ -366,12 +417,15 @@ export const useLevelStore = create<LevelState>((set, get) => ({
           num: '0',
         },
       },
+      history: newHistory,
+      historyIndex: newHistory.length - 1,
       analysisResult: null,
-    });
+      levelVersion: state.levelVersion + 1,
+    }));
   },
 
   fillLayer: (layer, tileData) => {
-    const { level } = get();
+    const { level, history, historyIndex } = get();
     const layerKey = `layer_${layer}` as `layer_${number}`;
     const layerData = level[layerKey];
 
@@ -387,7 +441,10 @@ export const useLevelStore = create<LevelState>((set, get) => ({
       }
     }
 
-    set({
+    // Save current state to history before making changes
+    const newHistory = [...history.slice(0, historyIndex + 1), cloneLevel(level)].slice(-MAX_HISTORY_SIZE);
+
+    set((state) => ({
       level: {
         ...level,
         [layerKey]: {
@@ -396,13 +453,68 @@ export const useLevelStore = create<LevelState>((set, get) => ({
           num: String(Object.keys(newTiles).length),
         },
       },
+      history: newHistory,
+      historyIndex: newHistory.length - 1,
       analysisResult: null,
-    });
+      levelVersion: state.levelVersion + 1,
+    }));
   },
 
   // Analysis
   setAnalysisResult: (result) => set({ analysisResult: result }),
   setIsAnalyzing: (isAnalyzing) => set({ isAnalyzing }),
+
+  // Undo/Redo
+  undo: () => {
+    const { history, historyIndex, level } = get();
+    if (historyIndex < 0) return;
+
+    // If we're at the end of history (normal state), save current state first
+    const newHistory = historyIndex === history.length - 1
+      ? [...history, cloneLevel(level)]
+      : history;
+
+    const previousLevel = newHistory[historyIndex];
+    set((state) => ({
+      level: cloneLevel(previousLevel),
+      history: newHistory,
+      historyIndex: state.historyIndex - 1,
+      analysisResult: null,
+      levelVersion: state.levelVersion + 1,
+    }));
+  },
+
+  redo: () => {
+    const { history, historyIndex } = get();
+    if (historyIndex >= history.length - 1) return;
+
+    const nextLevel = history[historyIndex + 2]; // +2 because we want the state after current
+    if (!nextLevel) return;
+
+    set((state) => ({
+      level: cloneLevel(nextLevel),
+      historyIndex: state.historyIndex + 1,
+      analysisResult: null,
+      levelVersion: state.levelVersion + 1,
+    }));
+  },
+
+  canUndo: () => {
+    const { historyIndex } = get();
+    return historyIndex >= 0;
+  },
+
+  canRedo: () => {
+    const { history, historyIndex } = get();
+    return historyIndex < history.length - 1;
+  },
+
+  // Verification tracking
+  markAsVerified: () => set((state) => ({ lastVerifiedVersion: state.levelVersion })),
+  needsReverification: () => {
+    const { levelVersion, lastVerifiedVersion } = get();
+    return lastVerifiedVersion >= 0 && levelVersion > lastVerifiedVersion;
+  },
 
   // Import/Export
   importJson: (json) => {
@@ -426,7 +538,12 @@ export const useLevelStore = create<LevelState>((set, get) => ({
         }
       }
 
-      set({ level: parsed as LevelJSON, analysisResult: null, selectedLayer: topLayerWithTiles });
+      set((state) => ({
+        level: parsed as LevelJSON,
+        analysisResult: null,
+        selectedLayer: topLayerWithTiles,
+        levelVersion: state.levelVersion + 1,
+      }));
       return true;
     } catch (e) {
       console.error('Failed to parse JSON:', e);

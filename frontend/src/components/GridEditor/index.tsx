@@ -1,12 +1,13 @@
-import { useMemo } from 'react';
+import { useMemo, useEffect, useCallback } from 'react';
 import { TileGrid } from './TileGrid';
 import { LayerSelector } from './LayerSelector';
 import { ToolPalette } from './ToolPalette';
 import { Minimap } from './Minimap';
+import { LayerStackPreview } from './LayerStackPreview';
 import { useLevelStore } from '../../stores/levelStore';
 import { useUIStore } from '../../stores/uiStore';
 import { Button, Tooltip } from '../ui';
-import { Eye, EyeOff, FileJson, RotateCcw, ZoomIn, Grid3X3, Map, AlertTriangle, CheckCircle } from 'lucide-react';
+import { Eye, EyeOff, FileJson, RotateCcw, ZoomIn, Grid3X3, Map, AlertTriangle, CheckCircle, Undo2, Redo2 } from 'lucide-react';
 import clsx from 'clsx';
 import { validateTileCount } from '../../utils/helpers';
 import type { LevelJSON, LevelLayer, TileData } from '../../types';
@@ -85,7 +86,7 @@ interface GridEditorProps {
 }
 
 export function GridEditor({ className }: GridEditorProps) {
-  const { level, selectedLayer, resetLevel } = useLevelStore();
+  const { level, selectedLayer, resetLevel, undo, redo, canUndo, canRedo } = useLevelStore();
   const {
     setJsonModalOpen,
     addNotification,
@@ -98,6 +99,31 @@ export function GridEditor({ className }: GridEditorProps) {
     showMinimap,
     setShowMinimap,
   } = useUIStore();
+
+  // Keyboard shortcuts for undo/redo
+  const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    // Check for Ctrl+Z (undo) or Cmd+Z on Mac
+    if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+      e.preventDefault();
+      if (canUndo()) {
+        undo();
+        addNotification('info', '실행 취소');
+      }
+    }
+    // Check for Ctrl+Y or Ctrl+Shift+Z (redo)
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
+      e.preventDefault();
+      if (canRedo()) {
+        redo();
+        addNotification('info', '다시 실행');
+      }
+    }
+  }, [undo, redo, canUndo, canRedo, addNotification]);
+
+  useEffect(() => {
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleKeyDown]);
 
   const handleReset = () => {
     if (confirm('레벨을 초기화하시겠습니까?')) {
@@ -223,6 +249,28 @@ export function GridEditor({ className }: GridEditorProps) {
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-bold text-gray-100">그리드 에디터</h2>
         <div className="flex gap-2">
+          {/* Undo/Redo buttons */}
+          <div className="flex gap-1 mr-2">
+            <Tooltip content="실행 취소 (Ctrl+Z)">
+              <Button
+                onClick={() => { undo(); addNotification('info', '실행 취소'); }}
+                variant="secondary"
+                size="sm"
+                disabled={!canUndo()}
+                icon={<Undo2 className="w-full h-full" />}
+              />
+            </Tooltip>
+            <Tooltip content="다시 실행 (Ctrl+Y)">
+              <Button
+                onClick={() => { redo(); addNotification('info', '다시 실행'); }}
+                variant="secondary"
+                size="sm"
+                disabled={!canRedo()}
+                icon={<Redo2 className="w-full h-full" />}
+              />
+            </Tooltip>
+          </div>
+
           {/* Layer transparency toggle */}
           <Tooltip content={showOtherLayers ? '다른 레이어 숨기기' : '다른 레이어 표시'}>
             <Button
@@ -323,8 +371,9 @@ export function GridEditor({ className }: GridEditorProps) {
             </div>
           )}
         </div>
-        <div className="w-56 flex-shrink-0">
+        <div className="w-56 flex-shrink-0 flex flex-col gap-3">
           <ToolPalette />
+          <LayerStackPreview />
         </div>
       </div>
     </div>
@@ -335,3 +384,4 @@ export { TileGrid } from './TileGrid';
 export { LayerSelector } from './LayerSelector';
 export { ToolPalette } from './ToolPalette';
 export { Minimap } from './Minimap';
+export { LayerStackPreview } from './LayerStackPreview';

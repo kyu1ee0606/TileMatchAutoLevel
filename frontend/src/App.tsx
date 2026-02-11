@@ -10,7 +10,7 @@ import { SimulationViewer } from './components/SimulationViewer';
 import { PlayTab } from './components/PlayTab';
 import { ProductionDashboard } from './components/ProductionDashboard';
 import { useLevelStore } from './stores/levelStore';
-import { useUIStore } from './stores/uiStore';
+import { useUIStore, type TabId } from './stores/uiStore';
 import { useSimulationStore } from './stores/simulationStore';
 import clsx from 'clsx';
 
@@ -236,14 +236,11 @@ function Notifications() {
   );
 }
 
-type TabId = 'editor' | 'simulation' | 'generator' | 'gboost' | 'local' | 'play' | 'production';
-
 function AppContent() {
-  const [activeTab, setActiveTab] = useState<TabId>('editor');
   const [isDragging, setIsDragging] = useState(false);
   const [playLevelId, setPlayLevelId] = useState<string | null>(null);
   const { importJson, level } = useLevelStore();
-  const { addNotification } = useUIStore();
+  const { addNotification, activeTab, setActiveTab } = useUIStore();
   const { fetchSimulation, clearResults } = useSimulationStore();
   const dragCounterRef = useRef(0);
 

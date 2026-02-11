@@ -3,6 +3,7 @@ import { useMutation } from '@tanstack/react-query';
 import { useLevelStore } from '../../stores/levelStore';
 import { analyzeAutoPlay, type AutoPlayResponse, type BotClearStats } from '../../api/analyze';
 import { Button } from '../ui/Button';
+import { AlertTriangle } from 'lucide-react';
 import clsx from 'clsx';
 
 interface AutoPlayPanelProps {
@@ -100,11 +101,29 @@ function DifficultyMatchSummary({ result, targetDifficulty, onRegenerate, isRege
         </div>
       </div>
 
-      {/* Target Difficulty Info */}
+      {/* Target vs Actual Difficulty */}
       {targetDifficulty !== undefined && (
-        <div className="mb-3 p-2 bg-gray-800/50 rounded text-sm">
-          <span className="text-gray-400">목표 난이도: </span>
-          <span className="text-white font-medium">{(targetDifficulty * 100).toFixed(0)}%</span>
+        <div className="mb-3 p-3 bg-gray-800/50 rounded-lg">
+          <div className="flex items-center justify-between">
+            <div className="text-center flex-1">
+              <div className="text-xs text-gray-500 mb-1">목표</div>
+              <div className="text-lg font-bold text-blue-400">{(targetDifficulty * 100).toFixed(0)}%</div>
+              <div className="text-xs text-gray-500">
+                {targetDifficulty <= 0.2 ? 'S등급' :
+                 targetDifficulty <= 0.4 ? 'A등급' :
+                 targetDifficulty <= 0.6 ? 'B등급' :
+                 targetDifficulty <= 0.8 ? 'C등급' : 'D등급'}
+              </div>
+            </div>
+            <div className="px-3 text-gray-500">→</div>
+            <div className="text-center flex-1">
+              <div className="text-xs text-gray-500 mb-1">실제</div>
+              <div className={clsx('text-lg font-bold', GRADE_COLORS[result.autoplay_grade])}>
+                {result.autoplay_grade}등급
+              </div>
+              <div className="text-xs text-gray-400">{result.autoplay_score.toFixed(0)}점</div>
+            </div>
+          </div>
         </div>
       )}
 
@@ -380,18 +399,27 @@ function GapSummaryTable({ botStats }: { botStats: BotClearStats[] }) {
 }
 
 export function AutoPlayPanel({ className, embedded = false, targetDifficulty, onRegenerate, isRegenerating, regenerationProgress }: AutoPlayPanelProps) {
-  const { level } = useLevelStore();
+  const { level, levelVersion, markAsVerified } = useLevelStore();
   const [iterations, setIterations] = useState(100);
   const [showDetails, setShowDetails] = useState(false);
+  const [verifiedAtVersion, setVerifiedAtVersion] = useState<number | null>(null);
 
   // Get target difficulty from prop, level data, or use default (0.5)
   const effectiveTargetDifficulty = targetDifficulty ?? (level as any).target_difficulty ?? (level as any).targetDifficulty;
+
+  // Check if level changed since last verification
+  const levelChanged = verifiedAtVersion !== null && verifiedAtVersion !== levelVersion;
 
   const mutation = useMutation({
     mutationFn: () => analyzeAutoPlay(level, {
       iterations,
       targetDifficulty: effectiveTargetDifficulty,
     }),
+    onSuccess: () => {
+      // Mark as verified when analysis completes
+      markAsVerified();
+      setVerifiedAtVersion(levelVersion);
+    },
   });
 
   const handleAnalyze = () => {
@@ -439,10 +467,28 @@ export function AutoPlayPanel({ className, embedded = false, targetDifficulty, o
         {/* Loading State */}
         {mutation.isPending && (
           <div className="flex flex-col items-center justify-center py-8">
-            <div className="animate-spin w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full" />
-            <p className="mt-3 text-sm text-gray-400">
-              {iterations * 5}회 시뮬레이션 실행 중...
+            <div className="relative">
+              <div className="animate-spin w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full" />
+              <div className="absolute inset-0 flex items-center justify-center">
+                <span className="text-lg">🤖</span>
+              </div>
+            </div>
+            <p className="mt-4 text-base font-medium text-gray-200">
+              봇 시뮬레이션 진행 중...
             </p>
+            <p className="mt-1 text-sm text-gray-400">
+              {iterations * 5}회 시뮬레이션 • 5개 봇 프로필
+            </p>
+            <div className="mt-4 grid grid-cols-5 gap-2">
+              {Object.entries(BOT_CONFIG).map(([key, config]) => (
+                <div key={key} className="flex flex-col items-center text-xs">
+                  <span className="animate-bounce" style={{ animationDelay: `${Object.keys(BOT_CONFIG).indexOf(key) * 0.1}s` }}>
+                    {config.icon}
+                  </span>
+                  <span className="text-gray-500 mt-1">{config.name}</span>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
@@ -478,6 +524,24 @@ export function AutoPlayPanel({ className, embedded = false, targetDifficulty, o
         {/* Results */}
         {result && !mutation.isPending && (
           <div className="space-y-4">
+            {/* Level Changed Warning */}
+            {levelChanged && (
+              <div className="flex items-center gap-2 p-3 bg-yellow-900/30 border border-yellow-600/50 rounded-lg">
+                <AlertTriangle className="w-5 h-5 text-yellow-400 flex-shrink-0" />
+                <div className="flex-1">
+                  <p className="text-sm font-medium text-yellow-300">레벨이 수정되었습니다</p>
+                  <p className="text-xs text-yellow-400/80">정확한 결과를 위해 다시 검증하세요</p>
+                </div>
+                <Button
+                  variant="warning"
+                  size="sm"
+                  onClick={handleAnalyze}
+                >
+                  재검증
+                </Button>
+              </div>
+            )}
+
             {/* Difficulty Match Summary - NEW! */}
             <DifficultyMatchSummary
               result={result}
@@ -538,14 +602,27 @@ export function AutoPlayPanel({ className, embedded = false, targetDifficulty, o
 
         {/* Initial State */}
         {!result && !mutation.isPending && !mutation.isError && (
-          <div className="text-center py-8 text-gray-400">
-            <span className="text-3xl">🎯</span>
-            <p className="mt-2 text-sm">
-              검증 시작 버튼을 눌러 생성된 레벨이 목표 난이도에 맞는지 확인하세요
+          <div className="text-center py-8">
+            <span className="text-4xl">🎯</span>
+            <p className="mt-3 text-base font-medium text-gray-200">
+              난이도 검증을 시작하세요
             </p>
-            <p className="mt-1 text-xs text-gray-500">
-              5개 봇 프로필로 반복 시뮬레이션 후 일치도를 분석합니다
+            <p className="mt-2 text-sm text-gray-400">
+              5개 봇 프로필(초보자~최적)이 레벨을 플레이하고<br/>
+              목표 난이도와의 일치도를 분석합니다
             </p>
+            <div className="mt-4 p-3 bg-gray-700/50 rounded-lg inline-block">
+              <div className="flex items-center gap-4 text-xs text-gray-400">
+                <span>⏱️ 예상 시간: ~{Math.ceil(iterations * 5 / 100)}초</span>
+                <span>🔄 {iterations * 5}회 시뮬레이션</span>
+              </div>
+            </div>
+            {effectiveTargetDifficulty !== undefined && (
+              <div className="mt-3 text-sm">
+                <span className="text-gray-500">목표 난이도: </span>
+                <span className="text-blue-400 font-medium">{(effectiveTargetDifficulty * 100).toFixed(0)}%</span>
+              </div>
+            )}
           </div>
         )}
       </div>

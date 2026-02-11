@@ -1,7 +1,7 @@
 # TileMatchAutoLevel 프로젝트 인덱스
 
-**마지막 업데이트**: 2025-12-31
-**프로젝트 버전**: MVP + 레벨 생성 자동화
+**마지막 업데이트**: 2026-02-11
+**프로젝트 버전**: MVP + 레벨 생성 자동화 + UX 개선
 
 ---
 
@@ -166,7 +166,44 @@ TileMatchAutoLevel/
 
 ---
 
-## 🔄 최근 변경 사항 (2025-12-23)
+## 🔄 최근 변경 사항 (2026-02-11)
+
+### ✅ 레벨 에디터 UX 대규모 개선 (P0-P2 완료)
+
+**P0: 자동생성 → 에디터 연결**
+- GeneratorPanel에 GenerationResultCard 렌더링
+- "에디터로 열기" / "시뮬레이션" 버튼으로 탭 자동 전환
+- 관련 파일: `GeneratorPanel/index.tsx`, `uiStore.ts`, `App.tsx`
+
+**P0: 시뮬레이션 결과 시각화 개선**
+- 초기 상태 메시지 개선 (예상 시간, 봇 설명 추가)
+- 로딩 애니메이션에 봇 아이콘 추가
+- 목표 등급 vs 실제 등급 비교 표시
+- 레벨 수정 후 "재검증 필요" 알림
+- 관련 파일: `AutoPlayPanel/index.tsx`
+
+**P1: 기믹 언락 레벨 표시**
+- 현재 레벨 번호 입력 필드 (1~1500, ±10 버튼)
+- 각 기믹에 언락 레벨 뱃지 표시 (🔒/✨/Lv.N)
+- 미해금 기믹 비활성화 (반투명 + 클릭 불가)
+- 관련 파일: `GeneratorPanel/index.tsx`
+
+**P2: 레이어 3D 프리뷰**
+- LayerStackPreview 컴포넌트 신규 생성
+- 레이어별 타일 밀도/기믹 시각화
+- 레이어 클릭으로 빠른 전환
+- 상위 레이어 가림 경고 메시지
+- 관련 파일: `GridEditor/LayerStackPreview.tsx`, `GridEditor/index.tsx`
+
+**P2: Undo/Redo 기능**
+- 히스토리 스택 (최대 50개)
+- Ctrl+Z (실행 취소), Ctrl+Y/Ctrl+Shift+Z (다시 실행) 단축키
+- 에디터 상단 Undo/Redo 버튼
+- 관련 파일: `levelStore.ts`, `GridEditor/index.tsx`
+
+---
+
+## 🔄 이전 변경 사항 (2025-12-23)
 
 ### ✅ 레벨 생성기 개선 (generator.py)
 - **Grass 장애물 추가**: 4방향 중 2개 이상 클리어 가능한 이웃 필요
@@ -194,6 +231,8 @@ TileMatchAutoLevel/
 | 파일 | 설명 |
 |------|------|
 | [PROJECT_INDEX.md](PROJECT_INDEX.md) | 프로젝트 인덱스 (현재 문서) |
+| [TODO.md](TODO.md) | 작업 목록 및 진행 상황 |
+| [UX_IMPROVEMENT_PLAN.md](UX_IMPROVEMENT_PLAN.md) | 레벨 에디터 UX 개선 계획 (P0-P2) |
 | [AUTOMATION_SUMMARY.md](AUTOMATION_SUMMARY.md) | 자동화 시스템 요약 |
 | [LOCAL_LEVELS_GUIDE.md](LOCAL_LEVELS_GUIDE.md) | 로컬 레벨 관리 가이드 |
 | [LEVEL_GENERATION_GUIDE.md](LEVEL_GENERATION_GUIDE.md) | 레벨 생성 도구 가이드 |
@@ -201,6 +240,8 @@ TileMatchAutoLevel/
 | [BENCHMARK_SYSTEM.md](BENCHMARK_SYSTEM.md) | 벤치마크 시스템 설명 |
 | [FINAL_SUMMARY.md](FINAL_SUMMARY.md) | 최종 요약 |
 | [AUDIT_Randomness_Removal.md](AUDIT_Randomness_Removal.md) | 랜덤성 제거 감사 |
+| [bot_simulation_accuracy_improvement_plan.md](bot_simulation_accuracy_improvement_plan.md) | 봇 시뮬레이션 정확도 개선 계획 |
+| [gimmick_unlock_design_for_client.md](gimmick_unlock_design_for_client.md) | 기믹 언락 클라이언트 설계 |
 
 ---
 

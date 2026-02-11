@@ -1,7 +1,7 @@
 # TileMatchAutoLevel - TODO 리스트
 
-**최종 업데이트**: 2025-12-30
-**프로젝트 버전**: MVP + 레벨 생성 자동화
+**최종 업데이트**: 2026-02-11
+**프로젝트 버전**: MVP + 레벨 생성 자동화 + UX 개선
 
 ---
 
@@ -202,7 +202,7 @@ BotTileGrid.tsx 파일이 수정됨 (git status에서 확인)
 
 ### 낮음 (Low Priority)
 
-#### 대기 중 [프론트엔드] 레벨 에디터 개선
+#### 대기 중 [프론트엔드] 레벨 에디터 추가 개선
 **담당자**: 미정
 **생성일**: 2025-12-30
 **관련 파일**: `frontend/src/components/GridEditor/`
@@ -210,7 +210,7 @@ BotTileGrid.tsx 파일이 수정됨 (git status에서 확인)
 **작업 내용**:
 - 드래그 앤 드롭 타일 배치
 - 복사/붙여넣기 기능
-- 실행 취소/다시 실행
+- ~~실행 취소/다시 실행~~ ✅ 완료 (2026-02-11)
 
 ---
 
@@ -240,6 +240,35 @@ BotTileGrid.tsx 파일이 수정됨 (git status에서 확인)
 ---
 
 ## 완료된 작업
+
+### 완료 [프론트엔드] 레벨 에디터 UX 대규모 개선 (P0-P2)
+**담당자**: Claude
+**완료일**: 2026-02-11
+**관련 파일**: `frontend/src/components/`, `frontend/src/stores/`
+
+**구현 내용**:
+
+| 우선순위 | 개선 항목 | 설명 |
+|----------|-----------|------|
+| P0 | 자동생성 → 에디터 연결 | GenerationResultCard, 탭 자동 전환 |
+| P0 | 시뮬레이션 결과 시각화 | 목표/실제 등급 비교, 재검증 알림 |
+| P1 | 기믹 언락 레벨 표시 | 레벨별 기믹 해금 표시, 미해금 비활성화 |
+| P1 | 에디터 내 즉시 검증 | levelVersion 추적, 변경 감지 알림 |
+| P2 | 레이어 3D 프리뷰 | LayerStackPreview 컴포넌트, 밀도/기믹 시각화 |
+| P2 | Undo/Redo 기능 | 히스토리 50개, Ctrl+Z/Y 단축키 |
+
+**수정된 파일**:
+- `App.tsx` - 탭 전환 지원
+- `AutoPlayPanel/index.tsx` - 시뮬레이션 시각화 개선
+- `GeneratorPanel/index.tsx` - 결과 카드, 기믹 언락 표시
+- `GridEditor/index.tsx` - Undo/Redo 버튼, 키보드 단축키
+- `GridEditor/LayerStackPreview.tsx` - 신규 컴포넌트
+- `levelStore.ts` - 히스토리 스택, 버전 추적
+- `uiStore.ts` - 탭 전환 상태 관리
+
+**문서**: [UX_IMPROVEMENT_PLAN.md](UX_IMPROVEMENT_PLAN.md)
+
+---
 
 ### 완료 [자동화] 레벨 난이도 자동 검증 시스템
 **담당자**: Claude

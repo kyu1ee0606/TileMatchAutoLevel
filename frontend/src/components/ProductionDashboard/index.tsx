@@ -47,6 +47,7 @@ import {
   recalculateBatchCounts,
 } from '../../storage/productionStorage';
 import { ProductionExport } from './ProductionExport';
+import { BatchApprovalPanel } from './BatchApprovalPanel';
 
 type DashboardTab = 'overview' | 'generate' | 'test' | 'playtest' | 'review' | 'export';
 
@@ -1148,75 +1149,165 @@ function GenerateTab({
         </div>
       )}
 
-      {/* Progress */}
-      {(isGenerating || progress.status !== 'idle') && (
-        <div className="p-4 bg-gray-800 rounded-lg space-y-4">
-          <div className="flex justify-between items-center">
-            <h3 className="text-sm font-medium text-white">생성 진행</h3>
-            <span className="text-xs text-gray-400">
-              {progress.status === 'generating' ? '생성 중...' :
-               progress.status === 'completed' ? '완료' :
-               progress.status === 'paused' ? '일시 정지' :
-               progress.status === 'error' ? '오류' : ''}
-            </span>
-          </div>
+      {/* Progress - Enhanced Dashboard */}
+      {(isGenerating || progress.status !== 'idle') && (() => {
+        // 평균 속도 계산 (레벨/분)
+        const avgSpeed = progress.elapsed_ms > 0
+          ? (progress.completed_levels / (progress.elapsed_ms / 60000))
+          : 0;
 
-          {/* Progress Bar */}
-          <div>
-            <div className="flex justify-between text-xs text-gray-400 mb-1">
-              <span>레벨 {progress.completed_levels}/{progress.total_levels}</span>
-              <span>{progressPercent.toFixed(1)}%</span>
-            </div>
-            <div className="h-3 bg-gray-700 rounded-full overflow-hidden">
-              <div
-                className={`h-full transition-[width] duration-500 ease-linear ${
-                  progress.status === 'error' ? 'bg-red-500' :
-                  progress.status === 'completed' ? 'bg-green-500' :
-                  'bg-indigo-500'
-                }`}
-                style={{ width: `${progressPercent}%` }}
-              />
-            </div>
-          </div>
+        // 세트별 진행률 계산 (현재 세트 주변 5개 표시)
+        const SETS_TO_SHOW = 7;
+        const currentSetIndex = progress.current_set_index;
+        const startSetIndex = Math.max(0, currentSetIndex - 2);
+        const setProgresses: { index: number; completed: boolean; active: boolean; percent: number }[] = [];
 
-          {/* Time Info */}
-          <div className="grid grid-cols-2 gap-4 text-sm">
+        for (let i = 0; i < SETS_TO_SHOW && startSetIndex + i < progress.total_sets; i++) {
+          const setIndex = startSetIndex + i;
+          const levelsPerSet = 10;
+          const completedInSet = Math.max(0, Math.min(levelsPerSet,
+            progress.completed_levels - (setIndex * levelsPerSet)));
+
+          setProgresses.push({
+            index: setIndex,
+            completed: completedInSet >= levelsPerSet,
+            active: setIndex === currentSetIndex,
+            percent: (completedInSet / levelsPerSet) * 100,
+          });
+        }
+
+        return (
+          <div className="p-4 bg-gray-800 rounded-lg space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="text-sm font-medium text-white flex items-center gap-2">
+                📊 생성 진행률
+              </h3>
+              <span className={`text-xs px-2 py-0.5 rounded ${
+                progress.status === 'generating' ? 'bg-indigo-900/50 text-indigo-300' :
+                progress.status === 'completed' ? 'bg-green-900/50 text-green-300' :
+                progress.status === 'paused' ? 'bg-yellow-900/50 text-yellow-300' :
+                progress.status === 'error' ? 'bg-red-900/50 text-red-300' : 'bg-gray-700 text-gray-300'
+              }`}>
+                {progress.status === 'generating' ? '생성 중...' :
+                 progress.status === 'completed' ? '완료' :
+                 progress.status === 'paused' ? '일시 정지' :
+                 progress.status === 'error' ? '오류' : '대기'}
+              </span>
+            </div>
+
+            {/* Main Progress Bar */}
             <div>
-              <div className="text-gray-400">경과 시간</div>
-              <div className="text-white">{formatTime(progress.elapsed_ms)}</div>
+              <div className="flex justify-between text-xs text-gray-400 mb-1">
+                <span>완료: {progress.completed_levels} / {progress.total_levels} 레벨</span>
+                <span className="font-mono">{progressPercent.toFixed(1)}%</span>
+              </div>
+              <div className="h-4 bg-gray-700 rounded-full overflow-hidden">
+                <div
+                  className={`h-full transition-[width] duration-500 ease-linear ${
+                    progress.status === 'error' ? 'bg-red-500' :
+                    progress.status === 'completed' ? 'bg-green-500' :
+                    'bg-gradient-to-r from-indigo-500 to-purple-500'
+                  }`}
+                  style={{ width: `${progressPercent}%` }}
+                />
+              </div>
             </div>
+
+            {/* Stats Grid */}
+            <div className="grid grid-cols-4 gap-2">
+              <div className="p-2 bg-gray-700/50 rounded text-center">
+                <div className="text-xs text-gray-400">⏱️ 경과</div>
+                <div className="text-sm font-medium text-white">{formatTime(progress.elapsed_ms)}</div>
+              </div>
+              <div className="p-2 bg-gray-700/50 rounded text-center">
+                <div className="text-xs text-gray-400">⏳ 남은 시간</div>
+                <div className="text-sm font-medium text-white">{formatTime(progress.estimated_remaining_ms)}</div>
+              </div>
+              <div className="p-2 bg-gray-700/50 rounded text-center">
+                <div className="text-xs text-gray-400">📈 평균 속도</div>
+                <div className="text-sm font-medium text-blue-300">{avgSpeed.toFixed(1)}/분</div>
+              </div>
+              <div className="p-2 bg-gray-700/50 rounded text-center">
+                <div className="text-xs text-gray-400">📦 현재 세트</div>
+                <div className="text-sm font-medium text-purple-300">{progress.current_set_index + 1}/{progress.total_sets}</div>
+              </div>
+            </div>
+
+            {/* Set Progress Mini Bars */}
             <div>
-              <div className="text-gray-400">예상 남은 시간</div>
-              <div className="text-white">{formatTime(progress.estimated_remaining_ms)}</div>
+              <div className="text-xs text-gray-400 mb-2">세트별 진행:</div>
+              <div className="flex gap-1">
+                {setProgresses.map((set) => (
+                  <div key={set.index} className="flex-1">
+                    <div
+                      className={`h-6 rounded overflow-hidden ${
+                        set.active ? 'ring-2 ring-indigo-400' : ''
+                      }`}
+                    >
+                      <div
+                        className={`h-full transition-all ${
+                          set.completed ? 'bg-green-500' :
+                          set.active ? 'bg-indigo-500' :
+                          set.percent > 0 ? 'bg-indigo-700' : 'bg-gray-600'
+                        }`}
+                        style={{ width: set.completed ? '100%' : `${set.percent}%` }}
+                      />
+                    </div>
+                    <div className={`text-[10px] text-center mt-0.5 ${
+                      set.active ? 'text-indigo-300 font-medium' : 'text-gray-500'
+                    }`}>
+                      {set.index + 1}
+                    </div>
+                  </div>
+                ))}
+                {progress.total_sets > startSetIndex + SETS_TO_SHOW && (
+                  <div className="text-xs text-gray-500 flex items-center ml-1">...</div>
+                )}
+              </div>
+            </div>
+
+            {/* Failed Levels Counter */}
+            {progress.failed_levels && progress.failed_levels.length > 0 && (
+              <div className="p-2 bg-red-900/20 border border-red-700/30 rounded-lg">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-red-300">
+                    ⚠️ 실패 레벨: {progress.failed_levels.length}개
+                  </span>
+                  <span className="text-xs text-red-400">
+                    (재생성 예정)
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Error Message */}
+            {progress.last_error && (
+              <div className="p-2 bg-red-900/30 border border-red-700/30 rounded text-sm text-red-400">
+                오류: {progress.last_error}
+              </div>
+            )}
+
+            {/* Actions */}
+            <div className="flex gap-2">
+              {isGenerating && (
+                <Button onClick={onCancel} variant="danger" className="flex-1">
+                  ⏸️ 일시 정지
+                </Button>
+              )}
+              {progress.status === 'paused' && (
+                <Button onClick={() => onStart({ strategy: playtestStrategy })} className="flex-1">
+                  ▶️ 계속 생성
+                </Button>
+              )}
+              {progress.status === 'completed' && (
+                <div className="w-full p-2 bg-green-900/30 border border-green-700/30 rounded text-center text-sm text-green-300">
+                  ✅ 생성 완료! 테스트 탭으로 이동하세요.
+                </div>
+              )}
             </div>
           </div>
-
-          {/* Current Status */}
-          <div className="text-sm text-gray-400">
-            세트 {progress.current_set_index + 1}/{progress.total_sets} - 레벨 {progress.current_level}
-          </div>
-
-          {/* Error Message */}
-          {progress.last_error && (
-            <div className="text-sm text-red-400">
-              오류: {progress.last_error}
-            </div>
-          )}
-
-          {/* Actions */}
-          {isGenerating && (
-            <Button onClick={onCancel} variant="danger" className="w-full">
-              일시 정지
-            </Button>
-          )}
-
-          {progress.status === 'paused' && (
-            <Button onClick={() => onStart({ strategy: playtestStrategy })} className="w-full">
-              계속 생성
-            </Button>
-          )}
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }
@@ -1846,6 +1937,41 @@ function TestTab({
   const handleStopBatchTest = () => {
     batchAbortRef.current?.abort();
     addNotification('info', '일괄 테스트 중지됨');
+  };
+
+  // 전체 자동 승인 상태
+  const [isApprovingAll, setIsApprovingAll] = useState(false);
+  const [approveAllProgress, setApproveAllProgress] = useState({ current: 0, total: 0 });
+
+  // 전체 자동 승인 - 모든 generated 상태 레벨을 approved로 변경
+  const handleApproveAllLevels = async () => {
+    // 전체 레벨 로드 (generated 상태)
+    const allLevels = await getProductionLevelsByBatch(batchId);
+    const generatedLevels = allLevels.filter(l => l.meta.status === 'generated');
+
+    if (generatedLevels.length === 0) {
+      addNotification('info', '승인할 레벨이 없습니다');
+      return;
+    }
+
+    setIsApprovingAll(true);
+    setApproveAllProgress({ current: 0, total: generatedLevels.length });
+
+    try {
+      for (let i = 0; i < generatedLevels.length; i++) {
+        await approveLevel(batchId, generatedLevels[i].meta.level_number, '자동승인(테스트완료)');
+        setApproveAllProgress({ current: i + 1, total: generatedLevels.length });
+      }
+
+      addNotification('success', `${generatedLevels.length}개 레벨 자동 승인 완료 → 익스포트 탭에서 내보내기 가능`);
+      loadLevels();
+      onStatsUpdate();
+    } catch (err) {
+      console.error('Auto approve failed:', err);
+      addNotification('error', '자동 승인 중 오류 발생');
+    } finally {
+      setIsApprovingAll(false);
+    }
   };
 
   // Regeneration state
@@ -3423,6 +3549,36 @@ function TestTab({
               </Button>
             )}
           </div>
+
+          {/* 전체 자동 승인 버튼 - 테스트 완료 후 */}
+          {batchTestProgress.status === 'completed' && (
+            <div className="mt-3 p-3 bg-green-900/20 border border-green-700/50 rounded-lg">
+              <div className="text-sm text-green-300 mb-2">
+                ✅ 테스트 완료! 전체 레벨을 승인하고 익스포트하시겠습니까?
+              </div>
+              {isApprovingAll ? (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 text-sm text-green-200">
+                    <div className="w-4 h-4 border-2 border-green-400 border-t-transparent rounded-full animate-spin" />
+                    승인 중... {approveAllProgress.current}/{approveAllProgress.total}
+                  </div>
+                  <div className="h-1.5 bg-gray-700 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-green-500 transition-all"
+                      style={{ width: `${approveAllProgress.total > 0 ? (approveAllProgress.current / approveAllProgress.total) * 100 : 0}%` }}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <Button
+                  onClick={handleApproveAllLevels}
+                  className="w-full bg-green-600 hover:bg-green-700"
+                >
+                  ✅ 전체 자동 승인 → 익스포트
+                </Button>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -4161,6 +4317,8 @@ function PlaytestTab({
 }
 
 // Review Tab Component
+type ReviewFilter = LevelStatus | 'all' | 'needs_attention';
+
 function ReviewTab({
   batchId,
   onLevelSelect,
@@ -4172,27 +4330,97 @@ function ReviewTab({
 }) {
   const { addNotification } = useUIStore();
   const [levels, setLevels] = useState<ProductionLevel[]>([]);
-  const [filter, setFilter] = useState<LevelStatus | 'all'>('all');
+  const [allLevels, setAllLevels] = useState<ProductionLevel[]>([]);
+  const [filter, setFilter] = useState<ReviewFilter>('all');
   const [isLoading, setIsLoading] = useState(true);
+  const [showBatchApproval, setShowBatchApproval] = useState(false);
 
   useEffect(() => {
     loadLevels();
-  }, [batchId, filter]);
+  }, [batchId]);
+
+  useEffect(() => {
+    applyFilter();
+  }, [allLevels, filter]);
 
   const loadLevels = async () => {
     setIsLoading(true);
     try {
-      const options = filter !== 'all' ? { status: filter } : undefined;
       const loadedLevels = await getProductionLevelsByBatch(batchId, {
-        ...options,
-        limit: 100,
+        limit: 500,
       });
-      setLevels(loadedLevels);
+      setAllLevels(loadedLevels);
     } catch (err) {
       console.error('Failed to load levels:', err);
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const applyFilter = () => {
+    let filtered = allLevels;
+
+    if (filter === 'needs_attention') {
+      // 주의 필요: 매치점수 60% 미만 OR D등급 OR 플레이테스트 이슈 있음
+      filtered = allLevels.filter(l => {
+        const matchScore = l.meta.match_score ?? 100;
+        const hasIssues = l.meta.playtest_results?.some(r => r.issues.length > 0);
+        return matchScore < 60 || l.meta.grade === 'D' || hasIssues;
+      });
+    } else if (filter !== 'all') {
+      filtered = allLevels.filter(l => l.meta.status === filter);
+    }
+
+    setLevels(filtered);
+  };
+
+  // 주의 필요 레벨 수 계산
+  const needsAttentionCount = useMemo(() => {
+    return allLevels.filter(l => {
+      const matchScore = l.meta.match_score ?? 100;
+      const hasIssues = l.meta.playtest_results?.some(r => r.issues.length > 0);
+      return matchScore < 60 || l.meta.grade === 'D' || hasIssues;
+    }).length;
+  }, [allLevels]);
+
+  // 레벨 상태별 배경색 계산
+  const getLevelBgColor = (level: ProductionLevel): string => {
+    const matchScore = level.meta.match_score ?? 100;
+    const grade = level.meta.grade;
+    const hasIssues = level.meta.playtest_results?.some(r => r.issues.length > 0);
+
+    // 빨강: 매치점수 60% 미만 OR D등급
+    if (matchScore < 60 || grade === 'D') {
+      return 'bg-red-900/30 border-l-4 border-red-500';
+    }
+
+    // 노랑: 매치점수 60-79% OR C등급 OR 이슈 있음
+    if (matchScore < 80 || grade === 'C' || hasIssues) {
+      return 'bg-yellow-900/20 border-l-4 border-yellow-500';
+    }
+
+    // 초록: 승인됨
+    if (level.meta.status === 'approved' || level.meta.status === 'exported') {
+      return 'bg-green-900/20 border-l-4 border-green-500';
+    }
+
+    // 기본
+    return 'bg-gray-800';
+  };
+
+  // 이슈 아이콘 표시
+  const getIssueIcon = (level: ProductionLevel): string | null => {
+    const matchScore = level.meta.match_score ?? 100;
+    const hasPlaytestIssues = level.meta.playtest_results?.some(r => r.issues.length > 0);
+    const hasBug = level.meta.playtest_results?.some(r =>
+      r.issues.some(i => i.toLowerCase().includes('bug') || i.toLowerCase().includes('버그'))
+    );
+
+    if (hasBug) return '🐛';
+    if (hasPlaytestIssues) return '⚠️';
+    if (matchScore < 60) return '⚠️';
+    if (level.meta.status === 'approved') return '✓';
+    return null;
   };
 
   const handleApprove = async (levelNumber: number) => {
@@ -4219,80 +4447,132 @@ function ReviewTab({
 
   return (
     <div className="space-y-4">
-      {/* Filter */}
-      <div className="flex gap-2">
-        {[
-          { value: 'all', label: '전체' },
-          { value: 'generated', label: '생성됨' },
-          { value: 'needs_rework', label: '수정필요' },
-          { value: 'approved', label: '승인됨' },
-          { value: 'rejected', label: '거부됨' },
-        ].map((opt) => (
+      {/* Mode Toggle */}
+      <div className="flex items-center justify-between">
+        <div className="flex gap-2">
           <button
-            key={opt.value}
-            onClick={() => setFilter(opt.value as LevelStatus | 'all')}
-            className={`px-3 py-1 rounded text-sm ${
-              filter === opt.value
+            onClick={() => setShowBatchApproval(false)}
+            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+              !showBatchApproval
                 ? 'bg-indigo-600 text-white'
-                : 'bg-gray-700 text-gray-300'
+                : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
             }`}
           >
-            {opt.label}
+            개별 검토
           </button>
-        ))}
+          <button
+            onClick={() => setShowBatchApproval(true)}
+            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+              showBatchApproval
+                ? 'bg-indigo-600 text-white'
+                : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+            }`}
+          >
+            배치 승인
+          </button>
+        </div>
       </div>
 
-      {/* Level List */}
-      {isLoading ? (
-        <div className="text-center text-gray-400 py-8">로딩 중...</div>
+      {/* Batch Approval Panel */}
+      {showBatchApproval ? (
+        <BatchApprovalPanel
+          batchId={batchId}
+          onComplete={() => setShowBatchApproval(false)}
+          onStatsUpdate={() => {
+            loadLevels();
+            onStatsUpdate();
+          }}
+        />
       ) : (
-        <div className="space-y-2 max-h-[500px] overflow-y-auto">
-          {levels.map((level) => (
-            <div
-              key={level.meta.level_number}
-              className="flex items-center justify-between p-3 bg-gray-800 rounded-lg"
-            >
-              <div className="flex items-center gap-4">
-                <button
-                  onClick={() => onLevelSelect?.(level)}
-                  className="text-indigo-400 hover:text-indigo-300"
-                >
-                  레벨 {level.meta.level_number}
-                </button>
-                <span className={getGradeColor(level.meta.grade)}>{level.meta.grade}</span>
-                <span className="text-xs text-gray-400">
-                  {level.meta.actual_difficulty.toFixed(3)}
-                </span>
-                <span className={`text-xs px-2 py-0.5 rounded ${getStatusColor(level.meta.status)}`}>
-                  {getStatusLabel(level.meta.status)}
-                </span>
-              </div>
-              <div className="flex gap-2">
-                {level.meta.status !== 'approved' && level.meta.status !== 'exported' && (
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    onClick={() => handleApprove(level.meta.level_number)}
+        <>
+          {/* Filter */}
+          <div className="flex gap-2 flex-wrap">
+            {[
+              { value: 'all', label: '전체' },
+              { value: 'needs_attention', label: `주의 필요 ⚠️ ${needsAttentionCount}`, highlight: needsAttentionCount > 0 },
+              { value: 'generated', label: '생성됨' },
+              { value: 'needs_rework', label: '수정필요' },
+              { value: 'approved', label: '승인됨' },
+              { value: 'rejected', label: '거부됨' },
+            ].map((opt) => (
+              <button
+                key={opt.value}
+                onClick={() => setFilter(opt.value as ReviewFilter)}
+                className={`px-3 py-1 rounded text-sm transition-colors ${
+                  filter === opt.value
+                    ? 'bg-indigo-600 text-white'
+                    : opt.highlight
+                      ? 'bg-red-900/50 text-red-200 border border-red-700 hover:bg-red-900/70'
+                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Level List */}
+          {isLoading ? (
+            <div className="text-center text-gray-400 py-8">로딩 중...</div>
+          ) : (
+            <div className="space-y-2 max-h-[500px] overflow-y-auto">
+              {levels.length === 0 ? (
+                <div className="text-center text-gray-500 py-8">
+                  {filter === 'needs_attention' ? '주의가 필요한 레벨이 없습니다' : '레벨이 없습니다'}
+                </div>
+              ) : (
+                levels.map((level) => (
+                  <div
+                    key={level.meta.level_number}
+                    className={`flex items-center justify-between p-3 rounded-lg transition-colors ${getLevelBgColor(level)}`}
                   >
-                    승인
-                  </Button>
-                )}
-                {level.meta.status !== 'rejected' && (
-                  <Button
-                    size="sm"
-                    variant="danger"
-                    onClick={() => {
-                      const reason = prompt('거부 사유:');
-                      if (reason) handleReject(level.meta.level_number, reason);
-                    }}
-                  >
-                    거부
-                  </Button>
-                )}
-              </div>
+                    <div className="flex items-center gap-4">
+                      <button
+                        onClick={() => onLevelSelect?.(level)}
+                        className="text-indigo-400 hover:text-indigo-300 font-medium"
+                      >
+                        레벨 {level.meta.level_number}
+                      </button>
+                      <span className={getGradeColor(level.meta.grade)}>{level.meta.grade}</span>
+                      <span className="text-xs text-gray-400">
+                        매치 {level.meta.match_score?.toFixed(0) ?? '-'}%
+                      </span>
+                      <span className={`text-xs px-2 py-0.5 rounded ${getStatusColor(level.meta.status)}`}>
+                        {getStatusLabel(level.meta.status)}
+                      </span>
+                      {getIssueIcon(level) && (
+                        <span className="text-sm">{getIssueIcon(level)}</span>
+                      )}
+                    </div>
+                    <div className="flex gap-2">
+                      {level.meta.status !== 'approved' && level.meta.status !== 'exported' && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => handleApprove(level.meta.level_number)}
+                        >
+                          승인
+                        </Button>
+                      )}
+                      {level.meta.status !== 'rejected' && (
+                        <Button
+                          size="sm"
+                          variant="danger"
+                          onClick={() => {
+                            const reason = prompt('거부 사유:');
+                            if (reason) handleReject(level.meta.level_number, reason);
+                          }}
+                        >
+                          거부
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
-          ))}
-        </div>
+          )}
+        </>
       )}
     </div>
   );

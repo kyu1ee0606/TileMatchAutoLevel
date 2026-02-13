@@ -247,7 +247,8 @@ class TileDistributor:
         rand_seed: int,
         shuffle_tile: int = 0,
         type_imbalance: int = 0,
-        unlock_tile: int = 0
+        unlock_tile: int = 0,
+        tile_type_offset: int = 0
     ) -> List[str]:
         """Complete t0 tile assignment matching in-game logic.
 
@@ -262,6 +263,7 @@ class TileDistributor:
             shuffle_tile: Additional shuffle count (xShuffleTile from level, default 0)
             type_imbalance: Imbalance setting (xTypeImbalance from level, 0-10)
             unlock_tile: Number of key tile sets (xUnlockTile from level)
+            tile_type_offset: Offset to add to tile type indices (e.g., 10 for t11~t15)
 
         Returns:
             List of tile type strings in shuffled order (e.g., ["t3", "t1", "t2", ...])
@@ -288,16 +290,24 @@ class TileDistributor:
 
         # Convert to tile type strings and expand to individual tiles
         # Each index in type_indices represents 3 tiles
+        # Apply tile_type_offset to match existing tile types in the level
+        # NOTE: KEY_TILE_INDEX (16) must be converted to "key", not "t16+offset"
         assignments = []
         for type_idx in type_indices:
-            tile_type = f"t{type_idx}"
+            if type_idx == TileDistributor.KEY_TILE_INDEX:
+                tile_type = "key"
+            else:
+                tile_type = f"t{type_idx + tile_type_offset}"
             assignments.extend([tile_type] * 3)
 
         # Handle remainder tiles (if t0_count % 3 != 0)
         remainder = t0_count % 3
         if remainder > 0 and type_indices:
-            # Add remaining tiles of the last type
-            last_type = f"t{type_indices[-1]}"
+            last_idx = type_indices[-1]
+            if last_idx == TileDistributor.KEY_TILE_INDEX:
+                last_type = "key"
+            else:
+                last_type = f"t{last_idx + tile_type_offset}"
             assignments.extend([last_type] * remainder)
 
         # Shuffle tile positions
@@ -628,9 +638,10 @@ class BotSimulator:
     8. stack_n/s/w/e gimmicks push blocks in that direction
     """
 
-    # Matchable tile types (t1-t15 are normal tiles, t16 is key tile)
+    # Matchable tile types (t1-t15 are normal tiles, "key" is the key gimmick tile)
     # Note: t0 is a random tile placeholder, gets converted at level init
-    MATCHABLE_TYPES = {f"t{i}" for i in range(1, 16)} | {"t16"}
+    # CRITICAL: "key" must be included for unlock_tile gimmick to work
+    MATCHABLE_TYPES = {f"t{i}" for i in range(1, 16)} | {"key"}
     # Random tile types that t0 can become (t1-t15)
     RANDOM_TILE_POOL = [f"t{i}" for i in range(1, 16)]
     # Default tile count for random distribution (matches sp_template default)
@@ -789,9 +800,19 @@ class BotSimulator:
         num_layers = level_json.get("layer", 8)
         state = GameState(max_moves=max_moves)
 
+        # Get unlock_tile setting FIRST (needed for dock initialization)
+        # Try both field names for unlock tile (xUnlockTile or unlockTile)
+        unlock_tile = level_json.get("xUnlockTile", level_json.get("unlockTile", 0))
+
         # Initialize 7-slot dock
+        # CRITICAL: Last unlock_tile slots are locked by default
+        # key 타일 3개 매칭시 1개씩 해제됨
         for i in range(7):
-            state.dock.append(DockSlot(index=i))
+            # Lock the last unlock_tile slots (slots 7-unlock_tile to 6)
+            # e.g., unlock_tile=1 -> slot 6 locked
+            # e.g., unlock_tile=2 -> slots 5,6 locked
+            is_locked = (i >= (7 - unlock_tile)) if unlock_tile > 0 else False
+            state.dock.append(DockSlot(index=i, is_locked=is_locked))
 
         # Get level settings for t0 distribution (sp_template compatible)
         rand_seed = level_json.get("randSeed", 0)
@@ -805,7 +826,7 @@ class BotSimulator:
         # Additional level settings for exact in-game t0 distribution matching
         shuffle_tile = level_json.get("xShuffleTile", 0)
         type_imbalance = level_json.get("xTypeImbalance", 0)
-        unlock_tile = level_json.get("xUnlockTile", 0)
+        # NOTE: unlock_tile is already read above for dock initialization
 
         # First pass: collect ALL t0 tiles AND count existing t1~t15 tiles
         # This includes:
@@ -848,6 +869,17 @@ class BotSimulator:
                         if 1 <= tile_num <= 15:
                             existing_tile_counts[tile_type] = existing_tile_counts.get(tile_type, 0) + 1
 
+        # Detect tile type offset from existing tiles
+        # If level uses t11~t15 instead of t1~t5, we need to offset t0 assignments
+        tile_type_offset = 0
+        if existing_tile_counts:
+            # Get the minimum tile number from existing tiles (e.g., 11 for t11~t15)
+            min_tile_num = min(int(t[1:]) for t in existing_tile_counts.keys())
+            # If tiles start at t11 or higher, calculate offset
+            # Offset = min_tile_num - 1 (so t1 becomes t11, t2 becomes t12, etc.)
+            if min_tile_num > use_tile_count:
+                tile_type_offset = min_tile_num - 1
+
         # Generate tile type assignments for ALL t0 tiles
         # Use TileDistributor for exact in-game matching (zWellRandom + original algorithm)
         t0_assignments = TileDistributor.assign_t0_tiles(
@@ -856,7 +888,8 @@ class BotSimulator:
             rand_seed=rand_seed,
             shuffle_tile=shuffle_tile,
             type_imbalance=type_imbalance,
-            unlock_tile=unlock_tile
+            unlock_tile=unlock_tile,
+            tile_type_offset=tile_type_offset
         )
 
         # Create a mapping for quick lookup
@@ -1257,6 +1290,19 @@ class BotSimulator:
                         if layer_idx not in state.tiles:
                             state.tiles[layer_idx] = {}
                         state.tiles[layer_idx][spawn_pos] = crafted_tile
+
+                        # CRITICAL: Remove the emitted tile from stacked_tiles to avoid double-counting
+                        # The tile is now in state.tiles, not in the craft box anymore
+                        emitted_key = crafted_tile.original_full_key
+                        if emitted_key in state.stacked_tiles:
+                            del state.stacked_tiles[emitted_key]
+                        # NOTE: Do NOT remove from craft_boxes tracking - _process_craft_after_pick
+                        # needs the key to find which craft box this tile came from when picked
+                        # Update the tile below to know there's no upper tile now
+                        if crafted_tile.under_stacked_tile_key:
+                            under_tile = state.stacked_tiles.get(crafted_tile.under_stacked_tile_key)
+                            if under_tile:
+                                under_tile.upper_stacked_tile_key = None
                     else:
                         # Spawn position is blocked - keep tile in craft box (not emitted)
                         # The tile stays is_crafted=False until spawn position clears
@@ -1930,7 +1976,8 @@ class BotSimulator:
         new_state = GameState()
         new_state.tiles = new_tiles
         new_state.layer_cols = base_state.layer_cols.copy()  # Shallow - doesn't change
-        new_state.dock = [DockSlot(index=i) for i in range(7)]
+        # CRITICAL: Copy dock slot lock status from base_state
+        new_state.dock = [DockSlot(index=s.index, is_locked=s.is_locked) for s in base_state.dock]
         new_state.dock_tiles = []
         new_state.goals_remaining = base_state.goals_remaining.copy()
         new_state.moves_used = 0
@@ -2231,6 +2278,7 @@ class BotSimulator:
         """Process 3-matches in dock. Returns dict of cleared tiles by type.
 
         Also decrements craft/stack goals for cleared tiles that originated from craft/stack boxes.
+        When 3 "key" tiles are matched, unlock one locked dock slot.
         """
         cleared_by_type: Dict[str, int] = {}
 
@@ -2262,6 +2310,15 @@ class BotSimulator:
                         goal_key = removed.origin_goal_type
                         if goal_key in state.goals_remaining:
                             state.goals_remaining[goal_key] = max(0, state.goals_remaining[goal_key] - 1)
+
+                # CRITICAL: When 3 "key" tiles are matched, unlock one locked dock slot
+                if tile_type == "key":
+                    # Find first locked slot and unlock it
+                    for slot in state.dock:
+                        if slot.is_locked:
+                            slot.is_locked = False
+                            state.max_dock_slots = sum(1 for s in state.dock if not s.is_locked)
+                            break
 
         return cleared_by_type
 

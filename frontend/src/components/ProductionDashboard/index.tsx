@@ -1571,7 +1571,7 @@ function TestTab({
   const loadLevels = async () => {
     setIsLoading(true);
     try {
-      const options = filter !== 'all' ? { status: filter, limit: 200 } : { limit: 200 };
+      const options = filter !== 'all' ? { status: filter, limit: 2000 } : { limit: 2000 };
       const loadedLevels = await getProductionLevelsByBatch(batchId, options);
       setLevels(loadedLevels);
     } catch (err) {
@@ -4347,7 +4347,7 @@ function ReviewTab({
     setIsLoading(true);
     try {
       const loadedLevels = await getProductionLevelsByBatch(batchId, {
-        limit: 500,
+        limit: 2000,
       });
       setAllLevels(loadedLevels);
     } catch (err) {

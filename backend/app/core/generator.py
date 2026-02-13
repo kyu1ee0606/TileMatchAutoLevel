@@ -5,6 +5,8 @@ import time
 from typing import Dict, List, Any, Optional, Tuple, Set
 from dataclasses import dataclass
 
+from .bot_simulator import BotSimulator, TileDistributor
+
 logger = logging.getLogger(__name__)
 
 
@@ -762,6 +764,48 @@ class LevelGenerator:
         # This fixes frogs that became covered due to tiles added in later steps
         level = self._validate_and_fix_frog_positions(level)
 
+        # PRE-VALIDATION: Set up key gimmick (unlockTile)
+        # key 기믹: 버퍼 슬롯 잠금 + key 타일 필요
+        # CRITICAL: key 타일은 t0 distribution 또는 직접 배치 둘 중 하나로만 처리!
+        # - craft/stack 골이 있으면: t0 distribution이 key 타일 생성 (TileDistributor.assign_t0_tiles)
+        # - craft/stack 골이 없으면: 직접 key 타일 배치 필요 (_place_key_tiles)
+        level_number = params.level_number if params.level_number else 0
+        gimmick_intensity = getattr(params, 'gimmick_intensity', 1.0)
+        KEY_UNLOCK_LEVEL = 111  # 백엔드 leveling_config.py와 동기화
+        KEY_PROBABILITY = 0.3  # 30% 확률
+        if level_number >= KEY_UNLOCK_LEVEL and gimmick_intensity > 0:
+            # 튜토리얼 레벨(111)은 항상 적용, 그 외는 확률 적용
+            is_key_tutorial = (level_number == KEY_UNLOCK_LEVEL)
+            if is_key_tutorial or random.random() < KEY_PROBABILITY * gimmick_intensity:
+                # 난이도에 따라 잠금 슬롯 수 결정 (1-2)
+                unlock_tile_count = 1  # 기본값: 1칸 잠금
+                if params.target_difficulty >= 0.7 and not is_key_tutorial:
+                    unlock_tile_count = 2  # 고난이도: 2칸 잠금 (튜토리얼은 항상 1칸)
+                level["unlockTile"] = unlock_tile_count
+
+                # Check if craft/stack goals have enough t0 tiles for key distribution
+                # t0 distribution: 첫 unlockTile 그룹(각 3개)이 key 타일이 됨
+                t0_count = 0
+                num_layers = level.get("layer", 8)
+                for layer_idx in range(num_layers):
+                    layer_key = f"layer_{layer_idx}"
+                    tiles = level.get(layer_key, {}).get("tiles", {})
+                    for pos, tile_data in tiles.items():
+                        if isinstance(tile_data, list) and len(tile_data) > 2:
+                            tile_type = tile_data[0]
+                            if tile_type.startswith("craft_") or tile_type.startswith("stack_"):
+                                if isinstance(tile_data[2], list) and tile_data[2]:
+                                    t0_count += int(tile_data[2][0]) if tile_data[2][0] else 0
+
+                key_tiles_needed = unlock_tile_count * 3
+                # t0 distribution이 key 타일을 충분히 제공할 수 있는지 확인
+                # t0_count >= key_tiles_needed면 t0 distribution이 처리함
+                if t0_count < key_tiles_needed:
+                    # craft/stack 골이 없거나 부족함 → 직접 key 타일 배치 필요
+                    tiles_to_place = key_tiles_needed - (t0_count // 3) * 3
+                    if tiles_to_place > 0:
+                        self._place_key_tiles(level, tiles_to_place)
+
         # FINAL VALIDATION: Ensure level is playable (all tile types divisible by 3, minimum tiles)
         validation_result = self._validate_playability(level, params.level_number)
         if not validation_result["is_playable"]:
@@ -790,37 +834,8 @@ class LevelGenerator:
         # Auto-calculate max_moves based on total tiles
         level["max_moves"] = self._calculate_max_moves(level)
 
-        # Set special gimmick fields based on level number (레벨 전역 설정)
-        # key와 time_attack은 타일 레벨 기믹이 아닌 레벨 전역 설정
-        # 레벨 번호 기반으로 언락 여부 판단 (get_gboost_style_gimmicks 참조)
-        # 확률 기반 적용: 모든 레벨에 적용하면 과도하므로 30% 확률로 적용
-        level_number = params.level_number if params.level_number else 0
-        gimmick_intensity = getattr(params, 'gimmick_intensity', 1.0)
-
-        # key 기믹: unlockTile 필드 설정 (버퍼 잠금) + key 타일 배치
-        # - 레벨 111 (튜토리얼): 100% 확률로 적용
-        # - 레벨 112+: 30% 확률로 적용
-        # key 기믹 작동 방식:
-        # 1. unlockTile: N → N개 버퍼 슬롯 잠금
-        # 2. "key" 타일 ID를 가진 타일 N*3개 배치 필요
-        # 3. key 타일 3개 모을 때마다 잠금 해제
-        KEY_UNLOCK_LEVEL = 111  # 백엔드 leveling_config.py와 동기화
-        KEY_PROBABILITY = 0.3  # 30% 확률
-        if level_number >= KEY_UNLOCK_LEVEL and gimmick_intensity > 0:
-            # 튜토리얼 레벨(111)은 항상 적용, 그 외는 확률 적용
-            is_key_tutorial = (level_number == KEY_UNLOCK_LEVEL)
-            if is_key_tutorial or random.random() < KEY_PROBABILITY * gimmick_intensity:
-                # 난이도에 따라 잠금 슬롯 수 결정 (1-2)
-                unlock_tile_count = 1  # 기본값: 1칸 잠금
-                if params.target_difficulty >= 0.7 and not is_key_tutorial:
-                    unlock_tile_count = 2  # 고난이도: 2칸 잠금 (튜토리얼은 항상 1칸)
-                level["unlockTile"] = unlock_tile_count
-
-                # key 타일 배치: unlockTile * 3개의 "key" 타일 필요
-                key_tiles_needed = unlock_tile_count * 3
-                self._place_key_tiles(level, key_tiles_needed)
-
         # time_attack 기믹: timea 필드 설정 (제한 시간, 초)
+        # NOTE: level_number와 gimmick_intensity는 위 PRE-VALIDATION 섹션에서 이미 선언됨
         # 적용 규칙 (TileBuster 패턴):
         # - 레벨 341 (튜토리얼): 최초 언락 레벨에 적용
         # - 레벨 350, 360, 370...: 톱니바퀴 패턴의 보스 레벨(10번째)에만 적용
@@ -1317,15 +1332,18 @@ class LevelGenerator:
         first_category_selected: Optional[int] = None
 
         for i, layer_idx in enumerate(sorted_layers):
-            if base_pattern_index is not None and i == 0:
-                # Use base pattern for first layer
+            if base_pattern_index is not None:
+                # CRITICAL FIX: When base_pattern_index is specified (e.g., special shape levels),
+                # use the SAME pattern for ALL layers to maintain visual consistency
+                # This ensures heart, star, butterfly patterns look correct across all layers
                 layer_patterns[layer_idx] = base_pattern_index
-                # Find which category this belongs to
-                for cat_idx, cat in enumerate(pattern_categories):
-                    if base_pattern_index in cat:
-                        used_categories.add(cat_idx)
-                        first_category_selected = cat_idx
-                        break
+                # Find which category this belongs to (for first layer tracking)
+                if i == 0:
+                    for cat_idx, cat in enumerate(pattern_categories):
+                        if base_pattern_index in cat:
+                            used_categories.add(cat_idx)
+                            first_category_selected = cat_idx
+                            break
             else:
                 # For the first layer without base pattern, also avoid recent batch categories
                 exclude_categories = used_categories.copy()
@@ -1931,10 +1949,12 @@ class LevelGenerator:
         # 1. No explicit layer_pattern_configs provided
         # 2. Multiple active layers (>= 3 for meaningful variety)
         # 3. pattern_type is 'aesthetic' or None (default)
+        # 4. NO specific pattern_index specified (special shape levels must use same pattern on all layers)
         enable_auto_mixing = (
             params.layer_pattern_configs is None and
             len(active_layers) >= 3 and
-            params.pattern_type in (None, "aesthetic")
+            params.pattern_type in (None, "aesthetic") and
+            params.pattern_index is None  # CRITICAL: Disable auto-mixing for special shape levels
         )
 
         effective_layer_pattern_configs = None
@@ -2283,7 +2303,24 @@ class LevelGenerator:
             # The tile assignment code will handle any count differences
             return selected
 
-        # Only for symmetry_mode="none": Ensure exact tile count by trimming or padding
+        # CRITICAL FIX: When pattern_index is explicitly specified (e.g., special shape levels),
+        # do NOT pad with random positions - preserve the pattern's natural shape
+        # Only trim if pattern is excessively large
+        if pattern_index is not None:
+            if len(selected) > actual_count * 1.5:
+                # Pattern is too large, trim minimally
+                center_x, center_y = cols / 2.0, rows / 2.0
+                def distance_from_center(pos: str) -> float:
+                    parts = pos.split("_")
+                    x, y = int(parts[0]), int(parts[1])
+                    return ((x - center_x) ** 2 + (y - center_y) ** 2) ** 0.5
+                selected.sort(key=distance_from_center)
+                selected = selected[:int(actual_count * 1.5)]
+            # Do NOT add filler positions - preserve pattern shape
+            return selected
+
+        # Only for symmetry_mode="none" and no specific pattern:
+        # Ensure exact tile count by trimming or padding
         if len(selected) > actual_count:
             # Trim excess - prefer to keep positions closer to center
             center_x, center_y = cols / 2.0, rows / 2.0
@@ -2493,16 +2530,58 @@ class LevelGenerator:
                         positions.append(f"{x}_{y}")
             return positions
 
-        # Pattern 8: Heart shape
+        # Pattern 8: Heart shape (pixel art style, scales to grid size)
         def heart_shape():
             positions = []
-            scale = max(cols, rows) / 8
-            for x in range(cols):
-                for y in range(rows):
-                    nx = (x - center_x + 0.5) / scale
-                    ny = -(y - center_y + 0.5) / scale + 0.5
-                    value = (nx**2 + ny**2 - 1)**3 - (nx**2) * (ny**3)
-                    if value <= 0.5:
+            # Define heart templates for different grid sizes
+            if cols <= 5 or rows <= 5:
+                # Small heart for tiny grids
+                template = [
+                    " # # ",
+                    "#####",
+                    "#####",
+                    " ### ",
+                    "  #  ",
+                ]
+            elif cols <= 7 or rows <= 7:
+                # Medium heart for 6-7 sized grids
+                template = [
+                    " ##  ## ",
+                    "########",
+                    "########",
+                    " ###### ",
+                    "  ####  ",
+                    "   ##   ",
+                ]
+            else:
+                # Large heart for 8+ sized grids
+                template = [
+                    " ##  ## ",
+                    "########",
+                    "########",
+                    "########",
+                    " ###### ",
+                    "  ####  ",
+                    "   ##   ",
+                    "   ##   ",
+                ]
+
+            template_rows = len(template)
+            template_cols = max(len(r) for r in template)
+
+            # Center the heart in the grid
+            y_offset = max(0, (rows - template_rows) // 2)
+            x_offset = max(0, (cols - template_cols) // 2)
+
+            for ty, row_str in enumerate(template):
+                y = ty + y_offset
+                if y >= rows:
+                    continue
+                for tx, char in enumerate(row_str):
+                    x = tx + x_offset
+                    if x >= cols:
+                        continue
+                    if char == '#':
                         positions.append(f"{x}_{y}")
             return positions
 
@@ -2612,21 +2691,59 @@ class LevelGenerator:
 
         # ============ Category 3: Star/Celestial Patterns (15-19) ============
 
-        # Pattern 15: Five-pointed Star
+        # Pattern 15: Five-pointed Star (pixel art style, scales to grid size)
         def star_five_point():
             positions = []
-            radius = min(cols, rows) / 2.5
-            inner_radius = radius * 0.4
-            for x in range(cols):
-                for y in range(rows):
-                    dx = x - center_x + 0.5
-                    dy = y - center_y + 0.5
-                    angle = math.atan2(dy, dx)
-                    dist = (dx**2 + dy**2) ** 0.5
-                    # Star shape formula
-                    star_angle = (angle + math.pi) % (2 * math.pi / 5)
-                    star_radius = inner_radius + (radius - inner_radius) * abs(math.cos(star_angle * 2.5))
-                    if dist <= star_radius:
+            # Define star templates for different grid sizes
+            if cols <= 5 or rows <= 5:
+                # Small star for tiny grids
+                template = [
+                    "  #  ",
+                    " ### ",
+                    "#####",
+                    " # # ",
+                    "# # #",
+                ]
+            elif cols <= 7 or rows <= 7:
+                # Medium star for 6-7 sized grids
+                template = [
+                    "   #   ",
+                    "  ###  ",
+                    " ##### ",
+                    "#######",
+                    " # # # ",
+                    "#  #  #",
+                    "#     #",
+                ]
+            else:
+                # Large star for 8+ sized grids
+                template = [
+                    "   ##   ",
+                    "   ##   ",
+                    "  ####  ",
+                    "########",
+                    "########",
+                    " ##  ## ",
+                    "##    ##",
+                    "#      #",
+                ]
+
+            template_rows = len(template)
+            template_cols = max(len(r) for r in template)
+
+            # Center the star in the grid
+            y_offset = max(0, (rows - template_rows) // 2)
+            x_offset = max(0, (cols - template_cols) // 2)
+
+            for ty, row_str in enumerate(template):
+                y = ty + y_offset
+                if y >= rows:
+                    continue
+                for tx, char in enumerate(row_str):
+                    x = tx + x_offset
+                    if x >= cols:
+                        continue
+                    if char == '#':
                         positions.append(f"{x}_{y}")
             return positions
 
@@ -3111,19 +3228,59 @@ class LevelGenerator:
 
         # ============ Category 7: Artistic Patterns (45-49) ============
 
-        # Pattern 45: Butterfly
+        # Pattern 45: Butterfly (pixel art style)
         def butterfly():
             positions = []
-            wing_radius = min(cols, rows) / 2.5
-            body_width = max(1, cols // 6)
-            for x in range(cols):
-                for y in range(rows):
-                    dx = abs(x - center_x + 0.5)
-                    dy = y - center_y + 0.5
-                    # Wings (two circles offset from center)
-                    wing_dist = ((dx - wing_radius * 0.5) ** 2 + dy ** 2) ** 0.5
-                    # Body (center column)
-                    if wing_dist <= wing_radius * 0.7 or dx <= body_width / 2:
+            # Define butterfly templates for different grid sizes
+            if cols <= 5 or rows <= 5:
+                # Small butterfly
+                template = [
+                    "# # #",
+                    "## ##",
+                    " # # ",
+                    "## ##",
+                    "# # #",
+                ]
+            elif cols <= 7 or rows <= 7:
+                # Medium butterfly
+                template = [
+                    "#  #  #",
+                    "## # ##",
+                    "### ###",
+                    "  ###  ",
+                    "### ###",
+                    "## # ##",
+                    "#  #  #",
+                ]
+            else:
+                # Large butterfly for 8+ sized grids
+                template = [
+                    "#      #",
+                    "##    ##",
+                    "### ####",
+                    "########",
+                    "   ##   ",
+                    "########",
+                    "### ####",
+                    "##    ##",
+                ]
+
+            template_rows = len(template)
+            template_cols = max(len(r) for r in template)
+
+            # Center the butterfly in the grid
+            y_offset = max(0, (rows - template_rows) // 2)
+            x_offset = max(0, (cols - template_cols) // 2)
+
+            for ty, row_str in enumerate(template):
+                y = ty + y_offset
+                if y >= rows:
+                    continue
+                for tx, char in enumerate(row_str):
+                    x = tx + x_offset
+                    if x >= cols:
+                        continue
+                    if char == '#':
                         positions.append(f"{x}_{y}")
             return positions
 
@@ -3729,6 +3886,8 @@ class LevelGenerator:
         if pattern_index is not None and 0 <= pattern_index < TOTAL_PATTERNS:
             pattern_name, pattern_fn = all_patterns[pattern_index]
             best_positions = pattern_fn()
+            # DEBUG: Print pattern selection
+            print(f"[AESTHETIC_PATTERN] Using specified pattern_index={pattern_index}, name={pattern_name}, positions={len(best_positions)}")
             if not best_positions:
                 # Fallback to filled rectangle if chosen pattern returns nothing
                 best_positions = filled_rectangle()
@@ -3773,12 +3932,30 @@ class LevelGenerator:
             _, best_positions, selected_pattern = top_candidates[selected_idx]
 
         # If we have too many positions, trim from edges (maintain symmetry)
+        # CRITICAL FIX: When pattern_index is explicitly specified (e.g., special shape levels),
+        # preserve the pattern shape by allowing more tiles (up to 50% more than target)
+        # This ensures heart, star, butterfly patterns maintain their visual identity
         if len(best_positions) > target_count:
-            def dist_from_center(pos: str) -> float:
-                x, y = map(int, pos.split("_"))
-                return ((x - center_x + 0.5) ** 2 + (y - center_y + 0.5) ** 2) ** 0.5
-            best_positions.sort(key=dist_from_center)
-            best_positions = best_positions[:target_count]
+            if pattern_index is not None:
+                # For specified patterns: allow up to 50% more tiles to preserve shape
+                max_allowed = int(target_count * 1.5)
+                if len(best_positions) <= max_allowed:
+                    # Pattern is within acceptable range, keep it as-is
+                    pass
+                else:
+                    # Pattern is too large, trim minimally to preserve shape
+                    def dist_from_center(pos: str) -> float:
+                        x, y = map(int, pos.split("_"))
+                        return ((x - center_x + 0.5) ** 2 + (y - center_y + 0.5) ** 2) ** 0.5
+                    best_positions.sort(key=dist_from_center)
+                    best_positions = best_positions[:max_allowed]
+            else:
+                # Auto-selected pattern: trim to exact target_count
+                def dist_from_center(pos: str) -> float:
+                    x, y = map(int, pos.split("_"))
+                    return ((x - center_x + 0.5) ** 2 + (y - center_y + 0.5) ** 2) ** 0.5
+                best_positions.sort(key=dist_from_center)
+                best_positions = best_positions[:target_count]
 
         return best_positions
 
@@ -8712,10 +8889,13 @@ class LevelGenerator:
 
         Rules for playability:
         1. Total matchable tiles must be divisible by 3
-        2. Each tile type count must be divisible by 3
+        2. Each tile type count must be divisible by 3 (including t0 tiles after distribution)
         3. Total tiles must meet minimum count (industry standard)
            - Level 1-5 (tutorial): minimum 9 tiles (3 sets)
            - Level 6+: minimum 18 tiles (6 sets)
+
+        CRITICAL: This function now simulates actual t0 tile distribution to ensure
+        the final tile type counts are all divisible by 3.
 
         Args:
             level: The level data to validate
@@ -8727,22 +8907,57 @@ class LevelGenerator:
         num_layers = level.get("layer", 8)
         type_counts: Dict[str, int] = {}
         total_matchable = 0
+        t0_count = 0
 
+        # First pass: count regular tiles and t0 tiles separately
         for i in range(num_layers):
             layer_key = f"layer_{i}"
             tiles = level.get(layer_key, {}).get("tiles", {})
             for pos, tile_data in tiles.items():
                 if isinstance(tile_data, list) and len(tile_data) > 0:
                     tile_type = tile_data[0]
-                    # Count internal tiles for craft/stack
+                    # Count internal tiles for craft/stack as t0
                     if tile_type in self.GOAL_TYPES or tile_type.startswith("craft_") or tile_type.startswith("stack_"):
                         if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
                             internal_count = int(tile_data[2][0]) if tile_data[2][0] else 0
-                            type_counts["t0"] = type_counts.get("t0", 0) + internal_count
+                            t0_count += internal_count
                             total_matchable += internal_count
                     else:
                         type_counts[tile_type] = type_counts.get(tile_type, 0) + 1
                         total_matchable += 1
+
+        # CRITICAL: Simulate actual t0 tile distribution using bot_simulator logic
+        # This gives us the REAL final tile type counts
+        if t0_count > 0:
+            use_tile_count = level.get("useTileCount", 5)
+            rand_seed = level.get("randSeed", 0)
+            shuffle_tile = level.get("xShuffleTile", 0)
+            type_imbalance = level.get("xTypeImbalance", 0)
+            unlock_tile = level.get("unlockTile", level.get("xUnlockTile", 0))
+
+            # Detect tile type offset from existing tiles (e.g., t11~t15 instead of t1~t5)
+            tile_type_offset = 0
+            if type_counts:
+                existing_t_types = [t for t in type_counts.keys() if t.startswith("t") and t[1:].isdigit()]
+                if existing_t_types:
+                    min_tile_num = min(int(t[1:]) for t in existing_t_types)
+                    if min_tile_num > use_tile_count:
+                        tile_type_offset = min_tile_num - 1
+
+            # Get the actual t0 distribution
+            t0_assignments = TileDistributor.assign_t0_tiles(
+                t0_count=t0_count,
+                use_tile_count=use_tile_count,
+                rand_seed=rand_seed,
+                shuffle_tile=shuffle_tile,
+                type_imbalance=type_imbalance,
+                unlock_tile=unlock_tile,
+                tile_type_offset=tile_type_offset
+            )
+
+            # Count the distributed t0 tiles by type
+            for tile_type in t0_assignments:
+                type_counts[tile_type] = type_counts.get(tile_type, 0) + 1
 
         # Check for types with count not divisible by 3
         bad_types = [(t, c) for t, c in type_counts.items() if c % 3 != 0]
@@ -8870,8 +9085,13 @@ class LevelGenerator:
         """
         Aggressively fix tile counts to ensure playability.
         This is a last-resort function that will force-fix any remaining issues.
+
+        CRITICAL: This function now uses actual t0 distribution simulation to ensure
+        the final tile type counts are all divisible by 3.
         """
         num_layers = level.get("layer", 8)
+        use_tile_count = level.get("useTileCount", 5)
+        rand_seed = level.get("randSeed", 0)
 
         # CRITICAL: First fix t0 (goal internals) to be divisible by 3
         # This must happen BEFORE removing regular tiles, because t0 affects total
@@ -8912,10 +9132,11 @@ class LevelGenerator:
                 goalCount[tile_type] = goalCount.get(tile_type, 0) + internal_count
             level["goalCount"] = goalCount
 
-        # Now count all tiles including updated t0
+        # Now count all tiles including updated t0 WITH ACTUAL DISTRIBUTION
         type_counts: Dict[str, int] = {}
         type_positions: Dict[str, List[Tuple[int, str]]] = {}
         total_matchable = 0
+        updated_t0_count = 0
 
         for i in range(num_layers):
             layer_key = f"layer_{i}"
@@ -8926,7 +9147,7 @@ class LevelGenerator:
                     if tile_type in self.GOAL_TYPES or tile_type.startswith("craft_") or tile_type.startswith("stack_"):
                         if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
                             internal_count = int(tile_data[2][0]) if tile_data[2][0] else 0
-                            type_counts["t0"] = type_counts.get("t0", 0) + internal_count
+                            updated_t0_count += internal_count
                             total_matchable += internal_count
                     else:
                         type_counts[tile_type] = type_counts.get(tile_type, 0) + 1
@@ -8934,6 +9155,29 @@ class LevelGenerator:
                         if tile_type not in type_positions:
                             type_positions[tile_type] = []
                         type_positions[tile_type].append((i, pos))
+
+        # CRITICAL: Simulate actual t0 distribution to get real type counts
+        if updated_t0_count > 0:
+            # Detect tile type offset from existing tiles
+            tile_type_offset = 0
+            if type_counts:
+                existing_t_types = [t for t in type_counts.keys() if t.startswith("t") and t[1:].isdigit()]
+                if existing_t_types:
+                    min_tile_num = min(int(t[1:]) for t in existing_t_types)
+                    if min_tile_num > use_tile_count:
+                        tile_type_offset = min_tile_num - 1
+
+            t0_assignments = TileDistributor.assign_t0_tiles(
+                t0_count=updated_t0_count,
+                use_tile_count=use_tile_count,
+                rand_seed=rand_seed,
+                shuffle_tile=level.get("xShuffleTile", 0),
+                type_imbalance=level.get("xTypeImbalance", 0),
+                unlock_tile=level.get("unlockTile", level.get("xUnlockTile", 0)),
+                tile_type_offset=tile_type_offset
+            )
+            for tile_type in t0_assignments:
+                type_counts[tile_type] = type_counts.get(tile_type, 0) + 1
 
         # If total is not divisible by 3, remove tiles
         total_remainder = total_matchable % 3
@@ -8967,23 +9211,50 @@ class LevelGenerator:
                     level[layer_key]["num"] = str(len(level[layer_key]["tiles"]))
 
         # Recount and fix type distribution
+        # CRITICAL: Must include t0 distribution to accurately identify which types need fixing
         type_counts = {}
         type_positions = {}
+        recount_t0 = 0
         for i in range(num_layers):
             layer_key = f"layer_{i}"
             tiles = level.get(layer_key, {}).get("tiles", {})
             for pos, tile_data in tiles.items():
                 if isinstance(tile_data, list) and len(tile_data) > 0:
                     tile_type = tile_data[0]
-                    if tile_type not in self.GOAL_TYPES and not tile_type.startswith("craft_") and not tile_type.startswith("stack_"):
+                    if tile_type in self.GOAL_TYPES or tile_type.startswith("craft_") or tile_type.startswith("stack_"):
+                        if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
+                            recount_t0 += int(tile_data[2][0]) if tile_data[2][0] else 0
+                    else:
                         type_counts[tile_type] = type_counts.get(tile_type, 0) + 1
                         if tile_type not in type_positions:
                             type_positions[tile_type] = []
                         type_positions[tile_type].append((i, pos))
 
+        # Include t0 distribution in type counts
+        if recount_t0 > 0:
+            tile_type_offset = 0
+            if type_counts:
+                existing_t_types = [t for t in type_counts.keys() if t.startswith("t") and t[1:].isdigit()]
+                if existing_t_types:
+                    min_tile_num = min(int(t[1:]) for t in existing_t_types)
+                    if min_tile_num > use_tile_count:
+                        tile_type_offset = min_tile_num - 1
+
+            t0_assignments = TileDistributor.assign_t0_tiles(
+                t0_count=recount_t0,
+                use_tile_count=use_tile_count,
+                rand_seed=rand_seed,
+                shuffle_tile=level.get("xShuffleTile", 0),
+                type_imbalance=level.get("xTypeImbalance", 0),
+                unlock_tile=level.get("unlockTile", level.get("xUnlockTile", 0)),
+                tile_type_offset=tile_type_offset
+            )
+            for tile_type in t0_assignments:
+                type_counts[tile_type] = type_counts.get(tile_type, 0) + 1
+
         # Pair up types with remainder 1 and remainder 2
         max_iterations = 20
-        for _ in range(max_iterations):
+        for iteration in range(max_iterations):
             rem1 = [t for t, c in type_counts.items() if c % 3 == 1 and type_positions.get(t)]
             rem2 = [t for t, c in type_counts.items() if c % 3 == 2 and type_positions.get(t)]
 
@@ -8992,6 +9263,7 @@ class LevelGenerator:
 
             if rem1 and rem2:
                 # Move 1 tile from rem1 type to rem2 type
+                # rem1 loses 1 → divisible by 3, rem2 gains 1 → divisible by 3
                 type_a = rem1[0]
                 type_b = rem2[0]
                 if type_positions[type_a]:
@@ -9001,9 +9273,74 @@ class LevelGenerator:
                         level[layer_key]["tiles"][pos][0] = type_b
                         type_counts[type_a] -= 1
                         type_counts[type_b] = type_counts.get(type_b, 0) + 1
+                        if type_b not in type_positions:
+                            type_positions[type_b] = []
+                        type_positions[type_b].append((layer_idx, pos))
+            elif len(rem2) >= 2:
+                # Two rem2 types: move 1 tile from each to the other
+                # Before: A=2 mod 3, B=2 mod 3
+                # After swapping 1 from A to B: A=1 mod 3, B=0 mod 3
+                # Then swap another: A=0 mod 3, B=1 mod 3... not good
+                # Better: Move 2 tiles from rem2[0] to rem2[1]
+                # A: 2 -> 0 mod 3 (remove 2), B: 2 -> 1 mod 3 (add 2)... still bad
+                # Actually: swap 1 tile from A to B
+                # A becomes rem1 (c-1, mod 3 = 1), B becomes rem0 (c+1, mod 3 = 0)
+                type_a = rem2[0]
+                type_b = rem2[1]
+                if type_positions[type_a]:
+                    layer_idx, pos = type_positions[type_a].pop()
+                    layer_key = f"layer_{layer_idx}"
+                    if pos in level.get(layer_key, {}).get("tiles", {}):
+                        level[layer_key]["tiles"][pos][0] = type_b
+                        type_counts[type_a] -= 1
+                        type_counts[type_b] = type_counts.get(type_b, 0) + 1
+                        if type_b not in type_positions:
+                            type_positions[type_b] = []
+                        type_positions[type_b].append((layer_idx, pos))
+                        # type_a: rem2 -> rem1, type_b: rem2 -> rem0
+            elif len(rem1) >= 2:
+                # Two rem1 types: move 1 tile from rem1[0] to rem1[1]
+                # A becomes rem0 (c-1), B becomes rem2 (c+1)
+                type_a = rem1[0]
+                type_b = rem1[1]
+                if type_positions[type_a]:
+                    layer_idx, pos = type_positions[type_a].pop()
+                    layer_key = f"layer_{layer_idx}"
+                    if pos in level.get(layer_key, {}).get("tiles", {}):
+                        level[layer_key]["tiles"][pos][0] = type_b
+                        type_counts[type_a] -= 1
+                        type_counts[type_b] = type_counts.get(type_b, 0) + 1
+                        if type_b not in type_positions:
+                            type_positions[type_b] = []
+                        type_positions[type_b].append((layer_idx, pos))
+                        # type_a: rem1 -> rem0, type_b: rem1 -> rem2
             else:
-                # Need to handle 3 types with same remainder
-                break
+                # Single rem1 or rem2 with no pair - can't fix with swaps
+                # Need to remove or add tiles
+                if rem2 and type_positions.get(rem2[0]):
+                    # Remove 2 tiles from rem2 type to make it rem0
+                    type_a = rem2[0]
+                    removed = 0
+                    while removed < 2 and type_positions[type_a]:
+                        layer_idx, pos = type_positions[type_a].pop()
+                        layer_key = f"layer_{layer_idx}"
+                        if pos in level.get(layer_key, {}).get("tiles", {}):
+                            del level[layer_key]["tiles"][pos]
+                            level[layer_key]["num"] = str(len(level[layer_key]["tiles"]))
+                            type_counts[type_a] -= 1
+                            removed += 1
+                elif rem1 and type_positions.get(rem1[0]):
+                    # Remove 1 tile from rem1 type to make it rem0
+                    type_a = rem1[0]
+                    if type_positions[type_a]:
+                        layer_idx, pos = type_positions[type_a].pop()
+                        layer_key = f"layer_{layer_idx}"
+                        if pos in level.get(layer_key, {}).get("tiles", {}):
+                            del level[layer_key]["tiles"][pos]
+                            level[layer_key]["num"] = str(len(level[layer_key]["tiles"]))
+                            type_counts[type_a] -= 1
+                else:
+                    break
 
         return level
 

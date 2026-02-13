@@ -228,27 +228,60 @@ export class GameEngine {
 
   /**
    * t0 타일들을 3의 배수 규칙에 맞게 분배
-   * 백엔드 _distribute_t0_tiles와 동일한 로직
+   * 백엔드 TileDistributor.assign_t0_tiles와 동일한 로직
+   *
+   * CRITICAL: useTileCount를 사용하여 t1~t{useTileCount} 범위로 분배해야 함
+   * CRITICAL: unlockTile > 0일 경우 첫 unlockTile * 3개의 타일은 "key"로 할당
    */
   private distributeT0Tiles(
     t0Count: number,
     existingTileCounts: Map<string, number>,
-    seed: number = 42
+    seed: number = 42,
+    unlockTile: number = 0,  // key 기믹: 버퍼 잠금 수
+    useTileCount: number = 0  // 사용할 타일 타입 개수 (레벨 JSON의 useTileCount)
   ): string[] {
     if (t0Count === 0) return [];
 
+    const assignments: string[] = [];
+    let remainingT0 = t0Count;
+
+    // CRITICAL: key 타일 먼저 할당 (unlockTile * 3개)
+    // 백엔드 TileDistributor와 동일하게 첫 unlockTile 그룹은 key 타일로 변환
+    if (unlockTile > 0) {
+      const keyTilesNeeded = unlockTile * 3;
+      const keyTilesToAdd = Math.min(keyTilesNeeded, remainingT0);
+      for (let i = 0; i < keyTilesToAdd; i++) {
+        assignments.push('key');
+      }
+      remainingT0 -= keyTilesToAdd;
+      console.log(`[distributeT0Tiles] Assigned ${keyTilesToAdd} key tiles (unlockTile=${unlockTile})`);
+    }
+
+    if (remainingT0 === 0) return assignments;
+
     // 사용 가능한 타일 타입 결정
-    // 기존 타일이 있으면 그 타입들만 사용, 없으면 RANDOM_TILE_POOL 사용
+    // CRITICAL FIX: useTileCount가 지정되면 t1~t{useTileCount} 사용 (백엔드와 동일)
+    // useTileCount가 없으면 기존 타일 타입에서 추출 (폴백)
     let availableTypes: string[];
-    if (existingTileCounts.size > 0) {
+    if (useTileCount > 0) {
+      // useTileCount 기반으로 타일 타입 결정 (백엔드 TileDistributor와 동일)
+      availableTypes = [];
+      for (let i = 1; i <= useTileCount; i++) {
+        availableTypes.push(`t${i}`);
+      }
+      console.log(`[distributeT0Tiles] Using useTileCount=${useTileCount}, availableTypes:`, availableTypes);
+    } else if (existingTileCounts.size > 0) {
+      // 폴백: 기존 타일 타입에서 추출
       availableTypes = Array.from(existingTileCounts.keys())
         .filter(t => t.startsWith('t') && t.slice(1).match(/^\d+$/))
         .sort((a, b) => parseInt(a.slice(1)) - parseInt(b.slice(1)));
       if (availableTypes.length === 0) {
         availableTypes = RANDOM_TILE_POOL.slice(0, 8);
       }
+      console.log(`[distributeT0Tiles] Fallback to existingTileCounts, availableTypes:`, availableTypes);
     } else {
       availableTypes = RANDOM_TILE_POOL.slice(0, 8);
+      console.log(`[distributeT0Tiles] Fallback to RANDOM_TILE_POOL, availableTypes:`, availableTypes);
     }
 
     // 각 타입별로 3의 배수가 되기 위해 필요한 타일 수 계산
@@ -262,9 +295,6 @@ export class GameEngine {
         typeNeeds.set(tileType, 3 - remainder);
       }
     }
-
-    const assignments: string[] = [];
-    let remainingT0 = t0Count;
 
     // 1단계: 3의 배수를 완성하기 위해 필요한 타일 먼저 할당
     const typesNeeding = Array.from(typeNeeds.entries())
@@ -578,10 +608,20 @@ export class GameEngine {
     }
 
     // ========== t0 타일 타입 분배 (3의 배수 규칙 보장) ==========
+    // CRITICAL: 레벨 JSON의 useTileCount와 randSeed를 사용하여 백엔드와 동일한 분배
+    const useTileCount = typeof levelJson.useTileCount === 'number'
+      ? levelJson.useTileCount : 0;
+    const randSeed = typeof levelJson.randSeed === 'number'
+      ? levelJson.randSeed : 42;
+
+    console.log(`[Init] t0 distribution params: useTileCount=${useTileCount}, randSeed=${randSeed}, unlockTile=${this.state.lockedSlots}`);
+
     const t0Assignments = this.distributeT0Tiles(
       t0Positions.length,
       existingTileCounts,
-      42 // seed
+      randSeed, // 레벨 JSON의 randSeed 사용
+      this.state.lockedSlots, // unlockTile - key 타일 생성에 사용
+      useTileCount // useTileCount 전달 (t1~t{useTileCount} 범위로 분배)
     );
 
     // 할당 맵 구성

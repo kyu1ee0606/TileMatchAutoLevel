@@ -143,24 +143,23 @@ def is_special_shape_level(level_number: int | None, cycle_size: int = SPECIAL_S
 def get_special_shape_pattern_index() -> int:
     """
     Get a random pattern index suitable for special shape levels.
-    Special shapes use visually distinctive patterns like stars, letters, arrows.
+    Special shapes use visually distinctive patterns that work well on small grids.
+
+    Only includes patterns that have been tested to display clearly:
+    - Pixel art templates (heart, star, butterfly) work best
+    - Simple letter shapes (H, X) also work well
 
     Returns:
         Pattern index (0-49) for aesthetic mode
     """
-    # Special shape patterns: visually distinctive, works well without strict symmetry
+    # Special shape patterns: pixel-art optimized for 7x7/8x8 grids
+    # Only include patterns that display clearly on small grids
     special_patterns = [
-        8,   # heart_shape
-        15,  # star_five_point
-        16,  # star_six_point
-        17,  # crescent_moon
-        18,  # sun_burst
-        19,  # spiral
-        20,  # letter_H
-        24,  # letter_X
-        25,  # letter_Y
-        45,  # butterfly
-        46,  # flower_pattern
+        8,   # heart_shape (pixel art)
+        15,  # star_five_point (pixel art)
+        45,  # butterfly (pixel art)
+        20,  # letter_H (simple shape)
+        24,  # letter_X (simple shape)
     ]
     return random.choice(special_patterns)
 
@@ -907,20 +906,16 @@ def generate_level(
         # No gimmicks specified
         obstacle_types = []
 
-    # Check if this is a special shape level (톱니바퀴 사이클: 매 10레벨마다 1개)
-    is_special_shape = is_special_shape_level(request.level_number)
+    # 특수 모양 레벨 로직 비활성화 - 다른 레벨과 동일하게 생성
+    # is_special_shape = is_special_shape_level(request.level_number)
+    is_special_shape = False
 
-    # For special shape levels, use distinctive patterns and allow asymmetry
+    # Use request parameters directly (no special shape override)
     pattern_index = request.pattern_index
     pattern_type = request.pattern_type
-    if is_special_shape and pattern_index is None:
-        pattern_index = get_special_shape_pattern_index()
-        pattern_type = "aesthetic"
-        logger.info(f"[SPECIAL_SHAPE] Level {request.level_number} is a special shape level, using pattern {pattern_index}")
 
     # Resolve symmetry mode
-    # At least one axis symmetry required, unless it's a special shape level
-    actual_symmetry = resolve_symmetry_mode(request.symmetry_mode, allow_none=is_special_shape)
+    actual_symmetry = resolve_symmetry_mode(request.symmetry_mode, allow_none=False)
 
     # DEBUG: Log symmetry mode resolution
     logger.info(f"[SYMMETRY_DEBUG] Level {request.level_number}: "
@@ -1012,10 +1007,11 @@ def generate_level(
             # Mark tutorial levels with the gimmick being introduced
             if tutorial_gimmick:
                 result.level_json["tutorial_gimmick"] = tutorial_gimmick
-            # Store actual symmetry mode used (not request value)
+            # Store actual symmetry mode and pattern type used (not request value)
             result.level_json["symmetry_mode"] = actual_symmetry
-            if request.pattern_type:
-                result.level_json["pattern_type"] = request.pattern_type
+            # Use local pattern_type variable (may be overridden for special shape levels)
+            if pattern_type:
+                result.level_json["pattern_type"] = pattern_type
 
             # Mark if this was a fallback generation
             if attempt > 0:
@@ -1356,19 +1352,16 @@ def generate_validated_level(
             # Adjust internal target difficulty based on previous results
             adjusted_difficulty = min(1.0, max(0.0, request.target_difficulty + difficulty_offset))
 
-            # Check if this is a special shape level (보스 전 스테이지: 9, 19, 29...)
-            is_special_shape = is_special_shape_level(request.level_number)
+            # 특수 모양 레벨 로직 비활성화 - 다른 레벨과 동일하게 생성
+            # is_special_shape = is_special_shape_level(request.level_number)
+            is_special_shape = False
 
-            # For special shape levels, use distinctive patterns and allow asymmetry
+            # Use request parameters directly (no special shape override)
             pattern_index = request.pattern_index
             pattern_type = request.pattern_type
-            if is_special_shape and pattern_index is None:
-                pattern_index = get_special_shape_pattern_index()
-                pattern_type = "aesthetic"
-                logger.info(f"[SPECIAL_SHAPE] Level {request.level_number} is a special shape level (pre-boss), using pattern {pattern_index}")
 
             # Resolve symmetry mode
-            actual_symmetry = resolve_symmetry_mode(request.symmetry_mode, allow_none=is_special_shape)
+            actual_symmetry = resolve_symmetry_mode(request.symmetry_mode, allow_none=False)
 
             params = GenerationParams(
                 target_difficulty=adjusted_difficulty,
@@ -1406,10 +1399,11 @@ def generate_validated_level(
             # Mark tutorial levels with the gimmick being introduced
             if tutorial_gimmick:
                 level_json["tutorial_gimmick"] = tutorial_gimmick
-            # Store actual symmetry mode used (not request value)
+            # Store actual symmetry mode and pattern type used (not request value)
             level_json["symmetry_mode"] = actual_symmetry
-            if request.pattern_type:
-                level_json["pattern_type"] = request.pattern_type
+            # Use local pattern_type variable (may be overridden for special shape levels)
+            if pattern_type:
+                level_json["pattern_type"] = pattern_type
 
             # FAST PATH: Skip bot simulation entirely when simulation is disabled
             if skip_simulation:
@@ -1474,10 +1468,11 @@ def generate_validated_level(
                 # Mark tutorial levels with the gimmick being introduced
                 if tutorial_gimmick:
                     best_result.level_json["tutorial_gimmick"] = tutorial_gimmick
-                # Store actual symmetry mode used (not request value)
+                # Store actual symmetry mode and pattern type used (not request value)
                 best_result.level_json["symmetry_mode"] = actual_symmetry
-                if request.pattern_type:
-                    best_result.level_json["pattern_type"] = request.pattern_type
+                # Use local pattern_type variable (may be overridden for special shape levels)
+                if pattern_type:
+                    best_result.level_json["pattern_type"] = pattern_type
                 best_actual_rates = actual_rates.copy()
                 best_target_rates = target_rates.copy()  # Store target rates for response
                 best_gaps = (avg_gap, max_gap)

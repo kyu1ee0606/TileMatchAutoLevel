@@ -140,16 +140,23 @@ def get_gboost_style_layer_config(level_number: int) -> Dict[str, Any]:
     Based on analysis of GBoost production levels (221 human-designed levels)
     and commercial games (Tile Explorer, Triple Tile, Tile Master 3D).
 
+    [v2] 타일 종류 수 업데이트:
+    - 보통 난이도(B등급): 10종류 기준선
+    - 쉬움 (S/A): 8-9종류
+    - 어려움 (C): 11종류
+    - 매우 어려움 (D+): 12종류
+    - 튜토리얼 (1-10): 4-5종류 유지
+
     1500레벨 전체에 대한 점진적 설정:
-    - Level 1-10: Tutorial - 1-2 layers, 7x7, 9-18 tiles
-    - Level 11-30: Early - 2-3 layers, 7x7, 18-36 tiles
-    - Level 31-60: Early-Mid - 3-4 layers, 7x7, 30-50 tiles
-    - Level 61-100: Mid - 4-5 layers, 10x10, 50-80 tiles
-    - Level 101-225: Mid-Late - 4-5 layers, 10x10, 60-90 tiles
-    - Level 226-600: Standard - 4-5 layers, 10x10, 70-100 tiles
-    - Level 601-1125: Advanced - 5 layers, 10x10, 75-105 tiles
-    - Level 1126-1500: Expert - 5-6 layers, 10x10, 84-120 tiles
-    - Level 1501+: Master - 5-6 layers, 10x10, 96-120 tiles
+    - Level 1-10: Tutorial - 1-2 layers, 7x7, 9-18 tiles, 4종류
+    - Level 11-30: Early - 2-3 layers, 7x7, 18-36 tiles, 5종류
+    - Level 31-60: Early-Mid - 3-4 layers, 7x7, 30-50 tiles, 7종류
+    - Level 61-100: Mid - 4-5 layers, 10x10, 50-80 tiles, 8종류
+    - Level 101-225: Mid-Late - 4-5 layers, 10x10, 60-90 tiles, 8종류
+    - Level 226-600: Standard - 4-5 layers, 10x10, 70-100 tiles, 9종류
+    - Level 601-1125: Advanced - 5 layers, 10x10, 75-105 tiles, 10종류 (기준선)
+    - Level 1126-1500: Expert - 5-6 layers, 10x10, 84-120 tiles, 11종류
+    - Level 1501+: Master - 5-6 layers, 10x10, 96-120 tiles, 12종류
 
     Args:
         level_number: The level number (1-based)
@@ -164,7 +171,7 @@ def get_gboost_style_layer_config(level_number: int) -> Dict[str, Any]:
             "cols": 7,
             "rows": 7,
             "total_tile_range": (9, 18),
-            "tile_types": 4,  # 4종류 (튜토리얼)
+            "tile_types": 4,  # 4종류 (튜토리얼 유지)
             "description": "Tutorial - minimal complexity"
         }
     elif level_number <= 30:
@@ -174,7 +181,7 @@ def get_gboost_style_layer_config(level_number: int) -> Dict[str, Any]:
             "cols": 7,
             "rows": 7,
             "total_tile_range": (18, 36),
-            "tile_types": 4,  # 4종류
+            "tile_types": 5,  # 4 → 5종류 (초반 점진적 증가)
             "description": "Early game - basic layering"
         }
     elif level_number <= 60:
@@ -184,7 +191,7 @@ def get_gboost_style_layer_config(level_number: int) -> Dict[str, Any]:
             "cols": 7,
             "rows": 7,
             "total_tile_range": (30, 50),
-            "tile_types": 5,  # 5종류
+            "tile_types": 7,  # 5 → 7종류
             "description": "Early-mid game - moderate complexity"
         }
     elif level_number <= 100:
@@ -194,7 +201,7 @@ def get_gboost_style_layer_config(level_number: int) -> Dict[str, Any]:
             "cols": 10,
             "rows": 10,
             "total_tile_range": (50, 80),
-            "tile_types": 5,  # 5종류
+            "tile_types": 8,  # 5 → 8종류
             "description": "Mid game - larger grid"
         }
     elif level_number <= 225:
@@ -204,7 +211,7 @@ def get_gboost_style_layer_config(level_number: int) -> Dict[str, Any]:
             "cols": 10,
             "rows": 10,
             "total_tile_range": (60, 90),
-            "tile_types": 5,  # 5종류
+            "tile_types": 8,  # 5 → 8종류 (S등급 마무리)
             "description": "Mid-late game - S등급 마무리"
         }
     elif level_number <= 600:
@@ -214,7 +221,7 @@ def get_gboost_style_layer_config(level_number: int) -> Dict[str, Any]:
             "cols": 10,
             "rows": 10,
             "total_tile_range": (70, 100),
-            "tile_types": 6,  # 6종류 (A등급)
+            "tile_types": 9,  # 6 → 9종류 (A등급)
             "description": "Standard game - A등급 주력"
         }
     elif level_number <= 1125:
@@ -224,7 +231,7 @@ def get_gboost_style_layer_config(level_number: int) -> Dict[str, Any]:
             "cols": 10,
             "rows": 10,
             "total_tile_range": (75, 105),
-            "tile_types": 6,  # 6종류 (B등급 ★핵심 재미 구간)
+            "tile_types": 10,  # 6 → 10종류 (B등급 기준선 ★)
             "description": "Advanced game - B등급 핵심 재미"
         }
     elif level_number <= 1500:
@@ -234,7 +241,7 @@ def get_gboost_style_layer_config(level_number: int) -> Dict[str, Any]:
             "cols": 10,
             "rows": 10,
             "total_tile_range": (84, 120),
-            "tile_types": 7,  # 7종류 (C/D등급 - 7슬롯 독과 균형)
+            "tile_types": 11,  # 7 → 11종류 (C/D등급)
             "description": "Expert game - C/D등급 도전"
         }
     else:
@@ -244,7 +251,7 @@ def get_gboost_style_layer_config(level_number: int) -> Dict[str, Any]:
             "cols": 10,
             "rows": 10,
             "total_tile_range": (96, 120),
-            "tile_types": 8,  # 8종류 (엔드게임)
+            "tile_types": 12,  # 8 → 12종류 (Master)
             "description": "Master game - 엔드게임"
         }
 
@@ -285,25 +292,21 @@ def get_tile_types_for_level(level_number: int) -> List[str]:
     """
     Get recommended tile types list based on level number.
 
-    톱니바퀴 패턴(10레벨 순환) 기반 타일 종류 선택:
-    - 10레벨 주기 내 가장 낮은 난이도 3개 레벨: 실제 타일 타입 5가지 사용
-    - 나머지 7개 레벨: t0 사용 (클라이언트에서 랜덤 타일로 변환)
+    [v2] 난이도별 타일 종류 수 (10종류 기준선):
+    - 튜토리얼 (1-10): 4-5종류
+    - 쉬움 (S/A): 8-9종류
+    - 보통 (B): 10종류 (기준선)
+    - 어려움 (C/D): 11-12종류
 
-    타일 그룹 순환 (30레벨마다 전체 순환, 쉬운 레벨에만 적용):
-    - 그룹 0: t1~t5 (레벨 1-10, 31-40, 61-70...)
-    - 그룹 1: t6~t10 (레벨 11-20, 41-50, 71-80...)
-    - 그룹 2: t11~t15 (레벨 21-30, 51-60, 81-90...)
-
-    [동적 난이도 기반 선택]
-    SAWTOOTH_PATTERN_10에서 가장 낮은 난이도 3개 position을 동적으로 찾아 적용.
-    현재 패턴 기준: position 0, 1, 2 (난이도 0.0, 0.1, 0.2)
-    패턴이 변경되면 자동으로 새로운 가장 낮은 position들이 선택됨.
+    톱니바퀴 패턴(10레벨 순환) 기반:
+    - 쉬운 레벨 (가장 낮은 난이도 3개): 실제 타일 타입 사용 (t1~t{tile_count})
+    - 일반 레벨: t0 사용 (클라이언트에서 랜덤 타일로 변환)
 
     Args:
         level_number: The level number (1-based)
 
     Returns:
-        List of tile type strings (t0 for random, or t1~t15 for fixed)
+        List of tile type strings (t0 for random, or t1~t{n} for fixed)
     """
     # 10레벨 주기 내 위치 (0~9)
     position_in_10 = (level_number - 1) % 10
@@ -313,22 +316,12 @@ def get_tile_types_for_level(level_number: int) -> List[str]:
     if position_in_10 in lowest_positions:
         # 레벨에 따른 타일 종류 수 결정 (난이도 스케일링)
         config = get_gboost_style_layer_config(level_number)
-        tile_count = config.get("tile_types", 5)
+        tile_count = config.get("tile_types", 10)
 
-        # 30레벨마다 타일 그룹 순환 (0, 1, 2)
-        group_index = ((level_number - 1) // 10) % 3
-
-        # 그룹별 타일 풀 정의
-        if group_index == 0:
-            base_tiles = ["t1", "t2", "t3", "t4", "t5"]
-        elif group_index == 1:
-            base_tiles = ["t6", "t7", "t8", "t9", "t10"]
-        else:
-            base_tiles = ["t11", "t12", "t13", "t14", "t15"]
-
-        # tile_count에 맞게 조정 (최소 3개 보장)
-        tile_count = max(3, min(tile_count, len(base_tiles)))
-        return base_tiles[:tile_count]
+        # [v2] 단순화: t1 ~ t{tile_count} 사용 (그룹 순환 제거)
+        # 최소 4개, 최대 12개 보장
+        tile_count = max(4, min(tile_count, 12))
+        return [f"t{i}" for i in range(1, tile_count + 1)]
     else:
         # 나머지 7개 레벨은 t0 사용 (클라이언트에서 랜덤 타일로 변환)
         return ["t0"]
@@ -370,9 +363,10 @@ class LevelGenerator:
     """Generates levels with target difficulty."""
 
     # Default tile types for generation
-    # NOTE: t0 is excluded - use t1~t5 for consistent tile types
+    # NOTE: t0 is excluded - use t1~t10 for consistent tile types
     # t0 was previously used as "random tile" but causes issues with bot simulation
-    DEFAULT_TILE_TYPES = ["t1", "t2", "t3", "t4", "t5"]
+    # [v2] 기본 10종류로 확장 (보통 난이도 기준선)
+    DEFAULT_TILE_TYPES = ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9", "t10"]
     OBSTACLE_TILE_TYPES = ["t8", "t9"]
     SPECIAL_TILE_TYPES = ["t10", "t11", "t12", "t14", "t15"]
     # All goal types - craft and stack with all 4 directions (s=south, n=north, e=east, w=west)

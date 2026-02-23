@@ -17,6 +17,13 @@ Tile Buster, Tile Explorer, Triple Match 3D 등 유명 타일 게임의
 3. 레이어/타일 수 점진적 증가 (연구 데이터 기반)
 4. 100레벨 단위 마일스톤 보스 시스템
 5. 로그 난이도 곡선 (1000레벨 이후 완만한 증가)
+
+[v2] 타일 종류 수 확장 (2026-02-23)
+- 보통 난이도(B등급): 10종류 기준선
+- 쉬움 (S/A): 8-9종류
+- 어려움 (C): 11종류
+- 매우 어려움 (D+): 12종류
+- 튜토리얼 (1-10): 4-5종류 유지
 """
 import math
 from typing import Dict, List, Optional, Any, Tuple
@@ -303,8 +310,8 @@ PHASE_CONFIGS: Dict[LevelPhase, PhaseConfig] = {
     LevelPhase.TUTORIAL: PhaseConfig(
         phase=LevelPhase.TUTORIAL,
         level_range=(1, 225),  # S등급 15% (225개)
-        min_tile_types=4,      # 최소 4종류 (GBoost 분석: 대부분 t0 랜덤 사용)
-        max_tile_types=5,      # 최대 5종류 (초반 복잡도 제한)
+        min_tile_types=4,      # 튜토리얼 유지
+        max_tile_types=8,      # 5 → 8 (S등급 상한) [v2]
         # [GBoost 분석] 레벨 1-30: 평균 4레이어, 최대 9레이어 → 점진적 증가
         min_layers=1,          # 레벨 1-10: 1-2 레이어
         max_layers=4,          # 레벨 21-225: 최대 4레이어 (GBoost 평균 기준)
@@ -321,8 +328,8 @@ PHASE_CONFIGS: Dict[LevelPhase, PhaseConfig] = {
     LevelPhase.BASIC: PhaseConfig(
         phase=LevelPhase.BASIC,
         level_range=(226, 600),  # A등급 25% (375개)
-        min_tile_types=5,        # 5종류로 시작 (복잡도 증가)
-        max_tile_types=6,        # 최대 6종류
+        min_tile_types=8,        # 5 → 8 [v2]
+        max_tile_types=9,        # 6 → 9 (A등급) [v2]
         # [GBoost 분석] 레벨 61-100: 평균 4.7레이어 → 4-5레이어
         min_layers=3,
         max_layers=5,
@@ -338,8 +345,8 @@ PHASE_CONFIGS: Dict[LevelPhase, PhaseConfig] = {
     LevelPhase.INTERMEDIATE: PhaseConfig(
         phase=LevelPhase.INTERMEDIATE,
         level_range=(601, 1125),  # B등급 35% (525개) ★핵심 재미 구간
-        min_tile_types=5,        # 5종류 유지 (복잡도 vs 플레이어빌리티 균형)
-        max_tile_types=7,        # 최대 7종류 (7슬롯 독과 균형)
+        min_tile_types=9,        # 5 → 9 [v2]
+        max_tile_types=10,       # 7 → 10 (B등급 기준선 ★) [v2]
         # [GBoost 분석] 레벨 101-150: 평균 4.8레이어, 151-200: 5레이어 고정
         min_layers=4,
         max_layers=5,
@@ -355,8 +362,8 @@ PHASE_CONFIGS: Dict[LevelPhase, PhaseConfig] = {
     LevelPhase.ADVANCED: PhaseConfig(
         phase=LevelPhase.ADVANCED,
         level_range=(1126, 1425),  # C등급 20% (300개)
-        min_tile_types=6,         # 6종류 (난이도 상승)
-        max_tile_types=8,         # 최대 8종류
+        min_tile_types=10,        # 6 → 10 [v2]
+        max_tile_types=11,        # 8 → 11 (C등급) [v2]
         # [GBoost 분석] 후반 레이어 5 고정 → 5-6레이어
         min_layers=5,
         max_layers=6,
@@ -372,8 +379,8 @@ PHASE_CONFIGS: Dict[LevelPhase, PhaseConfig] = {
     LevelPhase.EXPERT: PhaseConfig(
         phase=LevelPhase.EXPERT,
         level_range=(1426, 1500),  # D등급 5% (75개)
-        min_tile_types=6,
-        max_tile_types=8,         # 최대 8종류 (7슬롯 독보다 많음 = 어려움)
+        min_tile_types=11,        # 6 → 11 [v2]
+        max_tile_types=12,        # 8 → 12 (D등급) [v2]
         # [업계 표준] 최대 6레이어 (과도한 복잡성 방지)
         min_layers=5,
         max_layers=6,
@@ -389,8 +396,8 @@ PHASE_CONFIGS: Dict[LevelPhase, PhaseConfig] = {
     LevelPhase.MASTER: PhaseConfig(
         phase=LevelPhase.MASTER,
         level_range=(1501, 9999),  # 엔드게임 (무한 확장)
-        min_tile_types=6,
-        max_tile_types=8,
+        min_tile_types=11,        # 6 → 11 [v2]
+        max_tile_types=12,        # 8 → 12 (Master) [v2]
         # [엔드게임] 6레이어 유지 (과도한 복잡성 방지)
         min_layers=5,
         max_layers=6,

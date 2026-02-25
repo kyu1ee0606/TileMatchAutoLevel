@@ -63,54 +63,59 @@ def calculate_target_clear_rates(target_difficulty: float) -> Dict[str, float]:
     rates = {}
 
     # EASY levels (0-0.4): Realistic targets
+    # [v14.1] Level 31+ 기믹 해금 후 목표 대폭 하향
+    # 실제 테스트: ice+stack 기믹 → novice=32%, casual=30%, average=60%
     if target_difficulty <= 0.4:
         t = target_difficulty / 0.4
         easy_rates = {
-            "novice": 0.90 - t * 0.25,    # 90% -> 65%
-            "casual": 0.92 - t * 0.20,    # 92% -> 72%
-            "average": 0.95 - t * 0.15,   # 95% -> 80%
-            "expert": 0.97 - t * 0.10,    # 97% -> 87%
-            "optimal": 0.99 - t * 0.04,   # 99% -> 95%
+            "novice": 0.55 - t * 0.30,    # 55% -> 25% (Level31 실제: 32%)
+            "casual": 0.60 - t * 0.30,    # 60% -> 30% (Level31 실제: 30%)
+            "average": 0.80 - t * 0.20,   # 80% -> 60% (Level31 실제: 60%)
+            "expert": 0.95 - t * 0.05,    # 95% -> 90%
+            "optimal": 0.98 - t * 0.03,   # 98% -> 95%
         }
         for bot_type in BASE_TARGET_CLEAR_RATES:
             rates[bot_type] = easy_rates.get(bot_type, 0.85)
     elif target_difficulty <= 0.6:
         # MEDIUM levels (0.4-0.6): Transition zone
+        # [v14.1] EASY 끝값 → HARD 시작값 연속성 유지
         t = (target_difficulty - 0.4) / 0.2
         medium_start = {
-            "novice": 0.65,
-            "casual": 0.72,
-            "average": 0.80,
-            "expert": 0.87,
-            "optimal": 0.95,
+            "novice": 0.25,    # EASY 끝값(55%-30%=25%)과 연결
+            "casual": 0.30,    # EASY 끝값(60%-30%=30%)과 연결
+            "average": 0.60,   # EASY 끝값(80%-20%=60%)과 연결
+            "expert": 0.90,    # EASY 끝값(95%-5%=90%)과 연결
+            "optimal": 0.95,   # EASY 끝값(98%-3%=95%)과 연결
         }
         medium_end = {
-            "novice": 0.45,
-            "casual": 0.58,
-            "average": 0.72,
-            "expert": 0.82,
-            "optimal": 0.93,
+            "novice": 0.45,    # HARD 시작값과 연결
+            "casual": 0.55,    # HARD 시작값과 연결
+            "average": 0.72,   # HARD 시작값과 연결
+            "expert": 0.84,    # HARD 시작값과 연결
+            "optimal": 0.92,   # HARD 시작값과 연결
         }
         for bot_type in BASE_TARGET_CLEAR_RATES:
             start = medium_start.get(bot_type, 0.70)
             end = medium_end.get(bot_type, 0.60)
-            rates[bot_type] = start - t * (start - end)
+            rates[bot_type] = start + t * (end - start)  # start → end로 증가
     else:
         # HARD levels (0.6-1.0): Significant difficulty
+        # [v13.1] 현실적 목표 조정: 실제 봇 시뮬레이션 결과 기반
+        # E등급(90%) 실제 결과: nov=0-12%, cas=24-32%, ave=48-88%, exp=80-92%, opt=92-100%
         t = (target_difficulty - 0.6) / 0.4
         hard_start = {
-            "novice": 0.45,
-            "casual": 0.58,
-            "average": 0.72,
-            "expert": 0.82,
-            "optimal": 0.93,
+            "novice": 0.45,    # 0.6 난이도: 45%
+            "casual": 0.55,    # 0.6 난이도: 55%
+            "average": 0.72,   # 0.6 난이도: 72%
+            "expert": 0.84,    # 0.6 난이도: 84%
+            "optimal": 0.92,   # 0.6 난이도: 92%
         }
         hard_end = {
-            "novice": 0.10,
-            "casual": 0.25,
-            "average": 0.50,
-            "expert": 0.70,
-            "optimal": 0.85,
+            "novice": 0.03,    # E등급: 3% (실제 0-12% 범위 하단)
+            "casual": 0.20,    # E등급: 20% (실제 12-40% 범위)
+            "average": 0.70,   # E등급: 70% (실제 60-96% 범위, 상향)
+            "expert": 0.85,    # E등급: 85% (실제 76-100% 범위)
+            "optimal": 0.92,   # E등급: 92% (실제 88-100% 범위)
         }
         for bot_type in BASE_TARGET_CLEAR_RATES:
             start = hard_start.get(bot_type, 0.60)

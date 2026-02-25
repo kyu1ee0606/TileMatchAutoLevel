@@ -548,58 +548,60 @@ def calculate_target_clear_rates(target_difficulty: float) -> Dict[str, float]:
     rates = {}
 
     # EASY levels (0-0.4): Realistic targets considering game randomness
-    # Even easy levels have inherent variance from tile distribution and gimmicks
-    # Adjusted based on actual bot simulation results
+    # [v14] Level 31+에서 기믹 해금 후 novice/casual 목표 하향
+    # 실제 테스트: ice+stack 기믹이 있으면 novice=28%, casual=30% 수준
+    # 기존 목표(77-82%)는 기믹 없는 레벨에서만 가능
     if target_difficulty <= 0.4:
         t = target_difficulty / 0.4  # 0 at difficulty 0, 1 at difficulty 0.4
         easy_rates = {
-            "novice": 0.90 - t * 0.25,    # 90% -> 65%
-            "casual": 0.92 - t * 0.20,    # 92% -> 72%
-            "average": 0.95 - t * 0.15,   # 95% -> 80%
-            "expert": 0.97 - t * 0.10,    # 97% -> 87%
-            "optimal": 0.99 - t * 0.04,   # 99% -> 95%
+            "novice": 0.55 - t * 0.30,    # 55% -> 25% (Level31 실제: 32%)
+            "casual": 0.60 - t * 0.30,    # 60% -> 30% (Level31 실제: 30%)
+            "average": 0.80 - t * 0.20,   # 80% -> 60% (Level31 실제: 60%)
+            "expert": 0.95 - t * 0.05,    # 95% -> 90%
+            "optimal": 0.98 - t * 0.03,   # 98% -> 95%
         }
         for bot_type in BASE_TARGET_RATES:
             rates[bot_type] = easy_rates.get(bot_type, 0.85)
     elif target_difficulty <= 0.6:
         # MEDIUM levels (0.4-0.6): Transition zone
-        # NOTE: Raised targets to reflect actual bot performance (most levels are relatively easy)
+        # [v14.1] EASY 끝값 → HARD 시작값 연속성 유지
         t = (target_difficulty - 0.4) / 0.2  # 0 at 0.4, 1 at 0.6
         medium_start = {
-            "novice": 0.80,    # was 0.65: raised to match actual performance
-            "casual": 0.85,    # was 0.72
-            "average": 0.90,   # was 0.80
-            "expert": 0.94,    # was 0.87
-            "optimal": 0.98,   # was 0.95
+            "novice": 0.25,    # EASY 끝값(55%-30%=25%)과 연결
+            "casual": 0.30,    # EASY 끝값(60%-30%=30%)과 연결
+            "average": 0.60,   # EASY 끝값(80%-20%=60%)과 연결
+            "expert": 0.90,    # EASY 끝값(95%-5%=90%)과 연결
+            "optimal": 0.95,   # EASY 끝값(98%-3%=95%)과 연결
         }
         medium_end = {
-            "novice": 0.60,    # was 0.45: raised to realistic level
-            "casual": 0.70,    # was 0.58
-            "average": 0.80,   # was 0.72
-            "expert": 0.88,    # was 0.82
-            "optimal": 0.95,   # was 0.93
+            "novice": 0.45,    # HARD 시작값과 연결 (v13: 0.60)
+            "casual": 0.55,    # HARD 시작값과 연결 (v13: 0.70)
+            "average": 0.72,   # HARD 시작값과 연결 (v13: 0.80)
+            "expert": 0.84,    # HARD 시작값과 연결 (v13: 0.88)
+            "optimal": 0.92,   # HARD 시작값과 연결 (v13: 0.95)
         }
         for bot_type in BASE_TARGET_RATES:
             start = medium_start.get(bot_type, 0.70)
             end = medium_end.get(bot_type, 0.60)
-            rates[bot_type] = start - t * (start - end)
+            rates[bot_type] = start + t * (end - start)  # start → end로 증가
     else:
         # HARD levels (0.6-1.0): Significant difficulty for all but optimal
-        # NOTE: hard_start should match medium_end for continuity
+        # [v13.1] 현실적 목표 조정: 실제 봇 시뮬레이션 결과 기반
+        # E등급(90%) 실제 결과: nov=0-12%, cas=24-32%, ave=48-88%, exp=80-92%, opt=92-100%
         t = (target_difficulty - 0.6) / 0.4  # 0 at 0.6, 1 at 1.0
         hard_start = {
-            "novice": 0.60,    # matched with medium_end
-            "casual": 0.70,    # matched with medium_end
-            "average": 0.80,   # matched with medium_end
-            "expert": 0.88,    # matched with medium_end
-            "optimal": 0.95,   # matched with medium_end
+            "novice": 0.45,    # 0.6 난이도: 45%
+            "casual": 0.55,    # 0.6 난이도: 55%
+            "average": 0.72,   # 0.6 난이도: 72%
+            "expert": 0.84,    # 0.6 난이도: 84%
+            "optimal": 0.92,   # 0.6 난이도: 92%
         }
         hard_end = {
-            "novice": 0.20,    # was 0.10: raised to realistic level
-            "casual": 0.35,    # was 0.25
-            "average": 0.55,   # was 0.50
-            "expert": 0.75,    # same
-            "optimal": 0.88,   # same
+            "novice": 0.03,    # E등급: 3% (실제 0-12% 범위 하단)
+            "casual": 0.20,    # E등급: 20% (실제 12-40% 범위)
+            "average": 0.70,   # E등급: 70% (실제 60-96% 범위, 상향)
+            "expert": 0.85,    # E등급: 85% (실제 76-100% 범위)
+            "optimal": 0.92,   # E등급: 92% (실제 88-100% 범위)
         }
         for bot_type in BASE_TARGET_RATES:
             start = hard_start.get(bot_type, 0.70)
@@ -613,7 +615,7 @@ def calculate_target_clear_rates(target_difficulty: float) -> Dict[str, float]:
     return rates
 
 
-def calculate_match_score(actual_rates: Dict[str, float], target_rates: Dict[str, float]) -> Tuple[float, float, float]:
+def calculate_match_score(actual_rates: Dict[str, float], target_rates: Dict[str, float], target_difficulty: float = 0.5) -> Tuple[float, float, float]:
     """
     Calculate match score between actual and target clear rates.
 
@@ -622,11 +624,30 @@ def calculate_match_score(actual_rates: Dict[str, float], target_rates: Dict[str
     - avg_gap: average gap in percentage points
     - max_gap: maximum gap in percentage points
 
+    [v13] 난이도별 봇 가중치 적용:
+    - 낮은 난이도: 모든 봇 동일 가중치
+    - 높은 난이도: average/expert/optimal에 더 높은 가중치
+      (novice/casual은 높은 난이도에서 클리어 못하는 것이 정상)
+
     Note: "Too easy" (actual > target) is penalized less than "too hard" (actual < target)
     because players prefer easier levels over frustratingly hard ones.
     """
+    # [v13] 난이도별 봇 가중치: 높은 난이도에서 core bot 중심으로 평가
+    if target_difficulty >= 0.8:
+        # E등급: average/expert/optimal 중심 (novice/casual은 거의 무시)
+        bot_weights = {"novice": 0.3, "casual": 0.5, "average": 1.5, "expert": 1.5, "optimal": 1.2}
+    elif target_difficulty >= 0.6:
+        # C/D등급: core bot 중심, novice/casual 약간 감소
+        bot_weights = {"novice": 0.6, "casual": 0.8, "average": 1.3, "expert": 1.2, "optimal": 1.1}
+    else:
+        # 낮은 난이도: 균등 가중치
+        bot_weights = {"novice": 1.0, "casual": 1.0, "average": 1.0, "expert": 1.0, "optimal": 1.0}
+
     gaps = []
     raw_gaps = []  # For reporting
+    total_weight = 0
+    weighted_sum = 0
+
     for bot_type in target_rates:
         actual = actual_rates.get(bot_type, 0)
         target = target_rates[bot_type]
@@ -640,10 +661,16 @@ def calculate_match_score(actual_rates: Dict[str, float], target_rates: Dict[str
             gap = abs(raw_gap)  # Full penalty
         gaps.append(gap)
 
+        # 가중 평균 계산
+        weight = bot_weights.get(bot_type, 1.0)
+        weighted_sum += gap * weight
+        total_weight += weight
+
     if not gaps:
         return 100.0, 0.0, 0.0
 
-    avg_gap = sum(gaps) / len(gaps)
+    # [v13] 가중 평균 사용
+    avg_gap = weighted_sum / total_weight if total_weight > 0 else sum(gaps) / len(gaps)
     max_gap = max(gaps)
     weighted_gap = avg_gap * 0.6 + max_gap * 0.4
     match_score = max(0, 100 - weighted_gap * 2)
@@ -1164,20 +1191,33 @@ def generate_validated_level(
 
     # OPTIMIZATION: Adaptive simulation iterations based on difficulty
     # Lower difficulty = fewer iterations needed (more predictable outcomes)
+    # [v4] 높은 난이도에서는 기본값 증가 (정확도 향상)
     if skip_simulation:
         effective_iterations = 0
         logger.info(f"[FAST_GENERATE] simulation_iterations=0, skipping bot simulation")
     elif request.target_difficulty <= 0.2:
-        effective_iterations = min(8, request.simulation_iterations)   # Very easy: 8 iterations enough
+        effective_iterations = min(8, request.simulation_iterations)   # S등급: 8회
     elif request.target_difficulty <= 0.4:
-        effective_iterations = min(12, request.simulation_iterations)  # Easy: 12 iterations
+        effective_iterations = min(12, request.simulation_iterations)  # A등급: 12회
     elif request.target_difficulty <= 0.6:
-        effective_iterations = min(18, request.simulation_iterations)  # Medium: 18 iterations
+        effective_iterations = min(18, request.simulation_iterations)  # B등급: 18회
+    elif request.target_difficulty <= 0.8:
+        # C등급: 최소 20회, 최대 요청값
+        effective_iterations = max(20, request.simulation_iterations)
     else:
-        effective_iterations = request.simulation_iterations            # Hard: full iterations
+        # D/E등급: 최소 25회 (높은 난이도는 분산이 커서 더 많은 샘플 필요)
+        effective_iterations = max(25, request.simulation_iterations)
 
     # OPTIMIZATION: Early exit threshold - stop if match is good enough
-    EARLY_EXIT_THRESHOLD = 80.0  # Stop if match score >= 80%
+    EARLY_EXIT_THRESHOLD = 85.0  # Stop if match score >= 85% (increased from 80%)
+
+    # [v4] 높은 난이도에서 재시도 횟수 자동 증가
+    # C/D/E 등급은 수렴에 더 많은 시도 필요
+    effective_max_retries = request.max_retries
+    if request.target_difficulty >= 0.7:
+        effective_max_retries = max(5, request.max_retries)  # D/E등급: 최소 5회
+    elif request.target_difficulty >= 0.5:
+        effective_max_retries = max(4, request.max_retries)  # C등급: 최소 4회
 
     # Convert goals from Pydantic models to dicts
     goals = None
@@ -1202,27 +1242,90 @@ def generate_validated_level(
     best_max_moves = 50
 
     # Adaptive parameters for retry
-    current_max_layers = request.max_layers
-    difficulty_offset = 0.0  # Adjust target difficulty for generator
-    max_moves_modifier = 1.0  # Reduce max_moves for harder levels
-
-    # CALIBRATED moves_ratio based on target difficulty
-    # This is the key parameter for controlling difficulty
-    # Higher ratio = easier (more moves allowed)
-    # Lower ratio = harder (tighter move constraint)
-    # IMPROVED: More aggressive settings based on test findings
+    # [v13] 목표 난이도에 따른 레이어 수 조정 (양방향)
+    # S/A등급: 레이어 제한 (너무 복잡하지 않게)
+    # C/D/E등급: 레이어 최소 보장 (충분히 어렵게)
     if request.target_difficulty <= 0.2:
-        moves_ratio = 1.5  # Very very easy: 50% extra moves
+        # S등급 (매우 쉬움): 최대 2레이어
+        current_max_layers = min(request.max_layers, 2)
     elif request.target_difficulty <= 0.35:
-        moves_ratio = 1.35  # Very easy: 35% extra moves
+        # A등급 (쉬움): 최대 3레이어
+        current_max_layers = min(request.max_layers, 3)
     elif request.target_difficulty <= 0.5:
-        moves_ratio = 1.2  # Medium: 20% extra moves
-    elif request.target_difficulty <= 0.65:
-        moves_ratio = 1.1  # Hard: 10% extra moves
-    elif request.target_difficulty <= 0.8:
-        moves_ratio = 1.02  # Very Hard: 2% extra moves (almost exact)
+        # B등급 (보통): 최대 4레이어
+        current_max_layers = min(request.max_layers, 4)
+    elif request.target_difficulty <= 0.7:
+        # C등급 (어려움): 최소 4레이어, 최대 6레이어
+        current_max_layers = max(4, min(request.max_layers, 6))
+    elif request.target_difficulty <= 0.85:
+        # D등급 (매우 어려움): 최소 5레이어, 최대 7레이어
+        current_max_layers = max(5, min(request.max_layers, 7))
     else:
-        moves_ratio = 1.0  # Extreme: exact tile count (no extra moves)
+        # E등급 (극한): 최소 6레이어, 최대 8레이어
+        current_max_layers = max(6, min(request.max_layers, 8))
+
+    print(f"[LAYERS] target={request.target_difficulty:.2f}, current_max_layers={current_max_layers}")
+
+    # [v13] 등급별 초기 부스트: 더 어려운 레벨 생성
+    # 핵심 변경: max_moves_modifier 상한 상향 (0.75→0.82)
+    # 이유: 너무 낮은 modifier는 novice/casual 봇이 아예 클리어 불가능하게 만듦
+    if request.target_difficulty >= 0.85:
+        # E등급 (85%+): 강한 부스트 (modifier 0.75→0.82)
+        difficulty_offset = 0.25
+        max_moves_modifier = 0.82  # v12: 0.75 → v13: 0.82 (novice/casual 최소 클리어 보장)
+        print(f"[E_GRADE_BOOST] offset=+0.25, modifier=0.82")
+    elif request.target_difficulty >= 0.70:
+        # D등급 (70-85%): 강한 부스트 (modifier 0.80→0.85)
+        difficulty_offset = 0.20
+        max_moves_modifier = 0.85  # v12: 0.80 → v13: 0.85
+        print(f"[D_GRADE_BOOST] offset=+0.20, modifier=0.85")
+    elif request.target_difficulty >= 0.50:
+        # C등급 (50-70%): 중간 부스트
+        difficulty_offset = 0.15
+        max_moves_modifier = 0.88  # v12: 0.85 → v13: 0.88
+        print(f"[C_GRADE_BOOST] offset=+0.15, modifier=0.88")
+    elif request.target_difficulty >= 0.35:
+        # B등급 (35-50%): 약한 부스트
+        difficulty_offset = 0.10
+        max_moves_modifier = 0.92  # v12: 0.90 → v13: 0.92
+        print(f"[B_GRADE_BOOST] offset=+0.10, modifier=0.92")
+    else:
+        # S/A등급: 부스트 없음
+        difficulty_offset = 0.0
+        max_moves_modifier = 1.0
+
+    # ========================================================
+    # DIFFICULTY PROFILE SYSTEM (v4)
+    # 난이도별 최적화된 파라미터 프로파일
+    # ========================================================
+    # [v6] 더 공격적인 moves_ratio - 높은 난이도에서 이동 횟수 대폭 감소
+    # [v13] DIFFICULTY_PROFILES 업데이트
+    # - E등급: 레이어 증가 (6-7 → 6-8), 기믹 증가 (3 → 4), moves_ratio 감소 (0.70 → 0.65)
+    # - D등급: 레이어 증가 (5-6 → 5-7)
+    DIFFICULTY_PROFILES = {
+        "S": {"min_diff": 0.0, "max_diff": 0.2, "moves_ratio": 1.5, "min_layers": 1, "max_layers": 2, "tiles": 4, "gimmicks": 0},
+        "A": {"min_diff": 0.2, "max_diff": 0.35, "moves_ratio": 1.35, "min_layers": 2, "max_layers": 3, "tiles": 4, "gimmicks": 1},
+        "B": {"min_diff": 0.35, "max_diff": 0.5, "moves_ratio": 1.10, "min_layers": 3, "max_layers": 4, "tiles": 5, "gimmicks": 2},
+        "C": {"min_diff": 0.5, "max_diff": 0.7, "moves_ratio": 0.88, "min_layers": 4, "max_layers": 5, "tiles": 6, "gimmicks": 2},
+        "D": {"min_diff": 0.7, "max_diff": 0.85, "moves_ratio": 0.78, "min_layers": 5, "max_layers": 7, "tiles": 7, "gimmicks": 3},
+        "E": {"min_diff": 0.85, "max_diff": 1.0, "moves_ratio": 0.65, "min_layers": 6, "max_layers": 8, "tiles": 8, "gimmicks": 4},
+    }
+
+    def get_profile(target_diff):
+        for grade, profile in DIFFICULTY_PROFILES.items():
+            if profile["min_diff"] <= target_diff < profile["max_diff"]:
+                return grade, profile
+        return "E", DIFFICULTY_PROFILES["E"]
+
+    current_grade, current_profile = get_profile(request.target_difficulty)
+    moves_ratio = current_profile["moves_ratio"]
+
+    # 난이도 구간 내 위치에 따른 미세 조정 (0~1 범위)
+    grade_position = (request.target_difficulty - current_profile["min_diff"]) / (current_profile["max_diff"] - current_profile["min_diff"])
+    # 구간 상위로 갈수록 moves_ratio 감소
+    moves_ratio -= grade_position * 0.05
+
+    print(f"[PROFILE] Grade={current_grade}, target={request.target_difficulty:.2f}, moves_ratio={moves_ratio:.3f}, position={grade_position:.2f}")
 
     # CALIBRATED tile types based on target difficulty
     # More types = harder (more variety to match)
@@ -1237,30 +1340,48 @@ def generate_validated_level(
     ALL_AVAILABLE_TILES = [f"t{i}" for i in range(1, 16)]  # t1~t15 전체 풀
     is_tutorial_level_1 = request.level_number == 1
 
-    if request.target_difficulty >= 0.85:
-        tile_type_count = 8   # extreme (85%+)
-    elif request.target_difficulty >= 0.75:
-        tile_type_count = 8   # very hard (75-85%)
-    elif request.target_difficulty >= 0.65:
-        tile_type_count = 7   # hard (65-75%)
-    elif request.target_difficulty >= 0.55:
-        tile_type_count = 6   # medium-hard (55-65%)
-    elif request.target_difficulty >= 0.45:
-        tile_type_count = 5   # medium (45-55%)
-    elif request.target_difficulty >= 0.35:
-        tile_type_count = 5   # medium-easy (35-45%)
-    elif is_tutorial_level_1 and request.target_difficulty < 0.25:
-        tile_type_count = 3   # level 1 tutorial only (<25%)
+    # [v9] 타일 종류 수 - 8개 기준, 난이도에 따라 ±2 조정
+    # 기준선: 8개 (보통 난이도), 재시도 시 min/max 범위 내에서만 조정
+    # TILE_RANGE: (초기값, 최소값, 최대값)
+    TILE_RANGES = {
+        "tutorial": (4, 4, 4),    # 튜토리얼: 고정 4개
+        "S": (6, 5, 7),           # S등급 (0~20%): 6개 ± 1
+        "A": (7, 6, 8),           # A등급 (20~35%): 7개 ± 1
+        "B": (8, 6, 10),          # B등급 (35~50%): 8개 ± 2
+        "C": (8, 7, 10),          # C등급 (50~70%): 8개, 최소 7
+        "D": (9, 7, 11),          # D등급 (70~85%): 9개 ± 2
+        "E": (10, 8, 12),         # E등급 (85~100%): 10개 ± 2
+    }
+
+    if is_tutorial_level_1 and request.target_difficulty < 0.25:
+        tile_grade = "tutorial"
+    elif request.target_difficulty < 0.2:
+        tile_grade = "S"
+    elif request.target_difficulty < 0.35:
+        tile_grade = "A"
+    elif request.target_difficulty < 0.5:
+        tile_grade = "B"
+    elif request.target_difficulty < 0.7:
+        tile_grade = "C"
+    elif request.target_difficulty < 0.85:
+        tile_grade = "D"
     else:
-        tile_type_count = 4   # minimum for all other levels
+        tile_grade = "E"
+
+    tile_type_count, min_tile_types, max_tile_types = TILE_RANGES[tile_grade]
+    logger.info(f"[TILE_RANGE] Grade={tile_grade}, initial={tile_type_count}, range=[{min_tile_types}, {max_tile_types}]")
 
     # Use get_tile_types_for_level when level_number is provided (supports t0 for client-side randomization)
     # t0 = 랜덤 타일 플레이스홀더 (게임 시작 시 실제 타일로 변환)
     if request.tile_types:
         base_tile_types = list(request.tile_types)
     elif request.level_number is not None:
-        # Use level-based tile type selection (may return t0 for client-side randomization)
-        base_tile_types = get_tile_types_for_level(request.level_number)
+        # [FIX v2] 모든 등급에서 실제 타일 타입 사용 (t0 모드 비활성화)
+        # 문제: t0 사용 시 useTileCount가 level_number 기반으로 설정되어 난이도와 맞지 않음
+        # Level 31+ 에서 B/C/D 등급의 난이도 일치율이 급격히 떨어지는 원인
+        # 해결: 모든 등급에서 target_difficulty 기반 타일 수 사용
+        base_tile_types = [f"t{i}" for i in range(1, tile_type_count + 1)]
+        logger.info(f"[TILE_FORCE] Level {request.level_number}: using {tile_type_count} actual tiles for target_difficulty={request.target_difficulty:.2f}")
     else:
         # Fallback: random selection from available tiles (no level_number provided)
         default_tile_types = sorted(random.sample(ALL_AVAILABLE_TILES, tile_type_count))
@@ -1271,6 +1392,9 @@ def generate_validated_level(
 
     # Track tile type count separately for fine-tuning
     current_tile_type_count = len(current_tile_types)
+
+    # [v10] 진동 감지를 위한 히스토리 추적
+    direction_history = []  # 최근 조정 방향 기록 (1=too easy, -1=too hard)
 
     # Initial obstacle types from request (or auto-select based on difficulty)
     available_obstacles = ["chain", "frog", "ice", "grass", "bomb", "curtain", "teleport", "crate", "craft", "stack"]
@@ -1320,6 +1444,60 @@ def generate_validated_level(
 
     current_obstacle_types = base_obstacle_types.copy()
 
+    # [FIX] 목표 난이도에 따른 기믹 제한 (S/A등급 레벨이 기믹으로 어려워지는 문제 해결)
+    # 난이도가 높은 기믹: ice, bomb, crate, stack, craft, teleport
+    # 난이도가 낮은 기믹: chain, grass, frog, curtain
+    COMPLEX_GIMMICKS = {"ice", "bomb", "crate", "stack", "craft", "teleport"}
+    SIMPLE_GIMMICKS = {"chain", "grass", "frog", "curtain"}
+
+    if request.target_difficulty <= 0.2:
+        # S등급 (매우 쉬움): 기믹 완전 제거
+        if current_obstacle_types:
+            logger.info(f"[GIMMICK_LIMIT] S-grade: removing all gimmicks {current_obstacle_types} for target_difficulty={request.target_difficulty:.2f}")
+            current_obstacle_types = []
+    elif request.target_difficulty <= 0.35:
+        # A등급 (쉬움): 복잡한 기믹 제거, 최대 1개만
+        simple_only = [g for g in current_obstacle_types if g in SIMPLE_GIMMICKS]
+        if len(current_obstacle_types) != len(simple_only) or len(simple_only) > 1:
+            logger.info(f"[GIMMICK_LIMIT] A-grade: limiting gimmicks from {current_obstacle_types} to {simple_only[:1]} for target_difficulty={request.target_difficulty:.2f}")
+            current_obstacle_types = simple_only[:1]  # 최대 1개
+    elif request.target_difficulty <= 0.5:
+        # B등급 (보통): 복잡한 기믹 최대 1개, 전체 최대 2개
+        simple = [g for g in current_obstacle_types if g in SIMPLE_GIMMICKS]
+        complex = [g for g in current_obstacle_types if g in COMPLEX_GIMMICKS]
+        if len(complex) > 1 or len(current_obstacle_types) > 2:
+            limited = simple[:1] + complex[:1]
+            logger.info(f"[GIMMICK_LIMIT] B-grade: limiting gimmicks from {current_obstacle_types} to {limited} for target_difficulty={request.target_difficulty:.2f}")
+            current_obstacle_types = limited
+    elif request.target_difficulty <= 0.7:
+        # C등급 (어려움): 복잡한 기믹 최소 1개 보장, 전체 최소 2개
+        simple = [g for g in current_obstacle_types if g in SIMPLE_GIMMICKS]
+        complex = [g for g in current_obstacle_types if g in COMPLEX_GIMMICKS]
+        if len(complex) < 1 and base_obstacle_types:
+            # 기존 선택에서 복잡 기믹이 없으면 추가 시도
+            available_complex = [g for g in base_obstacle_types if g in COMPLEX_GIMMICKS and g not in current_obstacle_types]
+            if available_complex:
+                current_obstacle_types.append(available_complex[0])
+                logger.info(f"[GIMMICK_BOOST] C-grade: added complex gimmick {available_complex[0]} for target_difficulty={request.target_difficulty:.2f}")
+        if len(current_obstacle_types) < 2 and len(base_obstacle_types) >= 2:
+            missing = [g for g in base_obstacle_types if g not in current_obstacle_types]
+            if missing:
+                current_obstacle_types.extend(missing[:2 - len(current_obstacle_types)])
+                logger.info(f"[GIMMICK_BOOST] C-grade: boosted to {current_obstacle_types} for target_difficulty={request.target_difficulty:.2f}")
+    else:
+        # D등급 (매우 어려움): 복잡한 기믹 최소 2개 보장, 전체 최소 3개
+        simple = [g for g in current_obstacle_types if g in SIMPLE_GIMMICKS]
+        complex = [g for g in current_obstacle_types if g in COMPLEX_GIMMICKS]
+        if len(complex) < 2 and base_obstacle_types:
+            available_complex = [g for g in base_obstacle_types if g in COMPLEX_GIMMICKS and g not in current_obstacle_types]
+            for c in available_complex[:2 - len(complex)]:
+                current_obstacle_types.append(c)
+                logger.info(f"[GIMMICK_BOOST] D-grade: added complex gimmick {c} for target_difficulty={request.target_difficulty:.2f}")
+        if len(current_obstacle_types) < 3 and len(base_obstacle_types) >= 3:
+            missing = [g for g in base_obstacle_types if g not in current_obstacle_types]
+            current_obstacle_types.extend(missing[:3 - len(current_obstacle_types)])
+            logger.info(f"[GIMMICK_BOOST] D-grade: boosted to {current_obstacle_types} for target_difficulty={request.target_difficulty:.2f}")
+
     # CALIBRATED grid size based on target difficulty
     # 타일 매칭 게임 기준:
     # - 작은 그리드 = 적은 타일 = 쉬움 (S등급)
@@ -1347,10 +1525,17 @@ def generate_validated_level(
     min_grid_size = 5  # Minimum grid dimension
     max_grid_size = 9  # Maximum grid dimension
 
-    for attempt in range(1, request.max_retries + 1):
+    for attempt in range(1, effective_max_retries + 1):
         try:
             # Adjust internal target difficulty based on previous results
             adjusted_difficulty = min(1.0, max(0.0, request.target_difficulty + difficulty_offset))
+
+            # Log adjustment parameters for debugging (only on retry)
+            if attempt > 1:
+                logger.info(f"[RETRY {attempt}] target={request.target_difficulty:.2f}, adjusted={adjusted_difficulty:.2f}, "
+                           f"offset={difficulty_offset:+.2f}, moves_ratio={moves_ratio:.2f}, "
+                           f"tiles={len(current_tile_types)}, obstacles={current_obstacle_types}, "
+                           f"best_score={best_match_score:.1f}")
 
             # 특수 모양 레벨 로직 비활성화 - 다른 레벨과 동일하게 생성
             # is_special_shape = is_special_shape_level(request.level_number)
@@ -1432,12 +1617,21 @@ def generate_validated_level(
             all_target_rates = calculate_target_clear_rates(scoring_diff)
 
             # OPTIMIZATION: Run bot simulations in PARALLEL
-            # Core bots mode: 3 bots (casual/average/expert) for ~40% faster validation
-            # Full mode: 5 bots (all types) for comprehensive validation
+            # Adaptive bot selection based on difficulty for faster validation:
+            # - Low difficulty (<=0.4): Skip Expert/Optimal (they're overkill)
+            # - Medium difficulty (<=0.7): Skip Optimal
+            # - High difficulty (>0.7): All bots for comprehensive validation
             actual_rates = {}
             if request.use_core_bots_only:
                 bot_types = [BotType.CASUAL, BotType.AVERAGE, BotType.EXPERT]
+            elif request.target_difficulty <= 0.4:
+                # Low difficulty: Novice/Casual/Average sufficient (Expert/Optimal too slow)
+                bot_types = [BotType.NOVICE, BotType.CASUAL, BotType.AVERAGE]
+            elif request.target_difficulty <= 0.7:
+                # Medium difficulty: Include Expert, skip Optimal
+                bot_types = [BotType.NOVICE, BotType.CASUAL, BotType.AVERAGE, BotType.EXPERT]
             else:
+                # High difficulty: Full validation with all bots
                 bot_types = [BotType.NOVICE, BotType.CASUAL, BotType.AVERAGE, BotType.EXPERT, BotType.OPTIMAL]
 
             # Filter target rates to only include simulated bot types
@@ -1457,7 +1651,7 @@ def generate_validated_level(
                 actual_rates[bot_name] = clear_rate
 
             # Calculate match score
-            match_score, avg_gap, max_gap = calculate_match_score(actual_rates, target_rates)
+            match_score, avg_gap, max_gap = calculate_match_score(actual_rates, target_rates, request.target_difficulty)
 
             # Track best result
             if match_score > best_match_score:
@@ -1477,6 +1671,15 @@ def generate_validated_level(
                 best_target_rates = target_rates.copy()  # Store target rates for response
                 best_gaps = (avg_gap, max_gap)
                 best_max_moves = modified_max_moves
+
+            # OPTIMIZATION: Adaptive iteration reduction for subsequent attempts
+            # If first attempt gets decent match score, reduce iterations for faster retries
+            if attempt == 1 and match_score >= 70.0:
+                # Good first attempt - reduce iterations by 40% for remaining attempts
+                effective_iterations = max(5, int(effective_iterations * 0.6))
+            elif attempt == 1 and match_score >= 50.0:
+                # Decent first attempt - reduce iterations by 25%
+                effective_iterations = max(5, int(effective_iterations * 0.75))
 
             # OPTIMIZATION: Early exit if match score is excellent
             if match_score >= EARLY_EXIT_THRESHOLD:
@@ -1523,46 +1726,80 @@ def generate_validated_level(
             ) / len(target_rates)
 
             # Calculate per-bot gaps for smarter adjustment
-            casual_gap = actual_rates.get("casual", 0) - target_rates["casual"]
-            average_gap = actual_rates.get("average", 0) - target_rates["average"]
-            expert_gap = actual_rates.get("expert", 0) - target_rates["expert"]
+            # [FIX] Use .get() for target_rates as well (low difficulty may not include all bots)
+            casual_gap = actual_rates.get("casual", 0) - target_rates.get("casual", 0)
+            average_gap = actual_rates.get("average", 0) - target_rates.get("average", 0)
+            expert_gap = actual_rates.get("expert", 0) - target_rates.get("expert", 0)
+
+            # [v10] 진동 감지: 최근 4번 중 2번 이상 방향 전환 시 조기 종료
+            current_direction = 1 if avg_direction > 0 else -1
+            direction_history.append(current_direction)
+            if len(direction_history) >= 4:
+                recent = direction_history[-4:]
+                direction_changes = sum(1 for i in range(1, len(recent)) if recent[i] != recent[i-1])
+                if direction_changes >= 2 and best_result is not None:
+                    print(f"[OSCILLATION] Detected {direction_changes} direction changes in last 4 attempts, returning best result")
+                    return ValidatedLevelResponse(
+                        level_json=best_result.level_json,
+                        target_difficulty=request.target_difficulty,
+                        actual_difficulty=best_actual_difficulty,
+                        grade=best_result.grade.value,
+                        generation_time_ms=generation_time_ms,
+                        validation_passed=True,
+                        attempts=attempt,
+                        bot_clear_rates=best_rates,
+                        target_clear_rates=target_rates,
+                        avg_gap=best_gap,
+                        max_gap=max_gap,
+                        match_score=best_match_score,
+                    )
 
             if avg_direction > 0:
                 # Level too easy (higher clear rates than target)
-                # Apply multiple strategies to increase difficulty
-                gap_factor = min(1.0, avg_gap / 15.0)  # More aggressive factor
+                # [v5] 보수적 조정 - 급격한 변화 방지
+                if avg_gap < 5:
+                    adjustment_scale = 0.3  # 미세 조정
+                elif avg_gap < 15:
+                    adjustment_scale = 0.5  # 소폭 조정
+                elif avg_gap < 30:
+                    adjustment_scale = 0.7  # 중간 조정
+                else:
+                    adjustment_scale = 1.0  # 최대 조정 (cap)
+
+                gap_factor = min(0.8, avg_gap / 20.0) * adjustment_scale  # 더 완만한 계산
+                print(f"[ADJUST] Too easy: gap={avg_gap:.1f}%, scale={adjustment_scale}, factor={gap_factor:.2f}")
 
                 # PRIMARY Strategy: Tile type count (most effective for high difficulty)
                 # More tile types = harder to match before dock fills
-                # t0 사용 시: t0 추가 (useTileCount 증가)
-                # t1~t15 사용 시: 미사용 타일에서 랜덤 선택
-                if request.target_difficulty >= 0.7 and average_gap > 0.1:
-                    # Add tile types more aggressively
-                    types_to_add = 1 if avg_gap < 20 else 2
+                # [v9] max_tile_types 범위 내에서만 증가
+                if request.target_difficulty >= 0.5 and average_gap > 0.05:
+                    types_to_add = 1 if avg_gap < 10 else 2
                     uses_t0 = "t0" in current_tile_types
                     if uses_t0:
-                        # t0 모드: t0 추가로 useTileCount 증가
                         for _ in range(types_to_add):
-                            if len(current_tile_types) < 8:
+                            if len(current_tile_types) < max_tile_types:
                                 current_tile_types.append("t0")
                                 current_tile_type_count = len(current_tile_types)
                     else:
-                        # 일반 모드: t1~t15 중 미사용 타일에서 랜덤 선택
                         unused_tiles = [t for t in all_tile_types if t not in current_tile_types]
                         random.shuffle(unused_tiles)
                         for t in unused_tiles[:types_to_add]:
-                            if len(current_tile_types) < 8:
+                            if len(current_tile_types) < max_tile_types:
                                 current_tile_types.append(t)
                                 current_tile_type_count = len(current_tile_types)
+                    if current_tile_type_count != len(base_tile_types):
+                        logger.info(f"[TILE_ADJ+] tiles: {len(base_tile_types)} → {current_tile_type_count} (max={max_tile_types})")
 
                 # Strategy 2: Reduce moves ratio (tighter constraint)
-                if request.target_difficulty >= 0.7:
-                    # Gradually reduce moves ratio for harder levels
-                    reduction = 0.02 * (1 + gap_factor)
-                    moves_ratio = max(1.02, moves_ratio - reduction)
+                # IMPROVED: Apply to medium difficulty (>=0.5) and more aggressive reduction
+                if request.target_difficulty >= 0.5:
+                    # More aggressive reduction for larger gaps
+                    reduction = 0.03 * (1 + gap_factor)  # Was 0.02
+                    moves_ratio = max(1.0, moves_ratio - reduction)  # Was max 1.02
 
                 # Strategy 3: Add obstacles for complexity (respecting unlock levels)
-                if request.target_difficulty >= 0.6 and avg_gap > 15:
+                # IMPROVED: Lower threshold from 15 to 10
+                if request.target_difficulty >= 0.5 and avg_gap > 10:
                     unlock_levels = request.gimmick_unlock_levels or DEFAULT_GIMMICK_UNLOCK_LEVELS
                     for obs in ["chain", "frog", "ice"]:
                         # Only add if obstacle is unlocked at current level
@@ -1572,15 +1809,38 @@ def generate_validated_level(
                                 break
 
                 # Strategy 4: Increase internal difficulty
-                difficulty_offset += 0.15 * (1 + gap_factor)
+                # [v10] 비대칭 조정 - "Too easy"는 빠르게 조정
+                base_offset = 0.10 * (1 + gap_factor)  # 기본 0.10
+                if expert_gap > 0.15:
+                    base_offset += 0.05
+                base_offset = min(0.25, base_offset)  # 상향 조정은 더 적극적으로 (0.20 → 0.25)
+                difficulty_offset += base_offset
+                # [v10] 난이도 상한선: 목표 + 30% 이상 올라가지 않음
+                max_offset = min(0.30, (1.0 - request.target_difficulty) * 0.5)
+                if difficulty_offset > max_offset:
+                    difficulty_offset = max_offset
+                    print(f"[OFFSET_CEIL] Clamped to max_offset={max_offset:.3f}")
+                print(f"[OFFSET] base=+{base_offset:.3f}, total_offset={difficulty_offset:.3f}")
 
                 # Strategy 5: Increase max layers
-                if current_max_layers < 7 and avg_gap > 20:
-                    current_max_layers = min(7, current_max_layers + 1)
+                # IMPROVED: Lower threshold from 20 to 12
+                # [v12] 난이도 기반 최대 레이어 제한
+                max_layers_for_grade = 7  # 기본 최대값
+                if request.target_difficulty <= 0.2:
+                    max_layers_for_grade = 2  # S등급: 최대 2레이어
+                elif request.target_difficulty <= 0.35:
+                    max_layers_for_grade = 3  # A등급: 최대 3레이어
+                elif request.target_difficulty <= 0.5:
+                    max_layers_for_grade = 4  # B등급: 최대 4레이어
+                elif request.target_difficulty <= 0.7:
+                    max_layers_for_grade = 6  # C등급: 최대 6레이어
+                if current_max_layers < max_layers_for_grade and avg_gap > 12:
+                    current_max_layers = min(max_layers_for_grade, current_max_layers + 1)
 
                 # Strategy 6: Reduce max_moves modifier
+                # [v13] 하한 상향: 0.7 → 0.78 (novice/casual 최소 클리어 보장)
                 if request.target_difficulty >= 0.7 and avg_gap > 10:
-                    max_moves_modifier = max(0.7, max_moves_modifier - 0.05)
+                    max_moves_modifier = max(0.78, max_moves_modifier - 0.05)
 
                 # Strategy 7: Reduce grid size (NEW - based on test findings)
                 # Smaller grids significantly increase difficulty
@@ -1592,32 +1852,94 @@ def generate_validated_level(
 
             else:
                 # Level too hard (lower clear rates than target)
-                gap_factor = min(1.0, avg_gap / 15.0)
+                # [v5] 보수적 조정 - 급격한 변화 방지
+                # 최대 조정 폭 제한: gap 크기에 비례하되 상한 있음
+                if avg_gap < 5:
+                    adjustment_scale = 0.3  # 미세 조정
+                elif avg_gap < 15:
+                    adjustment_scale = 0.5  # 소폭 조정
+                elif avg_gap < 30:
+                    adjustment_scale = 0.7  # 중간 조정
+                else:
+                    adjustment_scale = 1.0  # 최대 조정 (cap)
+
+                gap_factor = min(0.8, avg_gap / 20.0) * adjustment_scale  # 더 완만한 계산
+                print(f"[ADJUST] Too hard: gap={avg_gap:.1f}%, scale={adjustment_scale}, factor={gap_factor:.2f}")
 
                 # PRIMARY Strategy: Reduce tile type count
-                if len(current_tile_types) > 4 and avg_gap > 10:
+                # [v9] min_tile_types 범위 내에서만 감소
+                if len(current_tile_types) > min_tile_types and avg_gap > 5:
                     # Remove tile types to make matching easier
                     current_tile_types.pop()
                     current_tile_type_count = len(current_tile_types)
+                    logger.info(f"[TILE_ADJ-] tiles: {len(base_tile_types)} → {current_tile_type_count} (min={min_tile_types})")
 
                 # Strategy 2: Increase moves ratio (more room for error)
-                if avg_gap > 10:
-                    moves_ratio = min(1.15, moves_ratio + 0.02)
+                # IMPROVED: Lower threshold and more aggressive adjustment
+                if avg_gap > 5:
+                    moves_ratio = min(1.3, moves_ratio + 0.04)  # Was min 1.15, +0.02
 
                 # Strategy 3: Decrease internal difficulty
-                difficulty_offset -= 0.15 * (1 + gap_factor)
+                # [v10] 비대칭 조정 - "Too hard"는 더 천천히 조정
+                base_offset = 0.10 * (1 + gap_factor)  # 기본 0.10
+                if casual_gap < -0.15:
+                    base_offset += 0.05
+                base_offset = min(0.20, base_offset)
+                # [v11] 등급별 조정 속도 (높을수록 천천히)
+                if request.target_difficulty >= 0.85:
+                    base_offset = base_offset * 0.3  # E등급: 30%
+                elif request.target_difficulty >= 0.70:
+                    base_offset = base_offset * 0.35  # D등급: 35%
+                elif request.target_difficulty >= 0.50:
+                    base_offset = base_offset * 0.4  # C등급: 40%
+                elif request.target_difficulty >= 0.35:
+                    base_offset = base_offset * 0.45  # B등급: 45%
+                else:
+                    base_offset = base_offset * 0.5  # S/A등급: 50%
+                difficulty_offset -= base_offset
+                # [v11] 등급별 난이도 하한선
+                if request.target_difficulty >= 0.85:
+                    min_offset = -0.15  # E등급: 최소 75%
+                elif request.target_difficulty >= 0.70:
+                    min_offset = -0.15  # D등급: 최소 55%
+                elif request.target_difficulty >= 0.50:
+                    min_offset = -0.15  # C등급: 최소 35%
+                elif request.target_difficulty >= 0.35:
+                    min_offset = -0.10  # B등급: 최소 25%
+                else:
+                    min_offset = -(request.target_difficulty * 0.3)  # S/A등급: 목표의 30%
+                if difficulty_offset < min_offset:
+                    difficulty_offset = min_offset
+                    print(f"[OFFSET_FLOOR] Clamped to min_offset={min_offset:.3f}")
+                print(f"[OFFSET] base=-{base_offset:.3f}, total_offset={difficulty_offset:.3f}")
 
                 # Strategy 4: Decrease max layers
-                if current_max_layers > 3 and avg_gap > 15:
-                    current_max_layers = max(3, current_max_layers - 1)
+                # IMPROVED: Lower threshold from 15 to 10
+                # [v12] 난이도 기반 최소 레이어 제한
+                min_layers_for_grade = 3  # 기본 최소값
+                if request.target_difficulty >= 0.7:
+                    min_layers_for_grade = 5  # D/E등급: 최소 5레이어
+                elif request.target_difficulty >= 0.5:
+                    min_layers_for_grade = 4  # C등급: 최소 4레이어
+                if current_max_layers > min_layers_for_grade and avg_gap > 10:
+                    current_max_layers = max(min_layers_for_grade, current_max_layers - 1)
 
                 # Strategy 5: Remove obstacles
-                if current_obstacle_types and avg_gap > 15:
+                # IMPROVED: Lower threshold from 15 to 10
+                if current_obstacle_types and avg_gap > 10:
                     current_obstacle_types.pop()
 
                 # Strategy 6: Increase max_moves modifier
-                if avg_gap > 10:
-                    max_moves_modifier = min(1.1, max_moves_modifier + 0.05)
+                # [v13] 더 적극적 조정: 난이도가 높을수록 더 많이 증가
+                if avg_gap > 5:
+                    # 난이도별 증가 폭 차등 적용
+                    if request.target_difficulty >= 0.85:
+                        increase = 0.10  # E등급: 더 크게 증가
+                    elif request.target_difficulty >= 0.70:
+                        increase = 0.09  # D등급
+                    else:
+                        increase = 0.08  # 기타
+                    max_moves_modifier = min(1.2, max_moves_modifier + increase)
 
                 # Strategy 7: Increase grid size (NEW - based on test findings)
                 # Larger grids significantly decrease difficulty
@@ -1626,6 +1948,45 @@ def generate_validated_level(
                         current_grid_size[0] += 1
                     if current_grid_size[1] < max_grid_size:
                         current_grid_size[1] += 1
+
+            # FRESH START STRATEGY: Reset parameters when stuck for too long
+            # This breaks out of local minima by trying completely different configurations
+            if attempt > 0 and attempt % 5 == 0 and best_match_score < 70:
+                logger.info(f"[FRESH_START] Attempt {attempt}: Resetting parameters (best_score={best_match_score:.1f})")
+                # Reset to initial values with some randomization
+                # [v13] 등급별 초기 부스트 값으로 리셋 (modifier 상향 조정)
+                if request.target_difficulty >= 0.85:
+                    difficulty_offset = 0.25 + random.uniform(-0.05, 0.05)
+                    max_moves_modifier = 0.82  # v12: 0.75 → v13: 0.82
+                elif request.target_difficulty >= 0.70:
+                    difficulty_offset = 0.20 + random.uniform(-0.05, 0.05)
+                    max_moves_modifier = 0.85  # v12: 0.80 → v13: 0.85
+                elif request.target_difficulty >= 0.50:
+                    difficulty_offset = 0.15 + random.uniform(-0.05, 0.05)
+                    max_moves_modifier = 0.88  # v12: 0.85 → v13: 0.88
+                elif request.target_difficulty >= 0.35:
+                    difficulty_offset = 0.10 + random.uniform(-0.03, 0.03)
+                    max_moves_modifier = 0.92  # v12: 0.90 → v13: 0.92
+                else:
+                    difficulty_offset = random.uniform(-0.05, 0.05)
+                    max_moves_modifier = 1.0
+                moves_ratio = 1.0 + random.uniform(0.05, 0.15) if request.target_difficulty < 0.5 else 1.0 + random.uniform(0, 0.05)
+                current_tile_types = base_tile_types.copy()
+                current_obstacle_types = base_obstacle_types.copy()
+                # [v12] FRESH_START에서도 난이도 기반 레이어 제한 유지
+                # 문제: request.max_layers로 리셋하면 난이도 기반 제한이 무효화됨
+                # 해결: 난이도 기반 current_max_layers 재계산
+                if request.target_difficulty <= 0.2:
+                    current_max_layers = min(request.max_layers, 2)  # S등급
+                elif request.target_difficulty <= 0.35:
+                    current_max_layers = min(request.max_layers, 3)  # A등급
+                elif request.target_difficulty <= 0.5:
+                    current_max_layers = min(request.max_layers, 4)  # B등급
+                elif request.target_difficulty <= 0.7:
+                    current_max_layers = max(4, min(request.max_layers, 6))  # C등급
+                else:
+                    current_max_layers = max(5, min(request.max_layers, 7))  # D/E등급
+                current_grid_size = calibrated_grid.copy()
 
             # RESHUFFLE STRATEGY: Try reshuffling best result before generating new level
             # This preserves gimmicks and tile types while changing positions
@@ -1654,7 +2015,7 @@ def generate_validated_level(
                         reshuffle_rates[bot_name] = clear_rate
 
                     reshuffle_score, reshuffle_avg_gap, reshuffle_max_gap = calculate_match_score(
-                        reshuffle_rates, target_rates
+                        reshuffle_rates, target_rates, request.target_difficulty
                     )
 
                     # Update best if reshuffled version is better
@@ -1791,7 +2152,7 @@ def enhance_level(
         return rates
 
     current_rates = _run_simulation(level_json)
-    current_score, current_avg_gap, current_max_gap = calculate_match_score(current_rates, target_rates)
+    current_score, current_avg_gap, current_max_gap = calculate_match_score(current_rates, target_rates, request.target_difficulty)
 
     best_level = copy.deepcopy(level_json)
     best_rates = current_rates.copy()
@@ -1906,7 +2267,7 @@ def enhance_level(
         # --- Run simulation on candidate ---
         try:
             cand_rates = _run_simulation(candidate)
-            cand_score, cand_avg_gap, cand_max_gap = calculate_match_score(cand_rates, target_rates)
+            cand_score, cand_avg_gap, cand_max_gap = calculate_match_score(cand_rates, target_rates, request.target_difficulty)
         except Exception as e:
             logger.warning(f"[ENHANCE] Iteration {iteration} simulation failed: {e}")
             continue

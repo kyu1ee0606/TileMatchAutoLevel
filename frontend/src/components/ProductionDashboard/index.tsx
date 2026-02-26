@@ -284,15 +284,18 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
           const { localIdx, levelNumber, targetDifficulty } = task;
 
           // Local helper: Calculate match score from bot stats (asymmetric penalty)
+          // [v14.2] 방안 B+D: maxGap 가중치 감소(0.4→0.3) + 어려움 패널티 완화(1.0→0.7)
           const calcMatchScore = (botStats: { clear_rate: number; target_clear_rate: number }[]) => {
             if (!botStats.length) return 0;
             const gaps = botStats.map(s => {
               const rawGap = (s.clear_rate - s.target_clear_rate) * 100;
-              return rawGap > 0 ? rawGap * 0.5 : Math.abs(rawGap); // Too easy = 50% penalty
+              // 방안 D: 너무 쉬움 = 50% 패널티, 너무 어려움 = 70% 패널티 (기존 100%)
+              return rawGap > 0 ? rawGap * 0.5 : Math.abs(rawGap) * 0.7;
             });
             const avgGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
             const maxGap = Math.max(...gaps);
-            const weightedGap = (avgGap * 0.6 + maxGap * 0.4);
+            // 방안 B: avgGap×0.7 + maxGap×0.3 (기존 0.6/0.4)
+            const weightedGap = (avgGap * 0.7 + maxGap * 0.3);
             return Math.max(0, 100 - weightedGap * 2);
           };
 
@@ -410,8 +413,16 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
               const candidates = await Promise.all(
                 Array.from({ length: CANDIDATES_PER_ATTEMPT }, () => {
                   // 미형 로직 유지: pattern_type, symmetry_mode, pattern_index는 기존 params 사용
-                  // 난이도 다양성을 위해 goal direction/type만 변경
-                  const candidateGoalDirection = (['s', 'n', 'e', 'w'] as const)[Math.floor(Math.random() * 4)];
+                  // Goal direction도 대칭 모드 기반으로 선택 (일관성 유지)
+                  let candidateGoalDirections: Array<'s' | 'n' | 'e' | 'w'>;
+                  if (symmetryMode === 'both' || symmetryMode === 'vertical') {
+                    candidateGoalDirections = Math.random() < 0.7 ? ['s', 'n'] : ['e', 'w'];
+                  } else if (symmetryMode === 'horizontal') {
+                    candidateGoalDirections = Math.random() < 0.7 ? ['e', 'w'] : ['s', 'n'];
+                  } else {
+                    candidateGoalDirections = ['s', 'n', 'e', 'w'];
+                  }
+                  const candidateGoalDirection = candidateGoalDirections[Math.floor(Math.random() * candidateGoalDirections.length)];
                   const candidateGoalType = (['craft', 'stack'] as const)[Math.floor(Math.random() * 2)];
 
                   return generateLevel(
@@ -425,7 +436,8 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
                     },
                     {
                       ...gimmickOptions,
-                      gimmick_intensity: Math.min(1, levelNumber / 500),
+                      // 기믹 강도를 목표 난이도로 제한 (과도한 기믹으로 난이도 초과 방지)
+                      gimmick_intensity: Math.min(targetDifficulty, levelNumber / 500),
                     }
                   ).catch(() => null);
                 })
@@ -1480,6 +1492,9 @@ function TestTab({
   const [previewTiles, setPreviewTiles] = useState<GameTile[]>([]);
   const [previewScale, setPreviewScale] = useState(1);
   const previewContainerRef = useRef<HTMLDivElement>(null);
+  const levelListRef = useRef<HTMLDivElement>(null);
+  const levelListScrollTopRef = useRef<number>(0);
+  const isLoadingLevelsRef = useRef<boolean>(false); // 로딩 중 스크롤 저장 방지 플래그
 
   // Playtest result state (after game ends)
   const [showResultForm, setShowResultForm] = useState(false);
@@ -1493,6 +1508,18 @@ function TestTab({
   useEffect(() => {
     loadLevels();
   }, [batchId, filter]);
+
+  // Preserve scroll position when levels update (during sequential/batch testing)
+  // loadLevels에서 로딩 중일 때는 건너뛰고, 개별 레벨 업데이트 시에만 동작
+  useEffect(() => {
+    if (!isLoadingLevelsRef.current && levelListRef.current && levelListScrollTopRef.current > 0) {
+      requestAnimationFrame(() => {
+        if (levelListRef.current) {
+          levelListRef.current.scrollTop = levelListScrollTopRef.current;
+        }
+      });
+    }
+  }, [levels]);
 
   // Sync selectedLevel with latest levels data (after regeneration, auto test save, etc.)
   useEffect(() => {
@@ -1569,13 +1596,37 @@ function TestTab({
   }, [selectedLevel]);
 
   const loadLevels = async () => {
+    // 스크롤 위치 보존을 위해 현재 위치 저장 (onScroll 핸들러보다 먼저)
+    const savedScrollTop = levelListRef.current?.scrollTop || levelListScrollTopRef.current;
+
+    // 로딩 중 플래그 설정 - onScroll에서 스크롤 위치 저장 방지
+    isLoadingLevelsRef.current = true;
+
     setIsLoading(true);
     try {
       const options = filter !== 'all' ? { status: filter, limit: 2000 } : { limit: 2000 };
       const loadedLevels = await getProductionLevelsByBatch(batchId, options);
       setLevels(loadedLevels);
+
+      // 스크롤 위치 복원 (DOM 업데이트 후)
+      if (savedScrollTop > 0) {
+        // 여러 프레임 대기 후 복원 (React 리렌더링 완료 보장)
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            if (levelListRef.current) {
+              levelListRef.current.scrollTop = savedScrollTop;
+              levelListScrollTopRef.current = savedScrollTop; // ref도 업데이트
+            }
+            // 플래그 해제
+            isLoadingLevelsRef.current = false;
+          });
+        });
+      } else {
+        isLoadingLevelsRef.current = false;
+      }
     } catch (err) {
       console.error('Failed to load levels:', err);
+      isLoadingLevelsRef.current = false;
     } finally {
       setIsLoading(false);
     }
@@ -1709,12 +1760,19 @@ function TestTab({
             level_json: currentLevel.level_json,
           }]);
 
-          // Update levels state
+          // Update levels state (preserve scroll position)
+          const scrollTop = levelListRef.current?.scrollTop || 0;
           setLevels(prev => prev.map(l =>
             l.meta.level_number === levelNumber
               ? { ...l, meta: { ...l.meta, match_score: matchScore, bot_clear_rates: botClearRates } }
               : l
           ));
+          // Restore scroll position after React re-render
+          requestAnimationFrame(() => {
+            if (levelListRef.current) {
+              levelListRef.current.scrollTop = scrollTop;
+            }
+          });
 
           if (matchScore >= PASS_THRESHOLD) {
             passed = true;
@@ -1760,18 +1818,18 @@ function TestTab({
   };
 
   // Calculate match score from bot stats (aligned with backend formula for consistency)
-  // Uses asymmetric penalty: "too easy" (actual > target) gets 50% penalty, "too hard" gets full penalty
+  // [v14.2] 방안 B+D: maxGap 가중치 감소(0.4→0.3) + 어려움 패널티 완화(1.0→0.7)
   const calculateMatchScoreFromBots = (botStats: { clear_rate: number; target_clear_rate: number }[]) => {
     if (!botStats.length) return 0;
     const gaps = botStats.map(s => {
       const rawGap = (s.clear_rate - s.target_clear_rate) * 100; // Positive = too easy
-      // Asymmetric penalty: too easy = 50% penalty, too hard = full penalty
-      return rawGap > 0 ? rawGap * 0.5 : Math.abs(rawGap);
+      // 방안 D: 너무 쉬움 = 50% 패널티, 너무 어려움 = 70% 패널티 (기존 100%)
+      return rawGap > 0 ? rawGap * 0.5 : Math.abs(rawGap) * 0.7;
     });
     const avgGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
     const maxGap = Math.max(...gaps);
-    // Aligned with backend: avg_gap * 0.6 + max_gap * 0.4, penalty * 2
-    const weightedGap = (avgGap * 0.6 + maxGap * 0.4);
+    // 방안 B: avgGap×0.7 + maxGap×0.3 (기존 0.6/0.4)
+    const weightedGap = (avgGap * 0.7 + maxGap * 0.3);
     return Math.max(0, 100 - weightedGap * 2);
   };
 
@@ -1901,8 +1959,9 @@ function TestTab({
         }
       }
 
-      // Update levels state directly for immediate UI feedback
+      // Update levels state directly for immediate UI feedback (preserve scroll position)
       if (batchSuccessResults.length > 0) {
+        const scrollTop = levelListRef.current?.scrollTop || 0;
         setLevels(prev => prev.map(level => {
           const result = batchSuccessResults.find(r => r.level_number === level.meta.level_number);
           if (result) {
@@ -1916,6 +1975,11 @@ function TestTab({
           }
           return level;
         }));
+        requestAnimationFrame(() => {
+          if (levelListRef.current) {
+            levelListRef.current.scrollTop = scrollTop;
+          }
+        });
       }
 
       setBatchTestProgress(prev => ({
@@ -2007,8 +2071,9 @@ function TestTab({
 
       const targetDifficulty = level.meta.target_difficulty;
       const targetScore = targetDifficulty * 100;
-      const gimmickIntensity = Math.min(1, levelNumber / 500);
-      const DIFFICULTY_TOLERANCE = 10.0; // 0.10 in 0-1 scale = 10.0 in 0-100 scale (허용 오차 증가)
+      // 기믹 강도를 목표 난이도로 제한 (과도한 기믹으로 난이도 초과 방지)
+      const gimmickIntensity = Math.min(targetDifficulty, levelNumber / 500);
+      const DIFFICULTY_TOLERANCE = 5.0; // 0.05 in 0-1 scale = 5.0 in 0-100 scale (프로덕션과 동일)
       const CANDIDATES_PER_ATTEMPT = 3;
       const MAX_ATTEMPTS = 5; // 최대 15개 후보
 
@@ -2075,8 +2140,16 @@ function TestTab({
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
         const candidates = await Promise.all(
           Array.from({ length: CANDIDATES_PER_ATTEMPT }, () => {
-            // 미형 파라미터는 고정, goal direction/type만 랜덤
-            const goalDirection = (['s', 'n', 'e', 'w'] as const)[Math.floor(Math.random() * 4)];
+            // Goal direction selection (프로덕션과 동일 - 대칭 모드 기반)
+            let goalDirections: Array<'s' | 'n' | 'e' | 'w'>;
+            if (symmetryMode === 'both' || symmetryMode === 'vertical') {
+              goalDirections = Math.random() < 0.7 ? ['s', 'n'] : ['e', 'w'];
+            } else if (symmetryMode === 'horizontal') {
+              goalDirections = Math.random() < 0.7 ? ['e', 'w'] : ['s', 'n'];
+            } else {
+              goalDirections = ['s', 'n', 'e', 'w'];
+            }
+            const goalDirection = goalDirections[Math.floor(Math.random() * goalDirections.length)];
             const goalType = (['craft', 'stack'] as const)[Math.floor(Math.random() * 2)];
 
             return generateLevel(
@@ -2252,8 +2325,8 @@ function TestTab({
     let failCount = 0;
     const REGEN_CONCURRENCY = 20; // 동시성 증가로 속도 개선
 
-    // 3. 레벨 1개 재생성: 반복 생성으로 오차 0.10 이내 달성
-    const DIFFICULTY_TOLERANCE = 10.0; // 0.10 in 0-1 scale = 10.0 in 0-100 scale (허용 오차 증가)
+    // 3. 레벨 1개 재생성: 반복 생성으로 오차 0.05 이내 달성 (프로덕션과 동일)
+    const DIFFICULTY_TOLERANCE = 5.0; // 0.05 in 0-1 scale = 5.0 in 0-100 scale (프로덕션과 동일)
     const CANDIDATES_PER_ATTEMPT = 3;
     const MAX_ATTEMPTS = 5; // 최대 15개 후보
 
@@ -2265,7 +2338,8 @@ function TestTab({
 
       const targetDifficulty = level.meta.target_difficulty;
       const targetScore = targetDifficulty * 100;
-      const gimmickIntensity = Math.min(1, levelNumber / 500);
+      // 기믹 강도를 목표 난이도로 제한 (과도한 기믹으로 난이도 초과 방지)
+      const gimmickIntensity = Math.min(targetDifficulty, levelNumber / 500);
 
       // === 미형 로직: 프로덕션 초기 생성과 동일한 레벨 타입 기반 패턴 선택 ===
       const isEarlyLevel = levelNumber <= 30;
@@ -2330,8 +2404,16 @@ function TestTab({
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
         const candidates = await Promise.all(
           Array.from({ length: CANDIDATES_PER_ATTEMPT }, () => {
-            // 미형 파라미터는 고정, goal direction/type만 랜덤
-            const goalDirection = (['s', 'n', 'e', 'w'] as const)[Math.floor(Math.random() * 4)];
+            // Goal direction selection (프로덕션과 동일 - 대칭 모드 기반)
+            let goalDirections: Array<'s' | 'n' | 'e' | 'w'>;
+            if (symmetryMode === 'both' || symmetryMode === 'vertical') {
+              goalDirections = Math.random() < 0.7 ? ['s', 'n'] : ['e', 'w'];
+            } else if (symmetryMode === 'horizontal') {
+              goalDirections = Math.random() < 0.7 ? ['e', 'w'] : ['s', 'n'];
+            } else {
+              goalDirections = ['s', 'n', 'e', 'w'];
+            }
+            const goalDirection = goalDirections[Math.floor(Math.random() * goalDirections.length)];
             const goalType = (['craft', 'stack'] as const)[Math.floor(Math.random() * 2)];
 
             return generateLevel(
@@ -3608,7 +3690,16 @@ function TestTab({
         </div>
 
         {/* Level list */}
-        <div className="flex-1 overflow-y-auto">
+        <div
+          ref={levelListRef}
+          className="flex-1 overflow-y-auto"
+          onScroll={(e) => {
+            // 로딩 중에는 스크롤 위치 저장하지 않음 (리렌더링 시 0으로 덮어쓰기 방지)
+            if (!isLoadingLevelsRef.current) {
+              levelListScrollTopRef.current = e.currentTarget.scrollTop;
+            }
+          }}
+        >
           {isLoading ? (
             <div className="flex items-center justify-center h-32 text-gray-400">
               로딩 중...

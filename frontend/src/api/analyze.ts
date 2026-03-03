@@ -116,3 +116,73 @@ export async function analyzeAutoPlay(
   );
   return response.data;
 }
+
+
+// ============================================================
+// Batch Verification Types & API (Post-generation validation)
+// ============================================================
+
+export interface BatchVerifyLevelItem {
+  level_json: LevelJSON;
+  level_id?: string;
+  target_difficulty?: number;
+}
+
+export interface BatchVerifyRequest {
+  levels: BatchVerifyLevelItem[];
+  iterations?: number;      // Default: 20
+  tolerance?: number;       // Default: 15.0
+  use_core_bots_only?: boolean;  // Default: true
+}
+
+export interface BatchVerifyResultItem {
+  level_id: string;
+  passed: boolean;
+  bot_clear_rates: Record<string, number>;
+  target_clear_rates: Record<string, number>;
+  avg_gap: number;
+  max_gap: number;
+  match_score: number;
+  static_grade: string;
+  issues: string[];
+}
+
+export interface BatchVerifyResponse {
+  results: BatchVerifyResultItem[];
+  total_levels: number;
+  passed_count: number;
+  failed_count: number;
+  pass_rate: number;
+  execution_time_ms: number;
+}
+
+/**
+ * Batch verify multiple levels using bot simulation.
+ * Use this for post-generation validation when levels are generated with fast mode.
+ */
+export async function batchVerifyLevels(
+  levels: BatchVerifyLevelItem[],
+  options?: {
+    iterations?: number;
+    tolerance?: number;
+    useCoreBotOnly?: boolean;
+  }
+): Promise<BatchVerifyResponse> {
+  const iterations = options?.iterations ?? 20;
+  // Timeout: base 30s + 2s per level per iteration
+  const timeoutMs = Math.max(60000, 30000 + levels.length * iterations * 2000);
+
+  const response = await apiClient.post<BatchVerifyResponse>(
+    '/analyze/batch-verify',
+    {
+      levels,
+      iterations,
+      tolerance: options?.tolerance ?? 15.0,
+      use_core_bots_only: options?.useCoreBotOnly ?? true,
+    },
+    {
+      timeout: timeoutMs,
+    }
+  );
+  return response.data;
+}

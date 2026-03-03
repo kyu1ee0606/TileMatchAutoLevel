@@ -1564,6 +1564,8 @@ def generate_validated_level(
                 tutorial_gimmick_min_count=3,  # Ensure at least 3 tutorial gimmicks are visible
                 # [연구 근거] 레벨 번호 전달 - unknown 비율 동적 계산용
                 level_number=request.level_number,
+                # Fast generation mode - skip deadlock check (use batch verify later)
+                skip_deadlock_check=request.skip_deadlock_check,
             )
 
             result = generator.generate(params)

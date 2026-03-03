@@ -332,16 +332,33 @@ def _get_process_pool() -> ProcessPoolExecutor:
     return _process_pool
 
 
-def _simulate_bot_process(args: Tuple[dict, str, int, int, Optional[int]]) -> 'BotSimulationResult':
+def _simulate_bot_process(args: Tuple[dict, str, int, int, Optional[int], bool, bool]) -> 'BotSimulationResult':
     """
     Top-level function for ProcessPoolExecutor (must be picklable).
     Runs a single bot simulation in a separate process for true CPU parallelism.
+
+    Args tuple:
+        level_json: Level data
+        bot_type_value: Bot type string value
+        iterations: Number of iterations
+        max_moves: Maximum moves allowed
+        seed: Random seed
+        fast_mode: Use fast verification profiles
+        early_termination: Enable early termination optimization
     """
-    level_json, bot_type_value, iterations, max_moves, seed = args
+    # Support both old 5-tuple and new 7-tuple format for backwards compatibility
+    if len(args) == 5:
+        level_json, bot_type_value, iterations, max_moves, seed = args
+        fast_mode = False
+        early_termination = False
+    else:
+        level_json, bot_type_value, iterations, max_moves, seed, fast_mode, early_termination = args
+
     simulator = BotSimulator()
-    profile = get_profile(BotType(bot_type_value))
+    profile = get_profile(BotType(bot_type_value), fast_mode=fast_mode)
     result = simulator.simulate_with_profile(
-        level_json, profile, iterations=iterations, max_moves=max_moves, seed=seed
+        level_json, profile, iterations=iterations, max_moves=max_moves, seed=seed,
+        early_termination=early_termination
     )
     return result
 
@@ -691,6 +708,10 @@ class BotSimulator:
     def __init__(self):
         self._rng = random.Random()
 
+    # Early termination constants
+    EARLY_TERM_MIN_ITERATIONS = 5  # Minimum iterations before checking early termination (reduced from 10)
+    EARLY_TERM_CONFIDENCE_THRESHOLD = 0.90  # 90% confidence for early termination (relaxed from 95%)
+
     def simulate_with_profile(
         self,
         level_json: Dict[str, Any],
@@ -698,12 +719,27 @@ class BotSimulator:
         iterations: int = 100,
         max_moves: Optional[int] = None,
         seed: Optional[int] = None,
+        honor_zero_seed: bool = False,
+        early_termination: bool = False,
     ) -> BotSimulationResult:
         """Run simulation with a specific bot profile.
 
         Performance optimizations:
         1. Create base_state once, then fast-copy for each iteration
         2. Precompute blocking map for O(1) blocking checks
+        3. Early termination when results are statistically conclusive
+
+        randSeed behavior (matches actual game):
+        - randSeed = 0 + honor_zero_seed=True: Each iteration uses different random seed (slow, accurate)
+        - randSeed = 0 + honor_zero_seed=False: Use seed 0 as fixed (fast, for generation/validation)
+        - randSeed > 0: All iterations use the same fixed seed (fast)
+
+        Args:
+            honor_zero_seed: If True and randSeed=0, simulate random seed per play (slower but accurate).
+                           If False, treat randSeed=0 as a fixed seed for fast validation.
+                           Default False for performance during level generation.
+            early_termination: If True, stop early when results are statistically conclusive.
+                             (100% or 0% clear rate after minimum iterations)
         """
         if seed is not None:
             self._rng.seed(seed)
@@ -712,22 +748,60 @@ class BotSimulator:
         if max_moves is None:
             max_moves = level_json.get("max_moves", 30)
 
-        # OPTIMIZATION 1: Create base state once and precompute blocking map
-        base_state = self._create_initial_state(level_json, max_moves)
-
-        # OPTIMIZATION 2: Precompute all blocking relationships
-        self._precompute_blocking_map(base_state)
+        # Check randSeed mode: 0 = random each play (only if honor_zero_seed=True), >0 = fixed seed
+        level_rand_seed = level_json.get("randSeed", 0)
+        use_random_seed_per_iteration = (level_rand_seed == 0 and honor_zero_seed)
 
         results: List[GameState] = []
+        actual_iterations = 0
 
-        for i in range(iterations):
-            if seed is not None:
-                self._rng.seed(seed + i)
+        if use_random_seed_per_iteration:
+            # randSeed = 0 with honor_zero_seed=True: Each iteration gets a different random seed
+            # This simulates the actual game behavior where each play has different t0 distribution
+            # NOTE: This is slower but more accurate for final difficulty assessment
+            for i in range(iterations):
+                if seed is not None:
+                    self._rng.seed(seed + i)
 
-            # OPTIMIZATION 3: Fast copy instead of full re-parse
-            state = self._fast_copy_state(base_state)
-            final_state = self._play_game(state, profile)
-            results.append(final_state)
+                # Generate a random seed for this iteration
+                iteration_seed = self._rng.randint(1, 999999)
+
+                # Create modified level_json with the random seed
+                level_with_seed = level_json.copy()
+                level_with_seed["randSeed"] = iteration_seed
+
+                # Create fresh initial state with this seed's t0 distribution
+                state = self._create_initial_state(level_with_seed, max_moves)
+                self._precompute_blocking_map(state)
+
+                final_state = self._play_game(state, profile)
+                results.append(final_state)
+                actual_iterations += 1
+
+                # Early termination check
+                if early_termination and self._should_terminate_early(results, iterations):
+                    break
+        else:
+            # randSeed > 0 OR (randSeed = 0 with honor_zero_seed=False): Use fixed seed (fast path)
+            # OPTIMIZATION 1: Create base state once and precompute blocking map
+            base_state = self._create_initial_state(level_json, max_moves)
+
+            # OPTIMIZATION 2: Precompute all blocking relationships
+            self._precompute_blocking_map(base_state)
+
+            for i in range(iterations):
+                if seed is not None:
+                    self._rng.seed(seed + i)
+
+                # OPTIMIZATION 3: Fast copy instead of full re-parse
+                state = self._fast_copy_state(base_state)
+                final_state = self._play_game(state, profile)
+                results.append(final_state)
+                actual_iterations += 1
+
+                # Early termination check
+                if early_termination and self._should_terminate_early(results, iterations):
+                    break
 
         cleared_count = sum(1 for r in results if r.cleared)
         moves_list = [r.moves_used for r in results]
@@ -737,8 +811,8 @@ class BotSimulator:
         return BotSimulationResult(
             bot_type=profile.bot_type,
             bot_name=profile.name,
-            iterations=iterations,
-            clear_rate=cleared_count / iterations if iterations > 0 else 0,
+            iterations=actual_iterations,  # Report actual iterations run
+            clear_rate=cleared_count / actual_iterations if actual_iterations > 0 else 0,
             avg_moves=statistics.mean(moves_list) if moves_list else 0,
             min_moves=min(moves_list) if moves_list else 0,
             max_moves=max(moves_list) if moves_list else max_moves,
@@ -747,6 +821,45 @@ class BotSimulator:
             avg_tiles_cleared=statistics.mean(tiles_list) if tiles_list else 0,
         )
 
+    def _should_terminate_early(self, results: List[GameState], target_iterations: int) -> bool:
+        """Check if we should terminate early based on current results.
+
+        Early termination conditions:
+        1. Minimum iterations completed (EARLY_TERM_MIN_ITERATIONS)
+        2. Results are conclusive:
+           - 100% clear rate (all iterations cleared)
+           - 0% clear rate (all iterations failed)
+           - High confidence that final rate won't change significantly
+
+        Returns:
+            True if early termination is recommended
+        """
+        n = len(results)
+
+        # Don't terminate before minimum iterations
+        if n < self.EARLY_TERM_MIN_ITERATIONS:
+            return False
+
+        cleared_count = sum(1 for r in results if r.cleared)
+        current_rate = cleared_count / n
+
+        # Case 1: 100% clear rate - very likely to stay high
+        if current_rate == 1.0:
+            return True
+
+        # Case 2: 0% clear rate - very likely to stay at 0
+        if current_rate == 0.0:
+            return True
+
+        # Case 3: Statistical confidence check using Wilson score interval
+        # If the confidence interval is tight enough, we can terminate
+        if n >= self.EARLY_TERM_MIN_ITERATIONS * 2:  # At least 20 iterations
+            # For extreme rates (>95% or <5%), we can be confident
+            if current_rate >= self.EARLY_TERM_CONFIDENCE_THRESHOLD or current_rate <= (1 - self.EARLY_TERM_CONFIDENCE_THRESHOLD):
+                return True
+
+        return False
+
     def assess_difficulty(
         self,
         level_json: Dict[str, Any],
@@ -754,8 +867,20 @@ class BotSimulator:
         max_moves: int = 30,
         parallel: bool = True,
         seed: Optional[int] = None,
+        fast_mode: bool = False,
+        early_termination: bool = False,
     ) -> MultiBotAssessmentResult:
-        """Run multi-bot assessment to determine level difficulty."""
+        """Run multi-bot assessment to determine level difficulty.
+
+        Args:
+            level_json: Level data to assess
+            team: Bot team to use (default: all 5 bots with 100 iterations each)
+            max_moves: Maximum moves allowed
+            parallel: Use parallel processing
+            seed: Random seed
+            fast_mode: Use fast verification profiles (reduced lookahead)
+            early_termination: Stop iterations early when results are conclusive
+        """
         if team is None:
             team = BotTeam.default_team(iterations_per_bot=100)
 
@@ -765,7 +890,8 @@ class BotSimulator:
             # Use ProcessPoolExecutor for true CPU parallelism (bypasses GIL)
             pool = _get_process_pool()
             args_list = [
-                (level_json, profile.bot_type.value, team.iterations_per_bot, max_moves, seed + i if seed else None)
+                (level_json, profile.bot_type.value, team.iterations_per_bot, max_moves,
+                 seed + i if seed else None, fast_mode, early_termination)
                 for i, profile in enumerate(team.profiles)
             ]
             futures = [pool.submit(_simulate_bot_process, args) for args in args_list]
@@ -775,12 +901,15 @@ class BotSimulator:
                 bot_results.append(result)
         else:
             for i, profile in enumerate(team.profiles):
+                # Use fast profile if fast_mode is enabled
+                actual_profile = get_profile(profile.bot_type, fast_mode=fast_mode) if fast_mode else profile
                 result = self.simulate_with_profile(
                     level_json,
-                    profile,
+                    actual_profile,
                     team.iterations_per_bot,
                     max_moves,
                     seed + i if seed else None,
+                    early_termination=early_termination,
                 )
                 bot_results.append(result)
 
@@ -814,6 +943,10 @@ class BotSimulator:
             is_locked = (i >= (7 - unlock_tile)) if unlock_tile > 0 else False
             state.dock.append(DockSlot(index=i, is_locked=is_locked))
 
+        # CRITICAL: Initialize max_dock_slots to reflect locked slots
+        # Without this, _is_dock_full() incorrectly uses 7 instead of actual available slots
+        state.max_dock_slots = 7 - unlock_tile
+
         # Get level settings for t0 distribution (sp_template compatible)
         rand_seed = level_json.get("randSeed", 0)
         use_tile_count = level_json.get("useTileCount", self.DEFAULT_USE_TILE_COUNT)
@@ -828,13 +961,15 @@ class BotSimulator:
         type_imbalance = level_json.get("xTypeImbalance", 0)
         # NOTE: unlock_tile is already read above for dock initialization
 
-        # First pass: collect ALL t0 tiles AND count existing t1~t15 tiles
+        # First pass: collect ALL t0 tiles AND count existing t1~t15 tiles AND explicit key tiles
         # This includes:
         # 1. Regular t0 tiles on the board
         # 2. t0 tiles INSIDE stack/craft containers
         # 3. Existing t1~t15 tiles (need to track for proper t0 distribution)
+        # 4. Explicit "key" tiles (need to subtract from unlock_tile for t0 distribution)
         t0_tiles: List[Tuple[int, str, Any]] = []  # (layer_idx, pos_key, tile_data)
         existing_tile_counts: Dict[str, int] = {}  # t1~t15 counts
+        explicit_key_count = 0  # Count of explicit "key" tiles in level JSON
 
         for layer_idx in range(num_layers):
             layer_key = f"layer_{layer_idx}"
@@ -863,6 +998,9 @@ class BotSimulator:
                     elif tile_type == "t0":
                         # Regular t0 tile
                         t0_tiles.append((layer_idx, pos, tile_data))
+                    elif tile_type == "key":
+                        # Explicit key tile - count it (don't generate more from t0)
+                        explicit_key_count += 1
                     elif isinstance(tile_type, str) and tile_type.startswith("t") and tile_type[1:].isdigit():
                         # Existing t1~t15 tile - count it
                         tile_num = int(tile_type[1:])
@@ -880,6 +1018,14 @@ class BotSimulator:
             if min_tile_num > use_tile_count:
                 tile_type_offset = min_tile_num - 1
 
+        # Calculate effective unlock_tile for t0 distribution
+        # If level already has explicit "key" tiles, reduce the number of keys to generate
+        # Each unlock_tile generates 3 key tiles, so we need: unlock_tile * 3 total keys
+        # effective_unlock_tile = max(0, unlock_tile - (explicit_key_count // 3))
+        # This prevents double key generation when level JSON has explicit keys
+        explicit_key_sets = explicit_key_count // 3
+        effective_unlock_tile = max(0, unlock_tile - explicit_key_sets)
+
         # Generate tile type assignments for ALL t0 tiles
         # Use TileDistributor for exact in-game matching (zWellRandom + original algorithm)
         t0_assignments = TileDistributor.assign_t0_tiles(
@@ -888,7 +1034,7 @@ class BotSimulator:
             rand_seed=rand_seed,
             shuffle_tile=shuffle_tile,
             type_imbalance=type_imbalance,
-            unlock_tile=unlock_tile,
+            unlock_tile=effective_unlock_tile,  # Use adjusted value to prevent double key generation
             tile_type_offset=tile_type_offset
         )
 
@@ -1317,6 +1463,17 @@ class BotSimulator:
                     if layer_idx not in state.tiles:
                         state.tiles[layer_idx] = {}
                     state.tiles[layer_idx][pos] = top_tile
+
+                    # CRITICAL: Remove the top tile from stacked_tiles to avoid double-counting
+                    # The tile is now in state.tiles, not just in the stack
+                    top_tile_key = top_tile.original_full_key
+                    if top_tile_key in state.stacked_tiles:
+                        del state.stacked_tiles[top_tile_key]
+                    # Update the tile below to know there's no upper tile blocking it
+                    if top_tile.under_stacked_tile_key:
+                        under_tile = state.stacked_tiles.get(top_tile.under_stacked_tile_key)
+                        if under_tile:
+                            under_tile.upper_stacked_tile_key = None
 
             # NOTE: Goal tracking for craft tiles is handled earlier in this function
             # (Line 737-738: each craft tile = 1 goal)
@@ -2675,12 +2832,18 @@ class BotSimulator:
 
         # DOCK DANGER MANAGEMENT
         # As dock fills, non-matching moves become increasingly dangerous
+        # ============================================================
+        # RISK TOLERANCE INTEGRATION
+        # 높은 risk_tolerance = 위험 상황에서도 패널티 덜 적용 (과감한 플레이)
+        # 낮은 risk_tolerance = 위험 상황에서 패널티 더 적용 (보수적 플레이)
+        # ============================================================
+        risk_penalty_factor = 1.5 - profile.risk_tolerance  # 0.5 ~ 1.45
         if dock_count >= 6 and not move.will_match:
-            base_score -= 50.0  # Critical danger - avoid non-matching
+            base_score -= 50.0 * risk_penalty_factor  # Critical danger
         elif dock_count >= 5 and not move.will_match:
-            base_score -= 20.0  # High danger
+            base_score -= 20.0 * risk_penalty_factor  # High danger
         elif dock_count >= 4 and not move.will_match:
-            base_score -= profile.blocking_awareness * 5.0
+            base_score -= profile.blocking_awareness * 5.0 * risk_penalty_factor
 
         # ENDGAME DOCK MANAGEMENT (for Optimal bot)
         # When dock is filling and we're not matching, prefer tiles that can SET UP matches
@@ -2813,10 +2976,100 @@ class BotSimulator:
         layer_bonus = move.layer_idx * profile.blocking_awareness * 0.3
         base_score += layer_bonus
 
+        # ============================================================
+        # STRATEGIC UNBLOCK BONUS - Core of sacrifice strategy
+        # 실제 플레이어처럼 "이 타일을 선택하면 어떤 타일이 풀리는가?" 고려
+        # 높은 blocking_awareness를 가진 봇만 이 전략 사용
+        # ============================================================
+        if profile.blocking_awareness >= 0.5 and hasattr(self, '_blocking_map'):
+            # Get tiles that will be unblocked by picking this tile
+            tile_state = move.tile_state
+            if tile_state:
+                unblock_bonus = 0.0
+                tile_key = (move.layer_idx, tile_state.position_key)
+
+                # Find tiles that are blocked by this tile
+                tiles_to_unblock = []
+                for (blocked_layer, blocked_pos), blockers in self._blocking_map.items():
+                    if tile_key in blockers:
+                        # This tile is blocking something
+                        blocked_tile = state.tiles.get(blocked_layer, {}).get(blocked_pos)
+                        if blocked_tile and not blocked_tile.picked:
+                            tiles_to_unblock.append(blocked_tile)
+
+                if tiles_to_unblock:
+                    # Check dock types for potential matches
+                    dock_types = {}
+                    for t in state.dock_tiles:
+                        dock_types[t.tile_type] = dock_types.get(t.tile_type, 0) + 1
+
+                    # Count how many unblocked tiles match dock types
+                    match_setup_count = 0
+                    same_type_unblock = 0
+
+                    for unblocked in tiles_to_unblock:
+                        utype = unblocked.tile_type
+                        if utype in dock_types:
+                            # Will unblock a tile that matches something in dock!
+                            if dock_types[utype] == 1:
+                                match_setup_count += 1  # Now 2 in dock after this
+                            elif dock_types[utype] >= 2:
+                                match_setup_count += 2  # This enables a match!
+                        if utype == move.tile_type:
+                            same_type_unblock += 1  # Unblocks same type as current
+
+                    # Bonus for unblocking tiles that help with matches
+                    if match_setup_count > 0:
+                        # Higher bonus when dock is under pressure
+                        pressure_factor = 1.0 + (dock_count / 7.0)
+                        unblock_bonus += match_setup_count * 5.0 * profile.blocking_awareness * pressure_factor
+
+                    # Bonus for unblocking same-type tiles (helps future matches)
+                    if same_type_unblock > 0:
+                        unblock_bonus += same_type_unblock * 3.0 * profile.blocking_awareness
+
+                    # Bonus for unblocking multiple tiles (clears board faster)
+                    if len(tiles_to_unblock) >= 2:
+                        unblock_bonus += len(tiles_to_unblock) * 1.5 * profile.blocking_awareness
+
+                    base_score += unblock_bonus
+
         # Chain preference - bonus for clearing effect tiles
         if move.attribute != "none":
             attribute_bonus = profile.chain_preference * 1.5
             base_score += attribute_bonus
+
+        # KEY TILE PRIORITY - unlock dock slots when locked
+        # Key tiles unlock one dock slot when 3 are matched
+        # Without unlocking, player has fewer dock slots = higher game over risk
+        has_locked_slots = any(slot.is_locked for slot in state.dock)
+        if has_locked_slots and move.tile_type == "key":
+            # Count key tiles already in dock
+            key_in_dock = sum(1 for t in state.dock_tiles if t.tile_type == "key")
+
+            # Base bonus scaled by bot's awareness level
+            # Higher awareness = more strategic about unlocking
+            awareness_factor = profile.blocking_awareness
+
+            if key_in_dock == 2:
+                # Can complete key match! High priority
+                base_score += 25.0 * awareness_factor
+            elif key_in_dock == 1:
+                # One more to complete - medium priority
+                base_score += 15.0 * awareness_factor
+            else:
+                # Starting collection - base priority
+                base_score += 8.0 * awareness_factor
+
+            # Extra urgency when dock is pressured
+            # With locked slots, effective dock space is smaller
+            unlocked_slots = sum(1 for s in state.dock if not s.is_locked)
+            if dock_count >= unlocked_slots - 1:
+                # Critical: dock almost full relative to available slots
+                base_score += 20.0 * awareness_factor
+            elif dock_count >= unlocked_slots - 2:
+                # Warning: getting tight
+                base_score += 10.0 * awareness_factor
 
         # STACK/CRAFT TILE PRIORITY (for Expert+ bots)
         # Expert bots: Basic priority for stack/craft tiles
@@ -2937,18 +3190,99 @@ class BotSimulator:
                     # Can't pick ice tiles directly - this shouldn't happen, but safety check
                     base_score -= profile.blocking_awareness * 10.0
 
-            # 2. CHAIN tiles: Penalize if many chain tiles remain locked with high dock count
+            # ============================================================
+            # 2. CHAIN/GRASS PROACTIVE UNLOCK BONUS
+            # Higher-level bots proactively unlock chain/grass by picking adjacent tiles
+            # This prevents deadlock situations before they happen
+            #
+            # CHAIN_PREFERENCE INTEGRATION:
+            # 높은 chain_preference = 기믹 해제에 더 높은 우선순위 부여
+            # 낮은 chain_preference = 기믹 해제 거의 고려 안함
+            # ============================================================
+            if tile_state:
+                move_x, move_y = tile_state.x_idx, tile_state.y_idx
+                move_layer = tile_state.layer_idx
+                layer_tiles = state.tiles.get(move_layer, {})
+
+                # chain_preference 기반 보너스 배율 (0.1 ~ 2.0)
+                gimmick_bonus_multiplier = 0.1 + profile.chain_preference * 1.9
+
+                # 2a. CHAIN UNLOCK BONUS: Bonus for picking tiles that unlock chains
+                # Chain unlocks when HORIZONTAL adjacent tile is picked (and chain is not blocked)
+                chain_unlock_bonus = 0.0
+                horizontal_neighbors = [(move_x - 1, move_y), (move_x + 1, move_y)]
+                for nx, ny in horizontal_neighbors:
+                    neighbor_pos = f"{nx}_{ny}"
+                    if neighbor_pos in layer_tiles:
+                        neighbor_tile = layer_tiles[neighbor_pos]
+                        if (not neighbor_tile.picked and
+                            neighbor_tile.effect_type == TileEffectType.CHAIN and
+                            not neighbor_tile.effect_data.get("unlocked", False)):
+                            # This move will unlock a chain tile!
+                            # Check if chain tile is blocked (if blocked, unlock won't happen)
+                            if not self._is_blocked_by_upper(state, neighbor_tile):
+                                # Chain will be unlocked immediately - HIGH PRIORITY
+                                chain_unlock_bonus = max(chain_unlock_bonus, 25.0 * profile.blocking_awareness * gimmick_bonus_multiplier)
+                            else:
+                                # Chain is blocked, but this move helps progress toward unlock
+                                chain_unlock_bonus = max(chain_unlock_bonus, 5.0 * profile.blocking_awareness * gimmick_bonus_multiplier)
+
+                if chain_unlock_bonus > 0:
+                    base_score += chain_unlock_bonus
+
+                # 2b. GRASS REDUCE BONUS: Bonus for picking tiles that reduce grass layers
+                # Grass reduces when 4-directional adjacent tile is picked (and grass is not blocked)
+                grass_reduce_bonus = 0.0
+                adjacent_neighbors = [
+                    (move_x - 1, move_y), (move_x + 1, move_y),
+                    (move_x, move_y - 1), (move_x, move_y + 1)
+                ]
+                for nx, ny in adjacent_neighbors:
+                    neighbor_pos = f"{nx}_{ny}"
+                    if neighbor_pos in layer_tiles:
+                        neighbor_tile = layer_tiles[neighbor_pos]
+                        if (not neighbor_tile.picked and
+                            neighbor_tile.effect_type == TileEffectType.GRASS):
+                            remaining_grass = neighbor_tile.effect_data.get("remaining", 0)
+                            if remaining_grass > 0:
+                                # Check if grass tile is blocked
+                                if not self._is_blocked_by_upper(state, neighbor_tile):
+                                    if remaining_grass == 1:
+                                        # This move will fully unlock the grass tile - HIGH PRIORITY
+                                        grass_reduce_bonus = max(grass_reduce_bonus, 20.0 * profile.blocking_awareness * gimmick_bonus_multiplier)
+                                    else:
+                                        # This move reduces grass layers - MEDIUM PRIORITY
+                                        grass_reduce_bonus = max(grass_reduce_bonus, 10.0 * profile.blocking_awareness * gimmick_bonus_multiplier)
+                                else:
+                                    # Grass is blocked, but reducing helps
+                                    grass_reduce_bonus = max(grass_reduce_bonus, 3.0 * profile.blocking_awareness * gimmick_bonus_multiplier)
+
+                if grass_reduce_bonus > 0:
+                    base_score += grass_reduce_bonus
+
+            # 3. CHAIN tiles: Penalize moves that don't help unlock when chains exist
             locked_chains = 0
-            for layer in state.tiles.values():
-                for tile in layer.values():
+            locked_chain_positions = []  # Track chain positions for smarter penalty
+            for layer_idx, layer in state.tiles.items():
+                for pos, tile in layer.items():
                     if not tile.picked and tile.effect_type == TileEffectType.CHAIN:
                         if not tile.effect_data.get("unlocked", False):
                             locked_chains += 1
-            if locked_chains >= 3 and dock_count >= 5 and not move.will_match:
-                # High risk: many locked chains + filling dock = potential deadlock
-                base_score -= profile.blocking_awareness * 8.0
+                            locked_chain_positions.append((layer_idx, pos, tile))
 
-            # 3. GRASS tiles: Penalty if grass tiles are blocking and dock is filling
+            # Lower threshold for penalty (was >= 3, now >= 1 with scaled penalty)
+            # chain_preference가 낮으면 패널티도 낮음 (기믹 무시 허용)
+            if locked_chains >= 1 and dock_count >= 4 and not move.will_match:
+                # Calculate penalty based on chain count and dock pressure
+                chain_penalty = profile.blocking_awareness * (2.0 + locked_chains * 2.0)
+                # Higher penalty when dock is more full
+                dock_pressure = (dock_count - 3) / 4.0  # 0 at dock=3, 1 at dock=7
+                chain_penalty *= (1.0 + dock_pressure)
+                # chain_preference 기반 패널티 스케일링 (0.2 ~ 1.2)
+                chain_penalty *= (0.2 + profile.chain_preference)
+                base_score -= chain_penalty
+
+            # 4. GRASS tiles: Penalize moves that don't help reduce grass when grass exists
             blocking_grass = 0
             for layer in state.tiles.values():
                 for tile in layer.values():
@@ -2956,9 +3290,17 @@ class BotSimulator:
                         remaining_grass = tile.effect_data.get("remaining", 0)
                         if remaining_grass > 0:
                             blocking_grass += 1
-            if blocking_grass >= 3 and dock_count >= 5 and not move.will_match:
-                # High risk: many grass tiles blocking + filling dock
-                base_score -= profile.blocking_awareness * 8.0
+
+            # Lower threshold for penalty (was >= 3, now >= 1 with scaled penalty)
+            # chain_preference가 낮으면 패널티도 낮음 (기믹 무시 허용)
+            if blocking_grass >= 1 and dock_count >= 4 and not move.will_match:
+                # Calculate penalty based on grass count and dock pressure
+                grass_penalty = profile.blocking_awareness * (2.0 + blocking_grass * 1.5)
+                dock_pressure = (dock_count - 3) / 4.0
+                grass_penalty *= (1.0 + dock_pressure)
+                # chain_preference 기반 패널티 스케일링 (0.2 ~ 1.2)
+                grass_penalty *= (0.2 + profile.chain_preference)
+                base_score -= grass_penalty
 
             # 4. LINK tiles: Bonus for completing link pairs (clears 2 tiles at once)
             if tile_state and tile_state.effect_type in (
@@ -3232,14 +3574,26 @@ class BotSimulator:
 
         # Calculate panic level (0.0 ~ 1.0)
         max_dock = 7
-        panic_level = min(1.0, (dock_count - threshold + 1) / (max_dock - threshold + 1))
+        base_panic_level = min(1.0, (dock_count - threshold + 1) / (max_dock - threshold + 1))
 
-        # Increase mistake rate (up to 2x)
-        panic_mistake_multiplier = 1 + panic_level
+        # ============================================================
+        # RISK TOLERANCE INTEGRATION
+        # 높은 risk_tolerance = 위험 상황에서도 침착함 유지
+        # 낮은 risk_tolerance = 위험 상황에서 패닉 증가
+        # ============================================================
+        # risk_tolerance가 높으면 패닉 레벨 감소 (최대 50% 감소)
+        # risk_tolerance가 낮으면 패닉 레벨 증가 (최대 30% 증가)
+        risk_factor = 1.0 - (profile.risk_tolerance * 0.5)  # 0.5 ~ 1.0
+        panic_level = base_panic_level * risk_factor
+
+        # Increase mistake rate (up to 2x, modulated by risk_tolerance)
+        # 높은 risk_tolerance = 패닉 상황에서도 실수 적게
+        panic_mistake_multiplier = 1 + (panic_level * (1.0 - profile.risk_tolerance * 0.3))
         adjusted_mistake = min(0.6, profile.mistake_rate * panic_mistake_multiplier)
 
-        # Reduce lookahead depth
-        depth_reduction = int(panic_level * 2)
+        # Reduce lookahead depth (modulated by risk_tolerance)
+        # 높은 risk_tolerance = 패닉 상황에서도 선읽기 유지
+        depth_reduction = int(panic_level * 2 * (1.0 - profile.risk_tolerance * 0.4))
         adjusted_depth = max(0, profile.lookahead_depth - depth_reduction)
 
         return adjusted_mistake, adjusted_depth
@@ -3358,10 +3712,27 @@ class BotSimulator:
         # Sort by score
         sorted_moves = sorted(moves, key=lambda m: m.score, reverse=True)
 
-        # Apply patience factor
+        # ============================================================
+        # PATIENCE PARAMETER INTEGRATION
+        # 높은 patience = 최적의 수를 신중하게 선택 (점수 차이 고려)
+        # 낮은 patience = 빠른 결정, 상위 몇 개 중 임의 선택
+        # ============================================================
         if profile.patience < 0.5 and len(sorted_moves) > 1:
-            cutoff = max(1, int(len(sorted_moves) * profile.patience))
+            # 성급한 플레이어: 상위 후보 중 랜덤 선택
+            # patience가 낮을수록 더 적은 후보에서 선택
+            cutoff = max(1, int(len(sorted_moves) * (0.3 + profile.patience * 0.4)))
             return self._rng.choice(sorted_moves[:cutoff])
+        elif profile.patience >= 0.8 and len(sorted_moves) > 1:
+            # 신중한 플레이어: 점수 차이가 작으면 2-in-dock 셋업 우선
+            top_score = sorted_moves[0].score
+            # 점수 차이가 5점 이내인 후보들 중에서
+            close_candidates = [m for m in sorted_moves if top_score - m.score <= 5.0]
+            if len(close_candidates) > 1:
+                # 2-in-dock 셋업 가능한 수 우선
+                for candidate in close_candidates:
+                    if candidate.match_count == 2:
+                        return candidate
+            # 그 외에는 최고 점수
 
         # OPTIMAL BOT: Use perfect information to avoid unsafe moves
         if profile.pattern_recognition >= 1.0:

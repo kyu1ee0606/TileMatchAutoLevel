@@ -526,9 +526,10 @@ class ValidatedGenerateRequest(BaseModel):
     # Validation parameters
     max_retries: int = Field(default=5, ge=1, le=20, description="Maximum generation retries")
     tolerance: float = Field(default=15.0, ge=1.0, le=50.0, description="Acceptable gap percentage from target")
-    simulation_iterations: int = Field(default=30, ge=0, le=100, description="Iterations for validation simulation (0=skip simulation, fast generation only)")
+    simulation_iterations: int = Field(default=0, ge=0, le=100, description="Iterations for validation simulation (0=skip simulation for fast generation, use batch verify API for post-validation)")
     use_best_match: bool = Field(default=True, description="Use best match strategy - always return best result after max_retries")
     use_core_bots_only: bool = Field(default=False, description="Use only 3 core bots (casual/average/expert) for faster validation - 40% speed boost")
+    skip_deadlock_check: bool = Field(default=True, description="Skip internal deadlock checking for ultra-fast generation (use batch verify for post-validation)")
 
 
 class ValidatedGenerateResponse(BaseModel):
@@ -572,3 +573,47 @@ class EnhanceLevelResponse(BaseModel):
     max_gap: float = Field(default=0, description="Maximum gap from target (%)")
     modifications: List[str] = Field(default=[], description="List of modifications applied")
     enhanced: bool = Field(default=False, description="Whether enhancement improved the level")
+
+
+# ============================================================
+# Batch Verification Schemas (Post-generation validation)
+# ============================================================
+
+class BatchVerifyLevelItem(BaseModel):
+    """Single level item for batch verification."""
+    level_json: Dict[str, Any] = Field(..., description="Level JSON to verify")
+    level_id: Optional[str] = Field(default=None, description="Optional level identifier")
+    target_difficulty: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Target difficulty for this level")
+
+
+class BatchVerifyRequest(BaseModel):
+    """Request schema for batch level verification."""
+    levels: List[BatchVerifyLevelItem] = Field(..., description="List of levels to verify")
+    iterations: int = Field(default=20, ge=3, le=100, description="Simulation iterations per bot (default: 20 for balance of speed/accuracy)")
+    tolerance: float = Field(default=15.0, ge=1.0, le=50.0, description="Acceptable gap percentage from target")
+    use_core_bots_only: bool = Field(default=True, description="Use only 3 core bots (casual/average/expert) for faster verification")
+    fast_mode: bool = Field(default=True, description="Use fast verification profiles with reduced lookahead depth")
+    early_termination: bool = Field(default=True, description="Stop iterations early when results are conclusive (100% or 0% clear)")
+
+
+class BatchVerifyResultItem(BaseModel):
+    """Single level verification result."""
+    level_id: str = Field(..., description="Level identifier")
+    passed: bool = Field(..., description="Whether verification passed")
+    bot_clear_rates: Dict[str, float] = Field(default={}, description="Clear rates per bot type")
+    target_clear_rates: Dict[str, float] = Field(default={}, description="Target clear rates")
+    avg_gap: float = Field(default=0, description="Average gap from target (%)")
+    max_gap: float = Field(default=0, description="Maximum gap from target (%)")
+    match_score: float = Field(default=0, description="Match score (0-100%)")
+    static_grade: str = Field(default="?", description="Static analysis grade")
+    issues: List[str] = Field(default=[], description="List of issues found")
+
+
+class BatchVerifyResponse(BaseModel):
+    """Response schema for batch verification."""
+    results: List[BatchVerifyResultItem] = Field(default=[], description="Verification results")
+    total_levels: int = Field(..., description="Total number of levels verified")
+    passed_count: int = Field(..., description="Number of levels that passed")
+    failed_count: int = Field(..., description="Number of levels that failed")
+    pass_rate: float = Field(..., description="Pass rate (0-1)")
+    execution_time_ms: int = Field(..., description="Total execution time in milliseconds")

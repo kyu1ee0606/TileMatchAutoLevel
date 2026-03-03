@@ -21,7 +21,7 @@ class LevelAnalyzer:
         "goal_amount": 1.5,       # 3-10 goals → 4.5-15 points
         "layer_blocking": 0.15,   # Reduced: blocking can be 0-300 → 0-45 points
         # New weights for better bot simulation correlation
-        "tile_type_count": 8.0,   # 3-6 types → 24-48 points (덱 큐 막힘 확률에 큰 영향)
+        "tile_type_count": 8.0,   # 8-12 types → 0-32 points (v2: 10종류 기준선 반영)
         "move_ratio": 15.0,       # 1.5-4.0 ratio → 22.5-60 points (무브 여유도)
     }
 
@@ -175,7 +175,12 @@ class LevelAnalyzer:
         layer_blocking = self._calculate_layer_blocking(layer_positions, num_layers)
 
         # Calculate new metrics
-        tile_type_count = len([t for t in tile_types.keys() if t.startswith("t")])  # t1~t15만 카운트
+        # t0 사용 시 useTileCount 필드 사용, 아니면 실제 타일 타입 카운트
+        if "t0" in tile_types:
+            # t0 = 랜덤 타일, useTileCount가 실제 타일 종류 수
+            tile_type_count = level_json.get("useTileCount", 5)
+        else:
+            tile_type_count = len([t for t in tile_types.keys() if t.startswith("t")])  # t1~t15만 카운트
         move_ratio = total_tiles / max_moves if max_moves > 0 else 0.0
 
         return LevelMetrics(
@@ -279,6 +284,24 @@ class LevelAnalyzer:
             synergy = min(gimmick_data["link"], blocking_count) * 0.4 * GIMMICK_BASE_WEIGHT
             score += synergy
 
+        # teleport + unknown: 숨겨진 타일이 계속 위치 변경 = 예측 불가 (v2 추가)
+        if gimmick_data["teleport"] > 0 and gimmick_data["unknown"] > 0:
+            synergy = min(gimmick_data["teleport"], gimmick_data["unknown"]) * 0.5 * GIMMICK_BASE_WEIGHT
+            score += synergy
+
+        # teleport + ice: 얼음 녹이기 전에 위치 변경 = 진행 방해 (v2 추가)
+        if gimmick_data["teleport"] > 0 and gimmick_data["ice"] > 0:
+            synergy = min(gimmick_data["teleport"], gimmick_data["ice"]) * 0.4 * GIMMICK_BASE_WEIGHT
+            score += synergy
+
+        # time_attack + 다른 기믹 조합: 시간 압박 하에서 기믹 처리는 훨씬 어려움 (v2 추가)
+        if metrics.has_time_attack:
+            total_gimmicks = sum(gimmick_data.values())
+            if total_gimmicks > 0:
+                # 기믹이 많을수록 시간 압박의 영향 증가
+                time_synergy = min(total_gimmicks, 10) * 0.3 * GIMMICK_BASE_WEIGHT
+                score += time_synergy
+
         return score
 
     def _calculate_score(self, metrics: LevelMetrics) -> float:
@@ -293,8 +316,8 @@ class LevelAnalyzer:
         # 통합 기믹 가중치 시스템 사용
         score += self._calculate_gimmick_score(metrics)
 
-        # 타일 종류 다양성: 3종류 기준, 초과 시 급격히 어려워짐
-        tile_type_penalty = max(0, metrics.tile_type_count - 3)
+        # 타일 종류 다양성: 8종류 기준, 초과 시 어려워짐 (v2: 10종류 기준선 반영)
+        tile_type_penalty = max(0, metrics.tile_type_count - 8)
         score += tile_type_penalty * self.WEIGHTS["tile_type_count"]
 
         # 무브 여유도: 비율 2.0 기준, 초과 시 어려움 증가

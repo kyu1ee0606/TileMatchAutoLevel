@@ -48,8 +48,9 @@ import {
 } from '../../storage/productionStorage';
 import { ProductionExport } from './ProductionExport';
 import { BatchApprovalPanel } from './BatchApprovalPanel';
+import { BatchVerifyPanel } from './BatchVerifyPanel';
 
-type DashboardTab = 'overview' | 'generate' | 'test' | 'playtest' | 'review' | 'export';
+type DashboardTab = 'overview' | 'generate' | 'verify' | 'test' | 'playtest' | 'review' | 'export';
 
 interface ProductionDashboardProps {
   onLevelSelect?: (level: ProductionLevel) => void;
@@ -851,6 +852,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
         {[
           { id: 'overview', label: '개요' },
           { id: 'generate', label: '생성' },
+          { id: 'verify', label: '검증' },
           { id: 'test', label: '테스트' },
           { id: 'playtest', label: '플레이테스트' },
           { id: 'review', label: '검토' },
@@ -890,6 +892,19 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             useCoreBots={useCoreBots}
             onUseCoreBotsChange={setUseCoreBots}
           />
+        )}
+
+        {activeTab === 'verify' && selectedBatchId && (
+          <div className="bg-gray-800 rounded-lg p-4">
+            <BatchVerifyPanel
+              batchId={selectedBatchId}
+              onComplete={() => setActiveTab('review')}
+              onStatsUpdate={async () => {
+                const newStats = await calculateProductionStats(selectedBatchId);
+                setStats(newStats);
+              }}
+            />
+          </div>
         )}
 
         {activeTab === 'test' && selectedBatchId && (

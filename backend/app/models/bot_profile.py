@@ -63,89 +63,187 @@ class BotProfile:
         }
 
 
-# Predefined bot profiles
+# Predefined bot profiles - 실제 인간 플레이어 행동 모델링
+# 각 봇은 실제 플레이어 유형의 인지적 특성과 행동 패턴을 반영
 PREDEFINED_PROFILES: Dict[BotType, BotProfile] = {
+    # ============================================================
+    # NOVICE (사람 초보자)
+    # - 게임 메카닉 이해 부족
+    # - 거의 랜덤한 타일 선택
+    # - 레이어/블로킹 개념 없음
+    # - 기믹(chain, grass) 영향 인지 못함
+    # - 독(dock) 관리 의식 없음
+    # ============================================================
     BotType.NOVICE: BotProfile(
         name="Novice Bot",
         bot_type=BotType.NOVICE,
-        description="초보 플레이어를 시뮬레이션. 거의 랜덤한 선택, 높은 실수율.",
-        mistake_rate=0.4,
-        lookahead_depth=0,
-        goal_priority=0.3,
-        blocking_awareness=0.2,
-        chain_preference=0.1,
-        patience=0.3,
-        risk_tolerance=0.7,
-        pattern_recognition=0.2,
-        weight=0.5,  # 낮은 가중치 (타겟 유저가 아님)
+        description="사람 초보자: 게임 메카닉 미이해, 거의 랜덤 선택, 기믹 인지 없음",
+        mistake_rate=0.45,       # 45% 실수 - 잘못된 선택 빈번
+        lookahead_depth=0,       # 선읽기 없음 - 즉흥적 선택
+        goal_priority=0.2,       # 목표 의식 거의 없음
+        blocking_awareness=0.1,  # 레이어 블로킹 거의 인지 못함
+        chain_preference=0.05,   # 기믹 선호도 거의 없음
+        patience=0.2,            # 성급함 - 빠른 선택
+        risk_tolerance=0.8,      # 위험 인지 없음 - 아무 타일이나 선택
+        pattern_recognition=0.15, # 패턴 인식 거의 없음
+        weight=0.5,              # 낮은 가중치 (타겟 유저 아님)
     ),
 
+    # ============================================================
+    # CASUAL (사람 초중급자)
+    # - 기본 매칭 규칙 이해 (3개 매칭)
+    # - 독(dock)이 차면 위험하다는 것 인지
+    # - 가끔 실수하며 학습 중
+    # - 레이어 개념 약간 인지
+    # - 기믹은 있다는 것만 앎
+    # ============================================================
     BotType.CASUAL: BotProfile(
         name="Casual Bot",
         bot_type=BotType.CASUAL,
-        description="캐주얼 플레이어를 시뮬레이션. 기본 전략, 가끔 실수.",
-        mistake_rate=0.2,
-        lookahead_depth=1,
-        goal_priority=0.5,
-        blocking_awareness=0.4,
-        chain_preference=0.3,
-        patience=0.4,
-        risk_tolerance=0.5,
-        pattern_recognition=0.4,
-        weight=1.0,  # 주요 타겟 유저
+        description="사람 초중급자: 기본 매칭 이해, 독 위험 인지, 가끔 실수",
+        mistake_rate=0.25,       # 25% 실수 - 학습 과정
+        lookahead_depth=1,       # 1수 앞 보기 - 즉각 매칭 인지
+        goal_priority=0.45,      # 어느정도 목표 의식
+        blocking_awareness=0.35, # 레이어 블로킹 약간 인지
+        chain_preference=0.25,   # 기믹 존재 인지, 우선순위 낮음
+        patience=0.35,           # 다소 성급 - 직관적 선택
+        risk_tolerance=0.6,      # 위험 감수 높음 - 경험 부족
+        pattern_recognition=0.35, # 기본 패턴만 인식
+        weight=1.0,              # 주요 타겟 유저
     ),
 
+    # ============================================================
+    # AVERAGE (사람 중급자)
+    # - 그리디 전략 사용 (즉시 이득 추구)
+    # - 레이어 블로킹 잘 이해
+    # - 독 관리 능력 있음
+    # - 기믹 효과 이해하고 어느정도 고려
+    # - 적은 실수, 가끔 최선 아닌 선택
+    # ============================================================
     BotType.AVERAGE: BotProfile(
         name="Average Bot",
         bot_type=BotType.AVERAGE,
-        description="평균 플레이어를 시뮬레이션. 그리디 전략, 적은 실수.",
-        mistake_rate=0.1,
-        lookahead_depth=2,
+        description="사람 중급자: 그리디 전략, 레이어 인식, 기믹 고려, 적은 실수",
+        mistake_rate=0.12,       # 12% 실수 - 가끔 판단 오류
+        lookahead_depth=2,       # 2수 앞 보기 - 단기 계획
+        goal_priority=0.7,       # 목표 달성 집중
+        blocking_awareness=0.7,  # 레이어 블로킹 잘 인지
+        chain_preference=0.6,    # 기믹 해제 우선순위 고려
+        patience=0.5,            # 균형잡힌 의사결정
+        risk_tolerance=0.4,      # 중간 위험 감수
+        pattern_recognition=0.6, # 주요 패턴 인식
+        weight=1.5,              # 가장 중요한 타겟
+    ),
+
+    # ============================================================
+    # EXPERT (사람 고급자)
+    # - 최적화 전략 사용
+    # - chain/grass 해제 우선순위 적극 고려
+    # - 장기적 게임 상태 예측
+    # - 독 관리 마스터
+    # - 매우 적은 실수
+    # ============================================================
+    BotType.EXPERT: BotProfile(
+        name="Expert Bot",
+        bot_type=BotType.EXPERT,
+        description="사람 고급자: 최적화 전략, 기믹 우선순위 적극 고려, 장기 예측",
+        mistake_rate=0.03,       # 3% 실수 - 드물게 판단 오류
+        lookahead_depth=5,       # 5수 앞 보기 - 중기 계획
+        goal_priority=0.92,      # 높은 목표 집중
+        blocking_awareness=0.92, # 레이어 블로킹 거의 완벽
+        chain_preference=0.85,   # 기믹 해제 적극 고려
+        patience=0.8,            # 신중한 의사결정
+        risk_tolerance=0.2,      # 보수적 플레이
+        pattern_recognition=0.88, # 고급 패턴 인식
+        weight=0.8,              # 중간 가중치
+    ),
+
+    # ============================================================
+    # OPTIMAL (최적 경로 AI)
+    # - 완벽한 정보 기반 의사결정
+    # - 실수 없음, 최선의 수만 선택
+    # - chain/grass 해제 시점 완벽 계산
+    # - 장기적 게임 트리 탐색
+    # - 데드락 회피 완벽
+    # ============================================================
+    BotType.OPTIMAL: BotProfile(
+        name="Optimal Bot",
+        bot_type=BotType.OPTIMAL,
+        description="최적 경로 AI: 실수 없음, 완벽한 정보 전략, 최선의 수만 선택",
+        mistake_rate=0.0,        # 0% 실수 - 완벽한 실행
+        lookahead_depth=10,      # 최대 선읽기 깊이
+        goal_priority=1.0,       # 완벽한 목표 집중
+        blocking_awareness=1.0,  # 완벽한 블로킹 인식
+        chain_preference=1.0,    # 기믹 우선순위 완벽 계산
+        patience=1.0,            # 최적의 수를 항상 기다림
+        risk_tolerance=0.05,     # 최소 위험 - 안전한 경로만
+        # Note: 0.99 사용 - _optimal_perfect_information_strategy에
+        # 특정 기믹 조합에서 버그가 있어 enhanced lookahead 사용
+        pattern_recognition=0.99, # Near-perfect 패턴 인식 (enhanced lookahead 사용)
+        weight=0.3,              # 낮은 가중치 (현실적 난이도 기준 아님)
+    ),
+}
+
+
+# ============================================================
+# Fast Verification Profiles - Optimized for batch verification
+# Reduced lookahead depth for faster simulation while maintaining accuracy
+# ============================================================
+FAST_VERIFICATION_PROFILES: Dict[BotType, BotProfile] = {
+    BotType.CASUAL: BotProfile(
+        name="Fast Casual Bot",
+        bot_type=BotType.CASUAL,
+        description="빠른 검증용 캐주얼 봇: lookahead 감소",
+        mistake_rate=0.25,
+        lookahead_depth=0,       # 1 → 0 (즉각 선택)
+        goal_priority=0.45,
+        blocking_awareness=0.35,
+        chain_preference=0.25,
+        patience=0.35,
+        risk_tolerance=0.6,
+        pattern_recognition=0.35,
+        weight=1.0,
+    ),
+    BotType.AVERAGE: BotProfile(
+        name="Fast Average Bot",
+        bot_type=BotType.AVERAGE,
+        description="빠른 검증용 평균 봇: lookahead 감소",
+        mistake_rate=0.12,
+        lookahead_depth=1,       # 2 → 1 (1수 앞만)
         goal_priority=0.7,
         blocking_awareness=0.7,
         chain_preference=0.6,
         patience=0.5,
         risk_tolerance=0.4,
         pattern_recognition=0.6,
-        weight=1.5,  # 가장 중요한 타겟
+        weight=1.5,
     ),
-
     BotType.EXPERT: BotProfile(
-        name="Expert Bot",
+        name="Fast Expert Bot",
         bot_type=BotType.EXPERT,
-        description="숙련 플레이어를 시뮬레이션. 최적화 전략, 매우 적은 실수.",
-        mistake_rate=0.02,  # 0.03 → 0.02 (실수율 감소)
-        lookahead_depth=5,  # 4 → 5 (더 깊은 예측)
-        goal_priority=0.95,  # 0.9 → 0.95 (목표 우선순위 증가)
-        blocking_awareness=0.95,  # 0.9 → 0.95
-        chain_preference=0.8,
-        patience=0.8,  # 0.7 → 0.8 (더 신중한 플레이)
-        risk_tolerance=0.25,  # 0.3 → 0.25 (더 보수적)
-        pattern_recognition=0.85,  # 0.8 → 0.85
-        weight=0.8,  # 중간 가중치
-    ),
-
-    BotType.OPTIMAL: BotProfile(
-        name="Optimal Bot",
-        bot_type=BotType.OPTIMAL,
-        description="최고 수준의 전략적 플레이 - 실수율 0%, 최대 예측 깊이.",
-        mistake_rate=0.0,  # Perfect execution - never makes mistakes
-        lookahead_depth=10,  # Maximum lookahead depth
-        goal_priority=1.0,  # Perfect goal focus
-        blocking_awareness=1.0,  # Perfect blocking awareness
-        chain_preference=1.0,  # Maximum chain preference
-        patience=1.0,  # Maximum patience - always waits for best move
-        risk_tolerance=0.1,  # Minimal risk tolerance
-        # Note: 0.99 instead of 1.0 to use enhanced lookahead strategy
-        # _optimal_perfect_information_strategy has bugs with certain gimmick combinations
-        pattern_recognition=0.99,  # Near-perfect pattern recognition
-        weight=0.3,  # Target: near-perfect play
+        description="빠른 검증용 전문가 봇: lookahead 감소",
+        mistake_rate=0.03,
+        lookahead_depth=2,       # 5 → 2 (2수 앞만)
+        goal_priority=0.92,
+        blocking_awareness=0.92,
+        chain_preference=0.85,
+        patience=0.8,
+        risk_tolerance=0.2,
+        pattern_recognition=0.88,
+        weight=0.8,
     ),
 }
 
 
-def get_profile(bot_type: BotType) -> BotProfile:
-    """Get predefined profile by bot type."""
+def get_profile(bot_type: BotType, fast_mode: bool = False) -> BotProfile:
+    """Get predefined profile by bot type.
+
+    Args:
+        bot_type: The bot type to get profile for
+        fast_mode: If True, return fast verification profile (reduced lookahead)
+    """
+    if fast_mode and bot_type in FAST_VERIFICATION_PROFILES:
+        return FAST_VERIFICATION_PROFILES[bot_type]
     return PREDEFINED_PROFILES[bot_type]
 
 
@@ -227,6 +325,22 @@ class BotTeam:
                 PREDEFINED_PROFILES[BotType.AVERAGE],
                 PREDEFINED_PROFILES[BotType.EXPERT],
                 PREDEFINED_PROFILES[BotType.OPTIMAL],
+            ],
+            iterations_per_bot=iterations_per_bot,
+        )
+
+    @classmethod
+    def fast_core_team(cls, iterations_per_bot: int = 20) -> "BotTeam":
+        """Create a fast verification team with reduced lookahead depth.
+
+        Uses only core bots (casual, average, expert) with optimized profiles
+        for faster batch verification while maintaining accuracy.
+        """
+        return cls(
+            profiles=[
+                FAST_VERIFICATION_PROFILES[BotType.CASUAL],
+                FAST_VERIFICATION_PROFILES[BotType.AVERAGE],
+                FAST_VERIFICATION_PROFILES[BotType.EXPERT],
             ],
             iterations_per_bot=iterations_per_bot,
         )

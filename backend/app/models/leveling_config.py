@@ -744,27 +744,28 @@ def calculate_hidden_tile_ratio(level_number: int) -> float:
     if level_number < 91:
         return 0.0
 
-    # 레벨 91-175: 점진적 도입 (0% → 15%)
+    # 레벨 91-175: 점진적 도입 (0% → 10%)
     if level_number < 175:
         progress = (level_number - 91) / (175 - 91)
-        return 0.15 * progress
+        return 0.10 * progress
 
-    # 레벨 175-400: 본격 도입 (15% → 30%)
+    # 레벨 175-400: 본격 도입 (10% → 15%)
     if level_number < 400:
         progress = (level_number - 175) / (400 - 175)
-        return 0.15 + 0.15 * progress
+        return 0.10 + 0.05 * progress
 
-    # 레벨 400-800: 중급 히든 (30% → 45%)
+    # 레벨 400-800: 중급 히든 (15% → 20%)
     if level_number < 800:
         progress = (level_number - 400) / (800 - 400)
-        return 0.30 + 0.15 * progress
+        return 0.15 + 0.05 * progress
 
-    # 레벨 800+: 고급 히든 (45% → 60%, 최대)
+    # 레벨 800+: 고급 히든 (20% → 25%, 최대)
+    # NOTE: 25% 초과 시 봇 시뮬레이션 클리어율 급격히 하락
     if level_number < 1500:
         progress = (level_number - 800) / (1500 - 800)
-        return 0.45 + 0.15 * progress
+        return 0.20 + 0.05 * progress
 
-    return 0.60  # 최대 60%
+    return 0.25  # 최대 25% (봇 시뮬레이션 호환성 유지)
 
 
 def get_layer_blocking_target(level_number: int, total_tiles: int) -> int:

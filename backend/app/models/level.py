@@ -157,6 +157,8 @@ class GenerationParams:
     # Level number for research-based unknown ratio calculation
     # [연구 근거] Room 8 Studio: 레벨 175+ 히든 타일 본격 도입
     level_number: Optional[int] = None  # Current level number for gimmick unlock & unknown ratio
+    # Fast generation mode - skip internal deadlock checking
+    skip_deadlock_check: bool = True  # Skip deadlock check for ultra-fast generation (use batch verify later)
 
     def __post_init__(self):
         """Set default values after initialization."""

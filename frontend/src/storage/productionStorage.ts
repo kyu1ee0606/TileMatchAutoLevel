@@ -349,6 +349,29 @@ export async function getPlaytestQueue(
 }
 
 /**
+ * 레벨 메타 업데이트 (상태 변경 없이)
+ * 배치 검증 결과 저장 등에 사용
+ */
+export async function updateProductionLevel(
+  batchId: string,
+  levelNumber: number,
+  metaUpdate: Partial<ProductionLevelMeta>
+): Promise<void> {
+  const level = await getProductionLevel(batchId, levelNumber);
+
+  if (!level) {
+    throw new Error(`Level ${levelNumber} not found in batch ${batchId}`);
+  }
+
+  level.meta = {
+    ...level.meta,
+    ...metaUpdate,
+  };
+
+  await saveProductionLevel(batchId, level);
+}
+
+/**
  * 레벨 상태 업데이트
  */
 export async function updateLevelStatus(

@@ -146,6 +146,11 @@ export interface ProductionLevelMeta {
   match_score?: number;
   validation_attempts?: number;  // 검증 기반 생성시 재시도 횟수
 
+  // 사후 배치 검증 결과
+  target_clear_rates?: Record<string, number>;  // 목표 클리어율
+  verified?: boolean;                            // 검증 완료 여부
+  verification_passed?: boolean;                 // 검증 통과 여부
+
   // 재생성 추적 (이진 탐색 수렴용)
   regen_attempts?: number;          // 재생성 시도 횟수
   regen_lower_bound?: number;       // 난이도 하한 (너무 쉬웠던 경계)

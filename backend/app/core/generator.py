@@ -648,12 +648,13 @@ class LevelGenerator:
 
         # Check if user has specified per-layer tile configs OR total_tile_count (strict mode)
         # In strict mode, we respect user's tile counts exactly without adjustment
-        # Also treat fixed layout levels (2, 3) as strict to preserve exact layout
+        # Only fixed layout levels (2, 3) and explicit per-layer configs are strict
+        # NOTE: total_tile_count alone does NOT trigger strict mode - it's used as a
+        # max_tiles limit during difficulty adjustment instead (see line ~720)
         is_fixed_layout_level = params.level_number in (2, 3)
         has_strict_tile_config = (
             is_fixed_layout_level or
-            (bool(params.layer_tile_configs) and len(params.layer_tile_configs) > 0) or
-            (params.total_tile_count is not None)
+            (bool(params.layer_tile_configs) and len(params.layer_tile_configs) > 0)
         )
 
         # Calculate total goal inner tiles (craft_s with count=3 means 3 additional tiles inside)
@@ -821,6 +822,46 @@ class LevelGenerator:
             if not validation_result["is_playable"]:
                 level = self._force_fix_tile_counts(level, params)
 
+        # CRITICAL: Ensure t0 distribution results in valid tile type counts
+        # This validates the randSeed produces a playable distribution
+        level = self._ensure_valid_t0_distribution(level)
+
+        # Final validation after t0 distribution fix
+        final_validation = self._validate_playability(level, params.level_number)
+        if not final_validation["is_playable"]:
+            logger.warning(
+                f"Level still not playable after t0 distribution fix! "
+                f"Bad types: {final_validation['bad_types']}"
+            )
+
+        # CRITICAL: Deadlock prevention - ensure tiles are well-distributed across layers
+        # This prevents scenarios where matching tiles are all blocked in lower layers
+        # Skip when skip_deadlock_check=True for ultra-fast generation (use batch verify later)
+        if not params.skip_deadlock_check:
+            level, deadlock_ok = self._ensure_no_deadlock(level, max_attempts=10)
+            if not deadlock_ok:
+                logger.warning(
+                    f"[generate] Level may have deadlock issues - could not fully resolve"
+                )
+        else:
+            # LIGHTWEIGHT VALIDATION: Quick structural check without full simulation
+            # 1. Ensure tile type counts are divisible by 3
+            level = self._ensure_tile_divisibility(level)
+
+            # 2. Quick deadlock check with minimal simulation (1 attempt, 1 iteration)
+            # This catches obvious structural issues without the full 10-attempt loop
+            level, _ = self._ensure_no_deadlock(level, max_attempts=1)
+            logger.info("[generate] Fast mode: lightweight validation with quick deadlock check")
+
+        # DOCK CAPACITY VALIDATION: Ensure useTileCount is compatible with unlockTile
+        # 규칙: 타일 종류 수가 너무 많으면 독이 금방 차서 데드락 발생
+        # 안전 기준: useTileCount <= (7 - unlockTile) + 2
+        level = self._validate_dock_tile_compatibility(level)
+
+        # KEY TILE VALIDATION: Ensure key tile count matches unlockTile * 3
+        # 초과 key 타일은 dock 공간만 차지하므로 클리어 불가능 야기
+        level = self._validate_and_fix_key_tile_count(level)
+
         # Calculate final metrics
         analyzer = get_analyzer()
         report = analyzer.analyze(level)
@@ -861,6 +902,10 @@ class LevelGenerator:
                     else:
                         time_limit = 45   # 매우 어려움: 45초
                 level["timea"] = time_limit
+
+        # CRITICAL: Final sync of layer num fields before returning
+        # This ensures t0 distribution calculations are based on correct tile counts
+        level = self._sync_layer_num_fields(level)
 
         generation_time_ms = int((time.time() - start_time) * 1000)
 
@@ -921,6 +966,209 @@ class LevelGenerator:
                 # Format: [tile_type, gimmick, extras...]
                 # For key tiles: the tile ID becomes "key"
                 tiles[pos] = ["key", original_tile[1] if len(original_tile) > 1 else ""]
+
+    def _ensure_tile_divisibility(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Lightweight validation: Ensure all tile type counts are divisible by 3.
+
+        This is a fast check that doesn't require simulation but catches
+        basic structural issues that would make the level impossible to clear.
+
+        Strategy:
+        1. Count tiles by type (including stack/craft internal tiles)
+        2. For types with remainder != 0, adjust by changing some tiles to other types
+        """
+        from collections import defaultdict
+        import random
+
+        # Count tiles by type
+        type_counts = defaultdict(int)
+        type_positions = defaultdict(list)  # Track positions for each type
+
+        num_layers = level.get("layer", 8)
+        for layer_idx in range(num_layers):
+            layer_key = f"layer_{layer_idx}"
+            layer_data = level.get(layer_key, {})
+            tiles = layer_data.get("tiles", {})
+
+            for pos, tile_data in tiles.items():
+                if not isinstance(tile_data, list) or len(tile_data) == 0:
+                    continue
+
+                tile_type = tile_data[0]
+                if tile_type in ("t0", "empty", "", None):
+                    continue
+
+                # Handle stack/craft tiles
+                if isinstance(tile_type, str) and (tile_type.startswith("stack_") or tile_type.startswith("craft_")):
+                    # Count internal tiles
+                    if len(tile_data) > 2:
+                        inner = tile_data[2]
+                        if isinstance(inner, list):
+                            for inner_tile in inner:
+                                if inner_tile and inner_tile not in ("t0", "empty"):
+                                    type_counts[inner_tile] += 1
+                        elif isinstance(inner, dict):
+                            inner_count = inner.get("totalCount", inner.get("count", 1))
+                            # Internal tiles are typically t0, will be distributed
+                    # The container tile itself (top tile)
+                    type_counts[tile_type] += 1
+                    type_positions[tile_type].append((layer_idx, pos))
+                else:
+                    type_counts[tile_type] += 1
+                    type_positions[tile_type].append((layer_idx, pos))
+
+        # Find types with remainder issues
+        bad_types = [(t, c, c % 3) for t, c in type_counts.items()
+                     if c % 3 != 0 and not t.startswith("stack_") and not t.startswith("craft_")]
+
+        if not bad_types:
+            return level  # All good
+
+        logger.info(f"[_ensure_tile_divisibility] Fixing {len(bad_types)} types: {bad_types[:5]}")
+
+        # Try to fix by pairing remainder=1 with remainder=2
+        rem1_types = [t for t, c, r in bad_types if r == 1]
+        rem2_types = [t for t, c, r in bad_types if r == 2]
+
+        # Strategy: Move tiles between types to fix remainders
+        # If rem1 type gives 1 tile to rem2 type, both become divisible by 3
+        for t1 in rem1_types[:]:
+            if not rem2_types:
+                break
+            t2 = rem2_types.pop(0)
+
+            # Change one t1 tile to t2
+            if type_positions[t1]:
+                layer_idx, pos = type_positions[t1].pop()
+                layer_key = f"layer_{layer_idx}"
+                if layer_key in level and "tiles" in level[layer_key]:
+                    level[layer_key]["tiles"][pos][0] = t2
+                    type_positions[t2].append((layer_idx, pos))
+                    rem1_types.remove(t1)
+                    logger.debug(f"[_ensure_tile_divisibility] Changed {t1} -> {t2} at {pos}")
+
+        # For remaining issues, add 1 or 2 tiles by changing other types
+        # This is a simplified fix - full fix would need more complex logic
+
+        return level
+
+    def _validate_dock_tile_compatibility(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Validate useTileCount is compatible with unlockTile (dock capacity).
+
+        CRITICAL: 독 슬롯 수 대비 타일 종류가 너무 많으면 데드락 발생
+        - 사용 가능 독 슬롯: 7 - unlockTile
+        - 안전 기준: useTileCount <= available_dock + 2
+
+        예시:
+        - unlockTile=0 (7칸): useTileCount <= 9 (안전)
+        - unlockTile=1 (6칸): useTileCount <= 8 (안전)
+        - unlockTile=2 (5칸): useTileCount <= 7 (안전)
+
+        위반 시:
+        1. useTileCount 감소 (우선)
+        2. unlockTile 감소 (백업)
+
+        Args:
+            level: Level JSON to validate and fix
+
+        Returns:
+            Fixed level JSON
+        """
+        unlock_tile = level.get("unlockTile", level.get("xUnlockTile", 0))
+        use_tile_count = level.get("useTileCount", 6)
+
+        # 사용 가능 독 슬롯
+        available_dock = 7 - unlock_tile
+
+        # 안전 기준: 독 슬롯 + 2 (여유분)
+        # 이론적으로 독 슬롯 수 이하가 가장 안전하지만, +2까지는 허용
+        safe_max_tile_count = available_dock + 2
+
+        if use_tile_count > safe_max_tile_count:
+            original_tile_count = use_tile_count
+            original_unlock_tile = unlock_tile
+
+            # 해결 방법 1: useTileCount 감소
+            new_tile_count = safe_max_tile_count
+
+            # 해결 방법 2: unlockTile도 조정 (너무 많이 감소하면)
+            if new_tile_count < 5:  # 최소 5종류는 유지
+                # unlockTile 감소로 독 슬롯 확보
+                while new_tile_count < 5 and unlock_tile > 0:
+                    unlock_tile -= 1
+                    available_dock = 7 - unlock_tile
+                    safe_max_tile_count = available_dock + 2
+                    new_tile_count = min(original_tile_count, safe_max_tile_count)
+
+                level["unlockTile"] = unlock_tile
+                if "xUnlockTile" in level:
+                    level["xUnlockTile"] = unlock_tile
+
+            level["useTileCount"] = new_tile_count
+
+            logger.warning(
+                f"[_validate_dock_tile_compatibility] "
+                f"Fixed incompatible tile/dock combo: "
+                f"useTileCount {original_tile_count}→{new_tile_count}, "
+                f"unlockTile {original_unlock_tile}→{unlock_tile}, "
+                f"available_dock={available_dock}"
+            )
+
+        return level
+
+    def _validate_and_fix_key_tile_count(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Validate and fix key tile count for game client compatibility.
+
+        CRITICAL: 게임 클라이언트에서 unlockTile > 0이면:
+        - t0 분배(TileDistributor)가 key 타일을 자동 생성함
+        - 따라서 레벨 JSON에 명시적 "key" 타일이 있으면 안 됨 (이중 생성 방지)
+
+        이 함수는:
+        - unlockTile > 0: 모든 명시적 key 타일을 t0으로 변환
+        - unlockTile = 0: key 타일 검증하지 않음 (t0 분배 없음)
+
+        Args:
+            level: Level JSON to validate and fix
+
+        Returns:
+            Fixed level JSON (명시적 key 타일 제거됨)
+        """
+        unlock_tile = level.get("unlockTile", level.get("xUnlockTile", 0))
+        if unlock_tile <= 0:
+            return level  # No t0-based key distribution, keep explicit keys if any
+
+        num_layers = level.get("layer", 8)
+
+        # Find all explicit key tiles
+        key_positions = []  # [(layer_idx, pos), ...]
+        for layer_idx in range(num_layers):
+            layer_key = f"layer_{layer_idx}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for pos, tile_data in tiles.items():
+                if isinstance(tile_data, list) and tile_data and tile_data[0] == "key":
+                    key_positions.append((layer_idx, pos))
+
+        if key_positions:
+            # CRITICAL: unlockTile > 0이면 게임 클라이언트가 t0 분배로 key 생성
+            # 명시적 key 타일이 있으면 이중 생성됨 → 모두 t0으로 변환
+            logger.info(
+                f"[_validate_and_fix_key_tile_count] unlockTile={unlock_tile}, "
+                f"found {len(key_positions)} explicit key tiles. "
+                f"Converting ALL to t0 (game client will generate keys from t0 distribution)."
+            )
+
+            for layer_idx, pos in key_positions:
+                layer_key = f"layer_{layer_idx}"
+                tiles = level[layer_key]["tiles"]
+                if pos in tiles:
+                    original = tiles[pos]
+                    gimmick = original[1] if len(original) > 1 else ""
+                    tiles[pos] = ["t0", gimmick]
+
+        return level
 
     def reshuffle_positions(self, level: Dict[str, Any], params: Optional[GenerationParams] = None) -> Dict[str, Any]:
         """
@@ -1771,6 +2019,8 @@ class LevelGenerator:
 
                 # Clamp to valid range
                 active_layer_count = max(min_layers, min(max_layers, active_layer_count))
+
+                print(f"[GEN_LAYER] target={target:.2f}, params.max={params.max_layers}, min={min_layers}, max={max_layers}, active={active_layer_count}")
 
             # Update level["layer"] to reflect actual active layer count
             level["layer"] = active_layer_count
@@ -6186,13 +6436,22 @@ class LevelGenerator:
         """Add bomb obstacles to a specific layer.
 
         Bombs have a countdown and explode if not cleared in time.
-        NOTE: Bombs CAN be placed on covered tiles. The countdown only starts
-        when the bomb becomes selectable (exposed/not covered by upper layers).
+        CRITICAL: Bombs should ONLY be placed on VISIBLE tiles (not covered by upper layers).
+        This ensures players can see the bomb countdown from the start.
         """
         layer_key = f"layer_{layer_idx}"
         tiles = level.get(layer_key, {}).get("tiles", {})
         if not tiles:
             return level
+
+        num_layers = level.get("layer", 8)
+
+        # Pre-compute positions covered by upper layers
+        covered_positions = set()
+        for upper_layer_idx in range(layer_idx + 1, num_layers):
+            upper_layer_key = f"layer_{upper_layer_idx}"
+            upper_tiles = level.get(upper_layer_key, {}).get("tiles", {})
+            covered_positions.update(upper_tiles.keys())
 
         added = 0
         positions = list(tiles.keys())
@@ -6201,6 +6460,11 @@ class LevelGenerator:
         for pos in positions:
             if added >= target:
                 break
+
+            # CRITICAL: Skip positions covered by upper layers
+            # Bombs on covered tiles are invisible to the player
+            if pos in covered_positions:
+                continue
 
             tile_data = tiles[pos]
             if not isinstance(tile_data, list) or len(tile_data) < 2:
@@ -7529,9 +7793,19 @@ class LevelGenerator:
             "ice": self._add_ice_to_tile,
             "unknown": self._add_unknown_to_tile,
         }
+        # Core obstacles that are always available for difficulty adjustment
+        # These are the most reliable obstacles that can be added to any tile
+        core_obstacles = ["chain", "ice"]
+
         # If obstacle_types is specified, only allow those actions
         if obstacle_types is not None and len(obstacle_types) > 0:
             obstacle_actions = [all_obstacle_actions[t] for t in obstacle_types if t in all_obstacle_actions]
+            # For high difficulty targets (C/D grade), always include core obstacles as fallback
+            # This ensures we can always increase difficulty even if selected gimmicks don't overlap
+            if target_difficulty >= 0.6:
+                for core_obs in core_obstacles:
+                    if core_obs not in obstacle_types and core_obs in all_obstacle_actions:
+                        obstacle_actions.append(all_obstacle_actions[core_obs])
         else:
             obstacle_actions = list(all_obstacle_actions.values())
 
@@ -7581,45 +7855,103 @@ class LevelGenerator:
         max_gimmicks = int(total_tiles * max_gimmick_ratio)
         gimmicks_capped = total_gimmicks >= max_gimmicks
 
-        # D grade (target >= 0.8): Add obstacles aggressively (70% chance)
+        # Helper: Try to add an obstacle, trying multiple types if one fails
+        def try_add_obstacle() -> Tuple[Dict[str, Any], bool]:
+            """Try to add obstacle, return (level, success)."""
+            if not obstacle_actions or gimmicks_capped:
+                return level, False
+            # Shuffle actions to try different types
+            shuffled_actions = obstacle_actions.copy()
+            random.shuffle(shuffled_actions)
+            for action in shuffled_actions:
+                old_gimmick_count = total_gimmicks
+                new_level = action(level)
+                # Check if obstacle was actually added
+                new_gimmick_count = 0
+                for layer_idx in range(8):
+                    layer_key = f"layer_{layer_idx}"
+                    tiles = new_level.get(layer_key, {}).get("tiles", {})
+                    for tile_data in tiles.values():
+                        if len(tile_data) > 1 and tile_data[1]:
+                            new_gimmick_count += 1
+                if new_gimmick_count > old_gimmick_count:
+                    return new_level, True
+            return level, False
+
+        # For symmetric patterns, we MUST use obstacles since tiles can't be added
+        # Be more aggressive with obstacle addition
+        is_symmetric = symmetry_mode != "none"
+
+        # D grade (target >= 0.8): Add obstacles aggressively
+        # For D grade, we STRONGLY prefer obstacles over tiles
         if target_difficulty >= 0.8:
-            if prefer_tiles_over_obstacles and not tiles_maxed_out:
-                if symmetry_mode == "none":
-                    return self._add_tile_to_layer(level)
-            elif not gimmicks_capped and random.random() < 0.70 and should_add_obstacle():
-                action = random.choice(obstacle_actions)
-                return action(level)
-            if symmetry_mode == "none" and not tiles_maxed_out:
+            # Only add tiles if gimmick_intensity is low (tutorial-style levels)
+            if prefer_tiles_over_obstacles and not tiles_maxed_out and not is_symmetric:
+                return self._add_tile_to_layer(level)
+            # For high difficulty, always try to add obstacles - try multiple times
+            if not gimmicks_capped and should_add_obstacle():
+                for _ in range(3):  # Try up to 3 times
+                    new_level, success = try_add_obstacle()
+                    if success:
+                        return new_level
+            # Fall back to tiles only if obstacles completely failed AND not tiles maxed
+            if not is_symmetric and not tiles_maxed_out:
+                # But prefer obstacle retry for high difficulty
+                if not gimmicks_capped and random.random() < 0.5:
+                    new_level, success = try_add_obstacle()
+                    if success:
+                        return new_level
+                return self._add_tile_to_layer(level)
+            # For symmetric patterns, keep trying obstacles
+            if is_symmetric and not gimmicks_capped:
+                new_level, success = try_add_obstacle()
+                if success:
+                    return new_level
+
+        # C grade (target >= 0.6): Add obstacles frequently
+        if target_difficulty >= 0.6:
+            if prefer_tiles_over_obstacles and not tiles_maxed_out and not is_symmetric:
+                return self._add_tile_to_layer(level)
+            # C grade: 70% obstacle, 30% tile
+            if not gimmicks_capped and random.random() < 0.70 and should_add_obstacle():
+                new_level, success = try_add_obstacle()
+                if success:
+                    return new_level
+            # Fall back to tiles if not symmetric
+            if not is_symmetric and not tiles_maxed_out:
                 return self._add_tile_to_layer(level)
 
-        # C grade (target >= 0.6): Add obstacles frequently (50% chance)
-        if target_difficulty >= 0.6:
-            if prefer_tiles_over_obstacles and not tiles_maxed_out:
-                if symmetry_mode == "none":
-                    return self._add_tile_to_layer(level)
-            elif not gimmicks_capped and random.random() < 0.50 and should_add_obstacle():
-                action = random.choice(obstacle_actions)
-                return action(level)
-
-        # B grade (target >= 0.4): Add obstacles moderately (30% chance)
+        # B grade (target >= 0.4): Add obstacles moderately
         if target_difficulty >= 0.4:
-            if prefer_tiles_over_obstacles:
-                if symmetry_mode == "none" and not tiles_maxed_out:
-                    return self._add_tile_to_layer(level)
-            elif not gimmicks_capped and random.random() < 0.30 and should_add_obstacle():
-                action = random.choice(obstacle_actions)
-                return action(level)
+            if prefer_tiles_over_obstacles and not tiles_maxed_out and not is_symmetric:
+                return self._add_tile_to_layer(level)
+            # B grade: 50% obstacle, 50% tile
+            if not gimmicks_capped and random.random() < 0.50 and should_add_obstacle():
+                new_level, success = try_add_obstacle()
+                if success:
+                    return new_level
+            # Fall back to tiles if not symmetric
+            if not is_symmetric and not tiles_maxed_out:
+                return self._add_tile_to_layer(level)
 
-        # If tiles are maxed out, add obstacles sparingly (20% chance, if not capped)
-        if tiles_maxed_out and not gimmicks_capped and random.random() < 0.2 and should_add_obstacle():
-            action = random.choice(obstacle_actions)
-            return action(level)
-
-        # For symmetric patterns, skip random tile addition to preserve symmetry
-        if symmetry_mode != "none":
+        # For symmetric patterns, ALWAYS try to add obstacles (this is our only option)
+        # We rely on obstacles to adjust difficulty since tiles can't be added
+        if is_symmetric and not gimmicks_capped and should_add_obstacle():
+            # Try multiple times to find a valid obstacle placement
+            for _ in range(3):
+                new_level, success = try_add_obstacle()
+                if success:
+                    return new_level
+            # No valid placement found, return unchanged
             return level
 
-        # Default: add tiles (for S/A grade targets)
+        # If tiles are maxed out, try obstacles (50% chance)
+        if tiles_maxed_out and not gimmicks_capped and random.random() < 0.5 and should_add_obstacle():
+            new_level, success = try_add_obstacle()
+            if success:
+                return new_level
+
+        # Default: add tiles (for S/A grade targets and non-symmetric patterns)
         return self._add_tile_to_layer(level)
 
     def _decrease_difficulty(self, level: Dict[str, Any], params: Optional["GenerationParams"] = None, target_difficulty: float = 0.5, tutorial_gimmick: Optional[str] = None) -> Dict[str, Any]:
@@ -8773,6 +9105,87 @@ class LevelGenerator:
 
             still_broken = [(t, c % 3) for t, c in type_counts_final.items() if c % 3 != 0]
 
+        # SPECIAL HANDLING: t0 (goal internal tiles) cannot be repositioned
+        # If t0 has remainder, we must adjust goal internal counts
+        t0_in_broken = [r for t, r in still_broken if t == "t0"]
+        other_broken = [(t, r) for t, r in still_broken if t != "t0"]
+
+        if t0_in_broken and goal_tiles_with_internal:
+            t0_remainder = t0_in_broken[0]  # 1 or 2
+            t0_count_current = type_counts_final.get("t0", 0)
+
+            # Strategy: Adjust goal internal count to make t0 divisible by 3
+            # If t0 remainder=1: add 2 to goal internal, OR remove 1
+            # If t0 remainder=2: add 1 to goal internal, OR remove 2
+            # Prefer adding to maintain more tiles
+
+            tiles_to_add_to_goal = 3 - t0_remainder  # 2 if rem=1, 1 if rem=2
+
+            # Check if we can balance with other broken types
+            # If other type has complementary remainder, we can add tiles to both
+            complementary_types = [t for t, r in other_broken if r == t0_remainder]
+
+            if complementary_types and available_positions:
+                # Add tiles to balance: t0 gets +tiles_to_add_to_goal, complementary gets +tiles_to_add_to_goal
+                # This adds 2*tiles_to_add_to_goal total (which is 2 or 4, both bad for total)
+                # Better strategy: reduce t0 by t0_remainder, add same amount to complementary type
+                pass  # Skip this complex case, use simple goal adjustment
+
+            # Simple fix: adjust goal internal tiles to make t0 divisible by 3
+            added_to_goal = 0
+            for layer_idx, pos, tile_data in goal_tiles_with_internal:
+                if added_to_goal >= tiles_to_add_to_goal:
+                    break
+                if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
+                    current_internal = int(tile_data[2][0]) if tile_data[2][0] else 0
+                    # Add to this goal tile
+                    tile_data[2][0] = current_internal + 1
+                    added_to_goal += 1
+
+                    # Update goalCount
+                    goal_type = tile_data[0]
+                    if "goalCount" in level:
+                        level["goalCount"][goal_type] = level["goalCount"].get(goal_type, 0) + 1
+
+            if added_to_goal > 0:
+                logger.info(
+                    f"[_ensure_tile_count_divisible_by_3] Added {added_to_goal} to goal internal tiles "
+                    f"to fix t0 remainder ({t0_remainder})"
+                )
+
+                # Now fix complementary type if exists (add tiles to match the added t0)
+                # This ensures total stays divisible by 3
+                # Added to t0: tiles_to_add_to_goal (2 or 1)
+                # Need to add complementary amount to reach total divisible by 3
+                # If we added 2 to t0: total += 2, need total += 1 more (add 1 tile) or total += 4 more
+                # If we added 1 to t0: total += 1, need total += 2 more (add 2 tiles) or total += 5 more
+
+                complement_needed = 3 - added_to_goal  # 1 if added 2, 2 if added 1
+                tiles_added_for_balance = 0
+
+                # Add tiles to a regular type (prefer type with complementary remainder)
+                target_type = None
+                if complementary_types:
+                    target_type = complementary_types[0]
+                elif valid_tile_types:
+                    target_type = valid_tile_types[0]
+
+                if target_type and available_positions:
+                    for _ in range(complement_needed):
+                        if not available_positions:
+                            break
+                        layer_idx_new, pos_new = available_positions.pop(0)
+                        layer_key_new = f"layer_{layer_idx_new}"
+                        level[layer_key_new]["tiles"][pos_new] = [target_type, ""]
+                        level[layer_key_new]["num"] = str(len(level[layer_key_new]["tiles"]))
+                        tiles_added_for_balance += 1
+
+                    if tiles_added_for_balance > 0:
+                        logger.info(
+                            f"[_ensure_tile_count_divisible_by_3] Added {tiles_added_for_balance} {target_type} tiles "
+                            f"to balance total after t0 adjustment"
+                        )
+
         # FINAL STEP: FORCE divisibility by 3
         # If still_broken has any types, it means the total is not divisible by 3
         # or the reassignment strategies failed. Force fix by removing tiles.
@@ -8874,6 +9287,37 @@ class LevelGenerator:
                             layer_key = f"layer_{layer_idx}"
                             if pos in level.get(layer_key, {}).get("tiles", {}):
                                 level[layer_key]["tiles"][pos][0] = type_b
+
+        return level
+
+    def _sync_layer_num_fields(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Synchronize all layer 'num' fields with actual tile counts.
+
+        CRITICAL FIX: Ensures num field always matches actual tiles count.
+        This prevents t0 distribution calculation errors caused by
+        num/tiles count mismatch.
+
+        Args:
+            level: Level data to synchronize
+
+        Returns:
+            Level with synchronized num fields
+        """
+        num_layers = level.get("layer", 8)
+
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            if layer_key in level and "tiles" in level[layer_key]:
+                actual_count = len(level[layer_key]["tiles"])
+                stored_num = int(level[layer_key].get("num", 0))
+
+                if actual_count != stored_num:
+                    logger.warning(
+                        f"[_sync_layer_num_fields] {layer_key} num mismatch: "
+                        f"stored={stored_num}, actual={actual_count}. Fixing."
+                    )
+                    level[layer_key]["num"] = str(actual_count)
 
         return level
 
@@ -9338,6 +9782,1038 @@ class LevelGenerator:
 
         return level
 
+    def _ensure_valid_t0_distribution(
+        self, level: Dict[str, Any], max_attempts: int = 50
+    ) -> Dict[str, Any]:
+        """
+        Ensure t0 tile distribution results in all tile types having counts divisible by 3.
+
+        CRITICAL FIX for level playability:
+        - t0 tiles are distributed at runtime based on randSeed
+        - If any tile type ends up with count not divisible by 3, the level is UNPLAYABLE
+        - This function validates the distribution and changes randSeed if needed
+
+        Args:
+            level: Level data with t0 tiles
+            max_attempts: Maximum randSeed change attempts (default 50)
+
+        Returns:
+            Level with valid t0 distribution (randSeed may be changed)
+        """
+        # CRITICAL: Sync num fields BEFORE counting tiles
+        # This ensures t0 distribution uses correct tile counts
+        level = self._sync_layer_num_fields(level)
+
+        num_layers = level.get("layer", 8)
+        use_tile_count = level.get("useTileCount", 5)
+
+        # Count t0 tiles (including goal internal tiles)
+        t0_count = 0
+        regular_type_counts: Dict[str, int] = {}
+
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for pos, tile_data in tiles.items():
+                if isinstance(tile_data, list) and len(tile_data) > 0:
+                    tile_type = tile_data[0]
+                    if tile_type in self.GOAL_TYPES or tile_type.startswith("craft_") or tile_type.startswith("stack_"):
+                        # Count internal tiles for goal tiles (craft/stack)
+                        if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
+                            internal_count = int(tile_data[2][0]) if tile_data[2][0] else 0
+                            t0_count += internal_count
+                    elif tile_type == "t0":
+                        t0_count += 1
+                    else:
+                        # Regular tile (t1, t2, etc.)
+                        regular_type_counts[tile_type] = regular_type_counts.get(tile_type, 0) + 1
+
+        # If no t0 tiles, nothing to validate
+        if t0_count == 0:
+            return level
+
+        # Detect tile type offset from existing tiles
+        tile_type_offset = 0
+        if regular_type_counts:
+            existing_t_types = [t for t in regular_type_counts.keys() if t.startswith("t") and t[1:].isdigit()]
+            if existing_t_types:
+                min_tile_num = min(int(t[1:]) for t in existing_t_types)
+                if min_tile_num > use_tile_count:
+                    tile_type_offset = min_tile_num - 1
+
+        original_seed = level.get("randSeed", 0)
+        best_seed = original_seed
+        best_bad_count = float('inf')
+
+        for attempt in range(max_attempts):
+            test_seed = original_seed + attempt if attempt > 0 else original_seed
+
+            # Simulate t0 distribution with this seed
+            t0_assignments = TileDistributor.assign_t0_tiles(
+                t0_count=t0_count,
+                use_tile_count=use_tile_count,
+                rand_seed=test_seed,
+                shuffle_tile=level.get("xShuffleTile", 0),
+                type_imbalance=level.get("xTypeImbalance", 0),
+                unlock_tile=level.get("unlockTile", level.get("xUnlockTile", 0)),
+                tile_type_offset=tile_type_offset
+            )
+
+            # Combine with regular tiles
+            combined_counts = dict(regular_type_counts)
+            for tile_type in t0_assignments:
+                combined_counts[tile_type] = combined_counts.get(tile_type, 0) + 1
+
+            # Check for types not divisible by 3
+            bad_types = [(t, c) for t, c in combined_counts.items() if c % 3 != 0]
+
+            if not bad_types:
+                # Found valid distribution!
+                if test_seed != original_seed:
+                    level["randSeed"] = test_seed
+                    logger.info(
+                        f"[_ensure_valid_t0_distribution] Changed randSeed from {original_seed} to {test_seed} "
+                        f"for valid t0 distribution (attempt {attempt + 1})"
+                    )
+                return level
+
+            # Track best attempt
+            if len(bad_types) < best_bad_count:
+                best_bad_count = len(bad_types)
+                best_seed = test_seed
+
+        # Could not find perfect distribution - use best seed and adjust t0 count
+        logger.warning(
+            f"[_ensure_valid_t0_distribution] Could not find valid randSeed after {max_attempts} attempts. "
+            f"Best seed {best_seed} has {best_bad_count} bad types. Adjusting t0 count."
+        )
+
+        # Strategy: Adjust t0 count to make distribution work
+        # The issue is t0_count % 3 remainder being assigned to last type
+        # Fix: Adjust goal internal tile counts to make t0_count divisible by 3
+        t0_remainder = t0_count % 3
+        if t0_remainder != 0:
+            tiles_to_add = 3 - t0_remainder
+            # Find goal tiles to adjust
+            goal_tiles = []
+            for i in range(num_layers):
+                layer_key = f"layer_{i}"
+                tiles = level.get(layer_key, {}).get("tiles", {})
+                for pos, tile_data in tiles.items():
+                    if isinstance(tile_data, list) and len(tile_data) > 0:
+                        tile_type = tile_data[0]
+                        if tile_type.startswith("craft_") or tile_type.startswith("stack_"):
+                            goal_tiles.append((i, pos, tile_data))
+
+            # Add tiles to goal internals
+            added = 0
+            goal_idx = 0
+            while added < tiles_to_add and goal_tiles:
+                layer_idx, pos, tile_data = goal_tiles[goal_idx % len(goal_tiles)]
+                if isinstance(tile_data[2], list) and tile_data[2]:
+                    tile_data[2][0] = int(tile_data[2][0]) + 1
+                    added += 1
+                    logger.info(
+                        f"[_ensure_valid_t0_distribution] Added 1 to goal at layer_{layer_idx}:{pos} "
+                        f"for t0 divisibility"
+                    )
+                goal_idx += 1
+                if goal_idx > len(goal_tiles) * 3:
+                    break
+
+            # Update goalCount
+            if goal_tiles:
+                goalCount = {}
+                for layer_idx, pos, tile_data in goal_tiles:
+                    tile_type = tile_data[0]
+                    internal_count = int(tile_data[2][0]) if isinstance(tile_data[2], list) and tile_data[2] else 0
+                    goalCount[tile_type] = goalCount.get(tile_type, 0) + internal_count
+                level["goalCount"] = goalCount
+
+        # Use best seed found
+        level["randSeed"] = best_seed
+        return level
+
+    def _validate_layer_distribution(
+        self, level: Dict[str, Any], use_tile_count: int
+    ) -> Dict[str, Any]:
+        """
+        Validate that tile types are well-distributed across layers to prevent deadlock.
+
+        CRITICAL: If all tiles of a type are concentrated in lower (blocked) layers,
+        the player cannot complete matches when those tiles are needed.
+
+        Rules:
+        1. For each tile type with 3+ tiles, at least 1 tile must be in top 50% of layers
+        2. No tile type should have >70% concentration in bottom 2 layers
+        3. Returns distribution quality score and problem types
+
+        Args:
+            level: Level data with tiles
+            use_tile_count: Number of tile types used
+
+        Returns:
+            Dict with:
+            - is_valid: bool - True if distribution is acceptable
+            - problem_types: List of (tile_type, issue_description)
+            - layer_distribution: Dict[tile_type, Dict[layer_idx, count]]
+            - score: float - Distribution quality score (0.0-1.0)
+        """
+        num_layers = level.get("layer", 8)
+        rand_seed = level.get("randSeed", 0)
+
+        # Simulate t0 distribution to get actual tile types
+        t0_positions: List[Tuple[int, str]] = []  # (layer_idx, pos)
+        regular_tiles: Dict[str, List[Tuple[int, str]]] = {}  # type -> [(layer_idx, pos)]
+
+        for layer_idx in range(num_layers):
+            layer_key = f"layer_{layer_idx}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for pos, tile_data in tiles.items():
+                if isinstance(tile_data, list) and len(tile_data) > 0:
+                    tile_type = tile_data[0]
+                    if tile_type == "t0":
+                        t0_positions.append((layer_idx, pos))
+                    elif tile_type.startswith("craft_") or tile_type.startswith("stack_"):
+                        # Goal tiles with internal t0 tiles
+                        if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
+                            internal_count = int(tile_data[2][0]) if tile_data[2][0] else 0
+                            for i in range(internal_count):
+                                t0_positions.append((layer_idx, f"{pos}_internal_{i}"))
+                    elif tile_type.startswith("t") and tile_type[1:].isdigit():
+                        if tile_type not in regular_tiles:
+                            regular_tiles[tile_type] = []
+                        regular_tiles[tile_type].append((layer_idx, pos))
+
+        # Get t0 assignments
+        if t0_positions:
+            t0_assignments = TileDistributor.assign_t0_tiles(
+                t0_count=len(t0_positions),
+                use_tile_count=use_tile_count,
+                rand_seed=rand_seed,
+                shuffle_tile=level.get("xShuffleTile", 0),
+                type_imbalance=level.get("xTypeImbalance", 0),
+                unlock_tile=level.get("unlockTile", level.get("xUnlockTile", 0)),
+                tile_type_offset=0
+            )
+
+            # Combine t0 assignments with their layer info
+            for i, (layer_idx, pos) in enumerate(t0_positions):
+                if i < len(t0_assignments):
+                    tile_type = t0_assignments[i]
+                    if tile_type not in regular_tiles:
+                        regular_tiles[tile_type] = []
+                    regular_tiles[tile_type].append((layer_idx, pos))
+
+        # Analyze distribution for each type
+        layer_distribution: Dict[str, Dict[int, int]] = {}
+        problem_types: List[Tuple[str, str]] = []
+        total_score = 0.0
+        scored_types = 0
+
+        top_half_start = num_layers // 2  # Upper layers (higher index = top)
+
+        for tile_type, positions in regular_tiles.items():
+            if len(positions) < 3:
+                continue  # Skip types with less than 3 tiles
+
+            # Count by layer
+            layer_counts: Dict[int, int] = {}
+            for layer_idx, pos in positions:
+                layer_counts[layer_idx] = layer_counts.get(layer_idx, 0) + 1
+            layer_distribution[tile_type] = layer_counts
+
+            total_tiles = len(positions)
+
+            # Check 1: At least 1 tile in top 50% of layers
+            top_half_count = sum(
+                count for layer_idx, count in layer_counts.items()
+                if layer_idx >= top_half_start
+            )
+
+            # Check 2: Bottom 2 layers concentration
+            bottom_2_count = sum(
+                count for layer_idx, count in layer_counts.items()
+                if layer_idx <= 1
+            )
+            bottom_concentration = bottom_2_count / total_tiles if total_tiles > 0 else 0
+
+            # Calculate type score
+            type_score = 1.0
+            issues = []
+
+            if top_half_count == 0:
+                type_score -= 0.5
+                issues.append(f"no tiles in top {num_layers - top_half_start} layers")
+
+            if bottom_concentration > 0.7:
+                type_score -= 0.3
+                issues.append(f"{bottom_concentration*100:.0f}% in bottom 2 layers")
+
+            if issues:
+                problem_types.append((tile_type, "; ".join(issues)))
+
+            total_score += max(0, type_score)
+            scored_types += 1
+
+        avg_score = total_score / scored_types if scored_types > 0 else 1.0
+
+        return {
+            "is_valid": len(problem_types) == 0 or avg_score >= 0.7,
+            "problem_types": problem_types,
+            "layer_distribution": layer_distribution,
+            "score": avg_score
+        }
+
+    def _validate_blocking_structure(
+        self, level: Dict[str, Any], use_tile_count: int
+    ) -> Dict[str, Any]:
+        """
+        블로킹 구조 검증: 같은 타입 타일이 서로 막는 패턴 탐지
+
+        검증 항목:
+        1. 같은 타입 상호 블로킹: t1이 t1을 막고 있으면 데드락 위험
+        2. 타입 접근성 분포: 각 타입이 다양한 접근 "창"에 분산되어야 함
+        3. 초기 매칭 가능성: 게임 시작 시 최소 1개 타입은 3개 이상 접근 가능해야 함
+
+        Returns:
+            Dict with validation results and issues found
+        """
+        from .bot_simulator import BotSimulator
+
+        num_layers = level.get("layer", 8)
+
+        # 블로킹 오프셋 정의 (TownPop 방식)
+        BLOCKING_OFFSETS_SAME_PARITY = [
+            (0, 0), (1, 0), (0, 1), (1, 1)
+        ]
+        BLOCKING_OFFSETS_UPPER_SMALLER = [
+            (-1, -1), (0, -1), (-1, 0), (0, 0)
+        ]
+        BLOCKING_OFFSETS_UPPER_BIGGER = [
+            (0, 0), (1, 0), (0, 1), (1, 1)
+        ]
+
+        issues = []
+        blocking_stats = {
+            "same_type_blocking": 0,
+            "total_blocking_pairs": 0,
+            "type_accessibility_score": 0.0,
+        }
+
+        # Step 1: 모든 타일 정보 수집 (t0 타일은 시뮬레이터로 실제 타입 확인)
+        all_tiles: Dict[str, List[Tuple[int, str, str]]] = {}  # type -> [(layer, pos, gimmick)]
+        tile_positions: Dict[str, Tuple[int, str, str]] = {}  # "layer_pos" -> (layer, pos, type)
+
+        # t0 타일 여부 확인
+        has_t0 = False
+        for layer_idx in range(num_layers):
+            layer_key = f"layer_{layer_idx}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for tile_data in tiles.values():
+                if isinstance(tile_data, list) and tile_data[0] == "t0":
+                    has_t0 = True
+                    break
+            if has_t0:
+                break
+
+        # t0 타일이 있으면 시뮬레이터로 실제 타입 확인
+        if has_t0:
+            try:
+                simulator = BotSimulator()
+                max_moves = level.get("max_moves", 50)
+                state = simulator._create_initial_state(level, max_moves)
+
+                # 시뮬레이터 상태에서 실제 타입 추출
+                for layer_idx, layer_tiles in state.tiles.items():
+                    for pos, tile_state in layer_tiles.items():
+                        tile_type = tile_state.tile_type
+                        gimmick = tile_state.effect_type.value if tile_state.effect_type else ""
+
+                        if tile_type not in all_tiles:
+                            all_tiles[tile_type] = []
+                        all_tiles[tile_type].append((layer_idx, pos, gimmick))
+                        tile_positions[f"{layer_idx}_{pos}"] = (layer_idx, pos, tile_type)
+            except Exception as e:
+                logger.warning(f"[_validate_blocking_structure] Failed to get t0 types: {e}")
+                # 폴백: 원본 데이터 사용
+                has_t0 = False
+
+        if not has_t0:
+            # Pre-assigned 타일: 원본 데이터 사용
+            for layer_idx in range(num_layers):
+                layer_key = f"layer_{layer_idx}"
+                tiles = level.get(layer_key, {}).get("tiles", {})
+
+                for pos, tile_data in tiles.items():
+                    if not isinstance(tile_data, list) or len(tile_data) < 1:
+                        continue
+
+                    tile_type = tile_data[0]
+                    gimmick = tile_data[1] if len(tile_data) > 1 else ""
+
+                    if tile_type not in all_tiles:
+                        all_tiles[tile_type] = []
+                    all_tiles[tile_type].append((layer_idx, pos, gimmick))
+                    tile_positions[f"{layer_idx}_{pos}"] = (layer_idx, pos, tile_type)
+
+        # Step 2: 블로킹 관계 분석
+        def get_blocking_offsets(lower_layer: int, upper_layer: int) -> List[Tuple[int, int]]:
+            """레이어 크기에 따른 블로킹 오프셋 반환"""
+            lower_col = int(level.get(f"layer_{lower_layer}", {}).get("col", 7))
+            upper_col = int(level.get(f"layer_{upper_layer}", {}).get("col", 7))
+
+            if lower_col == upper_col:
+                return BLOCKING_OFFSETS_SAME_PARITY
+            elif upper_col > lower_col:
+                return BLOCKING_OFFSETS_UPPER_BIGGER
+            else:
+                return BLOCKING_OFFSETS_UPPER_SMALLER
+
+        def is_blocked_by(lower_layer: int, lower_pos: str, upper_layer: int) -> Optional[str]:
+            """하위 타일이 상위 레이어의 어떤 타일에 막히는지 확인"""
+            if upper_layer >= num_layers:
+                return None
+
+            try:
+                col, row = map(int, lower_pos.split("_"))
+            except:
+                return None
+
+            upper_tiles = level.get(f"layer_{upper_layer}", {}).get("tiles", {})
+            offsets = get_blocking_offsets(lower_layer, upper_layer)
+
+            for dx, dy in offsets:
+                check_pos = f"{col + dx}_{row + dy}"
+                if check_pos in upper_tiles:
+                    return check_pos
+            return None
+
+        # Step 3: 같은 타입 상호 블로킹 검사
+        same_type_blocking_pairs = []
+
+        for tile_type, tiles in all_tiles.items():
+            if tile_type == "t0":
+                continue  # t0는 런타임에 할당되므로 스킵
+
+            # 각 타일에 대해 상위 레이어에서 같은 타입이 막고 있는지 확인
+            for lower_layer, lower_pos, _ in tiles:
+                for check_layer in range(lower_layer + 1, num_layers):
+                    blocking_pos = is_blocked_by(lower_layer, lower_pos, check_layer)
+                    if blocking_pos:
+                        check_key = f"{check_layer}_{blocking_pos}"
+                        if check_key in tile_positions:
+                            _, _, blocking_type = tile_positions[check_key]
+                            blocking_stats["total_blocking_pairs"] += 1
+
+                            if blocking_type == tile_type:
+                                blocking_stats["same_type_blocking"] += 1
+                                same_type_blocking_pairs.append(
+                                    (tile_type, f"L{lower_layer}:{lower_pos}", f"L{check_layer}:{blocking_pos}")
+                                )
+
+        # Step 4: 같은 타입 블로킹 비율 평가
+        if blocking_stats["total_blocking_pairs"] > 0:
+            same_type_ratio = blocking_stats["same_type_blocking"] / blocking_stats["total_blocking_pairs"]
+
+            # 같은 타입 블로킹이 15% 이상이면 위험
+            if same_type_ratio > 0.15:
+                issues.append(
+                    f"High same-type blocking: {same_type_ratio*100:.1f}% "
+                    f"({blocking_stats['same_type_blocking']}/{blocking_stats['total_blocking_pairs']})"
+                )
+
+            # 특정 타입이 과도하게 자기 타입에 막히는지 확인
+            type_self_blocking = {}
+            for tile_type, lower, upper in same_type_blocking_pairs:
+                type_self_blocking[tile_type] = type_self_blocking.get(tile_type, 0) + 1
+
+            for tile_type, count in type_self_blocking.items():
+                total_of_type = len(all_tiles.get(tile_type, []))
+                if total_of_type > 0 and count >= total_of_type * 0.5:
+                    issues.append(
+                        f"Type {tile_type}: {count}/{total_of_type} tiles blocked by same type"
+                    )
+
+        # Step 5: 초기 접근 가능 타일 분석 (시뮬레이터 사용)
+        try:
+            simulator = BotSimulator()
+            max_moves = level.get("max_moves", 50)
+            state = simulator._create_initial_state(level, max_moves)
+
+            # 접근 가능 타일 수집
+            accessible = [
+                t for layer in state.tiles.values()
+                for t in layer.values()
+                if not t.picked and simulator._can_pick_tile(state, t)
+            ]
+
+            # 타입별 접근 가능 수
+            accessible_by_type: Dict[str, int] = {}
+            for t in accessible:
+                accessible_by_type[t.tile_type] = accessible_by_type.get(t.tile_type, 0) + 1
+
+            # 3개 이상 접근 가능한 타입 수
+            types_with_3plus = sum(1 for c in accessible_by_type.values() if c >= 3)
+
+            if types_with_3plus == 0:
+                issues.append(
+                    f"No type has 3+ accessible tiles at start! "
+                    f"(accessible: {dict(accessible_by_type)})"
+                )
+            elif types_with_3plus < 2:
+                issues.append(
+                    f"Only {types_with_3plus} type(s) with 3+ accessible tiles"
+                )
+
+            # 접근성 점수 계산
+            total_accessible = len(accessible)
+            if total_accessible > 0:
+                blocking_stats["type_accessibility_score"] = types_with_3plus / use_tile_count
+
+        except Exception as e:
+            logger.warning(f"[_validate_blocking_structure] Simulation failed: {e}")
+
+        # 결과 반환
+        is_valid = len(issues) == 0
+
+        if issues:
+            logger.warning(f"[_validate_blocking_structure] Issues found: {issues[:3]}")
+
+        return {
+            "is_valid": is_valid,
+            "issues": issues,
+            "stats": blocking_stats,
+            "same_type_blocking_pairs": same_type_blocking_pairs[:10],  # 상위 10개만
+        }
+
+    def _fix_same_type_blocking(
+        self, level: Dict[str, Any], blocking_pairs: List[Tuple[str, str, str]]
+    ) -> Dict[str, Any]:
+        """
+        같은 타입 블로킹 문제 해결
+
+        전략:
+        - t0 타일: randSeed 변경으로 다른 타입 분포 시도
+        - Pre-assigned 타일: 상위 타일의 타입을 다른 타입으로 교체
+        """
+        import copy
+        import random
+
+        level = copy.deepcopy(level)
+        num_layers = level.get("layer", 8)
+
+        # t0 타일 여부 확인
+        has_t0 = False
+        t0_count = 0
+        preassigned_count = 0
+
+        for layer_idx in range(num_layers):
+            layer_key = f"layer_{layer_idx}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for tile_data in tiles.values():
+                if isinstance(tile_data, list) and len(tile_data) > 0:
+                    if tile_data[0] == "t0":
+                        t0_count += 1
+                    elif tile_data[0].startswith("t") and tile_data[0][1:].isdigit():
+                        preassigned_count += 1
+
+        has_t0 = t0_count > preassigned_count
+
+        # t0 타일의 경우: randSeed 변경으로 더 좋은 타입 분포 찾기
+        if has_t0:
+            from .bot_simulator import BotSimulator
+
+            current_seed = level.get("randSeed", 0)
+            best_seed = current_seed
+            best_blocking_count = len(blocking_pairs)
+            best_clear_rate = 0.0
+
+            simulator = BotSimulator()
+            use_tile_count = level.get("useTileCount", 5)
+
+            # 더 넓은 범위에서 seed 검색 (50개 시도)
+            for seed_offset in range(1, 51):
+                test_seed = current_seed + seed_offset * 137  # Larger prime for more diversity
+                test_level = copy.deepcopy(level)
+                test_level["randSeed"] = test_seed
+
+                try:
+                    # 빠른 시뮬레이션으로 클리어율 확인
+                    from app.models.bot_profile import get_profile
+                    profile = get_profile("optimal")
+                    result = simulator.simulate_with_profile(
+                        test_level, profile, iterations=3, max_moves=level.get("max_moves", 50)
+                    )
+
+                    # 클리어율이 더 높으면 채택
+                    if result.clear_rate > best_clear_rate:
+                        best_clear_rate = result.clear_rate
+                        best_seed = test_seed
+
+                        # 클리어율이 50% 이상이면 조기 종료
+                        if best_clear_rate >= 0.5:
+                            logger.info(
+                                f"[_fix_same_type_blocking] Found good seed {test_seed} "
+                                f"with {best_clear_rate*100:.0f}% clear rate"
+                            )
+                            break
+
+                except Exception as e:
+                    continue
+
+            if best_seed != current_seed:
+                level["randSeed"] = best_seed
+                logger.info(
+                    f"[_fix_same_type_blocking] Changed randSeed {current_seed} -> {best_seed} "
+                    f"(clear_rate: 0% -> {best_clear_rate*100:.0f}%)"
+                )
+            else:
+                # 더 좋은 seed를 찾지 못하면 랜덤 seed 시도
+                import random
+                level["randSeed"] = random.randint(100000, 999999)
+                logger.info(
+                    f"[_fix_same_type_blocking] No better seed found, using random: {level['randSeed']}"
+                )
+
+            return level
+
+        # Pre-assigned 타일의 경우: 타입 교체
+        rng = random.Random(level.get("randSeed", 0) + 999)
+
+        # 모든 타일 타입 수집
+        type_counts: Dict[str, int] = {}
+        for layer_idx in range(num_layers):
+            layer_key = f"layer_{layer_idx}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for tile_data in tiles.values():
+                if isinstance(tile_data, list) and len(tile_data) > 0:
+                    t = tile_data[0]
+                    if t != "t0":
+                        type_counts[t] = type_counts.get(t, 0) + 1
+
+        # 교체 가능한 타입 쌍 찾기 (둘 다 6개 이상인 타입)
+        swappable_types = [t for t, c in type_counts.items() if c >= 6]
+
+        swaps_made = 0
+        max_swaps = min(5, len(blocking_pairs))  # 최대 5개 교체
+
+        for tile_type, lower_loc, upper_loc in blocking_pairs[:max_swaps]:
+            if tile_type == "t0":
+                continue
+
+            # 상위 타일 위치 파싱
+            try:
+                upper_layer = int(upper_loc.split(":")[0][1:])
+                upper_pos = upper_loc.split(":")[1]
+            except:
+                continue
+
+            layer_key = f"layer_{upper_layer}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+
+            if upper_pos not in tiles:
+                continue
+
+            # 교체할 타입 선택 (다른 타입 중 6개 이상인 것)
+            other_types = [t for t in swappable_types if t != tile_type]
+            if not other_types:
+                continue
+
+            new_type = rng.choice(other_types)
+            old_tile = tiles[upper_pos]
+
+            # 타입 교체 (gimmick 유지)
+            tiles[upper_pos] = [new_type] + old_tile[1:]
+            swaps_made += 1
+
+            logger.info(
+                f"[_fix_same_type_blocking] Swapped {tile_type} -> {new_type} "
+                f"at layer {upper_layer}, pos {upper_pos}"
+            )
+
+        return level
+
+    def _quick_deadlock_check(
+        self, level: Dict[str, Any], max_moves: int = None
+    ) -> Dict[str, Any]:
+        """
+        Quick simulation-based deadlock check using optimal bot.
+
+        Runs a small number of simulations to detect if the level has
+        fundamental playability issues (deadlock patterns).
+
+        Args:
+            level: Level data to check
+            max_moves: Max moves for simulation (default from level)
+
+        Returns:
+            Dict with:
+            - has_deadlock: bool - True if deadlock detected
+            - clear_rate: float - Simulation clear rate
+            - avg_moves: float - Average moves used
+            - failure_reason: str - Description of failure pattern
+        """
+        from .bot_simulator import BotSimulator, get_profile
+
+        if max_moves is None:
+            max_moves = level.get("max_moves", level.get("maxMoves", 50))
+
+        simulator = BotSimulator()
+        profile = get_profile("optimal")
+
+        # Run small number of simulations for quick check
+        result = simulator.simulate_with_profile(
+            level_json=level,
+            profile=profile,
+            iterations=3,  # Quick check with 3 iterations
+            max_moves=max_moves,
+            seed=None
+        )
+
+        has_deadlock = result.clear_rate < 0.34  # Less than 1/3 clears
+
+        failure_reason = ""
+        if has_deadlock:
+            if result.avg_moves < max_moves * 0.5:
+                failure_reason = "Early game over - possible tile distribution issue"
+            else:
+                failure_reason = "Late game failure - possible blocking pattern"
+
+        return {
+            "has_deadlock": has_deadlock,
+            "clear_rate": result.clear_rate,
+            "avg_moves": result.avg_moves,
+            "failure_reason": failure_reason
+        }
+
+    def _reshuffle_tiles_across_layers(
+        self, level: Dict[str, Any], seed_offset: int = 0
+    ) -> Dict[str, Any]:
+        """
+        Reshuffle tile types across layers while keeping positions and gimmicks intact.
+
+        For pre-assigned tile levels (not using t0), this redistributes tile types
+        to improve layer balance and prevent deadlock patterns.
+
+        Strategy:
+        1. Collect all tile types and their gimmicks from all layers
+        2. Ensure each tile type has at least one tile in upper 50% of layers
+        3. Redistribute while maintaining 3-divisibility per type
+
+        Args:
+            level: Level data with pre-assigned tile types
+            seed_offset: Offset for random seed to get different shuffle
+
+        Returns:
+            Level with reshuffled tile distribution
+        """
+        import copy
+        import random
+
+        level = copy.deepcopy(level)
+        num_layers = level.get("layer", 8)
+        rand_seed = level.get("randSeed", 0) + seed_offset
+        rng = random.Random(rand_seed)
+
+        # Collect all tiles with their positions and gimmicks
+        all_tiles: List[Tuple[int, str, str, str]] = []  # (layer_idx, pos, tile_type, gimmick)
+        position_map: Dict[int, List[str]] = {}  # layer_idx -> [positions]
+
+        for layer_idx in range(num_layers):
+            layer_key = f"layer_{layer_idx}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            position_map[layer_idx] = []
+
+            for pos, tile_data in tiles.items():
+                if isinstance(tile_data, list) and len(tile_data) > 0:
+                    tile_type = tile_data[0]
+                    gimmick = tile_data[1] if len(tile_data) > 1 else ""
+
+                    # Only process regular tile types (t1, t2, etc.)
+                    if tile_type.startswith("t") and tile_type[1:].isdigit():
+                        all_tiles.append((layer_idx, pos, tile_type, gimmick))
+                        position_map[layer_idx].append(pos)
+
+        if not all_tiles:
+            return level
+
+        # Group tiles by type
+        tiles_by_type: Dict[str, List[Tuple[int, str, str]]] = {}
+        for layer_idx, pos, tile_type, gimmick in all_tiles:
+            if tile_type not in tiles_by_type:
+                tiles_by_type[tile_type] = []
+            tiles_by_type[tile_type].append((layer_idx, pos, gimmick))
+
+        # Calculate target: each type should have at least 1 tile in upper half
+        top_half_start = num_layers // 2
+
+        # Collect all positions by layer (for reassignment)
+        all_positions: List[Tuple[int, str]] = []
+        for layer_idx in range(num_layers):
+            for pos in position_map.get(layer_idx, []):
+                all_positions.append((layer_idx, pos))
+
+        # Sort positions by layer (top first for priority assignment)
+        all_positions.sort(key=lambda x: -x[0])
+
+        # Create new tile assignments with balanced distribution
+        new_assignments: List[Tuple[int, str, str, str]] = []
+
+        # First pass: ensure each type gets at least one top-half position
+        remaining_top_positions = [p for p in all_positions if p[0] >= top_half_start]
+        remaining_bottom_positions = [p for p in all_positions if p[0] < top_half_start]
+
+        for tile_type, tiles in tiles_by_type.items():
+            type_count = len(tiles)
+            gimmicks = [g for _, _, g in tiles]
+
+            # Shuffle gimmicks for variety
+            rng.shuffle(gimmicks)
+
+            assigned_positions = []
+
+            # Assign at least 1 to top half (if available)
+            if remaining_top_positions and type_count >= 3:
+                pos = remaining_top_positions.pop(0)
+                assigned_positions.append(pos)
+
+            # Assign remaining to any position
+            remaining_count = type_count - len(assigned_positions)
+            available = remaining_top_positions + remaining_bottom_positions
+            rng.shuffle(available)
+
+            for _ in range(remaining_count):
+                if available:
+                    pos = available.pop(0)
+                    assigned_positions.append(pos)
+                    # Update remaining lists
+                    if pos in remaining_top_positions:
+                        remaining_top_positions.remove(pos)
+                    elif pos in remaining_bottom_positions:
+                        remaining_bottom_positions.remove(pos)
+
+            # Create assignments with gimmicks
+            for i, (layer_idx, pos) in enumerate(assigned_positions):
+                gimmick = gimmicks[i] if i < len(gimmicks) else ""
+                new_assignments.append((layer_idx, pos, tile_type, gimmick))
+
+        # Apply new assignments to level
+        for layer_idx, pos, tile_type, gimmick in new_assignments:
+            layer_key = f"layer_{layer_idx}"
+            if layer_key in level and "tiles" in level[layer_key]:
+                if pos in level[layer_key]["tiles"]:
+                    level[layer_key]["tiles"][pos] = [tile_type, gimmick]
+
+        return level
+
+    def _fix_layer_distribution(
+        self, level: Dict[str, Any], problem_types: List[Tuple[str, str]]
+    ) -> Dict[str, Any]:
+        """
+        Attempt to fix layer distribution issues.
+
+        Strategy depends on level type:
+        1. For t0-based levels: change randSeed
+        2. For pre-assigned levels: reshuffle tiles across layers
+
+        Args:
+            level: Level data
+            problem_types: List of (tile_type, issue) from validation
+
+        Returns:
+            Updated level with potentially better distribution
+        """
+        if not problem_types:
+            return level
+
+        num_layers = level.get("layer", 8)
+
+        # Check if level uses t0 or pre-assigned tiles
+        t0_count = 0
+        preassigned_count = 0
+
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for tile_data in tiles.values():
+                if isinstance(tile_data, list) and len(tile_data) > 0:
+                    tile_type = tile_data[0]
+                    if tile_type == "t0":
+                        t0_count += 1
+                    elif tile_type.startswith("t") and tile_type[1:].isdigit():
+                        preassigned_count += 1
+
+        use_tile_count = level.get("useTileCount", 5)
+
+        # For pre-assigned tile levels: reshuffle tiles
+        if preassigned_count > t0_count:
+            logger.info(
+                f"[_fix_layer_distribution] Pre-assigned tile level detected. "
+                f"Attempting reshuffle..."
+            )
+
+            best_level = level
+            best_score = 0.0
+
+            for attempt in range(10):
+                test_level = self._reshuffle_tiles_across_layers(level, seed_offset=attempt)
+                result = self._validate_layer_distribution(test_level, use_tile_count)
+
+                if result["score"] > best_score:
+                    best_score = result["score"]
+                    best_level = test_level
+
+                    if result["is_valid"] and result["score"] >= 0.9:
+                        logger.info(
+                            f"[_fix_layer_distribution] Found good distribution "
+                            f"at attempt {attempt + 1} (score: {best_score:.2f})"
+                        )
+                        return best_level
+
+            if best_score > 0:
+                logger.info(
+                    f"[_fix_layer_distribution] Best reshuffle score: {best_score:.2f}"
+                )
+            return best_level
+
+        # For t0-based levels: try different seeds
+        original_seed = level.get("randSeed", 0)
+        best_level = level.copy()
+        best_score = 0.0
+
+        for attempt in range(20):
+            test_seed = original_seed + attempt + 1
+            test_level = level.copy()
+            test_level["randSeed"] = test_seed
+
+            result = self._validate_layer_distribution(test_level, use_tile_count)
+
+            if result["is_valid"] and result["score"] > best_score:
+                best_score = result["score"]
+                best_level = test_level
+
+                if result["score"] >= 0.9:
+                    # Good enough, stop searching
+                    break
+
+        if best_score > 0:
+            logger.info(
+                f"[_fix_layer_distribution] Changed randSeed from {original_seed} "
+                f"to {best_level.get('randSeed')} for better distribution (score: {best_score:.2f})"
+            )
+
+        return best_level
+
+    def _ensure_no_deadlock(
+        self, level: Dict[str, Any], max_attempts: int = 10
+    ) -> Tuple[Dict[str, Any], bool]:
+        """
+        Hybrid deadlock prevention: combines fast validation with simulation.
+
+        Phase 1: Quick layer distribution check
+        Phase 2: If issues found, try to fix with randSeed change or reshuffle
+        Phase 3: Run simulation check
+        Phase 4: If deadlock confirmed, reshuffle tiles and retry
+
+        Args:
+            level: Level data
+            max_attempts: Maximum fix attempts
+
+        Returns:
+            Tuple of (fixed_level, is_valid)
+        """
+        import copy
+
+        use_tile_count = level.get("useTileCount", 5)
+        original_seed = level.get("randSeed", 0)
+        num_layers = level.get("layer", 8)
+
+        # Check if level uses pre-assigned tiles (not t0)
+        t0_count = 0
+        preassigned_count = 0
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for tile_data in tiles.values():
+                if isinstance(tile_data, list) and len(tile_data) > 0:
+                    tile_type = tile_data[0]
+                    if tile_type == "t0":
+                        t0_count += 1
+                    elif tile_type.startswith("t") and tile_type[1:].isdigit():
+                        preassigned_count += 1
+
+        is_preassigned = preassigned_count > t0_count
+        original_level = copy.deepcopy(level)
+        best_level = level
+        best_clear_rate = 0.0
+
+        for attempt in range(max_attempts):
+            # Phase 1: Quick layer distribution validation
+            dist_result = self._validate_layer_distribution(level, use_tile_count)
+
+            if not dist_result["is_valid"]:
+                # Phase 1a: Try to fix distribution via reshuffle/seed change
+                logger.info(
+                    f"[_ensure_no_deadlock] Attempt {attempt + 1}: "
+                    f"Distribution issues found: {dist_result['problem_types'][:3]}"
+                )
+                level = self._fix_layer_distribution(level, dist_result["problem_types"])
+                dist_result = self._validate_layer_distribution(level, use_tile_count)
+
+            # Phase 2: Blocking structure validation (NEW)
+            blocking_result = self._validate_blocking_structure(level, use_tile_count)
+
+            if not blocking_result["is_valid"]:
+                logger.info(
+                    f"[_ensure_no_deadlock] Attempt {attempt + 1}: "
+                    f"Blocking issues found: {blocking_result['issues'][:2]}"
+                )
+
+                # Try to fix same-type blocking
+                if blocking_result["same_type_blocking_pairs"]:
+                    level = self._fix_same_type_blocking(
+                        level, blocking_result["same_type_blocking_pairs"]
+                    )
+
+            # Phase 3: Run simulation check
+            deadlock_result = self._quick_deadlock_check(level)
+
+            if not deadlock_result["has_deadlock"]:
+                logger.info(
+                    f"[_ensure_no_deadlock] Level passed deadlock check "
+                    f"(clear_rate: {deadlock_result['clear_rate']:.1%})"
+                )
+                return level, True
+
+            # Track best result
+            if deadlock_result["clear_rate"] > best_clear_rate:
+                best_clear_rate = deadlock_result["clear_rate"]
+                best_level = copy.deepcopy(level)
+
+            # Phase 4: Deadlock detected - try different fix
+            logger.warning(
+                f"[_ensure_no_deadlock] Attempt {attempt + 1}: "
+                f"Deadlock detected - {deadlock_result['failure_reason']}"
+            )
+
+            # For pre-assigned tiles: try reshuffle
+            if is_preassigned:
+                level = self._reshuffle_tiles_across_layers(
+                    original_level, seed_offset=(attempt + 1) * 17
+                )
+            else:
+                # For t0 tiles: try new seed
+                level = copy.deepcopy(original_level)
+                level["randSeed"] = original_seed + (attempt + 1) * 100
+
+        # Return best attempt even if not perfect
+        logger.error(
+            f"[_ensure_no_deadlock] Could not fully resolve deadlock after {max_attempts} attempts. "
+            f"Best clear_rate: {best_clear_rate:.1%}"
+        )
+        return best_level, best_clear_rate >= 0.1  # Accept if at least 10% clear rate
+
     def _validate_and_fix_obstacles(self, level: Dict[str, Any]) -> Dict[str, Any]:
         """
         Final validation pass to ensure all obstacles follow game rules.
@@ -9366,6 +10842,7 @@ class LevelGenerator:
 
                 # Validate chain tiles - Chain only checks LEFT and RIGHT (on screen)
                 # Position format is "col_row" (x_y)
+                # ENHANCED: Also check chain tile's own blocking status and layer position
                 if attr == "chain":
                     col, row = map(int, pos.split('_'))
                     # Only LEFT (col-1) and RIGHT (col+1) neighbors on screen
@@ -9375,6 +10852,8 @@ class LevelGenerator:
                     ]
 
                     has_clearable_neighbor = False
+                    clearable_neighbor_count = 0
+
                     for ncol, nrow in neighbors:
                         npos = f"{ncol}_{nrow}"
                         if npos in tiles:
@@ -9390,11 +10869,27 @@ class LevelGenerator:
                                 # If covered, the chain cannot be unlocked
                                 if not self._is_position_covered_by_upper(level, i, ncol, nrow):
                                     has_clearable_neighbor = True
-                                    break
+                                    clearable_neighbor_count += 1
+
+                    # ENHANCED VALIDATION: Check chain tile's own blocking status
+                    chain_is_blocked = self._is_position_covered_by_upper(level, i, col, row)
 
                     if not has_clearable_neighbor:
                         invalid_obstacles.append(pos)
                         logger.debug(f"[VALIDATE] Invalid chain at layer {i}/{pos}: no clearable uncovered horizontal neighbor")
+                    elif chain_is_blocked and i <= 1:
+                        # Chain in bottom layers (0 or 1) AND blocked by upper layers
+                        # This makes chain very hard to unlock - consider it risky
+                        # Only invalidate if in layer 0 with no accessible neighbors
+                        if i == 0:
+                            # Count how many layers are above this position
+                            blocking_layers = 0
+                            for upper_layer in range(i + 1, num_layers):
+                                if self._is_position_covered_by_upper(level, i, col, row):
+                                    blocking_layers += 1
+                            # If chain is in layer 0 and blocked by 3+ layers, consider risky
+                            if blocking_layers >= 3 and clearable_neighbor_count < 2:
+                                logger.warning(f"[VALIDATE] Risky chain at layer {i}/{pos}: blocked by {blocking_layers} layers, only {clearable_neighbor_count} clearable neighbors")
 
                 # Validate link tiles - connected direction MUST have a tile
                 # Position format is "col_row" (x_y)

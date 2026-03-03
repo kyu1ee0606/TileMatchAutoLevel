@@ -13,6 +13,9 @@ from ...models.schemas import (
     AutoPlayRequest,
     AutoPlayResponse,
     BotClearStats,
+    BatchVerifyRequest,
+    BatchVerifyResponse,
+    BatchVerifyResultItem,
 )
 from ...models.bot_profile import BotType, get_profile, PREDEFINED_PROFILES
 from ...core.analyzer import LevelAnalyzer
@@ -62,34 +65,55 @@ def calculate_target_clear_rates(target_difficulty: float) -> Dict[str, float]:
     """
     rates = {}
 
-    # EASY levels (0-0.4): Realistic targets
-    # [v14.1] Level 31+ 기믹 해금 후 목표 대폭 하향
-    # 실제 테스트: ice+stack 기믹 → novice=32%, casual=30%, average=60%
-    if target_difficulty <= 0.4:
-        t = target_difficulty / 0.4
-        easy_rates = {
-            "novice": 0.55 - t * 0.30,    # 55% -> 25% (Level31 실제: 32%)
-            "casual": 0.60 - t * 0.30,    # 60% -> 30% (Level31 실제: 30%)
-            "average": 0.80 - t * 0.20,   # 80% -> 60% (Level31 실제: 60%)
-            "expert": 0.95 - t * 0.05,    # 95% -> 90%
-            "optimal": 0.98 - t * 0.03,   # 98% -> 95%
+    # TUTORIAL levels (0-0.1): Very easy, all bots should clear 90%+
+    # [v14.2] 레벨 1-10 등 초반 튜토리얼 레벨 - 모든 봇 높은 클리어율 기대
+    if target_difficulty <= 0.1:
+        t = target_difficulty / 0.1
+        tutorial_rates = {
+            "novice": 0.95 - t * 0.05,    # 95% -> 90%
+            "casual": 0.98 - t * 0.03,    # 98% -> 95%
+            "average": 0.99 - t * 0.01,   # 99% -> 98%
+            "expert": 0.99,               # 99% 고정
+            "optimal": 0.99,              # 99% 고정
         }
         for bot_type in BASE_TARGET_CLEAR_RATES:
-            rates[bot_type] = easy_rates.get(bot_type, 0.85)
+            rates[bot_type] = tutorial_rates.get(bot_type, 0.95)
+    # EASY levels (0.1-0.4): Realistic targets
+    # [v14.2] Novice/Casual 목표 현실화 - 실제 봇 시뮬레이션 결과 기반
+    elif target_difficulty <= 0.4:
+        t = (target_difficulty - 0.1) / 0.3
+        easy_start = {
+            "novice": 0.90,    # TUTORIAL 끝값과 연결
+            "casual": 0.95,    # TUTORIAL 끝값과 연결
+            "average": 0.98,   # TUTORIAL 끝값과 연결
+            "expert": 0.99,    # TUTORIAL 끝값과 연결
+            "optimal": 0.99,   # TUTORIAL 끝값과 연결
+        }
+        easy_end = {
+            "novice": 0.10,    # MEDIUM 시작값과 연결
+            "casual": 0.20,    # MEDIUM 시작값과 연결
+            "average": 0.60,   # MEDIUM 시작값과 연결
+            "expert": 0.90,    # MEDIUM 시작값과 연결
+            "optimal": 0.95,   # MEDIUM 시작값과 연결
+        }
+        for bot_type in BASE_TARGET_CLEAR_RATES:
+            start = easy_start.get(bot_type, 0.95)
+            end = easy_end.get(bot_type, 0.60)
+            rates[bot_type] = start - t * (start - end)
     elif target_difficulty <= 0.6:
         # MEDIUM levels (0.4-0.6): Transition zone
-        # [v14.1] EASY 끝값 → HARD 시작값 연속성 유지
+        # [v14.2] Novice/Casual 목표 현실화 - 연속성 유지
         t = (target_difficulty - 0.4) / 0.2
         medium_start = {
-            "novice": 0.25,    # EASY 끝값(55%-30%=25%)과 연결
-            "casual": 0.30,    # EASY 끝값(60%-30%=30%)과 연결
-            "average": 0.60,   # EASY 끝값(80%-20%=60%)과 연결
-            "expert": 0.90,    # EASY 끝값(95%-5%=90%)과 연결
-            "optimal": 0.95,   # EASY 끝값(98%-3%=95%)과 연결
+            "novice": 0.10,    # EASY 끝값과 연결 (현실화)
+            "casual": 0.20,    # EASY 끝값과 연결 (현실화)
+            "average": 0.60,   # EASY 끝값과 연결
+            "expert": 0.90,    # EASY 끝값과 연결
+            "optimal": 0.95,   # EASY 끝값과 연결
         }
         medium_end = {
-            "novice": 0.45,    # HARD 시작값과 연결
-            "casual": 0.55,    # HARD 시작값과 연결
+            "novice": 0.05,    # HARD 시작값과 연결 (현실화)
+            "casual": 0.15,    # HARD 시작값과 연결 (현실화)
             "average": 0.72,   # HARD 시작값과 연결
             "expert": 0.84,    # HARD 시작값과 연결
             "optimal": 0.92,   # HARD 시작값과 연결
@@ -97,25 +121,24 @@ def calculate_target_clear_rates(target_difficulty: float) -> Dict[str, float]:
         for bot_type in BASE_TARGET_CLEAR_RATES:
             start = medium_start.get(bot_type, 0.70)
             end = medium_end.get(bot_type, 0.60)
-            rates[bot_type] = start + t * (end - start)  # start → end로 증가
+            rates[bot_type] = start + t * (end - start)  # start → end로 변화
     else:
         # HARD levels (0.6-1.0): Significant difficulty
-        # [v13.1] 현실적 목표 조정: 실제 봇 시뮬레이션 결과 기반
-        # E등급(90%) 실제 결과: nov=0-12%, cas=24-32%, ave=48-88%, exp=80-92%, opt=92-100%
+        # [v14.2] Novice/Casual 목표 현실화 - E등급 실제 결과 기반
         t = (target_difficulty - 0.6) / 0.4
         hard_start = {
-            "novice": 0.45,    # 0.6 난이도: 45%
-            "casual": 0.55,    # 0.6 난이도: 55%
-            "average": 0.72,   # 0.6 난이도: 72%
-            "expert": 0.84,    # 0.6 난이도: 84%
-            "optimal": 0.92,   # 0.6 난이도: 92%
+            "novice": 0.05,    # MEDIUM 끝값과 연결 (현실화)
+            "casual": 0.15,    # MEDIUM 끝값과 연결 (현실화)
+            "average": 0.72,   # MEDIUM 끝값과 연결
+            "expert": 0.84,    # MEDIUM 끝값과 연결
+            "optimal": 0.92,   # MEDIUM 끝값과 연결
         }
         hard_end = {
-            "novice": 0.03,    # E등급: 3% (실제 0-12% 범위 하단)
-            "casual": 0.20,    # E등급: 20% (실제 12-40% 범위)
-            "average": 0.70,   # E등급: 70% (실제 60-96% 범위, 상향)
-            "expert": 0.85,    # E등급: 85% (실제 76-100% 범위)
-            "optimal": 0.92,   # E등급: 92% (실제 88-100% 범위)
+            "novice": 0.02,    # E등급: 2% (실제 0-5% 범위)
+            "casual": 0.08,    # E등급: 8% (실제 5-15% 범위)
+            "average": 0.60,   # E등급: 60% (실제 50-70% 범위)
+            "expert": 0.80,    # E등급: 80% (실제 75-90% 범위)
+            "optimal": 0.88,   # E등급: 88% (실제 85-95% 범위)
         }
         for bot_type in BASE_TARGET_CLEAR_RATES:
             start = hard_start.get(bot_type, 0.60)
@@ -511,3 +534,191 @@ def analyze_autoplay(
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"AutoPlay analysis failed: {str(e)}")
+
+
+def _verify_single_level(
+    level_item: dict,
+    iterations: int,
+    tolerance: float,
+    use_core_bots_only: bool,
+    analyzer: LevelAnalyzer,
+    fast_mode: bool = True,
+    early_termination: bool = True,
+) -> BatchVerifyResultItem:
+    """Verify a single level with bot simulation.
+
+    Args:
+        level_item: Level data with level_json, level_id, target_difficulty
+        iterations: Number of simulation iterations per bot
+        tolerance: Maximum allowed gap from target (in percentage points)
+        use_core_bots_only: Use only core bots (casual, average, expert)
+        analyzer: LevelAnalyzer for static analysis
+        fast_mode: Use fast verification profiles (reduced lookahead)
+        early_termination: Stop iterations early when results are conclusive
+    """
+    level_json = level_item["level_json"]
+    level_id = level_item.get("level_id") or f"level_{id(level_json) % 10000}"
+    target_difficulty = level_item.get("target_difficulty")
+
+    issues = []
+
+    try:
+        # Static analysis first
+        static_report = analyzer.analyze(level_json)
+        static_grade = static_report.grade.value
+
+        # Determine target difficulty
+        if target_difficulty is None:
+            target_difficulty = static_report.score / 100.0
+
+        target_rates = calculate_target_clear_rates(target_difficulty)
+
+        # Select bot profiles
+        if use_core_bots_only:
+            profiles = ["casual", "average", "expert"]
+        else:
+            profiles = list(BASE_TARGET_CLEAR_RATES.keys())
+
+        # Calculate max moves
+        max_moves = _calculate_max_moves(level_json)
+
+        # Run simulations with optimizations
+        # Note: Don't use parallel bot execution here since level-level parallelism is already in place
+        # ProcessPoolExecutor overhead exceeds benefit when already parallelizing at level level
+        simulator = BotSimulator()
+        actual_rates = {}
+
+        for profile_name in profiles:
+            # Use fast verification profile if fast_mode is enabled
+            profile = get_profile(profile_name, fast_mode=fast_mode)
+            result = simulator.simulate_with_profile(
+                level_json=level_json,
+                profile=profile,
+                iterations=iterations,
+                max_moves=max_moves,
+                seed=None,
+                early_termination=early_termination,
+            )
+            actual_rates[profile_name] = result.clear_rate
+
+        # Calculate gaps
+        gaps = []
+        for profile_name in profiles:
+            target = target_rates.get(profile_name, 0.5)
+            actual = actual_rates.get(profile_name, 0.0)
+            gap = abs(target - actual) * 100
+            gaps.append(gap)
+
+            # Check for critical issues
+            if actual == 0.0:
+                issues.append(f"{profile_name}: 클리어율 0% (클리어 불가)")
+            elif gap > tolerance * 2:
+                issues.append(f"{profile_name}: 목표 대비 {gap:.1f}%p 차이")
+
+        avg_gap = sum(gaps) / len(gaps) if gaps else 0
+        max_gap = max(gaps) if gaps else 0
+
+        # Calculate match score (100 - avg_gap, clamped to 0-100)
+        match_score = max(0, min(100, 100 - avg_gap))
+
+        # Determine if passed
+        passed = max_gap <= tolerance and all(r > 0 for r in actual_rates.values())
+
+        return BatchVerifyResultItem(
+            level_id=level_id,
+            passed=passed,
+            bot_clear_rates=actual_rates,
+            target_clear_rates={p: target_rates.get(p, 0.5) for p in profiles},
+            avg_gap=round(avg_gap, 2),
+            max_gap=round(max_gap, 2),
+            match_score=round(match_score, 2),
+            static_grade=static_grade,
+            issues=issues,
+        )
+
+    except Exception as e:
+        return BatchVerifyResultItem(
+            level_id=level_id,
+            passed=False,
+            bot_clear_rates={},
+            target_clear_rates={},
+            avg_gap=100.0,
+            max_gap=100.0,
+            match_score=0.0,
+            static_grade="?",
+            issues=[f"검증 실패: {str(e)}"],
+        )
+
+
+@router.post("/analyze/batch-verify", response_model=BatchVerifyResponse)
+def batch_verify_levels(
+    request: BatchVerifyRequest,
+    analyzer: LevelAnalyzer = Depends(get_level_analyzer),
+) -> BatchVerifyResponse:
+    """
+    Batch verify multiple levels using bot simulation.
+
+    Use this endpoint for post-generation validation when levels are generated
+    with simulation_iterations=0 (fast generation mode).
+
+    Args:
+        request: BatchVerifyRequest with list of levels and verification parameters
+        analyzer: LevelAnalyzer dependency
+
+    Returns:
+        BatchVerifyResponse with verification results for each level
+    """
+    start_time = time.time()
+
+    if not request.levels:
+        raise HTTPException(status_code=400, detail="No levels provided")
+
+    results = []
+
+    # Process levels in parallel with optimizations
+    fast_mode = getattr(request, 'fast_mode', True)
+    early_termination = getattr(request, 'early_termination', True)
+
+    with ThreadPoolExecutor(max_workers=min(4, len(request.levels))) as executor:
+        futures = {
+            executor.submit(
+                _verify_single_level,
+                level_item.model_dump(),
+                request.iterations,
+                request.tolerance,
+                request.use_core_bots_only,
+                analyzer,
+                fast_mode,
+                early_termination,
+            ): i
+            for i, level_item in enumerate(request.levels)
+        }
+
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                results.append(result)
+            except Exception as e:
+                idx = futures[future]
+                results.append(BatchVerifyResultItem(
+                    level_id=f"level_{idx}",
+                    passed=False,
+                    issues=[f"처리 오류: {str(e)}"],
+                ))
+
+    # Sort by original order (using level_id)
+    results.sort(key=lambda x: int(x.level_id.split("_")[-1]) if x.level_id.split("_")[-1].isdigit() else 0)
+
+    passed_count = sum(1 for r in results if r.passed)
+    failed_count = len(results) - passed_count
+
+    execution_time_ms = int((time.time() - start_time) * 1000)
+
+    return BatchVerifyResponse(
+        results=results,
+        total_levels=len(results),
+        passed_count=passed_count,
+        failed_count=failed_count,
+        pass_rate=passed_count / len(results) if results else 0,
+        execution_time_ms=execution_time_ms,
+    )

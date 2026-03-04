@@ -1,7 +1,7 @@
 # TileMatchAutoLevel - TODO 리스트
 
-**최종 업데이트**: 2026-03-03
-**프로젝트 버전**: MVP + 레벨 생성 자동화 + UX 개선 + 봇 시뮬레이터 v15.1
+**최종 업데이트**: 2026-03-04
+**프로젝트 버전**: MVP + 레벨 생성 자동화 + UX 개선 + 봇 시뮬레이터 v15.2
 
 ---
 
@@ -50,87 +50,6 @@
 ## 우선순위
 
 ### 높음 (High Priority)
-
----
-
-#### 대기 중 [프론트엔드][UI] 프로덕션 탭 레벨 분포도 그래프 UI
-**담당자**: 미정
-**생성일**: 2026-03-03
-**관련 파일**:
-- `frontend/src/components/ProductionDashboard/index.tsx`
-- `frontend/src/components/ProductionDashboard/LevelDistributionChart.tsx` (신규)
-- `frontend/src/types/production.ts` (데이터 타입 참조)
-- `frontend/src/storage/productionStorage.ts` (레벨 데이터 로드)
-
-**작업 내용**:
-프로덕션 탭 하단에 1~1500 레벨의 분포도를 시각화하는 그래프 UI 추가
-
-**사전 조건**:
-- 차트 라이브러리 설치 필요: `npm install recharts` (권장) 또는 `npm install chart.js react-chartjs-2`
-- 현재 프로젝트에 차트 라이브러리 없음
-
-**데이터 구조** (`ProductionLevelMeta` from `production.ts`):
-```typescript
-{
-  level_number: number;        // 1-1500 (X축)
-  target_difficulty: number;   // 0.0-1.0 (Y축 옵션1)
-  grade: 'S'|'A'|'B'|'C'|'D'; // 난이도 등급
-  verified?: boolean;          // 검증 완료 여부
-  verification_passed?: boolean; // 검증 통과 여부
-  match_score?: number;        // 0-100 (Y축 옵션2)
-  bot_clear_rates?: {          // Y축 옵션3
-    casual: number;
-    average: number;
-    expert: number;
-  };
-}
-```
-
-**요구사항**:
-- X축: 레벨 번호 (1~1500)
-- Y축: 난이도(target_difficulty) 또는 봇 클리어율 (선택 가능)
-- 색상 구분:
-  - 초록: 검증 통과 (`verification_passed === true`)
-  - 노랑: 미검증 (`verified === false`)
-  - 빨강: 검증 실패 (`verified && !verification_passed`)
-  - 회색: 미생성 레벨
-- 특정 레벨 범위 확대/축소 (brush 또는 zoom)
-- 레벨 점 클릭 시 해당 레벨 상세 정보 표시 또는 이동
-- 통계 요약: 총 레벨 수, 검증 완료/실패 비율
-
-**UI 배치**:
-```
-ProductionDashboard
-├── 기존 컨트롤 패널들...
-├── 레벨 목록...
-└── [신규] LevelDistributionChart (하단 전체 너비)
-    ├── 차트 영역 (ScatterChart 또는 AreaChart)
-    ├── Y축 선택 드롭다운 (난이도/클리어율)
-    └── 범위 선택 브러시
-```
-
-**체크리스트**:
-- [ ] `npm install recharts` 실행
-- [ ] `LevelDistributionChart.tsx` 컴포넌트 생성
-- [ ] 레벨 데이터 로드 및 집계 로직 (`productionStorage.ts` 활용)
-- [ ] ScatterChart로 레벨 분포 시각화
-- [ ] 검증 상태별 색상 구분
-- [ ] Y축 전환 기능 (난이도 ↔ 클리어율)
-- [ ] Brush 컴포넌트로 범위 선택
-- [ ] 레벨 클릭 이벤트 핸들러
-- [ ] 반응형 디자인 (ResponsiveContainer)
-- [ ] ProductionDashboard 하단에 통합
-
-**참고 코드** (recharts ScatterChart 예시):
-```tsx
-import { ScatterChart, Scatter, XAxis, YAxis, Tooltip, ResponsiveContainer, Brush } from 'recharts';
-
-const data = levels.map(l => ({
-  x: l.meta.level_number,
-  y: l.meta.target_difficulty,
-  status: l.meta.verified ? (l.meta.verification_passed ? 'passed' : 'failed') : 'unverified'
-}));
-```
 
 ---
 
@@ -324,6 +243,49 @@ BotTileGrid.tsx 파일이 수정됨 (git status에서 확인)
 ---
 
 ## 완료된 작업
+
+### 완료 [버그][백엔드] useTileCount Fallback 버그 수정
+**담당자**: Claude
+**완료일**: 2026-03-04
+**관련 파일**: `backend/app/api/routes/generate.py`, `frontend/src/components/ProductionDashboard/index.tsx`
+
+**문제**: `/api/generate` 엔드포인트의 fallback 로직에서 `tile_types`가 고정값 `["t1", "t2", "t3"]`으로 설정되어 `useTileCount`가 3으로 잘못 설정됨
+
+**해결**:
+- Fallback 로직에서 `tile_types = None`으로 변경하여 level_number 기반 자동 선택 유지
+- 프론트엔드에 잘못된 useTileCount 레벨 감지 및 일괄 재생성 UI 추가
+
+**결과**: 레벨 1259의 useTileCount가 11로 정상 설정됨
+
+**문서**: [CHANGELOG_20260304_USETILECOUNT_FIX.md](CHANGELOG_20260304_USETILECOUNT_FIX.md)
+
+---
+
+### 완료 [프론트엔드][UI] 프로덕션 탭 레벨 분포도 그래프 UI
+**담당자**: Claude
+**완료일**: 2026-03-04
+**관련 파일**: `frontend/src/components/ProductionDashboard/LevelDistributionChart.tsx`
+
+**구현 내용**:
+- recharts 라이브러리를 사용한 ScatterChart 기반 레벨 분포 시각화
+- Y축 선택: 목표 난이도 / Casual/Average/Expert 클리어율 / 매치 점수
+- 색상 모드: 검증 상태 (통과/실패/미검증/미생성) 또는 난이도 등급 (S/A/B/C/D)
+- Brush 컴포넌트로 레벨 범위 선택
+- 커스텀 Tooltip으로 레벨 상세 정보 표시
+- 통계 요약: 검증 상태별 레벨 수
+
+**체크리스트**:
+- [x] `npm install recharts` 실행
+- [x] `LevelDistributionChart.tsx` 컴포넌트 생성
+- [x] ScatterChart로 레벨 분포 시각화
+- [x] 검증 상태별 색상 구분
+- [x] Y축 전환 기능
+- [x] Brush 컴포넌트로 범위 선택
+- [x] 레벨 클릭 이벤트 핸들러
+- [x] ResponsiveContainer로 반응형 디자인
+- [x] ProductionDashboard Overview 탭에 통합
+
+---
 
 ### 완료 [버그][백엔드] Key 타일 이중 생성 버그 수정
 **담당자**: Claude

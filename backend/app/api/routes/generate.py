@@ -996,11 +996,13 @@ def generate_level(
                 # Progressively simplify parameters
                 if attempt >= 1:
                     # Remove obstacles on first retry, but PRESERVE tutorial gimmick
+                    # CRITICAL: Keep tile_types as None to allow level_number-based auto-selection
+                    # Hardcoding tile_types would break useTileCount for high levels (e.g., 11 types for level 1126+)
                     params = GenerationParams(
                         target_difficulty=params.target_difficulty,
                         grid_size=params.grid_size,
                         max_layers=min(params.max_layers, 5),  # Reduce layers
-                        tile_types=params.tile_types[:4] if params.tile_types else ["t1", "t2", "t3", "t4"],
+                        tile_types=None,  # Let level_number-based auto-selection work
                         obstacle_types=[tutorial_gimmick] if tutorial_gimmick else [],  # Keep tutorial gimmick
                         goals=params.goals,
                         symmetry_mode=params.symmetry_mode,
@@ -1013,11 +1015,12 @@ def generate_level(
 
                 if attempt >= 2:
                     # Use simplest possible parameters, but STILL preserve tutorial gimmick
+                    # CRITICAL: Keep tile_types as None for proper useTileCount based on level_number
                     params = GenerationParams(
                         target_difficulty=params.target_difficulty,
                         grid_size=(6, 6),  # Simple grid
                         max_layers=4,  # Few layers
-                        tile_types=["t1", "t2", "t3"],  # Minimum tile types
+                        tile_types=None,  # Let level_number-based auto-selection work
                         obstacle_types=[tutorial_gimmick] if tutorial_gimmick else [],  # Keep tutorial gimmick
                         goals=[{"type": "craft", "direction": "s", "count": 3}],
                         symmetry_mode="horizontal",

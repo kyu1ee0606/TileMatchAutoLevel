@@ -49,6 +49,114 @@ import {
 import { ProductionExport } from './ProductionExport';
 import { BatchApprovalPanel } from './BatchApprovalPanel';
 import { BatchVerifyPanel } from './BatchVerifyPanel';
+import { LevelDistributionChart } from './LevelDistributionChart';
+
+/**
+ * 레벨 번호에 따른 예상 useTileCount 범위 계산
+ * 백엔드의 get_gboost_style_layer_config (레벨 기반) + TILE_RANGES (난이도 기반) 통합
+ *
+ * 두 가지 생성 방식:
+ * 1. /api/generate: 레벨 번호 기반 고정값 (get_use_tile_count_for_level)
+ * 2. /api/generate/validated: 난이도 등급 기반 범위 (TILE_RANGES)
+ *
+ * 검증 시에는 두 방식 모두 허용하도록 최소/최대 범위 사용
+ */
+function getExpectedUseTileCountRange(levelNumber: number, targetDifficulty?: number): {
+  min: number;
+  max: number;
+  levelBased: number;  // 레벨 기반 고정값
+} {
+  // 레벨 번호 기반 고정값 (get_gboost_style_layer_config)
+  let levelBased: number;
+  if (levelNumber <= 10) levelBased = 4;
+  else if (levelNumber <= 30) levelBased = 5;
+  else if (levelNumber <= 60) levelBased = 7;
+  else if (levelNumber <= 100) levelBased = 8;
+  else if (levelNumber <= 225) levelBased = 8;
+  else if (levelNumber <= 600) levelBased = 9;
+  else if (levelNumber <= 1125) levelBased = 10;
+  else if (levelNumber <= 1500) levelBased = 11;
+  else levelBased = 12;
+
+  // 난이도 등급 기반 범위 (TILE_RANGES from /generate/validated)
+  // TILE_RANGES = { "S": (6, 5, 7), "A": (7, 6, 8), "B": (8, 6, 10), "C": (8, 7, 10), "D": (9, 7, 11), "E": (10, 8, 12) }
+  let difficultyMin = 4;
+  let difficultyMax = 12;
+
+  if (targetDifficulty !== undefined) {
+    if (targetDifficulty < 0.2) {
+      // S등급: 6 ± 1
+      difficultyMin = 5; difficultyMax = 7;
+    } else if (targetDifficulty < 0.35) {
+      // A등급: 7 ± 1
+      difficultyMin = 6; difficultyMax = 8;
+    } else if (targetDifficulty < 0.5) {
+      // B등급: 8 ± 2
+      difficultyMin = 6; difficultyMax = 10;
+    } else if (targetDifficulty < 0.7) {
+      // C등급: 8, 최소 7
+      difficultyMin = 7; difficultyMax = 10;
+    } else if (targetDifficulty < 0.85) {
+      // D등급: 9 ± 2
+      difficultyMin = 7; difficultyMax = 11;
+    } else {
+      // E등급: 10 ± 2
+      difficultyMin = 8; difficultyMax = 12;
+    }
+  }
+
+  // 두 방식을 모두 허용: 레벨 기반 값 또는 난이도 기반 범위 내
+  const min = Math.min(levelBased, difficultyMin);
+  const max = Math.max(levelBased, difficultyMax);
+
+  return { min, max, levelBased };
+}
+
+/**
+ * 레벨의 useTileCount가 올바른지 검사
+ * 레벨 기반 고정값 또는 난이도 기반 범위 내에 있으면 유효
+ */
+function validateUseTileCount(levelNumber: number, useTileCount: number, targetDifficulty?: number): {
+  isValid: boolean;
+  range: { min: number; max: number };
+  levelBased: number;
+} {
+  const { min, max, levelBased } = getExpectedUseTileCountRange(levelNumber, targetDifficulty);
+
+  // useTileCount가 허용 범위 내에 있으면 유효
+  // 또는 레벨 기반 고정값과 정확히 일치하면 유효
+  const isValid = (useTileCount >= min && useTileCount <= max) || useTileCount === levelBased;
+
+  return {
+    isValid,
+    range: { min, max },
+    levelBased
+  };
+}
+
+/**
+ * 레벨 목록에서 useTileCount가 잘못된 레벨들을 찾기
+ * 너무 낮은 값(3 이하)만 문제로 간주 - fallback 버그로 인한 케이스
+ */
+function findLevelsWithWrongTileCount(levels: ProductionLevel[]): ProductionLevel[] {
+  return levels.filter(level => {
+    const levelNumber = level.meta.level_number;
+    const useTileCount = level.level_json?.useTileCount;
+    const targetDifficulty = level.meta.target_difficulty;
+
+    if (typeof useTileCount !== 'number') return false;
+
+    // 명백한 오류: useTileCount가 3 이하 (fallback 버그)
+    // 레벨 1-10 튜토리얼은 4가 정상이므로 3 이하만 문제
+    if (useTileCount <= 3 && levelNumber > 10) {
+      return true;
+    }
+
+    // 범위 검증
+    const validation = validateUseTileCount(levelNumber, useTileCount, targetDifficulty);
+    return !validation.isValid;
+  });
+}
 
 type DashboardTab = 'overview' | 'generate' | 'verify' | 'test' | 'playtest' | 'review' | 'export';
 
@@ -874,8 +982,8 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
 
       {/* Tab Content */}
       <div className="min-h-[400px]">
-        {activeTab === 'overview' && stats && selectedBatch && (
-          <OverviewTab stats={stats} batch={selectedBatch} />
+        {activeTab === 'overview' && stats && selectedBatch && selectedBatchId && (
+          <OverviewTab stats={stats} batch={selectedBatch} batchId={selectedBatchId} />
         )}
 
         {activeTab === 'generate' && selectedBatch && (
@@ -955,7 +1063,173 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
 }
 
 // Overview Tab Component
-function OverviewTab({ stats, batch }: { stats: ProductionStats; batch: ProductionBatch }) {
+function OverviewTab({ stats, batch, batchId }: { stats: ProductionStats; batch: ProductionBatch; batchId: string }) {
+  const { addNotification } = useUIStore();
+  const [levels, setLevels] = useState<ProductionLevel[]>([]);
+  const [isLoadingLevels, setIsLoadingLevels] = useState(false);
+  const [wrongTileCountLevels, setWrongTileCountLevels] = useState<ProductionLevel[]>([]);
+  const [isRegeneratingTileCount, setIsRegeneratingTileCount] = useState(false);
+  const [tileCountRegenProgress, setTileCountRegenProgress] = useState({ current: 0, total: 0 });
+
+  // Load levels for chart
+  useEffect(() => {
+    async function loadLevels() {
+      if (!batchId) return;
+      setIsLoadingLevels(true);
+      try {
+        const loadedLevels = await getProductionLevelsByBatch(batchId);
+        setLevels(loadedLevels);
+
+        // Check for levels with wrong useTileCount
+        const wrongLevels = findLevelsWithWrongTileCount(loadedLevels);
+        setWrongTileCountLevels(wrongLevels);
+      } catch (err) {
+        console.error('Failed to load levels for chart:', err);
+      } finally {
+        setIsLoadingLevels(false);
+      }
+    }
+    loadLevels();
+  }, [batchId]);
+
+  // Batch regenerate levels with wrong useTileCount
+  const handleBatchRegenerateTileCount = async () => {
+    if (wrongTileCountLevels.length === 0) return;
+
+    setIsRegeneratingTileCount(true);
+    setTileCountRegenProgress({ current: 0, total: wrongTileCountLevels.length });
+
+    const currentBatch = await getProductionBatch(batchId);
+    if (!currentBatch) {
+      addNotification('error', '배치를 찾을 수 없습니다');
+      setIsRegeneratingTileCount(false);
+      return;
+    }
+
+    let successCount = 0;
+    let failCount = 0;
+
+    for (let i = 0; i < wrongTileCountLevels.length; i++) {
+      const level = wrongTileCountLevels[i];
+      const levelNumber = level.meta.level_number;
+      setTileCountRegenProgress({ current: i + 1, total: wrongTileCountLevels.length });
+
+      try {
+        const targetDifficulty = level.meta.target_difficulty;
+        const gimmickIntensity = Math.min(targetDifficulty, levelNumber / 500);
+
+        // Pattern/symmetry selection matching handleRegenerateLevel logic
+        const isEarlyLevel = levelNumber <= 30;
+        const isSpecialShape = levelNumber % 10 === 9;
+        const isBossLevel = levelNumber % 10 === 0 && levelNumber > 0;
+
+        const patternRoll = Math.random();
+        let patternType: 'aesthetic' | 'geometric' | 'clustered';
+        if (isEarlyLevel) {
+          patternType = patternRoll < 0.50 ? 'geometric' : patternRoll < 0.90 ? 'aesthetic' : 'clustered';
+        } else if (isBossLevel) {
+          patternType = patternRoll < 0.75 ? 'aesthetic' : patternRoll < 0.95 ? 'geometric' : 'clustered';
+        } else if (isSpecialShape) {
+          patternType = patternRoll < 0.50 ? 'aesthetic' : patternRoll < 0.75 ? 'geometric' : 'clustered';
+        } else {
+          patternType = patternRoll < 0.60 ? 'aesthetic' : patternRoll < 0.85 ? 'geometric' : 'clustered';
+        }
+
+        const symmetryRoll = Math.random();
+        let symmetryMode: 'none' | 'horizontal' | 'vertical' | 'both';
+        if (isEarlyLevel) {
+          symmetryMode = symmetryRoll < 0.25 ? 'horizontal' : symmetryRoll < 0.50 ? 'vertical' : 'both';
+        } else if (isSpecialShape) {
+          symmetryMode = symmetryRoll < 0.30 ? 'none' : symmetryRoll < 0.65 ? 'horizontal' : 'vertical';
+        } else if (isBossLevel) {
+          symmetryMode = symmetryRoll < 0.20 ? 'horizontal' : symmetryRoll < 0.40 ? 'vertical' : 'both';
+        } else {
+          symmetryMode = symmetryRoll < 0.05 ? 'none' : symmetryRoll < 0.40 ? 'horizontal' : symmetryRoll < 0.75 ? 'vertical' : 'both';
+        }
+
+        // Grid size
+        let gridSize: [number, number] = [7, 7];
+        if (isBossLevel && targetDifficulty > 0.3) {
+          gridSize = [8, 8];
+        } else if (!isEarlyLevel && Math.random() < 0.3) {
+          gridSize = [8, 8];
+        }
+
+        // Layers
+        let minLayers = 2;
+        let maxLayers = Math.min(7, 3 + Math.floor(targetDifficulty * 4));
+        if (isEarlyLevel) { minLayers = 2; maxLayers = Math.min(4, maxLayers); }
+        else if (isBossLevel) { minLayers = Math.max(3, Math.floor(2 + targetDifficulty * 2)); maxLayers = Math.min(7, 4 + Math.floor(targetDifficulty * 3)); }
+
+        // Goal selection
+        let goalDirections: Array<'s' | 'n' | 'e' | 'w'>;
+        if (symmetryMode === 'both' || symmetryMode === 'vertical') {
+          goalDirections = Math.random() < 0.7 ? ['s', 'n'] : ['e', 'w'];
+        } else if (symmetryMode === 'horizontal') {
+          goalDirections = Math.random() < 0.7 ? ['e', 'w'] : ['s', 'n'];
+        } else {
+          goalDirections = ['s', 'n', 'e', 'w'];
+        }
+        const goalDirection = goalDirections[Math.floor(Math.random() * goalDirections.length)];
+        const goalType = (['craft', 'stack'] as const)[Math.floor(Math.random() * 2)];
+
+        const result = await generateLevel(
+          {
+            target_difficulty: targetDifficulty,
+            grid_size: gridSize,
+            min_layers: minLayers,
+            max_layers: maxLayers,
+            tile_types: undefined, // 백엔드에서 level_number 기반 자동 선택
+            obstacle_types: [],
+            goals: [{
+              type: goalType,
+              direction: goalDirection,
+              count: Math.max(2, Math.floor(3 + targetDifficulty * 2))
+            }],
+            symmetry_mode: symmetryMode,
+            pattern_type: patternType,
+          },
+          {
+            auto_select_gimmicks: true,
+            available_gimmicks: ['chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport', 'unknown'],
+            gimmick_intensity: gimmickIntensity,
+            gimmick_unlock_levels: currentBatch.gimmick_unlock_levels || PROFESSIONAL_GIMMICK_UNLOCK_LEVELS,
+            level_number: levelNumber,
+          }
+        );
+
+        // Save regenerated level
+        await saveProductionLevels(batchId, [{
+          meta: {
+            ...level.meta,
+            generated_at: new Date().toISOString(),
+            actual_difficulty: result.actual_difficulty,
+            grade: result.grade as DifficultyGrade,
+            bot_clear_rates: undefined,
+            match_score: undefined,
+            status_updated_at: new Date().toISOString(),
+            regen_attempts: (level.meta.regen_attempts || 0) + 1,
+          },
+          level_json: result.level_json,
+        }]);
+
+        successCount++;
+      } catch (err) {
+        console.error(`Failed to regenerate level ${levelNumber}:`, err);
+        failCount++;
+      }
+    }
+
+    // Reload levels to refresh the list
+    const loadedLevels = await getProductionLevelsByBatch(batchId);
+    setLevels(loadedLevels);
+    const newWrongLevels = findLevelsWithWrongTileCount(loadedLevels);
+    setWrongTileCountLevels(newWrongLevels);
+
+    setIsRegeneratingTileCount(false);
+    addNotification('success', `타일 종류 수 재생성 완료: ${successCount}개 성공, ${failCount}개 실패`);
+  };
+
   return (
     <div className="space-y-6">
       {/* Progress Overview */}
@@ -1014,6 +1288,79 @@ function OverviewTab({ stats, batch }: { stats: ProductionStats; batch: Producti
           <StatusBar label="내보내기 완료" count={stats.by_status.exported} total={batch.total_levels} color="purple" />
         </div>
       </div>
+
+      {/* Tile Count Warning & Batch Regenerate */}
+      {wrongTileCountLevels.length > 0 && (
+        <div className="p-4 bg-yellow-900/30 border border-yellow-600 rounded-lg">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <span className="text-yellow-500 text-lg">⚠️</span>
+              <h3 className="text-sm font-medium text-yellow-400">
+                타일 종류 수 오류 감지: {wrongTileCountLevels.length}개 레벨
+              </h3>
+            </div>
+            <Button
+              onClick={handleBatchRegenerateTileCount}
+              disabled={isRegeneratingTileCount}
+              variant="warning"
+              size="sm"
+            >
+              {isRegeneratingTileCount
+                ? `재생성 중... (${tileCountRegenProgress.current}/${tileCountRegenProgress.total})`
+                : `일괄 재생성 (${wrongTileCountLevels.length}개)`}
+            </Button>
+          </div>
+          <div className="text-xs text-yellow-400/80 mb-2">
+            이 레벨들은 fallback 생성으로 인해 useTileCount가 잘못 설정되었습니다.
+            일괄 재생성을 통해 레벨 번호에 맞는 올바른 타일 종류 수로 수정됩니다.
+          </div>
+          <div className="flex flex-wrap gap-1 max-h-20 overflow-y-auto">
+            {wrongTileCountLevels.slice(0, 50).map(level => {
+              const validation = validateUseTileCount(
+                level.meta.level_number,
+                level.level_json?.useTileCount ?? 0,
+                level.meta.target_difficulty
+              );
+              const rangeStr = validation.range.min === validation.range.max
+                ? `${validation.range.min}`
+                : `${validation.range.min}-${validation.range.max}`;
+              return (
+                <span
+                  key={level.meta.level_number}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 bg-yellow-600/20 rounded text-xs text-yellow-300"
+                  title={`현재: ${level.level_json?.useTileCount}, 허용 범위: ${rangeStr}, 레벨 기반: ${validation.levelBased}`}
+                >
+                  Lv.{level.meta.level_number}
+                  <span className="text-yellow-500">
+                    ({level.level_json?.useTileCount}→{rangeStr})
+                  </span>
+                </span>
+              );
+            })}
+            {wrongTileCountLevels.length > 50 && (
+              <span className="text-yellow-400/60 text-xs">
+                ... 외 {wrongTileCountLevels.length - 50}개
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Level Distribution Chart */}
+      {isLoadingLevels ? (
+        <div className="p-4 bg-gray-800 rounded-lg text-center text-gray-400">
+          레벨 데이터 로딩 중...
+        </div>
+      ) : levels.length > 0 ? (
+        <LevelDistributionChart
+          levels={levels}
+          totalLevels={batch.total_levels}
+        />
+      ) : (
+        <div className="p-4 bg-gray-800 rounded-lg text-center text-gray-400">
+          레벨 데이터가 없습니다.
+        </div>
+      )}
     </div>
   );
 }

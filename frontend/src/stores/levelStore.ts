@@ -164,6 +164,21 @@ function createEmptyLevel(layers: number = 8, gridSize: [number, number] = [7, 7
 // Maximum history size to prevent memory issues
 const MAX_HISTORY_SIZE = 50;
 
+// Clipboard data structure for copy/paste
+export interface ClipboardData {
+  tiles: Record<string, TileData>;
+  bounds: { minX: number; maxX: number; minY: number; maxY: number };
+  layer: number;
+}
+
+// Selection rectangle for multi-tile operations
+export interface SelectionRect {
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+}
+
 interface LevelState {
   // Current level data
   level: LevelJSON;
@@ -178,6 +193,11 @@ interface LevelState {
   // Undo/Redo history
   history: LevelJSON[];
   historyIndex: number;
+
+  // Clipboard and selection
+  clipboard: ClipboardData | null;
+  selection: SelectionRect | null;
+  isSelecting: boolean;
 
   // Analysis results
   analysisResult: DifficultyReport | null;
@@ -197,6 +217,14 @@ interface LevelState {
   removeTile: (layer: number, x: number, y: number) => ValidationResult;
   clearLayer: (layer: number) => void;
   fillLayer: (layer: number, tileData: TileData) => void;
+
+  // Selection and clipboard operations
+  setSelection: (selection: SelectionRect | null) => void;
+  setIsSelecting: (isSelecting: boolean) => void;
+  copySelection: () => void;
+  pasteClipboard: (targetX: number, targetY: number) => ValidationResult;
+  deleteSelection: () => void;
+  clearSelection: () => void;
 
   // Undo/Redo
   undo: () => void;
@@ -232,6 +260,9 @@ export const useLevelStore = create<LevelState>((set, get) => ({
   lastVerifiedVersion: -1,
   history: [],
   historyIndex: -1,
+  clipboard: null,
+  selection: null,
+  isSelecting: false,
   analysisResult: null,
   isAnalyzing: false,
 
@@ -459,6 +490,143 @@ export const useLevelStore = create<LevelState>((set, get) => ({
       levelVersion: state.levelVersion + 1,
     }));
   },
+
+  // Selection and clipboard operations
+  setSelection: (selection) => set({ selection }),
+  setIsSelecting: (isSelecting) => set({ isSelecting }),
+
+  copySelection: () => {
+    const { level, selectedLayer, selection } = get();
+    if (!selection) return;
+
+    const layerKey = `layer_${selectedLayer}` as `layer_${number}`;
+    const layerData = level[layerKey];
+    if (!layerData) return;
+
+    // Normalize selection bounds
+    const minX = Math.min(selection.startX, selection.endX);
+    const maxX = Math.max(selection.startX, selection.endX);
+    const minY = Math.min(selection.startY, selection.endY);
+    const maxY = Math.max(selection.startY, selection.endY);
+
+    // Copy tiles within selection (relative coordinates)
+    const copiedTiles: Record<string, TileData> = {};
+    for (let x = minX; x <= maxX; x++) {
+      for (let y = minY; y <= maxY; y++) {
+        const pos = `${x}_${y}`;
+        const tileData = layerData.tiles[pos];
+        if (tileData) {
+          // Store with relative position (0-based from selection origin)
+          const relPos = `${x - minX}_${y - minY}`;
+          copiedTiles[relPos] = [...tileData] as TileData;
+        }
+      }
+    }
+
+    if (Object.keys(copiedTiles).length === 0) return;
+
+    set({
+      clipboard: {
+        tiles: copiedTiles,
+        bounds: { minX: 0, maxX: maxX - minX, minY: 0, maxY: maxY - minY },
+        layer: selectedLayer,
+      },
+    });
+  },
+
+  pasteClipboard: (targetX, targetY) => {
+    const { level, selectedLayer, clipboard, history, historyIndex } = get();
+    if (!clipboard || Object.keys(clipboard.tiles).length === 0) {
+      return { valid: false, reason: '클립보드가 비어 있습니다' };
+    }
+
+    const layerKey = `layer_${selectedLayer}` as `layer_${number}`;
+    const layerData = level[layerKey];
+    if (!layerData) return { valid: false, reason: '레이어를 찾을 수 없습니다' };
+
+    // Save current state to history before making changes
+    const newHistory = [...history.slice(0, historyIndex + 1), cloneLevel(level)].slice(-MAX_HISTORY_SIZE);
+
+    const newTiles = { ...layerData.tiles };
+
+    // Paste tiles at target position
+    for (const [relPos, tileData] of Object.entries(clipboard.tiles)) {
+      const [relX, relY] = relPos.split('_').map(Number);
+      const newX = targetX + relX;
+      const newY = targetY + relY;
+      const newPos = `${newX}_${newY}`;
+
+      // Check grid bounds
+      const cols = parseInt(layerData.col) || 8;
+      const rows = parseInt(layerData.row) || 8;
+      if (newX >= 0 && newX < cols && newY >= 0 && newY < rows) {
+        newTiles[newPos] = [...tileData] as TileData;
+      }
+    }
+
+    set((state) => ({
+      level: {
+        ...level,
+        [layerKey]: {
+          ...layerData,
+          tiles: newTiles,
+          num: String(Object.keys(newTiles).length),
+        },
+      },
+      history: newHistory,
+      historyIndex: newHistory.length - 1,
+      analysisResult: null,
+      levelVersion: state.levelVersion + 1,
+    }));
+
+    return { valid: true };
+  },
+
+  deleteSelection: () => {
+    const { level, selectedLayer, selection, history, historyIndex } = get();
+    if (!selection) return;
+
+    const layerKey = `layer_${selectedLayer}` as `layer_${number}`;
+    const layerData = level[layerKey];
+    if (!layerData) return;
+
+    // Normalize selection bounds
+    const minX = Math.min(selection.startX, selection.endX);
+    const maxX = Math.max(selection.startX, selection.endX);
+    const minY = Math.min(selection.startY, selection.endY);
+    const maxY = Math.max(selection.startY, selection.endY);
+
+    // Save current state to history before making changes
+    const newHistory = [...history.slice(0, historyIndex + 1), cloneLevel(level)].slice(-MAX_HISTORY_SIZE);
+
+    const newTiles = { ...layerData.tiles };
+
+    // Delete tiles within selection
+    for (let x = minX; x <= maxX; x++) {
+      for (let y = minY; y <= maxY; y++) {
+        const pos = `${x}_${y}`;
+        delete newTiles[pos];
+      }
+    }
+
+    set((state) => ({
+      level: {
+        ...level,
+        [layerKey]: {
+          ...layerData,
+          tiles: newTiles,
+          num: String(Object.keys(newTiles).length),
+        },
+      },
+      history: newHistory,
+      historyIndex: newHistory.length - 1,
+      selection: null,
+      analysisResult: null,
+      levelVersion: state.levelVersion + 1,
+    }));
+  },
+
+  clearSelection: () => set({ selection: null, isSelecting: false }),
 
   // Analysis
   setAnalysisResult: (result) => set({ analysisResult: result }),

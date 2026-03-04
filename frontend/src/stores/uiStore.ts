@@ -2,7 +2,7 @@ import { create } from 'zustand';
 
 type Tool = 'paint' | 'erase' | 'fill' | 'inspect';
 type Panel = 'editor' | 'generator' | 'gboost' | 'production';
-export type TabId = 'editor' | 'simulation' | 'generator' | 'gboost' | 'local' | 'play' | 'production';
+export type TabId = 'editor' | 'simulation' | 'generator' | 'gboost' | 'local' | 'play' | 'production' | 'benchmark';
 
 // Generation result for display in result card
 interface GenerationResultInfo {

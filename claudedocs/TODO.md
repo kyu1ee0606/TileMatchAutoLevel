@@ -1,7 +1,7 @@
 # TileMatchAutoLevel - TODO 리스트
 
-**최종 업데이트**: 2026-02-11
-**프로젝트 버전**: MVP + 레벨 생성 자동화 + UX 개선
+**최종 업데이트**: 2026-03-03
+**프로젝트 버전**: MVP + 레벨 생성 자동화 + UX 개선 + 봇 시뮬레이터 v15.1
 
 ---
 
@@ -50,6 +50,87 @@
 ## 우선순위
 
 ### 높음 (High Priority)
+
+---
+
+#### 대기 중 [프론트엔드][UI] 프로덕션 탭 레벨 분포도 그래프 UI
+**담당자**: 미정
+**생성일**: 2026-03-03
+**관련 파일**:
+- `frontend/src/components/ProductionDashboard/index.tsx`
+- `frontend/src/components/ProductionDashboard/LevelDistributionChart.tsx` (신규)
+- `frontend/src/types/production.ts` (데이터 타입 참조)
+- `frontend/src/storage/productionStorage.ts` (레벨 데이터 로드)
+
+**작업 내용**:
+프로덕션 탭 하단에 1~1500 레벨의 분포도를 시각화하는 그래프 UI 추가
+
+**사전 조건**:
+- 차트 라이브러리 설치 필요: `npm install recharts` (권장) 또는 `npm install chart.js react-chartjs-2`
+- 현재 프로젝트에 차트 라이브러리 없음
+
+**데이터 구조** (`ProductionLevelMeta` from `production.ts`):
+```typescript
+{
+  level_number: number;        // 1-1500 (X축)
+  target_difficulty: number;   // 0.0-1.0 (Y축 옵션1)
+  grade: 'S'|'A'|'B'|'C'|'D'; // 난이도 등급
+  verified?: boolean;          // 검증 완료 여부
+  verification_passed?: boolean; // 검증 통과 여부
+  match_score?: number;        // 0-100 (Y축 옵션2)
+  bot_clear_rates?: {          // Y축 옵션3
+    casual: number;
+    average: number;
+    expert: number;
+  };
+}
+```
+
+**요구사항**:
+- X축: 레벨 번호 (1~1500)
+- Y축: 난이도(target_difficulty) 또는 봇 클리어율 (선택 가능)
+- 색상 구분:
+  - 초록: 검증 통과 (`verification_passed === true`)
+  - 노랑: 미검증 (`verified === false`)
+  - 빨강: 검증 실패 (`verified && !verification_passed`)
+  - 회색: 미생성 레벨
+- 특정 레벨 범위 확대/축소 (brush 또는 zoom)
+- 레벨 점 클릭 시 해당 레벨 상세 정보 표시 또는 이동
+- 통계 요약: 총 레벨 수, 검증 완료/실패 비율
+
+**UI 배치**:
+```
+ProductionDashboard
+├── 기존 컨트롤 패널들...
+├── 레벨 목록...
+└── [신규] LevelDistributionChart (하단 전체 너비)
+    ├── 차트 영역 (ScatterChart 또는 AreaChart)
+    ├── Y축 선택 드롭다운 (난이도/클리어율)
+    └── 범위 선택 브러시
+```
+
+**체크리스트**:
+- [ ] `npm install recharts` 실행
+- [ ] `LevelDistributionChart.tsx` 컴포넌트 생성
+- [ ] 레벨 데이터 로드 및 집계 로직 (`productionStorage.ts` 활용)
+- [ ] ScatterChart로 레벨 분포 시각화
+- [ ] 검증 상태별 색상 구분
+- [ ] Y축 전환 기능 (난이도 ↔ 클리어율)
+- [ ] Brush 컴포넌트로 범위 선택
+- [ ] 레벨 클릭 이벤트 핸들러
+- [ ] 반응형 디자인 (ResponsiveContainer)
+- [ ] ProductionDashboard 하단에 통합
+
+**참고 코드** (recharts ScatterChart 예시):
+```tsx
+import { ScatterChart, Scatter, XAxis, YAxis, Tooltip, ResponsiveContainer, Brush } from 'recharts';
+
+const data = levels.map(l => ({
+  x: l.meta.level_number,
+  y: l.meta.target_difficulty,
+  status: l.meta.verified ? (l.meta.verification_passed ? 'passed' : 'failed') : 'unverified'
+}));
+```
 
 ---
 
@@ -129,19 +210,20 @@ BotTileGrid.tsx 파일이 수정됨 (git status에서 확인)
 
 ### 중간 (Medium Priority)
 
-#### 대기 중 [프론트엔드] 벤치마크 대시보드 UI
-**담당자**: 미정
-**생성일**: 2025-12-30
-**관련 파일**: `frontend/src/components/`
+#### 완료 [프론트엔드] 벤치마크 대시보드 UI
+**담당자**: Claude
+**완료일**: 2026-02-24
+**관련 파일**: `frontend/src/components/BenchmarkDashboard/index.tsx`
 
-**작업 내용**:
+**구현 내용**:
 벤치마크 시스템 전체 현황을 한눈에 볼 수 있는 대시보드 UI 구현
 
 **체크리스트**:
-- [ ] 티어별 레벨 개수 및 상태 표시
-- [ ] 클리어율 통계 차트
-- [ ] 레벨 검증 결과 표시
-- [ ] 티어 선택 및 레벨 상세 보기
+- [x] 티어별 레벨 개수 및 상태 표시
+- [x] 레벨 검증 결과 표시 (봇별 목표/실제 클리어율)
+- [x] 티어 선택 및 레벨 상세 보기
+- [x] 전체 검증 기능
+- [x] 에디터로 레벨 로드 기능
 
 ---
 
@@ -183,20 +265,22 @@ BotTileGrid.tsx 파일이 수정됨 (git status에서 확인)
 
 ---
 
-#### 대기 중 [API] 게임부스트 서버 연동
-**담당자**: 미정
-**생성일**: 2025-12-30
-**관련 파일**: `backend/app/clients/gboost.py`, `backend/app/api/routes/gboost.py`
+#### 완료 [API] 게임부스트 서버 연동
+**담당자**: Claude
+**완료일**: 2026-02-24
+**관련 파일**: `backend/app/clients/gboost.py`, `backend/app/api/routes/gboost.py`, `frontend/src/components/GBoostPanel/`
 
-**작업 내용**:
-로컬 레벨을 게임부스트 서버에 업로드하는 기능 구현
+**구현 내용**:
+로컬 레벨을 게임부스트 서버에 업로드하는 기능 구현 완료
 
 **체크리스트**:
-- [ ] GBoostClient 클래스 구현
-- [ ] 인증 시스템 구현
-- [ ] 레벨 업로드 API 완성
-- [ ] 레벨 다운로드 API 구현
-- [ ] 테스트 및 문서화
+- [x] GBoostClient 클래스 구현 (TownPop 패턴)
+- [x] 인증 시스템 구현 (선택적 API key)
+- [x] 레벨 업로드 API 완성 (썸네일 자동 생성 포함)
+- [x] 레벨 다운로드 API 구현
+- [x] 레벨 목록 조회 및 삭제 API
+- [x] 로컬 레벨 일괄 업로드 기능
+- [x] 프론트엔드 설정 패널 및 마이그레이션 도구
 
 ---
 
@@ -240,6 +324,65 @@ BotTileGrid.tsx 파일이 수정됨 (git status에서 확인)
 ---
 
 ## 완료된 작업
+
+### 완료 [버그][백엔드] Key 타일 이중 생성 버그 수정
+**담당자**: Claude
+**완료일**: 2026-03-03
+**관련 파일**: `backend/app/core/bot_simulator.py`
+
+**문제**: 레벨 JSON에 명시적 `key` 타일 + `unlockTile` 설정 시 t0 분배에서 추가 key 생성 → 초과 key 문제
+
+**해결**:
+- `_create_initial_state()`에서 명시적 key 타일 카운트
+- `effective_unlock_tile = max(0, unlock_tile - explicit_key_sets)` 계산
+- t0 분배 시 조정된 값 사용
+
+**결과**: 12개 → 6개 (정확히 `unlockTile * 3`)
+
+---
+
+### 완료 [개선][백엔드] 봇 희생 전략 (Strategic Unblock Bonus) 구현
+**담당자**: Claude
+**완료일**: 2026-03-03
+**관련 파일**: `backend/app/core/bot_simulator.py`
+
+**구현 내용**:
+- `_score_move_with_profile()`에 레이어 블로킹 해제 보너스 추가
+- 언블로킹된 타일이 dock 타입 매칭 시 추가 점수
+- 같은 타입 타일 언블로킹 시 연속 플레이 보너스
+- `blocking_awareness >= 0.5` 봇에서 활성화
+
+**목적**: 봇이 즉시 매칭 안 되더라도 하위 레이어 접근을 위해 전략적 타일 선택
+
+---
+
+### 완료 [개선][백엔드] Generator Key 타일 검증 함수 추가
+**담당자**: Claude
+**완료일**: 2026-03-03
+**관련 파일**: `backend/app/core/generator.py`
+
+**구현 내용**:
+- `_validate_and_fix_key_tile_count()` 함수 추가
+- 게임 클라이언트 호환성: `unlockTile > 0`이면 모든 명시적 key를 t0로 변환
+- 게임 클라이언트(C#/Unity)의 t0 분배가 정확한 key 개수 생성하도록 보장
+
+---
+
+### 완료 [버그][백엔드] 폭탄 기믹 가시성 수정
+**담당자**: Claude
+**완료일**: 2026-03-03
+**관련 파일**: `backend/app/core/generator.py`
+
+**문제**: 폭탄이 상위 레이어 타일에 가려진 위치에 배치되면 플레이어에게 보이지 않음
+
+**해결**:
+- `_add_bomb_obstacles_to_layer()` 함수 수정
+- 상위 레이어에 의해 가려진 위치는 `covered_positions` 세트로 사전 계산
+- 가려진 위치에는 폭탄을 배치하지 않음
+
+**결과**: 폭탄이 항상 플레이어에게 보이는 위치에 배치됨
+
+---
 
 ### 완료 [프론트엔드] 레벨 에디터 UX 대규모 개선 (P0-P2)
 **담당자**: Claude

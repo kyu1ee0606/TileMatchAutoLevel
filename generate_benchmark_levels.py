@@ -352,12 +352,12 @@ def get_tier_defaults(tier: DifficultyTier) -> Dict:
             }
         },
         DifficultyTier.MEDIUM: {
-            "tile_types": 5,
-            "tile_count": 45,
-            "layers": 2,
-            "max_moves": 50,
-            "ice_tiles": 0,
-            "grass_tiles": 0,
+            "tile_types": 9,       # 9종류 타일 (v2: 5→9 증가)
+            "tile_count": 72,      # 72개 타일 (v2: 45→72 증가)
+            "layers": 3,           # 3레이어 (v2: 2→3 증가)
+            "max_moves": 35,       # 35무브 (v2: 50→35 감소)
+            "ice_tiles": 4,        # 얼음 4개 추가 (v2)
+            "grass_tiles": 3,      # 풀 3개 추가 (v2)
             "link_tiles": 0,
             "target_rates": {
                 "novice": 0.30,

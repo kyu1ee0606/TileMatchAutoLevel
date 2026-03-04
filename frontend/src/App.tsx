@@ -9,6 +9,7 @@ import { LocalLevelBrowser } from './components/GridEditor/LocalLevelBrowser';
 import { SimulationViewer } from './components/SimulationViewer';
 import { PlayTab } from './components/PlayTab';
 import { ProductionDashboard } from './components/ProductionDashboard';
+import { BenchmarkDashboard } from './components/BenchmarkDashboard';
 import { useLevelStore } from './stores/levelStore';
 import { useUIStore, type TabId } from './stores/uiStore';
 import { useSimulationStore } from './stores/simulationStore';
@@ -256,6 +257,7 @@ function AppContent() {
     { id: 'generator', label: '자동 생성', icon: '🎲' },
     { id: 'local', label: '로컬 레벨', icon: '💾' },
     { id: 'production', label: '프로덕션', icon: '🚀' },
+    { id: 'benchmark', label: '벤치마크', icon: '📊' },
     { id: 'gboost', label: '게임부스트', icon: '☁️' },
     { id: 'play', label: '플레이', icon: '▶️' },
   ];
@@ -425,6 +427,11 @@ function AppContent() {
         {activeTab === 'production' && (
           <div className="max-w-6xl mx-auto">
             <ProductionDashboard />
+          </div>
+        )}
+        {activeTab === 'benchmark' && (
+          <div className="max-w-6xl mx-auto">
+            <BenchmarkDashboard />
           </div>
         )}
         {activeTab === 'play' && (

@@ -7,7 +7,7 @@ import { LayerStackPreview } from './LayerStackPreview';
 import { useLevelStore } from '../../stores/levelStore';
 import { useUIStore } from '../../stores/uiStore';
 import { Button, Tooltip } from '../ui';
-import { Eye, EyeOff, FileJson, RotateCcw, ZoomIn, Grid3X3, Map, AlertTriangle, CheckCircle, Undo2, Redo2 } from 'lucide-react';
+import { Eye, EyeOff, FileJson, RotateCcw, ZoomIn, Grid3X3, Map, AlertTriangle, CheckCircle, Undo2, Redo2, Copy, Clipboard, Trash2 } from 'lucide-react';
 import clsx from 'clsx';
 import { validateTileCount } from '../../utils/helpers';
 import type { LevelJSON, LevelLayer, TileData } from '../../types';
@@ -86,7 +86,7 @@ interface GridEditorProps {
 }
 
 export function GridEditor({ className }: GridEditorProps) {
-  const { level, selectedLayer, resetLevel, undo, redo, canUndo, canRedo } = useLevelStore();
+  const { level, selectedLayer, resetLevel, undo, redo, canUndo, canRedo, selection, clipboard, copySelection, deleteSelection } = useLevelStore();
   const {
     setJsonModalOpen,
     addNotification,
@@ -246,6 +246,28 @@ export function GridEditor({ className }: GridEditorProps) {
         </div>
       )}
 
+      {/* Selection info bar */}
+      {selection && (
+        <div className="flex items-center gap-3 px-3 py-2 bg-blue-900/30 border border-blue-700 rounded-lg text-sm">
+          <span className="text-blue-300">
+            선택 영역: ({Math.abs(selection.endX - selection.startX) + 1} x {Math.abs(selection.endY - selection.startY) + 1})
+          </span>
+          <span className="text-blue-400/70">|</span>
+          <span className="text-blue-400/70 text-xs">Ctrl+C: 복사 | Ctrl+V: 붙여넣기 | Del: 삭제 | Esc: 취소</span>
+        </div>
+      )}
+
+      {/* Clipboard indicator */}
+      {clipboard && !selection && (
+        <div className="flex items-center gap-3 px-3 py-2 bg-green-900/30 border border-green-700 rounded-lg text-sm">
+          <span className="text-green-300">
+            클립보드: {Object.keys(clipboard.tiles).length}개 타일 ({clipboard.bounds.maxX + 1} x {clipboard.bounds.maxY + 1})
+          </span>
+          <span className="text-green-400/70">|</span>
+          <span className="text-green-400/70 text-xs">Ctrl+V: 마우스 위치에 붙여넣기 | Shift+드래그: 새 영역 선택</span>
+        </div>
+      )}
+
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-bold text-gray-100">그리드 에디터</h2>
         <div className="flex gap-2">
@@ -267,6 +289,36 @@ export function GridEditor({ className }: GridEditorProps) {
                 size="sm"
                 disabled={!canRedo()}
                 icon={<Redo2 className="w-full h-full" />}
+              />
+            </Tooltip>
+          </div>
+
+          {/* Copy/Paste buttons */}
+          <div className="flex gap-1 mr-2">
+            <Tooltip content="선택 영역 복사 (Ctrl+C) - Shift+드래그로 선택">
+              <Button
+                onClick={() => { copySelection(); addNotification('info', '복사됨'); }}
+                variant="secondary"
+                size="sm"
+                disabled={!selection}
+                icon={<Copy className="w-full h-full" />}
+              />
+            </Tooltip>
+            <Tooltip content={clipboard ? `클립보드: ${Object.keys(clipboard.tiles).length}개 타일` : '클립보드 비어있음'}>
+              <Button
+                variant={clipboard ? 'primary' : 'secondary'}
+                size="sm"
+                disabled={true}
+                icon={<Clipboard className="w-full h-full" />}
+              />
+            </Tooltip>
+            <Tooltip content="선택 영역 삭제 (Delete)">
+              <Button
+                onClick={() => { deleteSelection(); addNotification('info', '삭제됨'); }}
+                variant="danger"
+                size="sm"
+                disabled={!selection}
+                icon={<Trash2 className="w-full h-full" />}
               />
             </Tooltip>
           </div>

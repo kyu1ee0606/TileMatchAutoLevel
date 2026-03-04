@@ -107,14 +107,61 @@ export function TileGrid({ className }: TileGridProps) {
     selectedAttribute,
     setTile,
     removeTile,
+    selection,
+    setSelection,
+    isSelecting,
+    setIsSelecting,
+    clipboard,
+    copySelection,
+    pasteClipboard,
+    deleteSelection,
+    clearSelection,
   } = useLevelStore();
 
   const { activeTool, showOtherLayers, gridZoom, setGridZoom, showGridCoordinates, addNotification } = useUIStore();
 
   const [isDragging, setIsDragging] = useState(false);
   const [isLayerTransitioning, setIsLayerTransitioning] = useState(false);
+  const [selectionStart, setSelectionStart] = useState<{ x: number; y: number } | null>(null);
+  const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const prevLayerRef = useRef(selectedLayer);
+
+  // Keyboard shortcuts for selection operations
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Copy: Ctrl+C
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c' && selection) {
+        e.preventDefault();
+        copySelection();
+        addNotification('info', '선택 영역이 복사되었습니다');
+      }
+      // Paste: Ctrl+V
+      if ((e.ctrlKey || e.metaKey) && e.key === 'v' && clipboard && hoverPos) {
+        e.preventDefault();
+        const result = pasteClipboard(hoverPos.x, hoverPos.y);
+        if (result.valid) {
+          addNotification('success', '붙여넣기 완료');
+        } else {
+          addNotification('error', result.reason || '붙여넣기 실패');
+        }
+      }
+      // Delete: Delete or Backspace
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selection) {
+        e.preventDefault();
+        deleteSelection();
+        addNotification('info', '선택 영역이 삭제되었습니다');
+      }
+      // Escape: Clear selection
+      if (e.key === 'Escape') {
+        clearSelection();
+        setSelectionStart(null);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selection, clipboard, hoverPos, copySelection, pasteClipboard, deleteSelection, clearSelection, addNotification]);
 
   // Calculate tile size based on zoom
   const TILE_SIZE = Math.round(BASE_TILE_SIZE * gridZoom);
@@ -269,12 +316,37 @@ export function TileGrid({ className }: TileGridProps) {
     );
   }
 
-  const handleMouseDown = (x: number, y: number) => {
+  const handleMouseDown = (x: number, y: number, e: React.MouseEvent) => {
+    // Shift+click for selection mode
+    if (e.shiftKey) {
+      setSelectionStart({ x, y });
+      setIsSelecting(true);
+      setSelection({ startX: x, startY: y, endX: x, endY: y });
+      return;
+    }
+
+    // If there's an active selection and clicking outside, clear it
+    if (selection && !isInSelection(x, y)) {
+      clearSelection();
+    }
+
     setIsDragging(true);
     handleTileAction(x, y);
   };
 
   const handleMouseEnter = (x: number, y: number) => {
+    setHoverPos({ x, y });
+
+    if (isSelecting && selectionStart) {
+      setSelection({
+        startX: selectionStart.x,
+        startY: selectionStart.y,
+        endX: x,
+        endY: y,
+      });
+      return;
+    }
+
     if (isDragging) {
       handleTileAction(x, y);
     }
@@ -282,6 +354,20 @@ export function TileGrid({ className }: TileGridProps) {
 
   const handleMouseUp = () => {
     setIsDragging(false);
+    if (isSelecting) {
+      setIsSelecting(false);
+      setSelectionStart(null);
+    }
+  };
+
+  // Check if a position is within current selection
+  const isInSelection = (x: number, y: number): boolean => {
+    if (!selection) return false;
+    const minX = Math.min(selection.startX, selection.endX);
+    const maxX = Math.max(selection.startX, selection.endX);
+    const minY = Math.min(selection.startY, selection.endY);
+    const maxY = Math.max(selection.startY, selection.endY);
+    return x >= minX && x <= maxX && y >= minY && y <= maxY;
   };
 
   // Render a single tile (for other layers)
@@ -405,18 +491,25 @@ export function TileGrid({ className }: TileGridProps) {
     const pos = `${x}_${y}`;
     const tileData = tiles[pos];
 
+    const isSelected = isInSelection(x, y);
+
     // Empty cell - fully transparent, border only for grid recognition
     if (!tileData) {
       return (
         <div
           key={pos}
-          className="border border-gray-600/30 hover:border-gray-400/50 cursor-pointer transition-colors"
+          className={clsx(
+            'border cursor-pointer transition-colors',
+            isSelected
+              ? 'border-blue-400 bg-blue-500/20'
+              : 'border-gray-600/30 hover:border-gray-400/50'
+          )}
           style={{
             width: TILE_SIZE,
             height: TILE_SIZE,
-            backgroundColor: 'transparent',
+            backgroundColor: isSelected ? undefined : 'transparent',
           }}
-          onMouseDown={() => handleMouseDown(x, y)}
+          onMouseDown={(e) => handleMouseDown(x, y, e)}
           onMouseEnter={() => handleMouseEnter(x, y)}
         />
       );
@@ -443,13 +536,16 @@ export function TileGrid({ className }: TileGridProps) {
     return (
       <div
         key={pos}
-        className="cursor-pointer flex items-center justify-center text-xs font-bold relative transition-transform hover:scale-105 overflow-hidden"
+        className={clsx(
+          'cursor-pointer flex items-center justify-center text-xs font-bold relative transition-transform hover:scale-105 overflow-hidden',
+          isSelected && 'ring-2 ring-blue-400 ring-inset'
+        )}
         style={{
           width: TILE_SIZE,
           height: TILE_SIZE,
           backgroundColor: 'transparent',
         }}
-        onMouseDown={() => handleMouseDown(x, y)}
+        onMouseDown={(e) => handleMouseDown(x, y, e)}
         onMouseEnter={() => handleMouseEnter(x, y)}
         title={isUnknownAndCovered
           ? `??? (Unknown - 상위 타일에 가려짐)`

@@ -1195,6 +1195,7 @@ def generate_validated_level(
     # OPTIMIZATION: Adaptive simulation iterations based on difficulty
     # Lower difficulty = fewer iterations needed (more predictable outcomes)
     # [v4] 높은 난이도에서는 기본값 증가 (정확도 향상)
+    # [v15] 초기 탐색용 reduced iterations 추가 (첫 2회는 빠른 탐색)
     if skip_simulation:
         effective_iterations = 0
         logger.info(f"[FAST_GENERATE] simulation_iterations=0, skipping bot simulation")
@@ -1211,8 +1212,20 @@ def generate_validated_level(
         # D/E등급: 최소 25회 (높은 난이도는 분산이 커서 더 많은 샘플 필요)
         effective_iterations = max(25, request.simulation_iterations)
 
+    # [v15] 초기 탐색용 iterations (처음 2회는 빠르게 탐색)
+    initial_exploration_iterations = min(15, effective_iterations)
+    full_iterations = effective_iterations  # 정밀 검증용 원본값 보존
+
     # OPTIMIZATION: Early exit threshold - stop if match is good enough
-    EARLY_EXIT_THRESHOLD = 85.0  # Stop if match score >= 85% (increased from 80%)
+    # [v15] 등급별 차등화된 Early Exit 문턱 (속도 최적화)
+    # S/A등급: 높은 문턱 (빠른 수렴 가능)
+    # D/E등급: 낮은 문턱 (적당한 품질로 빠르게 종료)
+    if request.target_difficulty <= 0.35:
+        EARLY_EXIT_THRESHOLD = 90.0  # S/A등급: 90%
+    elif request.target_difficulty <= 0.6:
+        EARLY_EXIT_THRESHOLD = 85.0  # B/C등급: 85%
+    else:
+        EARLY_EXIT_THRESHOLD = 78.0  # D/E등급: 78% (80→78, 더 빠른 종료)
 
     # [v4] 높은 난이도에서 재시도 횟수 자동 증가
     # C/D/E 등급은 수렴에 더 많은 시도 필요
@@ -1245,27 +1258,37 @@ def generate_validated_level(
     best_max_moves = 50
 
     # Adaptive parameters for retry
-    # [v13] 목표 난이도에 따른 레이어 수 조정 (양방향)
-    # S/A등급: 레이어 제한 (너무 복잡하지 않게)
-    # C/D/E등급: 레이어 최소 보장 (충분히 어렵게)
-    if request.target_difficulty <= 0.2:
-        # S등급 (매우 쉬움): 최대 2레이어
-        current_max_layers = min(request.max_layers, 2)
-    elif request.target_difficulty <= 0.35:
-        # A등급 (쉬움): 최대 3레이어
-        current_max_layers = min(request.max_layers, 3)
-    elif request.target_difficulty <= 0.5:
-        # B등급 (보통): 최대 4레이어
-        current_max_layers = min(request.max_layers, 4)
-    elif request.target_difficulty <= 0.7:
-        # C등급 (어려움): 최소 4레이어, 최대 6레이어
-        current_max_layers = max(4, min(request.max_layers, 6))
-    elif request.target_difficulty <= 0.85:
-        # D등급 (매우 어려움): 최소 5레이어, 최대 7레이어
-        current_max_layers = max(5, min(request.max_layers, 7))
+    # [v14] 레벨 번호 기반 레이어 수 결정 (get_gboost_style_layer_config 우선)
+    # 난이도 기반 조정은 레벨 설정 범위 내에서만 적용
+    from ...core.generator import get_gboost_style_layer_config
+
+    if request.level_number:
+        # 레벨 번호가 있으면 해당 레벨의 설정 사용
+        level_config = get_gboost_style_layer_config(request.level_number)
+        config_min = level_config["min_layers"]
+        config_max = level_config["max_layers"]
+
+        # 난이도에 따라 config 범위 내에서 조정
+        if request.target_difficulty <= 0.3:
+            current_max_layers = config_min  # 쉬운 난이도: 최소 층수 사용
+        elif request.target_difficulty <= 0.6:
+            current_max_layers = (config_min + config_max) // 2  # 중간 난이도
+        else:
+            current_max_layers = config_max  # 어려운 난이도: 최대 층수 사용
     else:
-        # E등급 (극한): 최소 6레이어, 최대 8레이어
-        current_max_layers = max(6, min(request.max_layers, 8))
+        # 레벨 번호 없으면 기존 난이도 기반 로직
+        if request.target_difficulty <= 0.2:
+            current_max_layers = min(request.max_layers, 2)
+        elif request.target_difficulty <= 0.35:
+            current_max_layers = min(request.max_layers, 3)
+        elif request.target_difficulty <= 0.5:
+            current_max_layers = min(request.max_layers, 4)
+        elif request.target_difficulty <= 0.7:
+            current_max_layers = max(4, min(request.max_layers, 6))
+        elif request.target_difficulty <= 0.85:
+            current_max_layers = max(5, min(request.max_layers, 7))
+        else:
+            current_max_layers = max(6, min(request.max_layers, 8))
 
     print(f"[LAYERS] target={request.target_difficulty:.2f}, current_max_layers={current_max_layers}")
 
@@ -1533,12 +1556,20 @@ def generate_validated_level(
             # Adjust internal target difficulty based on previous results
             adjusted_difficulty = min(1.0, max(0.0, request.target_difficulty + difficulty_offset))
 
+            # [v15] 초기 탐색 가속화: 처음 2회는 빠른 시뮬레이션
+            # best_match_score >= 70이면 정밀 검증 모드로 전환
+            if attempt <= 2 and best_match_score < 70:
+                current_iterations = initial_exploration_iterations
+                logger.info(f"[FAST_EXPLORE] attempt={attempt}, using {current_iterations} iterations (exploration mode)")
+            else:
+                current_iterations = full_iterations
+
             # Log adjustment parameters for debugging (only on retry)
             if attempt > 1:
                 logger.info(f"[RETRY {attempt}] target={request.target_difficulty:.2f}, adjusted={adjusted_difficulty:.2f}, "
                            f"offset={difficulty_offset:+.2f}, moves_ratio={moves_ratio:.2f}, "
                            f"tiles={len(current_tile_types)}, obstacles={current_obstacle_types}, "
-                           f"best_score={best_match_score:.1f}")
+                           f"best_score={best_match_score:.1f}, iterations={current_iterations}")
 
             # 특수 모양 레벨 로직 비활성화 - 다른 레벨과 동일하게 생성
             # is_special_shape = is_special_shape_level(request.level_number)
@@ -1647,7 +1678,7 @@ def generate_validated_level(
             # True CPU parallelism (separate processes, no GIL)
             pool = _get_bot_pool()
             sim_args = [
-                (bt.value, level_json, effective_iterations, modified_max_moves)
+                (bt.value, level_json, current_iterations, modified_max_moves)
                 for bt in bot_types
             ]
             futures = [pool.submit(_simulate_single_bot, args) for args in sim_args]
@@ -1678,13 +1709,14 @@ def generate_validated_level(
                 best_max_moves = modified_max_moves
 
             # OPTIMIZATION: Adaptive iteration reduction for subsequent attempts
+            # [v15] full_iterations 기반으로 조정 (current_iterations는 탐색 모드 전용)
             # If first attempt gets decent match score, reduce iterations for faster retries
             if attempt == 1 and match_score >= 70.0:
                 # Good first attempt - reduce iterations by 40% for remaining attempts
-                effective_iterations = max(5, int(effective_iterations * 0.6))
+                full_iterations = max(5, int(full_iterations * 0.6))
             elif attempt == 1 and match_score >= 50.0:
                 # Decent first attempt - reduce iterations by 25%
-                effective_iterations = max(5, int(effective_iterations * 0.75))
+                full_iterations = max(5, int(full_iterations * 0.75))
 
             # OPTIMIZATION: Early exit if match score is excellent
             if match_score >= EARLY_EXIT_THRESHOLD:
@@ -1815,11 +1847,21 @@ def generate_validated_level(
 
                 # Strategy 4: Increase internal difficulty
                 # [v10] 비대칭 조정 - "Too easy"는 빠르게 조정
-                base_offset = 0.10 * (1 + gap_factor)  # 기본 0.10
+                # [v15] 갭 기반 적응형 조정 폭
+                gap_magnitude = abs(avg_gap)
+                if gap_magnitude > 20:
+                    adjustment_factor = 1.5  # 큰 갭: 공격적 조정
+                elif gap_magnitude > 10:
+                    adjustment_factor = 1.2  # 중간 갭: 적당한 조정
+                else:
+                    adjustment_factor = 1.0  # 작은 갭: 기본 조정
+
+                base_offset = 0.10 * (1 + gap_factor) * adjustment_factor  # 기본 0.10 * 적응형 factor
                 if expert_gap > 0.15:
                     base_offset += 0.05
-                base_offset = min(0.25, base_offset)  # 상향 조정은 더 적극적으로 (0.20 → 0.25)
+                base_offset = min(0.30, base_offset)  # 상향 조정은 더 적극적으로 (0.25 → 0.30)
                 difficulty_offset += base_offset
+                logger.info(f"[v15_ADAPTIVE] gap_magnitude={gap_magnitude:.1f}, adjustment_factor={adjustment_factor:.1f} (too easy)")
                 # [v10] 난이도 상한선: 목표 + 30% 이상 올라가지 않음
                 max_offset = min(0.30, (1.0 - request.target_difficulty) * 0.5)
                 if difficulty_offset > max_offset:
@@ -1886,22 +1928,33 @@ def generate_validated_level(
 
                 # Strategy 3: Decrease internal difficulty
                 # [v10] 비대칭 조정 - "Too hard"는 더 천천히 조정
-                base_offset = 0.10 * (1 + gap_factor)  # 기본 0.10
+                # [v15] 갭 기반 적응형 조정 폭: 큰 갭일수록 더 공격적으로 조정
+                gap_magnitude = abs(avg_gap)
+                if gap_magnitude > 20:
+                    adjustment_factor = 1.5  # 큰 갭: 공격적 조정 (50% 증가)
+                elif gap_magnitude > 10:
+                    adjustment_factor = 1.2  # 중간 갭: 적당한 조정 (20% 증가)
+                else:
+                    adjustment_factor = 1.0  # 작은 갭: 기본 조정
+
+                base_offset = 0.10 * (1 + gap_factor) * adjustment_factor  # 기본 0.10 * 갭 factor * 적응형 factor
                 if casual_gap < -0.15:
                     base_offset += 0.05
-                base_offset = min(0.20, base_offset)
+                base_offset = min(0.25, base_offset)  # 상한 0.20 → 0.25 (더 공격적)
                 # [v11] 등급별 조정 속도 (높을수록 천천히)
+                # [v15] 등급별 비율 상향 조정 (더 빠른 수렴)
                 if request.target_difficulty >= 0.85:
-                    base_offset = base_offset * 0.3  # E등급: 30%
+                    base_offset = base_offset * 0.40  # E등급: 30% → 40%
                 elif request.target_difficulty >= 0.70:
-                    base_offset = base_offset * 0.35  # D등급: 35%
+                    base_offset = base_offset * 0.45  # D등급: 35% → 45%
                 elif request.target_difficulty >= 0.50:
-                    base_offset = base_offset * 0.4  # C등급: 40%
+                    base_offset = base_offset * 0.50  # C등급: 40% → 50%
                 elif request.target_difficulty >= 0.35:
-                    base_offset = base_offset * 0.45  # B등급: 45%
+                    base_offset = base_offset * 0.55  # B등급: 45% → 55%
                 else:
-                    base_offset = base_offset * 0.5  # S/A등급: 50%
+                    base_offset = base_offset * 0.60  # S/A등급: 50% → 60%
                 difficulty_offset -= base_offset
+                logger.info(f"[v15_ADAPTIVE] gap_magnitude={gap_magnitude:.1f}, adjustment_factor={adjustment_factor:.1f}")
                 # [v11] 등급별 난이도 하한선
                 if request.target_difficulty >= 0.85:
                     min_offset = -0.15  # E등급: 최소 75%
@@ -1978,19 +2031,29 @@ def generate_validated_level(
                 moves_ratio = 1.0 + random.uniform(0.05, 0.15) if request.target_difficulty < 0.5 else 1.0 + random.uniform(0, 0.05)
                 current_tile_types = base_tile_types.copy()
                 current_obstacle_types = base_obstacle_types.copy()
-                # [v12] FRESH_START에서도 난이도 기반 레이어 제한 유지
-                # 문제: request.max_layers로 리셋하면 난이도 기반 제한이 무효화됨
-                # 해결: 난이도 기반 current_max_layers 재계산
-                if request.target_difficulty <= 0.2:
-                    current_max_layers = min(request.max_layers, 2)  # S등급
-                elif request.target_difficulty <= 0.35:
-                    current_max_layers = min(request.max_layers, 3)  # A등급
-                elif request.target_difficulty <= 0.5:
-                    current_max_layers = min(request.max_layers, 4)  # B등급
-                elif request.target_difficulty <= 0.7:
-                    current_max_layers = max(4, min(request.max_layers, 6))  # C등급
+                # [v14] FRESH_START에서 레벨 번호 기반 레이어 재계산
+                if request.level_number:
+                    level_config = get_gboost_style_layer_config(request.level_number)
+                    config_min = level_config["min_layers"]
+                    config_max = level_config["max_layers"]
+                    if request.target_difficulty <= 0.3:
+                        current_max_layers = config_min
+                    elif request.target_difficulty <= 0.6:
+                        current_max_layers = (config_min + config_max) // 2
+                    else:
+                        current_max_layers = config_max
                 else:
-                    current_max_layers = max(5, min(request.max_layers, 7))  # D/E등급
+                    # 레벨 번호 없으면 기존 난이도 기반 로직
+                    if request.target_difficulty <= 0.2:
+                        current_max_layers = min(request.max_layers, 2)  # S등급
+                    elif request.target_difficulty <= 0.35:
+                        current_max_layers = min(request.max_layers, 3)  # A등급
+                    elif request.target_difficulty <= 0.5:
+                        current_max_layers = min(request.max_layers, 4)  # B등급
+                    elif request.target_difficulty <= 0.7:
+                        current_max_layers = max(4, min(request.max_layers, 6))  # C등급
+                    else:
+                        current_max_layers = max(5, min(request.max_layers, 7))  # D/E등급
                 current_grid_size = calibrated_grid.copy()
 
             # RESHUFFLE STRATEGY: Try reshuffling best result before generating new level

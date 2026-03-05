@@ -6,6 +6,7 @@ from typing import Dict, List, Any, Optional, Tuple, Set
 from dataclasses import dataclass
 
 from .bot_simulator import BotSimulator, TileDistributor
+from .pattern_templates import get_pattern_positions, get_pattern_name, PATTERN_TEMPLATES
 
 logger = logging.getLogger(__name__)
 
@@ -133,30 +134,60 @@ def get_gboost_style_gimmicks(level_number: int) -> Dict[str, Any]:
         }
 
 
+# ============================================================================
+# 레벨 설정 통합 테이블 (LEVEL_CONFIG_TABLE)
+# ============================================================================
+# 모든 레벨 생성 파라미터를 한 곳에서 관리
+# 수정 시 이 테이블만 변경하면 됨
+#
+# 필드 설명:
+#   max_level: 해당 설정이 적용되는 최대 레벨 번호 (이하)
+#   min_layers, max_layers: 레이어 수 범위
+#   grid_size: 그리드 크기 (홀수 레이어 기준, 짝수 레이어는 +1)
+#   tile_range: (min, max) 타일 수 범위
+#   tile_types: 사용할 타일 종류 수
+#   description: 설명
+# ============================================================================
+LEVEL_CONFIG_TABLE = [
+    # (max_level, min_layers, max_layers, grid_size, tile_range, tile_types, description)
+    (3,    1, 2, 4, (9, 18),   4,  "Tutorial - 튜토리얼 (1-3)"),
+    (5,    3, 4, 4, (18, 36),  5,  "Tutorial - 후반 튜토리얼 (4-5)"),      # 4x4 그리드
+    (10,   3, 4, 5, (18, 36),  5,  "Tutorial - 후반 튜토리얼 (6-10)"),     # 5x5 그리드
+    (30,   3, 4, 6, (24, 48),  6,  "Early - 초반 (11-30)"),
+    (60,   3, 4, 7, (30, 50),  8,  "Early-Mid - 초중반 (31-60)"),
+    (100,  4, 5, 8, (50, 80),  9,  "Mid - 중반 (61-100)"),
+    (225,  4, 5, 8, (60, 90),  9,  "Mid-Late - 중후반 (101-225)"),
+    (600,  4, 5, 8, (70, 100), 10, "Standard - A등급 주력 (226-600)"),
+    (1125, 5, 5, 8, (75, 105), 11, "Advanced - B등급 기준선 (601-1125)"),
+    (1500, 5, 6, 8, (84, 120), 12, "Expert - C/D등급 (1126-1500)"),
+    (99999, 5, 6, 8, (96, 120), 13, "Master - 엔드게임 (1501+)"),
+]
+
+
+def get_grid_size_for_level(level_number: int) -> Tuple[int, int]:
+    """
+    Get recommended grid size based on level number.
+    그리드 크기는 LEVEL_CONFIG_TABLE에서 가져옴.
+
+    CRITICAL: col과 row는 항상 같아야 함 (정사각형 그리드)
+
+    Args:
+        level_number: The level number (1-based)
+
+    Returns:
+        Tuple of (cols, rows) - always square (cols == rows)
+    """
+    for max_level, _, _, grid_size, _, _, _ in LEVEL_CONFIG_TABLE:
+        if level_number <= max_level:
+            return (grid_size, grid_size)
+    # Fallback to last config
+    return (8, 8)
+
+
 def get_gboost_style_layer_config(level_number: int) -> Dict[str, Any]:
     """
     Get recommended layer configuration based on level number.
-
-    Based on analysis of GBoost production levels (221 human-designed levels)
-    and commercial games (Tile Explorer, Triple Tile, Tile Master 3D).
-
-    [v2] 타일 종류 수 업데이트:
-    - 보통 난이도(B등급): 10종류 기준선
-    - 쉬움 (S/A): 8-9종류
-    - 어려움 (C): 11종류
-    - 매우 어려움 (D+): 12종류
-    - 튜토리얼 (1-10): 4-5종류 유지
-
-    1500레벨 전체에 대한 점진적 설정:
-    - Level 1-10: Tutorial - 1-2 layers, 7x7, 9-18 tiles, 4종류
-    - Level 11-30: Early - 2-3 layers, 7x7, 18-36 tiles, 5종류
-    - Level 31-60: Early-Mid - 3-4 layers, 7x7, 30-50 tiles, 7종류
-    - Level 61-100: Mid - 4-5 layers, 10x10, 50-80 tiles, 8종류
-    - Level 101-225: Mid-Late - 4-5 layers, 10x10, 60-90 tiles, 8종류
-    - Level 226-600: Standard - 4-5 layers, 10x10, 70-100 tiles, 9종류
-    - Level 601-1125: Advanced - 5 layers, 10x10, 75-105 tiles, 10종류 (기준선)
-    - Level 1126-1500: Expert - 5-6 layers, 10x10, 84-120 tiles, 11종류
-    - Level 1501+: Master - 5-6 layers, 10x10, 96-120 tiles, 12종류
+    모든 설정은 LEVEL_CONFIG_TABLE에서 가져옴.
 
     Args:
         level_number: The level number (1-based)
@@ -164,96 +195,29 @@ def get_gboost_style_layer_config(level_number: int) -> Dict[str, Any]:
     Returns:
         Dict with layer and grid configuration including tile_types
     """
-    if level_number <= 10:
-        return {
-            "min_layers": 1,
-            "max_layers": 2,
-            "cols": 7,
-            "rows": 7,
-            "total_tile_range": (9, 18),
-            "tile_types": 4,  # 4종류 (튜토리얼 유지)
-            "description": "Tutorial - minimal complexity"
-        }
-    elif level_number <= 30:
-        return {
-            "min_layers": 2,
-            "max_layers": 3,
-            "cols": 7,
-            "rows": 7,
-            "total_tile_range": (18, 36),
-            "tile_types": 5,  # 4 → 5종류 (초반 점진적 증가)
-            "description": "Early game - basic layering"
-        }
-    elif level_number <= 60:
-        return {
-            "min_layers": 3,
-            "max_layers": 4,
-            "cols": 7,
-            "rows": 7,
-            "total_tile_range": (30, 50),
-            "tile_types": 7,  # 5 → 7종류
-            "description": "Early-mid game - moderate complexity"
-        }
-    elif level_number <= 100:
-        return {
-            "min_layers": 4,
-            "max_layers": 5,
-            "cols": 10,
-            "rows": 10,
-            "total_tile_range": (50, 80),
-            "tile_types": 8,  # 5 → 8종류
-            "description": "Mid game - larger grid"
-        }
-    elif level_number <= 225:
-        return {
-            "min_layers": 4,
-            "max_layers": 5,
-            "cols": 10,
-            "rows": 10,
-            "total_tile_range": (60, 90),
-            "tile_types": 8,  # 5 → 8종류 (S등급 마무리)
-            "description": "Mid-late game - S등급 마무리"
-        }
-    elif level_number <= 600:
-        return {
-            "min_layers": 4,
-            "max_layers": 5,
-            "cols": 10,
-            "rows": 10,
-            "total_tile_range": (70, 100),
-            "tile_types": 9,  # 6 → 9종류 (A등급)
-            "description": "Standard game - A등급 주력"
-        }
-    elif level_number <= 1125:
-        return {
-            "min_layers": 5,
-            "max_layers": 5,
-            "cols": 10,
-            "rows": 10,
-            "total_tile_range": (75, 105),
-            "tile_types": 10,  # 6 → 10종류 (B등급 기준선 ★)
-            "description": "Advanced game - B등급 핵심 재미"
-        }
-    elif level_number <= 1500:
-        return {
-            "min_layers": 5,
-            "max_layers": 6,
-            "cols": 10,
-            "rows": 10,
-            "total_tile_range": (84, 120),
-            "tile_types": 11,  # 7 → 11종류 (C/D등급)
-            "description": "Expert game - C/D등급 도전"
-        }
-    else:
-        return {
-            "min_layers": 5,
-            "max_layers": 6,
-            "cols": 10,
-            "rows": 10,
-            "total_tile_range": (96, 120),
-            "tile_types": 12,  # 8 → 12종류 (Master)
-            "description": "Master game - 엔드게임"
-        }
+    for max_level, min_layers, max_layers, grid_size, tile_range, tile_types, description in LEVEL_CONFIG_TABLE:
+        if level_number <= max_level:
+            return {
+                "min_layers": min_layers,
+                "max_layers": max_layers,
+                "cols": grid_size,
+                "rows": grid_size,
+                "total_tile_range": tile_range,
+                "tile_types": tile_types,
+                "description": description
+            }
+
+    # Fallback to last config (Master)
+    last = LEVEL_CONFIG_TABLE[-1]
+    return {
+        "min_layers": last[1],
+        "max_layers": last[2],
+        "cols": last[3],
+        "rows": last[3],
+        "total_tile_range": last[4],
+        "tile_types": last[5],
+        "description": last[6]
+    }
 
 
 def get_lowest_difficulty_positions(count: int = 3) -> Set[int]:
@@ -903,6 +867,33 @@ class LevelGenerator:
                         time_limit = 45   # 매우 어려움: 45초
                 level["timea"] = time_limit
 
+        # CRITICAL: Final boundary check - remove any tiles outside valid grid
+        # This prevents tiles at positions like (7, 3) in a 7x7 grid
+        # NOTE: In PATTERN mode, use the uniform grid size stored in level metadata
+        if level.get("_pattern_uniform_grid"):
+            # Pattern mode: use the stored uniform grid dimensions
+            boundary_cols = level.get("_pattern_grid_cols", params.grid_size[0] + 1)
+            boundary_rows = level.get("_pattern_grid_rows", params.grid_size[1] + 1)
+        else:
+            # Normal mode: use the larger of odd/even layer sizes
+            boundary_cols = params.grid_size[0] + 1  # Even layer size
+            boundary_rows = params.grid_size[1] + 1
+
+        for layer_idx in range(7):
+            layer_key = f"layer_{layer_idx}"
+            if layer_key in level and "tiles" in level[layer_key]:
+                tiles = level[layer_key]["tiles"]
+                invalid_positions = []
+                for pos in tiles.keys():
+                    parts = pos.split("_")
+                    if len(parts) == 2:
+                        x, y = int(parts[0]), int(parts[1])
+                        if x < 0 or x >= boundary_cols or y < 0 or y >= boundary_rows:
+                            invalid_positions.append(pos)
+                for pos in invalid_positions:
+                    del tiles[pos]
+                    logger.debug(f"[BOUNDARY] Removed out-of-bounds tile at {pos} from {layer_key}")
+
         # CRITICAL: Final sync of layer num fields before returning
         # This ensures t0 distribution calculations are based on correct tile counts
         level = self._sync_layer_num_fields(level)
@@ -1006,7 +997,7 @@ class LevelGenerator:
                         inner = tile_data[2]
                         if isinstance(inner, list):
                             for inner_tile in inner:
-                                if inner_tile and inner_tile not in ("t0", "empty"):
+                                if inner_tile and isinstance(inner_tile, str) and inner_tile not in ("t0", "empty"):
                                     type_counts[inner_tile] += 1
                         elif isinstance(inner, dict):
                             inner_count = inner.get("totalCount", inner.get("count", 1))
@@ -1020,7 +1011,7 @@ class LevelGenerator:
 
         # Find types with remainder issues
         bad_types = [(t, c, c % 3) for t, c in type_counts.items()
-                     if c % 3 != 0 and not t.startswith("stack_") and not t.startswith("craft_")]
+                     if c % 3 != 0 and isinstance(t, str) and not t.startswith("stack_") and not t.startswith("craft_")]
 
         if not bad_types:
             return level  # All good
@@ -1443,7 +1434,15 @@ class LevelGenerator:
 
     def _create_base_structure(self, params: GenerationParams) -> Dict[str, Any]:
         """Create the base level structure with empty layers."""
-        cols, rows = params.grid_size
+        # Auto-select grid size based on level number if level_number is provided
+        # This ensures early levels (1-10) use smaller grids (4x4 ~ 5x5)
+        # Check for common default grid sizes: (7, 7) from request schema, (8, 8) from old defaults
+        DEFAULT_GRID_SIZES = {(7, 7), (8, 8)}
+        if params.level_number and params.grid_size in DEFAULT_GRID_SIZES:
+            # Override default grid size with level-appropriate size
+            cols, rows = get_grid_size_for_level(params.level_number)
+        else:
+            cols, rows = params.grid_size
 
         # Calculate useTileCount from tile_types
         # If tile_types not specified and level_number is provided, use auto-config
@@ -1845,11 +1844,10 @@ class LevelGenerator:
         level["layer"] = 2
 
         # Layer 0: 4×3 rectangle (4 columns, 3 rows) = 12 tiles
-        # col=5: TownPop blocking logic uses col comparison between layers
-        # Upper layer col < lower layer col → pyramid blocking behavior
+        # CRITICAL: Layer dimensions must be SQUARE (col == row)
         level["layer_0"] = {
             "col": "5",  # Base layer col (must be > layer_1 col for pyramid blocking)
-            "row": "4",  # Row based on actual tile range + 1
+            "row": "5",  # MUST equal col for square grid
             "tiles": {},
             "num": "0",
         }
@@ -1859,10 +1857,10 @@ class LevelGenerator:
                 level["layer_0"]["tiles"][pos_key] = ["t0", ""]
 
         # Layer 1: 3×3 rectangle = 9 tiles
-        # col=4: Smaller than layer_0 for proper pyramid blocking
+        # CRITICAL: Layer dimensions must be SQUARE (col == row)
         level["layer_1"] = {
             "col": "4",  # Upper layer col < lower layer col
-            "row": "4",
+            "row": "4",  # MUST equal col for square grid
             "tiles": {},
             "num": "0",
         }
@@ -1878,15 +1876,15 @@ class LevelGenerator:
     ) -> Dict[str, Any]:
         """Create fixed layout for level 3.
 
-        Layout:
-        - layer_0 (bottom): 6×3 rectangle (18 tiles)
-        - layer_1 (top): Two 2×3 islands on left and right sides (12 tiles)
-        - Total: 30 tiles (divisible by 3)
+        Layout (4x4/5x5 grid, same as level 4):
+        - layer_0 (bottom, 5x5): 4×3 rectangle (12 tiles)
+        - layer_1 (top, 4x4): 2×3 rectangle (6 tiles)
+        - Total: 18 tiles (divisible by 3)
 
-        Island layout on layer_1:
-        [##  ##]  <- Two 2×3 rectangles with gap in middle
-        [##  ##]
-        [##  ##]
+        layer_0 (5x5):        layer_1 (4x4):
+        [####]                [##]
+        [####]                [##]
+        [####]                [##]
         """
         tile_types = params.tile_types
         if not tile_types and params.level_number:
@@ -1897,38 +1895,29 @@ class LevelGenerator:
         # Set level to 2 layers
         level["layer"] = 2
 
-        # Layer 0: 6×3 rectangle = 18 tiles
-        # col=7: Base layer col (must be > layer_1 col for pyramid blocking)
-        # TownPop blocking: col comparison determines offset check behavior
+        # Layer 0: 4×3 rectangle = 12 tiles (5x5 grid)
+        # CRITICAL: Layer dimensions must be SQUARE (col == row)
         level["layer_0"] = {
-            "col": "7",  # Base layer col (6 tiles wide → col=7)
-            "row": "4",  # Row based on actual tile range (3 rows → row=4)
+            "col": "5",  # 5x5 grid (same as level 4-5)
+            "row": "5",  # MUST equal col for square grid
             "tiles": {},
             "num": "0",
         }
-        for x in range(6):
+        for x in range(4):
             for y in range(3):
                 pos_key = f"{x}_{y}"
                 level["layer_0"]["tiles"][pos_key] = ["t0", ""]
 
-        # Layer 1: Two 2×3 islands = 12 tiles
-        # Left island: x=0,1, y=0,1,2
-        # Right island: x=3,4, y=0,1,2 (with gap at x=2)
-        # col=6: Smaller than layer_0 for proper pyramid blocking
+        # Layer 1: 2×3 rectangle = 6 tiles (4x4 grid)
+        # CRITICAL: Layer dimensions must be SQUARE (col == row)
         level["layer_1"] = {
-            "col": "6",  # Upper layer col < lower layer col
-            "row": "4",
+            "col": "4",  # 4x4 grid (same as level 4-5)
+            "row": "4",  # MUST equal col for square grid
             "tiles": {},
             "num": "0",
         }
-        # Left island (2×3)
+        # Single 2×3 rectangle
         for x in range(2):
-            for y in range(3):
-                pos_key = f"{x}_{y}"
-                level["layer_1"]["tiles"][pos_key] = ["t0", ""]
-
-        # Right island (2×3) - offset by 1 for the gap
-        for x in range(3, 5):  # x=3,4 (leaving x=2 as gap)
             for y in range(3):
                 pos_key = f"{x}_{y}"
                 level["layer_1"]["tiles"][pos_key] = ["t0", ""]
@@ -1946,7 +1935,12 @@ class LevelGenerator:
             return self._create_fixed_layout_level_3(level, params)
 
         target = params.target_difficulty
-        cols, rows = params.grid_size
+        # Auto-select grid size based on level number if using default
+        DEFAULT_GRID_SIZES = {(7, 7), (8, 8)}
+        if params.level_number and params.grid_size in DEFAULT_GRID_SIZES:
+            cols, rows = get_grid_size_for_level(params.level_number)
+        else:
+            cols, rows = params.grid_size
 
         # Auto-select tile types based on level number if not specified
         tile_types = params.tile_types
@@ -1988,8 +1982,9 @@ class LevelGenerator:
                 min_layers = max(1, params.min_layers)
                 max_layers = params.max_layers
 
-                # Tutorial mode: For very low difficulty (≤0.15), use 2-3 layers
-                is_tutorial_mode = target <= 0.15
+                # Tutorial mode: For very low difficulty (≤0.15) AND early levels (1-3)
+                # Levels 4+ should use params.min_layers/max_layers even with low difficulty
+                is_tutorial_mode = target <= 0.15 and (params.level_number is None or params.level_number <= 3)
                 if is_tutorial_mode:
                     max_layers = min(max_layers, 3)
                     min_layers = min(min_layers, 2)
@@ -2228,84 +2223,153 @@ class LevelGenerator:
                         return (config.pattern_type, config.pattern_index)
             return None
 
-        # Layer scaling disabled - all layers use full dimensions
-        max_layer_idx = max(active_layers) if active_layers else 0
-        layer_shrink_rate = 1.0  # No shrink - preserve pattern shapes
-
-        for layer_idx in active_layers:
-            layer_key = f"layer_{layer_idx}"
-            is_odd_layer = layer_idx % 2 == 1
-
-            # Calculate base layer dimensions (original logic)
-            base_cols = cols if is_odd_layer else cols + 1
-            base_rows = rows if is_odd_layer else rows + 1
-
-            # Phase 1: Apply dynamic layer shrinking for pyramid/turtle effect
-            # Higher layers get progressively smaller to create visual depth
-            if max_layer_idx > 0 and layer_idx > 0:
-                # Calculate shrink factor based on layer position
-                # layer_idx 0 = full size, higher = smaller
-                shrink_factor = layer_shrink_rate ** layer_idx
-
-                # Apply shrink factor but ensure minimum viable size (at least 4x4)
-                layer_cols = max(4, int(base_cols * shrink_factor))
-                layer_rows = max(4, int(base_rows * shrink_factor))
-
-                # Ensure dimensions stay within original grid bounds
-                layer_cols = min(layer_cols, base_cols)
-                layer_rows = min(layer_rows, base_rows)
-            else:
-                layer_cols = base_cols
-                layer_rows = base_rows
-
-            # Phase 2: Calculate center offset for depth emphasis
-            # Higher layers are visually centered within the lower layer's footprint
-            # This creates the turtle/pyramid depth effect
-            layer_offset_x = (base_cols - layer_cols) // 2
-            layer_offset_y = (base_rows - layer_rows) // 2
-
-            # Get target tile count for this layer
-            target_count = layer_tile_counts.get(layer_idx, 0)
-            if target_count <= 0:
-                continue
-
-            # Determine pattern type and index for this layer
-            # Priority: 1) Explicit/Auto layer config, 2) Level-wide default
-            layer_pattern_config = get_effective_layer_pattern(layer_idx)
-
-            if layer_pattern_config:
-                # Use per-layer configuration (explicit or auto-generated)
-                layer_pattern_type = layer_pattern_config[0]
-                layer_pattern_index = layer_pattern_config[1] if layer_pattern_config[1] is not None else layer_pattern_indices.get(layer_idx, params.pattern_index)
-            else:
-                # Use level-wide pattern_type with varied pattern_index per layer
-                layer_pattern_type = params.pattern_type
-                layer_pattern_index = layer_pattern_indices.get(layer_idx, params.pattern_index)
-
-            # Generate positions for this layer with symmetry and pattern options
-            # Note: positions are generated within the shrunk layer dimensions
-            positions = self._generate_layer_positions_for_count(
-                layer_cols, layer_rows, target_count,
-                symmetry_mode=effective_symmetry_mode,
-                pattern_type=layer_pattern_type,
-                pattern_index=layer_pattern_index  # Use varied pattern per layer
+        # CRITICAL: When pattern_index is specified (special shape levels like Heart, Star),
+        # generate a MASTER pattern first and ALL layers share the SAME positions.
+        # This ensures the visual shape is maintained when layers are stacked.
+        if params.pattern_index is not None:
+            # Generate master pattern positions using the LARGEST grid size (even layer grid)
+            # Even layers use cols+1 x rows+1, odd layers use cols x rows
+            # We generate for the larger grid to get the FULL pattern shape
+            max_cols = cols + 1  # Even layer column count
+            max_rows = rows + 1  # Even layer row count
+            master_positions = self._generate_aesthetic_positions(
+                max_cols, max_rows,  # Use LARGEST grid size to get full pattern
+                target_count=1000,  # Request many positions to get full pattern shape
+                pattern_index=params.pattern_index
             )
 
-            # Phase 2: Apply center offset to positions so higher layers appear centered
-            if layer_offset_x > 0 or layer_offset_y > 0:
-                offset_positions = []
-                for pos in positions:
-                    parts = pos.split("_")
-                    x, y = int(parts[0]), int(parts[1])
-                    new_x = x + layer_offset_x
-                    new_y = y + layer_offset_y
-                    # Ensure within original grid bounds
-                    if 0 <= new_x < base_cols and 0 <= new_y < base_rows:
-                        offset_positions.append(f"{new_x}_{new_y}")
-                positions = offset_positions
+            _logger.info(f"[PATTERN_SHAPE] pattern_index={params.pattern_index}, "
+                        f"master_positions={len(master_positions)}, "
+                        f"active_layers={active_layers}")
 
-            for pos in positions:
-                all_layer_positions.append((layer_idx, pos))
+            # ALL layers will share the SAME pattern positions
+            # The FULL pattern shape is used on each layer for visual clarity
+            # This creates a stacked 3D effect while maintaining the recognizable shape
+
+            # CRITICAL: PRESERVE EXACT PATTERN SHAPE - no modification!
+            # Do NOT add or remove positions to maintain the designed visual pattern.
+            # The tile type distribution will handle 3-divisibility requirements
+            # by ensuring the total across all layers works out correctly.
+            remainder = len(master_positions) % 3
+            if remainder != 0:
+                _logger.info(f"[PATTERN_SHAPE] Pattern has {len(master_positions)} positions (remainder {remainder}). "
+                            f"Preserving exact shape - tile types will be adjusted for playability.")
+
+            # Ensure minimum of 6 positions
+            if len(master_positions) < 6:
+                _logger.warning(f"[PATTERN_SHAPE] Pattern has only {len(master_positions)} positions, minimum is 6")
+
+            # CRITICAL: Store pattern lock flag and positions in level metadata
+            # This prevents later functions from adding/removing tiles outside pattern
+            level["_preserve_pattern"] = True
+            level["_pattern_locked_positions"] = set(master_positions)
+
+            # In PATTERN mode, ALL layers use the SAME grid size (largest = max_cols x max_rows)
+            # This ensures the pattern shape is identical across all layers
+            # Store this flag so tile placement uses consistent grid
+            level["_pattern_uniform_grid"] = True
+            level["_pattern_grid_cols"] = max_cols
+            level["_pattern_grid_rows"] = max_rows
+
+            for layer_idx in active_layers:
+                # In pattern mode, DO NOT filter by layer grid - use ALL master positions
+                # All layers share the exact same pattern positions for visual consistency
+                layer_positions = list(master_positions)
+
+                # Add to all_layer_positions
+                for pos in layer_positions:
+                    all_layer_positions.append((layer_idx, pos))
+
+            _logger.info(f"[PATTERN_SHAPE] All layers share full pattern ({len(master_positions)} positions), "
+                        f"total={len(all_layer_positions)}")
+
+            # CRITICAL: Update ALL layer col/row to uniform grid size for pattern consistency
+            # This ensures odd layers don't filter out positions
+            for layer_idx in active_layers:
+                layer_key = f"layer_{layer_idx}"
+                level[layer_key]["col"] = str(max_cols)
+                level[layer_key]["row"] = str(max_rows)
+
+        else:
+            # Standard per-layer pattern generation (original logic)
+            # Layer scaling disabled - all layers use full dimensions
+            max_layer_idx = max(active_layers) if active_layers else 0
+            layer_shrink_rate = 1.0  # No shrink - preserve pattern shapes
+
+            for layer_idx in active_layers:
+                layer_key = f"layer_{layer_idx}"
+                is_odd_layer = layer_idx % 2 == 1
+
+                # Calculate base layer dimensions (original logic)
+                base_cols = cols if is_odd_layer else cols + 1
+                base_rows = rows if is_odd_layer else rows + 1
+
+                # Phase 1: Apply dynamic layer shrinking for pyramid/turtle effect
+                # Higher layers get progressively smaller to create visual depth
+                if max_layer_idx > 0 and layer_idx > 0:
+                    # Calculate shrink factor based on layer position
+                    # layer_idx 0 = full size, higher = smaller
+                    shrink_factor = layer_shrink_rate ** layer_idx
+
+                    # Apply shrink factor but ensure minimum viable size (at least 4x4)
+                    layer_cols = max(4, int(base_cols * shrink_factor))
+                    layer_rows = max(4, int(base_rows * shrink_factor))
+
+                    # Ensure dimensions stay within original grid bounds
+                    layer_cols = min(layer_cols, base_cols)
+                    layer_rows = min(layer_rows, base_rows)
+                else:
+                    layer_cols = base_cols
+                    layer_rows = base_rows
+
+                # Phase 2: Calculate center offset for depth emphasis
+                # Higher layers are visually centered within the lower layer's footprint
+                # This creates the turtle/pyramid depth effect
+                layer_offset_x = (base_cols - layer_cols) // 2
+                layer_offset_y = (base_rows - layer_rows) // 2
+
+                # Get target tile count for this layer
+                target_count = layer_tile_counts.get(layer_idx, 0)
+                if target_count <= 0:
+                    continue
+
+                # Determine pattern type and index for this layer
+                # Priority: 1) Explicit/Auto layer config, 2) Level-wide default
+                layer_pattern_config = get_effective_layer_pattern(layer_idx)
+
+                if layer_pattern_config:
+                    # Use per-layer configuration (explicit or auto-generated)
+                    layer_pattern_type = layer_pattern_config[0]
+                    layer_pattern_index = layer_pattern_config[1] if layer_pattern_config[1] is not None else layer_pattern_indices.get(layer_idx, params.pattern_index)
+                else:
+                    # Use level-wide pattern_type with varied pattern_index per layer
+                    layer_pattern_type = params.pattern_type
+                    layer_pattern_index = layer_pattern_indices.get(layer_idx, params.pattern_index)
+
+                # Generate positions for this layer with symmetry and pattern options
+                # Note: positions are generated within the shrunk layer dimensions
+                positions = self._generate_layer_positions_for_count(
+                    layer_cols, layer_rows, target_count,
+                    symmetry_mode=effective_symmetry_mode,
+                    pattern_type=layer_pattern_type,
+                    pattern_index=layer_pattern_index  # Use varied pattern per layer
+                )
+
+                # Phase 2: Apply center offset to positions so higher layers appear centered
+                if layer_offset_x > 0 or layer_offset_y > 0:
+                    offset_positions = []
+                    for pos in positions:
+                        parts = pos.split("_")
+                        x, y = int(parts[0]), int(parts[1])
+                        new_x = x + layer_offset_x
+                        new_y = y + layer_offset_y
+                        # Ensure within original grid bounds
+                        if 0 <= new_x < base_cols and 0 <= new_y < base_rows:
+                            offset_positions.append(f"{new_x}_{new_y}")
+                    positions = offset_positions
+
+                for pos in positions:
+                    all_layer_positions.append((layer_idx, pos))
 
         # CRITICAL: Ensure total positions is divisible by 3
         # When layers are full, clamping may break divisibility
@@ -2595,10 +2659,16 @@ class LevelGenerator:
         pattern = pattern_type or "geometric"
 
         # Resolve symmetry mode:
+        # - PATTERN MODE: When pattern_index is specified, ALWAYS use "none" (pattern is pre-designed)
         # - "none" explicitly passed: truly no symmetry (for exact tile counts)
         # - None (not specified): random single-axis for visual appeal
         # - "both": 4-way symmetry for aesthetic patterns
-        if symmetry_mode == "none":
+
+        # CRITICAL: Pattern mode overrides all symmetry settings
+        # Patterns are pre-designed shapes - applying symmetry would distort them
+        if pattern_index is not None:
+            symmetry = "none"
+        elif symmetry_mode == "none":
             # User explicitly requested no symmetry - respect this for exact counts
             symmetry = "none"
         elif symmetry_mode is None:
@@ -2656,11 +2726,18 @@ class LevelGenerator:
             cols: Grid columns
             rows: Grid rows
             target_count: Target number of tiles
-            pattern_index: If specified (0-49), forces use of that specific pattern.
+            pattern_index: If specified (0-63), forces use of that specific pattern.
                           None = auto-select best pattern based on target_count.
         """
         import math
         center_x, center_y = cols / 2.0, rows / 2.0
+
+        # PATTERN MODE FIX: When pattern_index is specified, use grid-based target_count
+        # This ensures patterns have consistent visual shape regardless of requested tile count
+        # Pattern functions use target_count to calculate radius/size, so we normalize it
+        if pattern_index is not None:
+            # Use ~50% of grid area for clear pattern visibility
+            target_count = int(cols * rows * 0.5)
 
         # ============ Category 1: Basic Shapes (0-9) ============
 
@@ -2684,7 +2761,9 @@ class LevelGenerator:
 
         # Pattern 1: Diamond/Rhombus shape
         def diamond_shape():
-            radius = int((target_count * 2) ** 0.5)
+            # Use grid-based radius for consistent visual shape
+            # Diamond spans ~60% of grid for clear visual recognition
+            radius = min(cols, rows) * 0.6
             positions = []
             for x in range(cols):
                 for y in range(rows):
@@ -3070,41 +3149,100 @@ class LevelGenerator:
 
         # ============ Category 4: Letter Shapes (20-29) ============
 
-        # Pattern 20: Letter H
+        # Pattern 20: Letter H (pixel art style)
         def letter_H():
             positions = []
-            bar_width = max(2, cols // 4)
-            for x in range(bar_width):
-                for y in range(rows):
-                    positions.append(f"{x}_{y}")
-            for x in range(cols - bar_width, cols):
-                for y in range(rows):
-                    positions.append(f"{x}_{y}")
-            mid_y = rows // 2
-            bar_height = max(2, rows // 4)
-            for x in range(bar_width, cols - bar_width):
-                for y in range(mid_y - bar_height // 2, mid_y + bar_height // 2 + 1):
-                    positions.append(f"{x}_{y}")
+            if cols <= 5 or rows <= 5:
+                template = [
+                    "# #",
+                    "# #",
+                    "###",
+                    "# #",
+                    "# #",
+                ]
+            elif cols <= 7 or rows <= 7:
+                template = [
+                    "##   ##",
+                    "##   ##",
+                    "##   ##",
+                    "#######",
+                    "##   ##",
+                    "##   ##",
+                    "##   ##",
+                ]
+            else:
+                template = [
+                    "##    ##",
+                    "##    ##",
+                    "##    ##",
+                    "########",
+                    "########",
+                    "##    ##",
+                    "##    ##",
+                    "##    ##",
+                ]
+            template_rows = len(template)
+            template_cols = max(len(r) for r in template)
+            y_offset = max(0, (rows - template_rows) // 2)
+            x_offset = max(0, (cols - template_cols) // 2)
+            for ty, row_str in enumerate(template):
+                y = ty + y_offset
+                if y >= rows:
+                    continue
+                for tx, char in enumerate(row_str):
+                    x = tx + x_offset
+                    if x >= cols:
+                        continue
+                    if char == '#':
+                        positions.append(f"{x}_{y}")
             return positions
 
-        # Pattern 21: Letter I
+        # Pattern 21: Letter I (pixel art style)
         def letter_I():
             positions = []
-            bar_height = max(2, rows // 4)
-            stem_width = max(2, cols // 3)
-            stem_start = int((cols - stem_width) / 2)
-            # Top bar
-            for x in range(cols):
-                for y in range(bar_height):
-                    positions.append(f"{x}_{y}")
-            # Bottom bar
-            for x in range(cols):
-                for y in range(rows - bar_height, rows):
-                    positions.append(f"{x}_{y}")
-            # Stem
-            for x in range(stem_start, stem_start + stem_width):
-                for y in range(bar_height, rows - bar_height):
-                    positions.append(f"{x}_{y}")
+            if cols <= 5 or rows <= 5:
+                template = [
+                    "###",
+                    " # ",
+                    " # ",
+                    " # ",
+                    "###",
+                ]
+            elif cols <= 7 or rows <= 7:
+                template = [
+                    "#####",
+                    "  #  ",
+                    "  #  ",
+                    "  #  ",
+                    "  #  ",
+                    "  #  ",
+                    "#####",
+                ]
+            else:
+                template = [
+                    "######",
+                    "  ##  ",
+                    "  ##  ",
+                    "  ##  ",
+                    "  ##  ",
+                    "  ##  ",
+                    "  ##  ",
+                    "######",
+                ]
+            template_rows = len(template)
+            template_cols = max(len(r) for r in template)
+            y_offset = max(0, (rows - template_rows) // 2)
+            x_offset = max(0, (cols - template_cols) // 2)
+            for ty, row_str in enumerate(template):
+                y = ty + y_offset
+                if y >= rows:
+                    continue
+                for tx, char in enumerate(row_str):
+                    x = tx + x_offset
+                    if x >= cols:
+                        continue
+                    if char == '#':
+                        positions.append(f"{x}_{y}")
             return positions
 
         # Pattern 22: Letter L
@@ -3141,17 +3279,49 @@ class LevelGenerator:
                     positions.append(f"{x}_{y}")
             return positions
 
-        # Pattern 24: Letter X
+        # Pattern 24: Letter X (pixel art style)
         def letter_X():
             positions = []
-            thickness = max(1.5, min(cols, rows) / 5)
-            for x in range(cols):
-                for y in range(rows):
-                    # Diagonal 1 (top-left to bottom-right)
-                    d1 = abs((x - center_x) - (y - center_y) * cols / rows)
-                    # Diagonal 2 (top-right to bottom-left)
-                    d2 = abs((x - center_x) + (y - center_y) * cols / rows)
-                    if d1 <= thickness or d2 <= thickness:
+            if cols <= 5 or rows <= 5:
+                template = [
+                    "# #",
+                    " # ",
+                    "# #",
+                ]
+            elif cols <= 7 or rows <= 7:
+                template = [
+                    "##   ##",
+                    " ## ## ",
+                    "  ###  ",
+                    "   #   ",
+                    "  ###  ",
+                    " ## ## ",
+                    "##   ##",
+                ]
+            else:
+                template = [
+                    "##    ##",
+                    " ##  ## ",
+                    "  ####  ",
+                    "   ##   ",
+                    "   ##   ",
+                    "  ####  ",
+                    " ##  ## ",
+                    "##    ##",
+                ]
+            template_rows = len(template)
+            template_cols = max(len(r) for r in template)
+            y_offset = max(0, (rows - template_rows) // 2)
+            x_offset = max(0, (cols - template_cols) // 2)
+            for ty, row_str in enumerate(template):
+                y = ty + y_offset
+                if y >= rows:
+                    continue
+                for tx, char in enumerate(row_str):
+                    x = tx + x_offset
+                    if x >= cols:
+                        continue
+                    if char == '#':
                         positions.append(f"{x}_{y}")
             return positions
 
@@ -3175,52 +3345,105 @@ class LevelGenerator:
                     positions.append(f"{x}_{y}")
             return positions
 
-        # Pattern 26: Letter Z
+        # Pattern 26: Letter Z (pixel art style)
         def letter_Z():
             positions = []
-            bar_height = max(2, rows // 4)
-            thickness = max(1.5, min(cols, rows) / 5)
-            # Top bar
-            for x in range(cols):
-                for y in range(bar_height):
-                    positions.append(f"{x}_{y}")
-            # Bottom bar
-            for x in range(cols):
-                for y in range(rows - bar_height, rows):
-                    positions.append(f"{x}_{y}")
-            # Diagonal
-            for x in range(cols):
-                for y in range(bar_height, rows - bar_height):
-                    expected_x = cols - 1 - (y - bar_height) * cols / (rows - 2 * bar_height)
-                    if abs(x - expected_x) <= thickness:
+            if cols <= 5 or rows <= 5:
+                template = [
+                    "###",
+                    " # ",
+                    "# ",
+                    "###",
+                ]
+            elif cols <= 7 or rows <= 7:
+                template = [
+                    "#######",
+                    "    ## ",
+                    "   ##  ",
+                    "  ##   ",
+                    " ##    ",
+                    "##     ",
+                    "#######",
+                ]
+            else:
+                template = [
+                    "########",
+                    "     ## ",
+                    "    ##  ",
+                    "   ##   ",
+                    "  ##    ",
+                    " ##     ",
+                    "##      ",
+                    "########",
+                ]
+            template_rows = len(template)
+            template_cols = max(len(r) for r in template)
+            y_offset = max(0, (rows - template_rows) // 2)
+            x_offset = max(0, (cols - template_cols) // 2)
+            for ty, row_str in enumerate(template):
+                y = ty + y_offset
+                if y >= rows:
+                    continue
+                for tx, char in enumerate(row_str):
+                    x = tx + x_offset
+                    if x >= cols:
+                        continue
+                    if char == '#':
                         positions.append(f"{x}_{y}")
             return positions
 
-        # Pattern 27: Letter S
+        # Pattern 27: Letter S (pixel art style, scales to grid size)
         def letter_S():
             positions = []
-            bar_height = max(2, rows // 5)
-            bar_width = max(2, cols // 4)
-            # Top bar
-            for x in range(cols):
-                for y in range(bar_height):
-                    positions.append(f"{x}_{y}")
-            # Upper left vertical
-            for x in range(bar_width):
-                for y in range(bar_height, rows // 2):
-                    positions.append(f"{x}_{y}")
-            # Middle bar
-            for x in range(cols):
-                for y in range(rows // 2 - bar_height // 2, rows // 2 + bar_height // 2 + 1):
-                    positions.append(f"{x}_{y}")
-            # Lower right vertical
-            for x in range(cols - bar_width, cols):
-                for y in range(rows // 2 + 1, rows - bar_height):
-                    positions.append(f"{x}_{y}")
-            # Bottom bar
-            for x in range(cols):
-                for y in range(rows - bar_height, rows):
-                    positions.append(f"{x}_{y}")
+            # Define S templates for different grid sizes
+            if cols <= 5 or rows <= 5:
+                # Small S for tiny grids
+                template = [
+                    "#####",
+                    "#    ",
+                    "#####",
+                    "    #",
+                    "#####",
+                ]
+            elif cols <= 7 or rows <= 7:
+                # Medium S for 6-7 sized grids
+                template = [
+                    " ##### ",
+                    "##   # ",
+                    " ###   ",
+                    "   ### ",
+                    " #   ##",
+                    " ##### ",
+                ]
+            else:
+                # Large S for 8+ sized grids
+                template = [
+                    "  #####  ",
+                    " ##   ## ",
+                    " ##      ",
+                    "  #####  ",
+                    "      ## ",
+                    " ##   ## ",
+                    "  #####  ",
+                ]
+
+            template_rows = len(template)
+            template_cols = max(len(r) for r in template)
+
+            # Center the S in the grid
+            y_offset = max(0, (rows - template_rows) // 2)
+            x_offset = max(0, (cols - template_cols) // 2)
+
+            for ty, row_str in enumerate(template):
+                y = ty + y_offset
+                if y >= rows:
+                    continue
+                for tx, char in enumerate(row_str):
+                    x = tx + x_offset
+                    if x >= cols:
+                        continue
+                    if char == '#':
+                        positions.append(f"{x}_{y}")
             return positions
 
         # Pattern 28: Letter O (ring)
@@ -3301,16 +3524,46 @@ class LevelGenerator:
                         positions.append(f"{x}_{y}")
             return positions
 
-        # Pattern 33: Bowtie
+        # Pattern 33: Bowtie (pixel art style - actual bow tie shape)
         def bowtie():
             positions = []
-            for y in range(rows):
-                dist_from_center = abs(y - center_y)
-                width = int(cols * (1 - dist_from_center / center_y * 0.7))
-                width = max(2, min(cols, width))
-                start_x = int((cols - width) / 2)
-                for x in range(start_x, min(cols, start_x + width)):
-                    if 0 <= x < cols:
+            if cols <= 5 or rows <= 5:
+                template = [
+                    "# #",
+                    "###",
+                    "# #",
+                ]
+            elif cols <= 7 or rows <= 7:
+                template = [
+                    "##   ##",
+                    " ## ## ",
+                    "  ###  ",
+                    " ## ## ",
+                    "##   ##",
+                ]
+            else:
+                template = [
+                    "###  ###",
+                    " ### ## ",
+                    "  ####  ",
+                    "   ##   ",
+                    "  ####  ",
+                    " ##  ## ",
+                    "###  ###",
+                ]
+            template_rows = len(template)
+            template_cols = max(len(r) for r in template)
+            y_offset = max(0, (rows - template_rows) // 2)
+            x_offset = max(0, (cols - template_cols) // 2)
+            for ty, row_str in enumerate(template):
+                y = ty + y_offset
+                if y >= rows:
+                    continue
+                for tx, char in enumerate(row_str):
+                    x = tx + x_offset
+                    if x >= cols:
+                        continue
+                    if char == '#':
                         positions.append(f"{x}_{y}")
             return positions
 
@@ -4128,10 +4381,24 @@ class LevelGenerator:
 
         # If pattern_index is specified, use that specific pattern
         if pattern_index is not None and 0 <= pattern_index < TOTAL_PATTERNS:
-            pattern_name, pattern_fn = all_patterns[pattern_index]
-            best_positions = pattern_fn()
-            # DEBUG: Print pattern selection
-            print(f"[AESTHETIC_PATTERN] Using specified pattern_index={pattern_index}, name={pattern_name}, positions={len(best_positions)}")
+            # PRIORITY 1: Use pixel-art template if available (more accurate shapes)
+            if pattern_index in PATTERN_TEMPLATES:
+                template_positions = get_pattern_positions(pattern_index, cols, rows)
+                if template_positions:
+                    pattern_name = get_pattern_name(pattern_index)
+                    best_positions = template_positions
+                    print(f"[AESTHETIC_PATTERN] Using TEMPLATE pattern_index={pattern_index}, name={pattern_name}, positions={len(best_positions)}")
+                else:
+                    # Template returned empty, fall back to procedural
+                    pattern_name, pattern_fn = all_patterns[pattern_index]
+                    best_positions = pattern_fn()
+                    print(f"[AESTHETIC_PATTERN] Template empty, using PROCEDURAL pattern_index={pattern_index}, name={pattern_name}, positions={len(best_positions)}")
+            else:
+                # PRIORITY 2: Fall back to procedural function
+                pattern_name, pattern_fn = all_patterns[pattern_index]
+                best_positions = pattern_fn()
+                print(f"[AESTHETIC_PATTERN] Using PROCEDURAL pattern_index={pattern_index}, name={pattern_name}, positions={len(best_positions)}")
+
             if not best_positions:
                 # Fallback to filled rectangle if chosen pattern returns nothing
                 best_positions = filled_rectangle()
@@ -4177,22 +4444,13 @@ class LevelGenerator:
 
         # If we have too many positions, trim from edges (maintain symmetry)
         # CRITICAL FIX: When pattern_index is explicitly specified (e.g., special shape levels),
-        # preserve the pattern shape by allowing more tiles (up to 50% more than target)
-        # This ensures heart, star, butterfly patterns maintain their visual identity
+        # NEVER trim - preserve the exact pattern shape as defined
+        # Patterns are pixel-art templates designed for visual recognition
         if len(best_positions) > target_count:
             if pattern_index is not None:
-                # For specified patterns: allow up to 50% more tiles to preserve shape
-                max_allowed = int(target_count * 1.5)
-                if len(best_positions) <= max_allowed:
-                    # Pattern is within acceptable range, keep it as-is
-                    pass
-                else:
-                    # Pattern is too large, trim minimally to preserve shape
-                    def dist_from_center(pos: str) -> float:
-                        x, y = map(int, pos.split("_"))
-                        return ((x - center_x + 0.5) ** 2 + (y - center_y + 0.5) ** 2) ** 0.5
-                    best_positions.sort(key=dist_from_center)
-                    best_positions = best_positions[:max_allowed]
+                # For specified patterns: NEVER trim - pattern shape must be preserved exactly
+                # Trimming destroys carefully designed pixel-art patterns (S, letters, etc.)
+                pass
             else:
                 # Auto-selected pattern: trim to exact target_count
                 def dist_from_center(pos: str) -> float:
@@ -4201,7 +4459,17 @@ class LevelGenerator:
                 best_positions.sort(key=dist_from_center)
                 best_positions = best_positions[:target_count]
 
-        return best_positions
+        # CRITICAL: Filter out any positions that exceed grid boundaries
+        # This ensures no tiles are placed outside the valid grid area
+        valid_positions = []
+        for pos in best_positions:
+            parts = pos.split("_")
+            if len(parts) == 2:
+                x, y = int(parts[0]), int(parts[1])
+                if 0 <= x < cols and 0 <= y < rows:
+                    valid_positions.append(pos)
+
+        return valid_positions
 
     def _generate_random_positions(
         self, cols: int, rows: int, target_count: int, symmetry: str
@@ -7069,6 +7337,10 @@ class LevelGenerator:
         if not goals:
             return level
 
+        # PATTERN MODE: Check if pattern positions should be preserved
+        preserve_pattern = level.get("_preserve_pattern", False)
+        pattern_locked_positions = level.get("_pattern_locked_positions", set())
+
         # Find the topmost active layer
         num_layers = level.get("layer", 8)
         top_layer_idx = None
@@ -7212,7 +7484,12 @@ class LevelGenerator:
         # Find available positions for goals (positions not already occupied)
         center_col = cols // 2
         center_row = rows // 2
-        symmetry_mode = params.symmetry_mode or "none"
+        # PATTERN MODE: Force symmetry to "none" to avoid mirror goal placement
+        # Patterns are pre-designed shapes - symmetry would distort them
+        if preserve_pattern:
+            symmetry_mode = "none"
+        else:
+            symmetry_mode = params.symmetry_mode or "none"
         placed_positions = set()  # Track positions used by goals
         output_positions = set()  # Track output positions of goals
         goal_positions_info = []  # Track (pos, goal_type) for adjacency check
@@ -7425,26 +7702,33 @@ class LevelGenerator:
 
             # For symmetric modes, goals should REPLACE existing tiles at self-symmetric positions
             # to preserve overall symmetry. For non-symmetric modes, add at new positions.
-            use_replacement_mode = symmetry_mode in ("horizontal", "vertical", "both")
+            # PATTERN MODE: In pattern mode, ALWAYS replace existing tiles (never add new positions)
+            use_replacement_mode = symmetry_mode in ("horizontal", "vertical", "both") or preserve_pattern
 
             # Try positions in randomized order
             for try_row in row_order_list:
                 for try_col in col_search_order:
                     try_pos = f"{try_col}_{try_row}"
 
-                    # In symmetric mode: REPLACE existing tiles at self-symmetric positions
-                    # In non-symmetric mode: ADD at new positions (original behavior)
+                    # In symmetric mode OR pattern mode: REPLACE existing tiles
+                    # In non-symmetric non-pattern mode: ADD at new positions (original behavior)
                     if use_replacement_mode:
-                        # For symmetry preservation: must be an existing tile position
+                        # For symmetry/pattern preservation: must be an existing tile position
                         if try_pos not in tiles:
                             continue
+
+                        # PATTERN MODE: Also check if position is within locked pattern positions
+                        if preserve_pattern and pattern_locked_positions:
+                            if try_pos not in pattern_locked_positions:
+                                continue
+
                         # Check if this is a self-symmetric position OR we can place mirrored goal
                         mirror_col, mirror_row = get_mirror_position(try_col, try_row)
                         mirror_pos = f"{mirror_col}_{mirror_row}"
                         is_self_symmetric = is_self_symmetric_position(try_col, try_row)
 
                         # If not self-symmetric, check if mirror position is also valid
-                        if not is_self_symmetric:
+                        if not is_self_symmetric and symmetry_mode in ("horizontal", "vertical", "both"):
                             # Mirror position must exist and not be used
                             # Also check if mirror position is another goal's output position
                             if mirror_pos not in tiles or mirror_pos in placed_positions or mirror_pos in output_positions:
@@ -7528,23 +7812,27 @@ class LevelGenerator:
 
                 # CRITICAL: Clear tiles from lower layers at goal position
                 # This ensures the goal is visible and not visually confusing
-                for i in range(top_layer_idx):
-                    lower_layer_key = f"layer_{i}"
-                    lower_tiles = level.get(lower_layer_key, {}).get("tiles", {})
-                    if pos in lower_tiles:
-                        del lower_tiles[pos]
-                        level[lower_layer_key]["num"] = str(len(lower_tiles))
-                        logger.debug(f"[_add_goals] Cleared tile at {lower_layer_key}:{pos} for goal visibility")
+                # PATTERN MODE: Skip clearing to preserve pattern shape - goals are on top layer anyway
+                if not preserve_pattern:
+                    for i in range(top_layer_idx):
+                        lower_layer_key = f"layer_{i}"
+                        lower_tiles = level.get(lower_layer_key, {}).get("tiles", {})
+                        if pos in lower_tiles:
+                            del lower_tiles[pos]
+                            level[lower_layer_key]["num"] = str(len(lower_tiles))
+                            logger.debug(f"[_add_goals] Cleared tile at {lower_layer_key}:{pos} for goal visibility")
 
                 # CRITICAL: Clear tiles from ALL layers at output position
                 # Stack/Craft goals spawn tiles at output position, so existing tiles would block them
-                for i in range(level.get("layer", 8)):
-                    check_layer_key = f"layer_{i}"
-                    check_tiles = level.get(check_layer_key, {}).get("tiles", {})
-                    if output_pos in check_tiles:
-                        del check_tiles[output_pos]
-                        level[check_layer_key]["num"] = str(len(check_tiles))
-                        logger.debug(f"[_add_goals] Cleared tile at {check_layer_key}:{output_pos} for goal output")
+                # PATTERN MODE: Skip clearing to preserve pattern shape - output tiles will overlap
+                if not preserve_pattern:
+                    for i in range(level.get("layer", 8)):
+                        check_layer_key = f"layer_{i}"
+                        check_tiles = level.get(check_layer_key, {}).get("tiles", {})
+                        if output_pos in check_tiles:
+                            del check_tiles[output_pos]
+                            level[check_layer_key]["num"] = str(len(check_tiles))
+                            logger.debug(f"[_add_goals] Cleared tile at {check_layer_key}:{output_pos} for goal output")
 
                 # CRITICAL: For stack goals, clear additional positions in stack direction
                 # Stack tiles are offset by 0.1 per stacked tile in the output direction
@@ -7587,19 +7875,22 @@ class LevelGenerator:
                                 continue
 
                             # Clear from all layers
-                            for i in range(level.get("layer", 8)):
-                                check_layer_key = f"layer_{i}"
-                                check_tiles = level.get(check_layer_key, {}).get("tiles", {})
-                                if ext_pos in check_tiles:
-                                    del check_tiles[ext_pos]
-                                    level[check_layer_key]["num"] = str(len(check_tiles))
-                                    logger.debug(f"[_add_goals] Cleared tile at {check_layer_key}:{ext_pos} for stack extension")
+                            # PATTERN MODE: Skip clearing to preserve pattern shape
+                            if not preserve_pattern:
+                                for i in range(level.get("layer", 8)):
+                                    check_layer_key = f"layer_{i}"
+                                    check_tiles = level.get(check_layer_key, {}).get("tiles", {})
+                                    if ext_pos in check_tiles:
+                                        del check_tiles[ext_pos]
+                                        level[check_layer_key]["num"] = str(len(check_tiles))
+                                        logger.debug(f"[_add_goals] Cleared tile at {check_layer_key}:{ext_pos} for stack extension")
 
                             # Also add to output_positions to prevent other goals from using it
                             output_positions.add(ext_pos)
 
                 # In symmetric mode, also place mirrored goal if not self-symmetric position
-                if use_replacement_mode and not is_self_symmetric_position(p_col, p_row):
+                # PATTERN MODE: Skip mirror placement if only using pattern mode (no symmetry)
+                if use_replacement_mode and symmetry_mode in ("horizontal", "vertical", "both") and not is_self_symmetric_position(p_col, p_row):
                     mirror_col, mirror_row = get_mirror_position(p_col, p_row)
                     mirror_pos = f"{mirror_col}_{mirror_row}"
 
@@ -7639,22 +7930,26 @@ class LevelGenerator:
                         self._place_goal_tile(tiles, mirror_pos, mirrored_goal_type, goal_count)
 
                         # CRITICAL: Clear tiles from lower layers at mirrored goal position
-                        for i in range(top_layer_idx):
-                            lower_layer_key = f"layer_{i}"
-                            lower_tiles = level.get(lower_layer_key, {}).get("tiles", {})
-                            if mirror_pos in lower_tiles:
-                                del lower_tiles[mirror_pos]
-                                level[lower_layer_key]["num"] = str(len(lower_tiles))
-                                logger.debug(f"[_add_goals] Cleared tile at {lower_layer_key}:{mirror_pos} for mirrored goal visibility")
+                        # PATTERN MODE: Skip clearing to preserve pattern shape
+                        if not preserve_pattern:
+                            for i in range(top_layer_idx):
+                                lower_layer_key = f"layer_{i}"
+                                lower_tiles = level.get(lower_layer_key, {}).get("tiles", {})
+                                if mirror_pos in lower_tiles:
+                                    del lower_tiles[mirror_pos]
+                                    level[lower_layer_key]["num"] = str(len(lower_tiles))
+                                    logger.debug(f"[_add_goals] Cleared tile at {lower_layer_key}:{mirror_pos} for mirrored goal visibility")
 
                         # CRITICAL: Clear tiles from ALL layers at mirrored output position
-                        for i in range(level.get("layer", 8)):
-                            check_layer_key = f"layer_{i}"
-                            check_tiles = level.get(check_layer_key, {}).get("tiles", {})
-                            if mirror_output_pos in check_tiles:
-                                del check_tiles[mirror_output_pos]
-                                level[check_layer_key]["num"] = str(len(check_tiles))
-                                logger.debug(f"[_add_goals] Cleared tile at {check_layer_key}:{mirror_output_pos} for mirrored goal output")
+                        # PATTERN MODE: Skip clearing to preserve pattern shape
+                        if not preserve_pattern:
+                            for i in range(level.get("layer", 8)):
+                                check_layer_key = f"layer_{i}"
+                                check_tiles = level.get(check_layer_key, {}).get("tiles", {})
+                                if mirror_output_pos in check_tiles:
+                                    del check_tiles[mirror_output_pos]
+                                    level[check_layer_key]["num"] = str(len(check_tiles))
+                                    logger.debug(f"[_add_goals] Cleared tile at {check_layer_key}:{mirror_output_pos} for mirrored goal output")
             else:
                 logger.warning(f"[_add_goals] Could not find position for {goal_type}")
 
@@ -7770,8 +8065,17 @@ class LevelGenerator:
         - target >= 0.4 (B grade): Mix of tiles and obstacles (50% chance each)
         - target >= 0.6 (C grade): Primarily obstacles, multiple per iteration
         - target >= 0.8 (D grade): Aggressive obstacle addition, activate more layers
+
+        CRITICAL: When pattern_index is specified (special shape levels like Heart, Star),
+        we MUST NOT add/remove tiles as it would break the pattern shape.
+        Only gimmicks (obstacles) are used for difficulty adjustment in this case.
         """
         symmetry_mode = params.symmetry_mode if params else "none"
+
+        # CRITICAL: Check if pattern_index is specified (special shape level)
+        # When pattern_index is set, we preserve tile positions and only adjust via gimmicks
+        pattern_index = getattr(params, 'pattern_index', None) if params else None
+        preserve_pattern_shape = pattern_index is not None
 
         # Check gimmick_intensity - if 0, don't add obstacles, only add tiles
         # For values between 0 and 1, use as probability multiplier
@@ -7882,6 +8186,20 @@ class LevelGenerator:
         # Be more aggressive with obstacle addition
         is_symmetric = symmetry_mode != "none"
 
+        # CRITICAL: When pattern_index is specified, preserve tile positions
+        # Adding random tiles would break the visual pattern shape (Heart, Star, etc.)
+        # Use obstacles ONLY for difficulty adjustment
+        if preserve_pattern_shape:
+            # Only adjust via gimmicks - try multiple times to add obstacles
+            if not gimmicks_capped and should_add_obstacle():
+                for _ in range(5):  # Try up to 5 times for pattern preservation
+                    new_level, success = try_add_obstacle()
+                    if success:
+                        return new_level
+            # If obstacles capped or can't add, return unchanged
+            # Pattern shape takes priority over exact difficulty matching
+            return level
+
         # D grade (target >= 0.8): Add obstacles aggressively
         # For D grade, we STRONGLY prefer obstacles over tiles
         if target_difficulty >= 0.8:
@@ -7962,6 +8280,10 @@ class LevelGenerator:
         - target >= 0.2 (A grade): Remove 1-2 tiles, possibly remove obstacle
         - target < 0.2 (S grade): Aggressively remove 2-3 tiles and obstacles
 
+        CRITICAL: When pattern_index is specified (special shape levels like Heart, Star),
+        we MUST NOT remove tiles as it would break the pattern shape.
+        Only gimmicks (obstacles) are removed for difficulty adjustment in this case.
+
         Args:
             level: Level data
             params: Generation parameters
@@ -7969,8 +8291,20 @@ class LevelGenerator:
             tutorial_gimmick: Tutorial gimmick type to preserve (don't remove this type)
         """
         symmetry_mode = params.symmetry_mode if params else "none"
-        # For symmetric patterns, skip random tile removal to preserve symmetry
-        if symmetry_mode != "none":
+
+        # CRITICAL: Check if pattern_index is specified (special shape level)
+        # When pattern_index is set, we preserve tile positions and only adjust via gimmicks
+        pattern_index = getattr(params, 'pattern_index', None) if params else None
+        preserve_pattern_shape = pattern_index is not None
+
+        # For symmetric patterns OR pattern-specified levels, skip random tile removal to preserve shape
+        if symmetry_mode != "none" or preserve_pattern_shape:
+            # Only remove obstacles, don't remove tiles (to preserve pattern shape)
+            if preserve_pattern_shape:
+                # Try to remove obstacles multiple times for more aggressive reduction
+                num_attempts = 3 if target_difficulty < 0.2 else 2 if target_difficulty < 0.4 else 1
+                for _ in range(num_attempts):
+                    level = self._remove_random_obstacle(level, tutorial_gimmick=tutorial_gimmick)
             return level
 
         # S grade (target < 0.2): Very aggressive - remove multiple tiles and obstacles
@@ -8708,6 +9042,148 @@ class LevelGenerator:
 
         return level
 
+    def _redistribute_tile_types_for_divisibility(
+        self, level: Dict[str, Any], params: GenerationParams
+    ) -> Dict[str, Any]:
+        """
+        PATTERN MODE ONLY: Redistribute tile types to ensure each type count is divisible by 3.
+
+        This function NEVER adds or removes tiles - it only changes tile types.
+        This preserves the visual pattern shape while ensuring match-3 playability.
+
+        Algorithm:
+        1. Count each tile type
+        2. Identify types with remainder (1 or 2)
+        3. Redistribute by changing tile types:
+           - remainder=1: change 1 tile to a type with remainder=2 (or 2 tiles to other types)
+           - remainder=2: change 2 tiles to other types (or 1 tile to remainder=1 type)
+        4. Positions are NEVER modified
+        """
+        num_layers = level.get("layer", 8)
+        use_tile_count = level.get("useTileCount", 15)
+
+        # Collect valid tile types
+        valid_tile_types = [f"t{i}" for i in range(1, use_tile_count + 1)]
+
+        # Step 1: Count each tile type and collect positions
+        type_counts: Dict[str, int] = {}
+        type_positions: Dict[str, List[Tuple[int, str]]] = {}  # type -> [(layer_idx, pos)]
+
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for pos, tile_data in tiles.items():
+                if isinstance(tile_data, list) and len(tile_data) > 0:
+                    tile_type = tile_data[0]
+                    # Skip goal tiles
+                    if tile_type in self.GOAL_TYPES or tile_type.startswith("craft_") or tile_type.startswith("stack_"):
+                        continue
+                    type_counts[tile_type] = type_counts.get(tile_type, 0) + 1
+                    if tile_type not in type_positions:
+                        type_positions[tile_type] = []
+                    type_positions[tile_type].append((i, pos))
+
+        if not type_counts:
+            return level
+
+        # Step 2: Identify types with remainder
+        rem1_types = []  # types with count % 3 == 1 (need to change 1 or add 2)
+        rem2_types = []  # types with count % 3 == 2 (need to change 2 or add 1)
+
+        for tile_type, count in type_counts.items():
+            remainder = count % 3
+            if remainder == 1:
+                rem1_types.append(tile_type)
+            elif remainder == 2:
+                rem2_types.append(tile_type)
+
+        # Step 3: Redistribute by pairing rem1 with rem2
+        # Strategy: Move 1 tile from rem1 type to rem2 type
+        # This makes rem1 type have count%3==0 and rem2 type have count%3==0
+        while rem1_types and rem2_types:
+            from_type = rem1_types.pop()
+            to_type = rem2_types.pop()
+
+            # Change one tile from from_type to to_type
+            if type_positions.get(from_type):
+                layer_idx, pos = type_positions[from_type].pop()
+                layer_key = f"layer_{layer_idx}"
+                if pos in level[layer_key]["tiles"]:
+                    old_data = level[layer_key]["tiles"][pos]
+                    level[layer_key]["tiles"][pos] = [to_type, old_data[1] if len(old_data) > 1 else ""]
+
+                    # Update counts
+                    type_counts[from_type] -= 1
+                    type_counts[to_type] = type_counts.get(to_type, 0) + 1
+
+                    # Now both should be divisible by 3
+
+        # Step 4: Handle remaining rem1 types (need to convert 1 tile to get 0 remainder)
+        # Strategy: Change to a type that already has count divisible by 3
+        for from_type in rem1_types:
+            # Find a target type that won't break divisibility
+            # Changing 1 tile: from_type loses 1 (rem1 -> rem0), to_type gains 1
+            # We need to_type to also become divisible, so pick one with rem2
+            # But we're out of rem2 types, so pick any type with count divisible by 3
+            # That type will now have rem1, but we can pair it later
+
+            # Simple approach: convert 1 tile from rem1 to a type with remainder=2
+            # But if no rem2, just pick any divisible type
+            target_type = None
+            for t, c in type_counts.items():
+                if c % 3 == 0 and t != from_type and type_positions.get(t):
+                    target_type = t
+                    break
+
+            if not target_type:
+                # Fall back to any valid type
+                target_type = random.choice(valid_tile_types)
+
+            if type_positions.get(from_type):
+                layer_idx, pos = type_positions[from_type].pop()
+                layer_key = f"layer_{layer_idx}"
+                if pos in level[layer_key]["tiles"]:
+                    old_data = level[layer_key]["tiles"][pos]
+                    level[layer_key]["tiles"][pos] = [target_type, old_data[1] if len(old_data) > 1 else ""]
+                    type_counts[from_type] -= 1
+                    type_counts[target_type] = type_counts.get(target_type, 0) + 1
+
+        # Step 5: Handle remaining rem2 types
+        for from_type in rem2_types:
+            # Need to change 2 tiles, or find rem1 to pair with
+            # Change 2 tiles to the same type that has remainder=1
+            target_type = None
+            for t, c in type_counts.items():
+                if c % 3 == 1 and t != from_type:
+                    target_type = t
+                    break
+
+            if target_type and type_positions.get(from_type) and len(type_positions[from_type]) >= 1:
+                # Change 1 tile to pair with rem1
+                layer_idx, pos = type_positions[from_type].pop()
+                layer_key = f"layer_{layer_idx}"
+                if pos in level[layer_key]["tiles"]:
+                    old_data = level[layer_key]["tiles"][pos]
+                    level[layer_key]["tiles"][pos] = [target_type, old_data[1] if len(old_data) > 1 else ""]
+                    type_counts[from_type] -= 1
+                    type_counts[target_type] = type_counts.get(target_type, 0) + 1
+            elif type_positions.get(from_type) and len(type_positions[from_type]) >= 2:
+                # Change 2 tiles to a type with remainder=0
+                for _ in range(2):
+                    if not type_positions[from_type]:
+                        break
+                    layer_idx, pos = type_positions[from_type].pop()
+                    layer_key = f"layer_{layer_idx}"
+                    if pos in level[layer_key]["tiles"]:
+                        # Pick a random valid type
+                        target = random.choice(valid_tile_types)
+                        old_data = level[layer_key]["tiles"][pos]
+                        level[layer_key]["tiles"][pos] = [target, old_data[1] if len(old_data) > 1 else ""]
+                        type_counts[from_type] -= 1
+                        type_counts[target] = type_counts.get(target, 0) + 1
+
+        return level
+
     def _ensure_tile_count_divisible_by_3(
         self, level: Dict[str, Any], params: GenerationParams
     ) -> Dict[str, Any]:
@@ -8724,7 +9200,16 @@ class LevelGenerator:
 
         CRITICAL: First ensures TOTAL matchable tiles is divisible by 3 by adjusting
         craft_s internal tile counts if necessary.
+
+        PATTERN MODE: When _preserve_pattern is True, only redistribute tile types
+        without adding or removing any tiles (to preserve visual pattern shape).
         """
+        # CRITICAL: Check if pattern mode is active
+        # In pattern mode, we ONLY redistribute tile types, never add/remove tiles
+        preserve_pattern = level.get("_preserve_pattern", False)
+        if preserve_pattern:
+            return self._redistribute_tile_types_for_divisibility(level, params)
+
         num_layers = level.get("layer", 8)
         use_tile_count = level.get("useTileCount", 15)
 
@@ -9526,10 +10011,16 @@ class LevelGenerator:
 
         CRITICAL: This function now uses actual t0 distribution simulation to ensure
         the final tile type counts are all divisible by 3.
+
+        PATTERN MODE: When preserve_pattern is True, we NEVER delete tiles -
+        only redistribute tile types to fix divisibility issues.
         """
         num_layers = level.get("layer", 8)
         use_tile_count = level.get("useTileCount", 5)
         rand_seed = level.get("randSeed", 0)
+
+        # PATTERN PRESERVATION: Check if we should preserve tile positions
+        preserve_pattern = level.get("_preserve_pattern", False)
 
         # CRITICAL: First fix t0 (goal internals) to be divisible by 3
         # This must happen BEFORE removing regular tiles, because t0 affects total
@@ -9618,8 +10109,9 @@ class LevelGenerator:
                 type_counts[tile_type] = type_counts.get(tile_type, 0) + 1
 
         # If total is not divisible by 3, remove tiles
+        # PATTERN MODE: Skip tile deletion - patterns must preserve tile positions
         total_remainder = total_matchable % 3
-        if total_remainder != 0:
+        if total_remainder != 0 and not preserve_pattern:
             tiles_to_remove = total_remainder
 
             # Find removable tiles - prefer tiles without attributes, but allow any regular tile
@@ -9754,6 +10246,13 @@ class LevelGenerator:
                         # type_a: rem1 -> rem0, type_b: rem1 -> rem2
             else:
                 # Single rem1 or rem2 with no pair - can't fix with swaps
+                # PATTERN MODE: Can't delete tiles - must preserve positions
+                if preserve_pattern:
+                    # In pattern mode, we accept imperfect type distribution
+                    # rather than breaking the pattern shape
+                    logger.warning("[_force_fix_tile_counts] Pattern mode: skipping tile deletion for type balance")
+                    break
+
                 # Need to remove or add tiles
                 if rem2 and type_positions.get(rem2[0]):
                     # Remove 2 tiles from rem2 type to make it rem0

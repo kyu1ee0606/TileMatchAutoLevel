@@ -50,6 +50,8 @@ import { ProductionExport } from './ProductionExport';
 import { BatchApprovalPanel } from './BatchApprovalPanel';
 import { BatchVerifyPanel } from './BatchVerifyPanel';
 import { LevelDistributionChart } from './LevelDistributionChart';
+import { PatternSelector } from '../common/PatternSelector';
+import { getPatternByIndex, BOSS_PATTERNS, SPECIAL_PATTERNS } from '../../constants/patterns';
 
 /**
  * 레벨 번호에 따른 예상 useTileCount 범위 계산
@@ -1790,7 +1792,7 @@ function TestTab({
   const [isLoading, setIsLoading] = useState(true);
   const [selectedLevel, setSelectedLevel] = useState<ProductionLevel | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [filter, setFilter] = useState<LevelStatus | 'all'>('all');
+  const [filter, setFilter] = useState<LevelStatus | 'all' | 'low_match' | 'untested'>('all');
   const [searchQuery, setSearchQuery] = useState('');
 
   // Test mode: manual (play), auto_single (bot sim for selected), auto_batch (batch bot sim)
@@ -1966,7 +1968,9 @@ function TestTab({
 
     setIsLoading(true);
     try {
-      const options = filter !== 'all' ? { status: filter, limit: 2000 } : { limit: 2000 };
+      // API는 LevelStatus만 지원하므로 특수 필터(low_match, untested)는 제외
+      const isStatusFilter = filter !== 'all' && filter !== 'low_match' && filter !== 'untested';
+      const options = isStatusFilter ? { status: filter as LevelStatus, limit: 2000 } : { limit: 2000 };
       const loadedLevels = await getProductionLevelsByBatch(batchId, options);
       setLevels(loadedLevels);
 
@@ -2407,6 +2411,13 @@ function TestTab({
   const [regenerationThreshold, setRegenerationThreshold] = useState(70);
   const [selectedRegenLevels, setSelectedRegenLevels] = useState<Set<number>>(new Set());
 
+  // Regeneration Modal state (모양 선택 기능)
+  const [regenModalOpen, setRegenModalOpen] = useState(false);
+  const [regenModalLevel, setRegenModalLevel] = useState<number | null>(null);
+  const [regenPatternIndex, setRegenPatternIndex] = useState<number | undefined>(undefined);
+  const [regenSymmetryMode, setRegenSymmetryMode] = useState<'none' | 'horizontal' | 'vertical' | 'both'>('horizontal');
+  const [regenGenerationMode, setRegenGenerationMode] = useState<'quick' | 'pattern'>('pattern');
+
   // Per-level regeneration progress tracking
   const [regenProgressMap, setRegenProgressMap] = useState<Map<number, {
     status: 'waiting' | 'generating' | 'saving' | 'done' | 'failed';
@@ -2417,7 +2428,45 @@ function TestTab({
 
   // Regenerate single level - pure generation without bot simulation
   // 봇 시뮬레이션 없이 목표 난이도에 근접한 레벨만 생성, match_score는 일괄 테스트에서 측정
-  const handleRegenerateLevel = async (levelNumber: number) => {
+  // 모달 열기: 패턴 선택 UI 표시
+  const openRegenModal = (levelNumber: number) => {
+    const level = levels.find(l => l.meta.level_number === levelNumber);
+    if (!level) return;
+
+    // 레벨 타입에 따른 기본 대칭 모드 설정
+    const isEarlyLevel = levelNumber <= 30;
+    const isSpecialShape = levelNumber % 10 === 9;
+    const isBossLevel = levelNumber % 10 === 0 && levelNumber > 0;
+
+    let defaultSymmetry: 'none' | 'horizontal' | 'vertical' | 'both' = 'horizontal';
+    if (isEarlyLevel || isBossLevel) {
+      defaultSymmetry = 'both';
+    } else if (isSpecialShape) {
+      defaultSymmetry = 'vertical';
+    }
+
+    setRegenModalLevel(levelNumber);
+    setRegenPatternIndex(undefined); // 자동 선택으로 초기화
+    setRegenSymmetryMode(defaultSymmetry);
+    setRegenGenerationMode('pattern'); // 기본값: 패턴 생성
+    setRegenModalOpen(true);
+  };
+
+  // 모달에서 재생성 실행
+  const handleRegenFromModal = async () => {
+    if (regenModalLevel === null) return;
+    setRegenModalOpen(false);
+    // 빠른 생성 모드: 패턴 인덱스 없이 자동 선택 (각 레이어 다른 패턴)
+    // 패턴 생성 모드: 선택한 패턴 인덱스 사용 (모든 레이어 동일한 위치)
+    const patternIndexToUse = regenGenerationMode === 'quick' ? undefined : regenPatternIndex;
+    await handleRegenerateLevel(regenModalLevel, patternIndexToUse, regenSymmetryMode);
+  };
+
+  const handleRegenerateLevel = async (
+    levelNumber: number,
+    userPatternIndex?: number,
+    userSymmetryMode?: 'none' | 'horizontal' | 'vertical' | 'both'
+  ) => {
     const level = levels.find(l => l.meta.level_number === levelNumber);
     if (!level) return;
 
@@ -2439,46 +2488,52 @@ function TestTab({
       const CANDIDATES_PER_ATTEMPT = 3;
       const MAX_ATTEMPTS = 5; // 최대 15개 후보
 
-      // === 미형 로직: 프로덕션 초기 생성과 동일한 레벨 타입 기반 패턴 선택 ===
+      // === 미형 로직: 사용자 선택이 있으면 우선, 없으면 자동 선택 ===
       const isEarlyLevel = levelNumber <= 30;
       const isSpecialShape = levelNumber % 10 === 9;
       const isBossLevel = levelNumber % 10 === 0 && levelNumber > 0;
 
-      // Pattern type selection (프로덕션과 동일)
-      const patternRoll = Math.random();
+      // Pattern type: 사용자가 패턴을 선택했으면 aesthetic, 아니면 자동 선택
       let patternType: 'aesthetic' | 'geometric' | 'clustered';
-      if (isEarlyLevel) {
-        patternType = patternRoll < 0.50 ? 'geometric' : patternRoll < 0.90 ? 'aesthetic' : 'clustered';
-      } else if (isBossLevel) {
-        patternType = patternRoll < 0.75 ? 'aesthetic' : patternRoll < 0.95 ? 'geometric' : 'clustered';
-      } else if (isSpecialShape) {
-        patternType = patternRoll < 0.50 ? 'aesthetic' : patternRoll < 0.75 ? 'geometric' : 'clustered';
+      if (userPatternIndex !== undefined) {
+        patternType = 'aesthetic'; // 사용자 패턴 선택 시 무조건 aesthetic
       } else {
-        patternType = patternRoll < 0.60 ? 'aesthetic' : patternRoll < 0.85 ? 'geometric' : 'clustered';
-      }
-
-      // Symmetry mode selection (프로덕션과 동일)
-      const symmetryRoll = Math.random();
-      let symmetryMode: 'none' | 'horizontal' | 'vertical' | 'both';
-      if (isEarlyLevel) {
-        symmetryMode = symmetryRoll < 0.25 ? 'horizontal' : symmetryRoll < 0.50 ? 'vertical' : 'both';
-      } else if (isSpecialShape) {
-        symmetryMode = symmetryRoll < 0.30 ? 'none' : symmetryRoll < 0.65 ? 'horizontal' : 'vertical';
-      } else if (isBossLevel) {
-        symmetryMode = symmetryRoll < 0.20 ? 'horizontal' : symmetryRoll < 0.40 ? 'vertical' : 'both';
-      } else {
-        symmetryMode = symmetryRoll < 0.05 ? 'none' : symmetryRoll < 0.40 ? 'horizontal' : symmetryRoll < 0.75 ? 'vertical' : 'both';
-      }
-
-      // Pattern index for boss/special levels
-      let patternIndex: number | undefined = undefined;
-      if (patternType === 'aesthetic') {
-        if (isBossLevel) {
-          const bossPatterns = [8, 15, 16, 45, 46, 17, 18];
-          patternIndex = bossPatterns[Math.floor(Math.random() * bossPatterns.length)];
+        const patternRoll = Math.random();
+        if (isEarlyLevel) {
+          patternType = patternRoll < 0.50 ? 'geometric' : patternRoll < 0.90 ? 'aesthetic' : 'clustered';
+        } else if (isBossLevel) {
+          patternType = patternRoll < 0.75 ? 'aesthetic' : patternRoll < 0.95 ? 'geometric' : 'clustered';
         } else if (isSpecialShape) {
-          const specialPatterns = [3, 4, 20, 23, 24, 30, 33];
-          patternIndex = specialPatterns[Math.floor(Math.random() * specialPatterns.length)];
+          patternType = patternRoll < 0.50 ? 'aesthetic' : patternRoll < 0.75 ? 'geometric' : 'clustered';
+        } else {
+          patternType = patternRoll < 0.60 ? 'aesthetic' : patternRoll < 0.85 ? 'geometric' : 'clustered';
+        }
+      }
+
+      // Symmetry mode: 사용자 선택 우선, 없으면 자동 선택
+      let symmetryMode: 'none' | 'horizontal' | 'vertical' | 'both';
+      if (userSymmetryMode !== undefined) {
+        symmetryMode = userSymmetryMode;
+      } else {
+        const symmetryRoll = Math.random();
+        if (isEarlyLevel) {
+          symmetryMode = symmetryRoll < 0.25 ? 'horizontal' : symmetryRoll < 0.50 ? 'vertical' : 'both';
+        } else if (isSpecialShape) {
+          symmetryMode = symmetryRoll < 0.30 ? 'none' : symmetryRoll < 0.65 ? 'horizontal' : 'vertical';
+        } else if (isBossLevel) {
+          symmetryMode = symmetryRoll < 0.20 ? 'horizontal' : symmetryRoll < 0.40 ? 'vertical' : 'both';
+        } else {
+          symmetryMode = symmetryRoll < 0.05 ? 'none' : symmetryRoll < 0.40 ? 'horizontal' : symmetryRoll < 0.75 ? 'vertical' : 'both';
+        }
+      }
+
+      // Pattern index: 사용자 선택 우선, 없으면 보스/특수 레벨만 자동 선택
+      let patternIndex: number | undefined = userPatternIndex;
+      if (patternIndex === undefined && patternType === 'aesthetic') {
+        if (isBossLevel) {
+          patternIndex = BOSS_PATTERNS[Math.floor(Math.random() * BOSS_PATTERNS.length)];
+        } else if (isSpecialShape) {
+          patternIndex = SPECIAL_PATTERNS[Math.floor(Math.random() * SPECIAL_PATTERNS.length)];
         }
       }
 
@@ -2913,15 +2968,34 @@ function TestTab({
     }
   };
 
-  // Filtered levels based on search
+  // Filtered levels based on search and filter
   const filteredLevels = useMemo(() => {
-    if (!searchQuery) return levels;
-    const query = searchQuery.toLowerCase();
-    return levels.filter(l =>
-      l.meta.level_number.toString().includes(query) ||
-      l.meta.grade.toLowerCase().includes(query)
-    );
-  }, [levels, searchQuery]);
+    let result = levels;
+
+    // Apply filter
+    if (filter === 'low_match') {
+      result = result.filter(l =>
+        l.meta.match_score !== undefined && l.meta.match_score < 70
+      );
+    } else if (filter === 'untested') {
+      result = result.filter(l =>
+        l.meta.match_score === undefined || l.meta.match_score === 0
+      );
+    } else if (filter !== 'all') {
+      result = result.filter(l => l.meta.status === filter);
+    }
+
+    // Apply search query
+    if (searchQuery) {
+      const query = searchQuery.toLowerCase();
+      result = result.filter(l =>
+        l.meta.level_number.toString().includes(query) ||
+        l.meta.grade.toLowerCase().includes(query)
+      );
+    }
+
+    return result;
+  }, [levels, searchQuery, filter]);
 
   const handleSelectLevel = (level: ProductionLevel) => {
     setSelectedLevel(level);
@@ -4040,10 +4114,12 @@ function TestTab({
           />
           <select
             value={filter}
-            onChange={(e) => setFilter(e.target.value as LevelStatus | 'all')}
+            onChange={(e) => setFilter(e.target.value as LevelStatus | 'all' | 'low_match' | 'untested')}
             className="w-full px-3 py-1.5 text-sm bg-gray-700 border border-gray-600 rounded"
           >
             <option value="all">전체 레벨</option>
+            <option value="low_match">⚠️ 낮은 일치율 (&lt;70%)</option>
+            <option value="untested">🔍 미테스트</option>
             <option value="generated">생성됨</option>
             <option value="playtest_queue">테스트 대기</option>
             <option value="approved">승인됨</option>
@@ -4103,7 +4179,7 @@ function TestTab({
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              handleRegenerateLevel(level.meta.level_number);
+                              openRegenModal(level.meta.level_number);
                             }}
                             disabled={isRegen || isBatchRegenerating}
                             className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${
@@ -4555,6 +4631,158 @@ function TestTab({
         )}
       </div>
       </div>
+
+      {/* Pattern Selection Modal for Regeneration */}
+      {regenModalOpen && regenModalLevel !== null && (
+        <>
+          <div
+            className="fixed inset-0 bg-black/50 z-50"
+            onClick={() => setRegenModalOpen(false)}
+          />
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div
+              className="bg-gray-800 rounded-xl border border-gray-600 shadow-2xl w-full max-w-md"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="p-4 border-b border-gray-700">
+                <h3 className="text-lg font-semibold text-white">
+                  레벨 {regenModalLevel} 재생성
+                </h3>
+                <p className="text-sm text-gray-400 mt-1">
+                  원하는 패턴과 대칭 모드를 선택하세요
+                </p>
+              </div>
+
+              <div className="p-4 space-y-4">
+                {/* Generation Mode Selection */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">
+                    생성 모드
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => setRegenGenerationMode('quick')}
+                      className={`flex items-center gap-2 px-3 py-3 rounded-lg border transition-colors ${
+                        regenGenerationMode === 'quick'
+                          ? 'bg-blue-600 border-blue-500 text-white'
+                          : 'bg-gray-700 border-gray-600 text-gray-300 hover:border-gray-500'
+                      }`}
+                    >
+                      <span className="text-xl">⚡</span>
+                      <div className="text-left">
+                        <div className="text-sm font-medium">빠른 생성</div>
+                        <div className="text-xs opacity-75">레이어별 다른 패턴</div>
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => setRegenGenerationMode('pattern')}
+                      className={`flex items-center gap-2 px-3 py-3 rounded-lg border transition-colors ${
+                        regenGenerationMode === 'pattern'
+                          ? 'bg-blue-600 border-blue-500 text-white'
+                          : 'bg-gray-700 border-gray-600 text-gray-300 hover:border-gray-500'
+                      }`}
+                    >
+                      <span className="text-xl">✨</span>
+                      <div className="text-left">
+                        <div className="text-sm font-medium">패턴 생성</div>
+                        <div className="text-xs opacity-75">일관된 타일 배치</div>
+                      </div>
+                    </button>
+                  </div>
+                  <p className="text-xs text-gray-400 mt-2">
+                    {regenGenerationMode === 'quick'
+                      ? '⚡ 각 레이어가 독립적인 패턴으로 생성됩니다.'
+                      : '✨ 모든 레이어가 동일한 타일 위치를 공유합니다.'}
+                  </p>
+                </div>
+
+                {/* Pattern Selection - Only shown in pattern mode */}
+                {regenGenerationMode === 'pattern' && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-2">
+                      맵 패턴
+                    </label>
+                    <PatternSelector
+                      value={regenPatternIndex}
+                      onChange={setRegenPatternIndex}
+                      showPopular={true}
+                    />
+                  </div>
+                )}
+
+                {/* Symmetry Mode Selection */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">
+                    대칭 모드
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { value: 'none', label: '없음', icon: '⊘' },
+                      { value: 'horizontal', label: '수평', icon: '↔️' },
+                      { value: 'vertical', label: '수직', icon: '↕️' },
+                      { value: 'both', label: '양방향', icon: '✚' },
+                    ].map(option => (
+                      <button
+                        key={option.value}
+                        onClick={() => setRegenSymmetryMode(option.value as typeof regenSymmetryMode)}
+                        className={`flex items-center gap-2 px-3 py-2 rounded-lg border transition-colors ${
+                          regenSymmetryMode === option.value
+                            ? 'bg-blue-600 border-blue-500 text-white'
+                            : 'bg-gray-700 border-gray-600 text-gray-300 hover:border-gray-500'
+                        }`}
+                      >
+                        <span>{option.icon}</span>
+                        <span className="text-sm">{option.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Preview Info */}
+                <div className="bg-gray-700/50 rounded-lg p-3">
+                  <div className="text-xs text-gray-400 mb-1">선택된 설정</div>
+                  <div className="flex items-center gap-3 text-sm flex-wrap">
+                    <span className="text-gray-300">
+                      모드: {regenGenerationMode === 'quick' ? '⚡ 빠른 생성' : '✨ 패턴 생성'}
+                    </span>
+                    <span className="text-gray-500">|</span>
+                    {regenGenerationMode === 'pattern' && (
+                      <>
+                        <span className="text-gray-300">
+                          패턴: {regenPatternIndex !== undefined
+                            ? `${getPatternByIndex(regenPatternIndex)?.icon} ${getPatternByIndex(regenPatternIndex)?.nameKo}`
+                            : '🎲 자동 선택'}
+                        </span>
+                        <span className="text-gray-500">|</span>
+                      </>
+                    )}
+                    <span className="text-gray-300">
+                      대칭: {regenSymmetryMode === 'none' ? '없음' :
+                             regenSymmetryMode === 'horizontal' ? '수평' :
+                             regenSymmetryMode === 'vertical' ? '수직' : '양방향'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-4 border-t border-gray-700 flex justify-end gap-2">
+                <button
+                  onClick={() => setRegenModalOpen(false)}
+                  className="px-4 py-2 text-sm bg-gray-700 text-gray-300 rounded-lg hover:bg-gray-600 transition-colors"
+                >
+                  취소
+                </button>
+                <button
+                  onClick={handleRegenFromModal}
+                  className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-500 transition-colors"
+                >
+                  재생성 시작
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }

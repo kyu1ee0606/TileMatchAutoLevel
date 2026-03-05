@@ -69,6 +69,8 @@ const DEFAULT_CONFIG: LevelSetGenerationConfig = {
     symmetry_mode: 'both',  // 기본값: 양방향 대칭
     pattern_type: 'aesthetic',  // 기본값: 미관 최적화 패턴 (Tile Explorer/Tile Buster 스타일)
   },
+  // 생성 모드 - 기본값: 패턴 생성 (미관 최적화)
+  generationMode: 'pattern',
   // 기믹 자동 선택 관련 - 기본값: 자동 모드
   gimmickMode: 'auto',
   availableGimmicks: ['chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport', 'unknown'],  // 기본 기믹 풀 (전체)
@@ -180,7 +182,8 @@ export function LevelSetGenerator({ onLevelSetCreated }: LevelSetGeneratorProps)
         tile_types: config.useGimmickUnlock ? undefined : config.baseParams.tile_types,
         goals: effectiveGoals,
         target_difficulty: plan.targetDifficulty,
-        pattern_index: config.baseParams.pattern_type === 'aesthetic' ? (setIndex % 50) : undefined,
+        // 패턴 생성 모드: 세트별로 다른 패턴 인덱스 할당, 빠른 생성 모드: 패턴 없음
+        pattern_index: config.generationMode === 'pattern' ? (setIndex % 50) : undefined,
       };
 
       let useAutoGimmicks = false;

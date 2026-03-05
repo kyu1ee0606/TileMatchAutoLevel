@@ -106,6 +106,13 @@ export type GimmickUnlockLevels = Record<string, number>;
 export type LevelingMode = 'simple' | 'professional';
 
 /**
+ * 생성 모드
+ * - 'quick': 빠른 생성 - 패턴 인덱스 없이 자동 혼합, 각 레이어가 다른 패턴 사용
+ * - 'pattern': 패턴 생성 - 고정 패턴 인덱스 사용, 모든 레이어가 동일한 위치 공유
+ */
+export type GenerationMode = 'quick' | 'pattern';
+
+/**
  * 기본 기믹 언락 레벨 - 백엔드 DEFAULT_GIMMICK_UNLOCK_LEVELS와 동기화
  * 13개 기믹 (v5 - key, time_attack 추가)
  */
@@ -180,6 +187,8 @@ export interface LevelSetGenerationConfig {
   levelCount: number;
   difficultyPoints: DifficultyPoint[];
   baseParams: Omit<GenerationParams, 'target_difficulty'>;
+  // 생성 모드 (빠른 생성 vs 패턴 생성)
+  generationMode: GenerationMode;  // 'quick' (빠른 생성) 또는 'pattern' (패턴 생성)
   // 기믹 자동 선택 관련
   gimmickMode: GimmickMode;  // 자동/수동/하이브리드
   availableGimmicks: string[];  // 자동 선택 시 사용 가능한 기믹 풀

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { LevelSetGenerationConfig, GimmickMode, LevelGimmickOverride, DifficultyPoint, MultiSetConfig, LevelingMode } from '../../types/levelSet';
+import type { LevelSetGenerationConfig, GimmickMode, LevelGimmickOverride, DifficultyPoint, MultiSetConfig, LevelingMode, GenerationMode } from '../../types/levelSet';
 import { createDefaultMultiSetConfig, calculateTotalLevels, STEP_10_PRESET, DEFAULT_GIMMICK_UNLOCK_LEVELS, SIMPLE_GIMMICK_UNLOCK_LEVELS, PROFESSIONAL_GIMMICK_UNLOCK_LEVELS } from '../../types/levelSet';
 import type { GoalConfig, SymmetryMode, PatternType } from '../../types';
 import { Button } from '../ui';
@@ -58,6 +58,21 @@ const LEVELING_MODE_OPTIONS: { id: LevelingMode; label: string; icon: string; de
     label: '심플',
     icon: '📊',
     description: '기존 방식: 5레벨 간격, 빠른 기믹 언락'
+  },
+];
+
+const GENERATION_MODE_OPTIONS: { id: GenerationMode; label: string; icon: string; description: string }[] = [
+  {
+    id: 'quick',
+    label: '빠른 생성',
+    icon: '⚡',
+    description: '각 레이어마다 다른 패턴으로 빠르게 생성'
+  },
+  {
+    id: 'pattern',
+    label: '패턴 생성',
+    icon: '✨',
+    description: '모든 레이어가 동일한 타일 위치를 공유 (미관 최적화)'
   },
 ];
 
@@ -170,6 +185,54 @@ export function LevelSetConfig({
             각 세트는 "{config.setName || '세트'} 1", "{config.setName || '세트'} 2" ... 형식으로 저장됩니다.
           </p>
         )}
+      </div>
+
+      {/* Generation Mode - Quick vs Pattern */}
+      <div className="bg-gradient-to-r from-blue-900/50 to-cyan-900/50 rounded-lg p-4 border border-blue-500/30">
+        <div className="flex items-center gap-2 mb-3">
+          <span className="text-lg">🎨</span>
+          <label className="text-sm font-medium text-white">생성 모드</label>
+        </div>
+
+        <div className="flex flex-wrap gap-2 mb-3">
+          {GENERATION_MODE_OPTIONS.map((opt) => {
+            const isSelected = (config.generationMode || 'pattern') === opt.id;
+            return (
+              <button
+                key={opt.id}
+                onClick={() => {
+                  // When switching to quick mode, change pattern_type to random
+                  // When switching to pattern mode, change pattern_type to aesthetic
+                  const newPatternType = opt.id === 'quick' ? 'random' : 'aesthetic';
+                  onConfigChange({
+                    ...config,
+                    generationMode: opt.id,
+                    baseParams: { ...config.baseParams, pattern_type: newPatternType },
+                  });
+                }}
+                className={`px-4 py-3 text-sm rounded-lg transition-colors flex items-center gap-2 flex-1 min-w-[140px] ${
+                  isSelected
+                    ? 'bg-blue-600 text-white ring-2 ring-blue-400'
+                    : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                }`}
+                disabled={disabled}
+                title={opt.description}
+              >
+                <span className="text-xl">{opt.icon}</span>
+                <div className="text-left">
+                  <div className="font-medium">{opt.label}</div>
+                  <div className="text-xs opacity-75">{opt.id === 'quick' ? '레이어별 다른 패턴' : '일관된 타일 배치'}</div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        <p className="text-xs text-blue-300">
+          {(config.generationMode || 'pattern') === 'quick'
+            ? '⚡ 빠른 생성: 각 레이어가 독립적인 패턴으로 생성됩니다. 다양한 레이아웃을 원할 때 사용하세요.'
+            : '✨ 패턴 생성: 모든 레이어가 동일한 타일 위치를 공유합니다. 시각적으로 일관된 레벨을 원할 때 사용하세요.'}
+        </p>
       </div>
 
       {/* Multi-Set Mode Toggle */}

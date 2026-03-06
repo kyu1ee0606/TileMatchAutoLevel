@@ -255,6 +255,22 @@ PATTERN_TEMPLATES: Dict[int, Dict] = {
             " ### ",
             "  #  ",
         ],
+        'medium6': [
+            ".#..#.",
+            "######",
+            "######",
+            ".####.",
+            "..##..",
+            "..##..",
+        ],
+        'medium7': [
+            ".##.##.",
+            "#######",
+            "#######",
+            ".#####.",
+            "..###..",
+            "...#...",
+        ],
         'medium': [
             " ##  ## ",
             "########",
@@ -424,30 +440,48 @@ PATTERN_TEMPLATES: Dict[int, Dict] = {
     14: {
         'name': 'chevron',
         'small': [
-            "#   #",
-            " # # ",
             "  #  ",
             " # # ",
             "#   #",
+            "     ",
+            "     ",
+        ],
+        'medium6': [
+            "..##..",
+            ".#..#.",
+            "#....#",
+            "......",
+            "..##..",
+            ".#..#.",
+        ],
+        'medium7': [
+            "...#...",
+            "..#.#..",
+            ".#...#.",
+            "#.....#",
+            ".......",
+            "..###..",
+            ".#...#.",
         ],
         'medium': [
-            "##   ##",
-            " ## ## ",
-            "  ###  ",
-            "   #   ",
-            "  ###  ",
-            " ## ## ",
-            "##   ##",
+            "   ##   ",
+            "  #  #  ",
+            " #    # ",
+            "#      #",
+            "        ",
+            "   ##   ",
+            "  #  #  ",
+            " #    # ",
         ],
         'large': [
-            "##    ##",
-            " ##  ## ",
-            "  ####  ",
             "   ##   ",
+            "  #  #  ",
+            " #    # ",
+            "#      #",
+            "        ",
             "   ##   ",
-            "  ####  ",
-            " ##  ## ",
-            "##    ##",
+            "  #  #  ",
+            " #    # ",
         ],
     },
 
@@ -457,30 +491,48 @@ PATTERN_TEMPLATES: Dict[int, Dict] = {
     15: {
         'name': 'star_five',
         'small': [
-            "  #  ",
-            " ### ",
+            "..#..",
+            ".###.",
             "#####",
-            " # # ",
-            "#   #",
+            "..#..",
+            ".#.#.",
+        ],
+        'medium6': [
+            "..##..",
+            ".####.",
+            "######",
+            "..##..",
+            ".####.",
+            ".#..#.",
+        ],
+        'medium7': [
+            "...#...",
+            "..###..",
+            ".#####.",
+            "#######",
+            "...#...",
+            "..###..",
+            ".##.##.",
         ],
         'medium': [
-            "   #   ",
-            "  ###  ",
-            "# ### #",
-            "#######",
-            " # # # ",
-            "#  #  #",
-            "#     #",
+            "   ##   ",
+            "  ####  ",
+            " ###### ",
+            "########",
+            "   ##   ",
+            "  ####  ",
+            " ##  ## ",
+            "##    ##",
         ],
         'large': [
-            "    #    ",
-            "   ###   ",
-            "  #####  ",
-            "# ##### #",
-            "#########",
-            " #  #  # ",
-            "##  #  ##",
-            "#   #   #",
+            "   ##   ",
+            "  ####  ",
+            " ###### ",
+            "########",
+            "   ##   ",
+            "  ####  ",
+            " ##  ## ",
+            "##    ##",
         ],
     },
     16: {
@@ -641,24 +693,42 @@ PATTERN_TEMPLATES: Dict[int, Dict] = {
             " # ",
             "###",
         ],
+        'medium6': [
+            "######",
+            ".##..",
+            ".##..",
+            ".##..",
+            ".##..",
+            "######",
+        ],
+        'medium7': [
+            "#######",
+            "..##...",
+            "..##...",
+            "..##...",
+            "..##...",
+            "..##...",
+            "#######",
+        ],
         'medium': [
-            "#####",
-            "  #  ",
-            "  #  ",
-            "  #  ",
-            "  #  ",
-            "  #  ",
-            "#####",
+            "########",
+            "   ##   ",
+            "   ##   ",
+            "   ##   ",
+            "   ##   ",
+            "   ##   ",
+            "   ##   ",
+            "########",
         ],
         'large': [
-            "######",
-            "  ##  ",
-            "  ##  ",
-            "  ##  ",
-            "  ##  ",
-            "  ##  ",
-            "  ##  ",
-            "######",
+            "########",
+            "   ##   ",
+            "   ##   ",
+            "   ##   ",
+            "   ##   ",
+            "   ##   ",
+            "   ##   ",
+            "########",
         ],
     },
     22: {
@@ -755,14 +825,32 @@ PATTERN_TEMPLATES: Dict[int, Dict] = {
             " # ",
             " # ",
         ],
+        'medium6': [
+            "##..##",
+            ".####.",
+            "..##..",
+            "..##..",
+            "..##..",
+            "..##..",
+        ],
+        'medium7': [
+            "##...##",
+            ".##.##.",
+            "..###..",
+            "...#...",
+            "..###..",
+            "..###..",
+            "..###..",
+        ],
         'medium': [
-            "##   ##",
-            " ## ## ",
-            "  ###  ",
-            "   #   ",
-            "   #   ",
-            "   #   ",
-            "   #   ",
+            "##    ##",
+            " ##  ## ",
+            "  ####  ",
+            "   ##   ",
+            "   ##   ",
+            "   ##   ",
+            "   ##   ",
+            "   ##   ",
         ],
         'large': [
             "##    ##",
@@ -812,6 +900,22 @@ PATTERN_TEMPLATES: Dict[int, Dict] = {
             "    #",
             "#####",
         ],
+        'medium6': [
+            ".####.",
+            "##....",
+            ".###..",
+            "..###.",
+            "....##",
+            ".####.",
+        ],
+        'medium7': [
+            ".#####.",
+            "##.....",
+            ".####..",
+            "...###.",
+            ".....##",
+            ".#####.",
+        ],
         'medium': [
             " ##### ",
             "##   # ",
@@ -839,24 +943,42 @@ PATTERN_TEMPLATES: Dict[int, Dict] = {
             "#   #",
             " ### ",
         ],
+        'medium6': [
+            ".####.",
+            "##..##",
+            "##..##",
+            "##..##",
+            "##..##",
+            ".####.",
+        ],
+        'medium7': [
+            ".#####.",
+            "##...##",
+            "##...##",
+            "##...##",
+            "##...##",
+            "##...##",
+            ".#####.",
+        ],
         'medium': [
-            "  ###  ",
-            " #   # ",
-            "#     #",
-            "#     #",
-            "#     #",
-            " #   # ",
-            "  ###  ",
+            " ###### ",
+            "##    ##",
+            "##    ##",
+            "##    ##",
+            "##    ##",
+            "##    ##",
+            "##    ##",
+            " ###### ",
         ],
         'large': [
-            "  ####  ",
-            " #    # ",
-            "#      #",
-            "#      #",
-            "#      #",
-            "#      #",
-            " #    # ",
-            "  ####  ",
+            " ###### ",
+            "##    ##",
+            "##    ##",
+            "##    ##",
+            "##    ##",
+            "##    ##",
+            "##    ##",
+            " ###### ",
         ],
     },
     29: {
@@ -1267,6 +1389,23 @@ PATTERN_TEMPLATES: Dict[int, Dict] = {
             "# #",
             "###",
             "# #",
+        ],
+        'medium6': [
+            "#..#.#",
+            "##.###",
+            ".####.",
+            ".####.",
+            "##.###",
+            "#..#.#",
+        ],
+        'medium7': [
+            "#..#..#",
+            "##.#.##",
+            "###.###",
+            "..###..",
+            "###.###",
+            "##.#.##",
+            "#..#..#",
         ],
         'medium': [
             "#  #  #",
@@ -1794,6 +1933,75 @@ PATTERN_TEMPLATES: Dict[int, Dict] = {
             "########",
         ],
     },
+
+    # =========================================================================
+    # Category 10: Layered Patterns (64+) - Different pattern per layer
+    # =========================================================================
+    64: {
+        'name': 'nested_frames',
+        'description': 'Concentric square frames - larger at top layer, smaller at bottom',
+        'is_layered': True,  # Special flag for per-layer patterns
+        # Layer 0 (top): 7x7 frame
+        'layer_0': [
+            "#######",
+            "#     #",
+            "#     #",
+            "#     #",
+            "#     #",
+            "#     #",
+            "#######",
+        ],
+        # Layer 1: 6x6 frame (centered)
+        'layer_1': [
+            "######",
+            "#    #",
+            "#    #",
+            "#    #",
+            "#    #",
+            "######",
+        ],
+        # Layer 2: 5x5 frame (centered)
+        'layer_2': [
+            "#####",
+            "#   #",
+            "#   #",
+            "#   #",
+            "#####",
+        ],
+        # Layer 3 (bottom): 4x4 frame (centered)
+        'layer_3': [
+            "####",
+            "#  #",
+            "#  #",
+            "####",
+        ],
+        # Fallback for standard template lookup
+        'small': [
+            "#####",
+            "#   #",
+            "#   #",
+            "#   #",
+            "#####",
+        ],
+        'medium': [
+            "#######",
+            "#     #",
+            "#     #",
+            "#     #",
+            "#     #",
+            "#     #",
+            "#######",
+        ],
+        'large': [
+            "#######",
+            "#     #",
+            "#     #",
+            "#     #",
+            "#     #",
+            "#     #",
+            "#######",
+        ],
+    },
 }
 
 
@@ -1818,9 +2026,15 @@ def get_template(pattern_index: int, cols: int, rows: int) -> Optional[List[str]
 
     pattern = PATTERN_TEMPLATES[pattern_index]
 
-    # Select template based on grid size
+    # Select template based on grid size (prefer exact match when available)
     if cols <= 5 or rows <= 5:
         return pattern.get('small')
+    elif cols == 6:
+        # Try 6-column specific template first
+        return pattern.get('medium6') or pattern.get('medium')
+    elif cols == 7:
+        # Try 7-column specific template first
+        return pattern.get('medium7') or pattern.get('medium')
     elif cols <= 7 or rows <= 7:
         return pattern.get('medium')
     else:
@@ -1887,6 +2101,65 @@ def get_pattern_name(pattern_index: int) -> str:
     if pattern_index in PATTERN_TEMPLATES:
         return PATTERN_TEMPLATES[pattern_index].get('name', f'pattern_{pattern_index}')
     return f'pattern_{pattern_index}'
+
+
+def is_layered_pattern(pattern_index: int) -> bool:
+    """Check if a pattern has per-layer templates."""
+    if pattern_index in PATTERN_TEMPLATES:
+        return PATTERN_TEMPLATES[pattern_index].get('is_layered', False)
+    return False
+
+
+def get_layered_template(pattern_index: int, layer_index: int, cols: int, rows: int) -> Optional[List[str]]:
+    """
+    Get a layer-specific template for layered patterns.
+
+    Args:
+        pattern_index: Pattern index
+        layer_index: Layer index (0 = top, 3 = bottom)
+        cols: Grid columns
+        rows: Grid rows
+
+    Returns:
+        Template for the specific layer, or standard template if not layered
+    """
+    if pattern_index not in PATTERN_TEMPLATES:
+        return None
+
+    pattern = PATTERN_TEMPLATES[pattern_index]
+
+    # If it's a layered pattern, try to get layer-specific template
+    if pattern.get('is_layered', False):
+        layer_key = f'layer_{layer_index}'
+        if layer_key in pattern:
+            return pattern[layer_key]
+        # Fallback to last available layer
+        for i in range(layer_index, -1, -1):
+            fallback_key = f'layer_{i}'
+            if fallback_key in pattern:
+                return pattern[fallback_key]
+
+    # Default to standard template selection
+    return get_template(pattern_index, cols, rows)
+
+
+def get_layered_pattern_positions(pattern_index: int, layer_index: int, cols: int, rows: int) -> List[str]:
+    """
+    Get positions for a layered pattern at a specific layer.
+
+    Args:
+        pattern_index: Pattern index
+        layer_index: Layer index (0 = top, 3 = bottom)
+        cols: Grid columns
+        rows: Grid rows
+
+    Returns:
+        List of position strings for this layer
+    """
+    template = get_layered_template(pattern_index, layer_index, cols, rows)
+    if template:
+        return template_to_positions(template, cols, rows)
+    return []
 
 
 def get_all_pattern_names() -> Dict[int, str]:

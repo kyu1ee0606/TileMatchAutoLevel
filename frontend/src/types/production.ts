@@ -151,6 +151,10 @@ export interface ProductionLevelMeta {
   verified?: boolean;                            // 검증 완료 여부
   verification_passed?: boolean;                 // 검증 통과 여부
 
+  // 패턴 생성 정보
+  pattern_index?: number;                        // 사용된 패턴 인덱스 (undefined = 랜덤/패턴 없음)
+  pattern_type?: 'aesthetic' | 'geometric' | 'clustered';  // 패턴 타입
+
   // 재생성 추적 (이진 탐색 수렴용)
   regen_attempts?: number;          // 재생성 시도 횟수
   regen_lower_bound?: number;       // 난이도 하한 (너무 쉬웠던 경계)

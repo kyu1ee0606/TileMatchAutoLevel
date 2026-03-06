@@ -6,7 +6,7 @@ from typing import Dict, List, Any, Optional, Tuple, Set
 from dataclasses import dataclass
 
 from .bot_simulator import BotSimulator, TileDistributor
-from .pattern_templates import get_pattern_positions, get_pattern_name, PATTERN_TEMPLATES
+from .pattern_templates import get_pattern_positions, get_pattern_name, PATTERN_TEMPLATES, is_layered_pattern, get_layered_pattern_positions
 
 logger = logging.getLogger(__name__)
 
@@ -2227,68 +2227,136 @@ class LevelGenerator:
         # generate a MASTER pattern first and ALL layers share the SAME positions.
         # This ensures the visual shape is maintained when layers are stacked.
         if params.pattern_index is not None:
-            # Generate master pattern positions using the LARGEST grid size (even layer grid)
-            # Even layers use cols+1 x rows+1, odd layers use cols x rows
-            # We generate for the larger grid to get the FULL pattern shape
-            max_cols = cols + 1  # Even layer column count
-            max_rows = rows + 1  # Even layer row count
-            master_positions = self._generate_aesthetic_positions(
-                max_cols, max_rows,  # Use LARGEST grid size to get full pattern
-                target_count=1000,  # Request many positions to get full pattern shape
-                pattern_index=params.pattern_index
-            )
+            # Check if this is a LAYERED pattern (different shape per layer)
+            use_layered_pattern = is_layered_pattern(params.pattern_index)
 
-            _logger.info(f"[PATTERN_SHAPE] pattern_index={params.pattern_index}, "
-                        f"master_positions={len(master_positions)}, "
-                        f"active_layers={active_layers}")
+            if use_layered_pattern:
+                # LAYERED PATTERN MODE: Each layer has a different pattern (e.g., nested frames)
+                logger.info(f"[LAYERED_PATTERN] Using layered pattern {params.pattern_index}")
 
-            # ALL layers will share the SAME pattern positions
-            # The FULL pattern shape is used on each layer for visual clarity
-            # This creates a stacked 3D effect while maintaining the recognizable shape
+                all_locked_positions = set()
 
-            # CRITICAL: PRESERVE EXACT PATTERN SHAPE - no modification!
-            # Do NOT add or remove positions to maintain the designed visual pattern.
-            # The tile type distribution will handle 3-divisibility requirements
-            # by ensuring the total across all layers works out correctly.
-            remainder = len(master_positions) % 3
-            if remainder != 0:
-                _logger.info(f"[PATTERN_SHAPE] Pattern has {len(master_positions)} positions (remainder {remainder}). "
-                            f"Preserving exact shape - tile types will be adjusted for playability.")
+                for layer_idx in active_layers:
+                    is_odd_layer = layer_idx % 2 == 1
 
-            # Ensure minimum of 6 positions
-            if len(master_positions) < 6:
-                _logger.warning(f"[PATTERN_SHAPE] Pattern has only {len(master_positions)} positions, minimum is 6")
+                    # Calculate actual layer grid size (following alternating rule)
+                    if is_odd_layer:
+                        layer_cols = cols  # Smaller grid for odd layers
+                        layer_rows = rows
+                    else:
+                        layer_cols = cols + 1  # Larger grid for even layers
+                        layer_rows = rows + 1
 
-            # CRITICAL: Store pattern lock flag and positions in level metadata
-            # This prevents later functions from adding/removing tiles outside pattern
-            level["_preserve_pattern"] = True
-            level["_pattern_locked_positions"] = set(master_positions)
+                    # Get layer-specific pattern positions
+                    layer_positions = get_layered_pattern_positions(
+                        params.pattern_index, layer_idx, layer_cols, layer_rows
+                    )
 
-            # In PATTERN mode, ALL layers use the SAME grid size (largest = max_cols x max_rows)
-            # This ensures the pattern shape is identical across all layers
-            # Store this flag so tile placement uses consistent grid
-            level["_pattern_uniform_grid"] = True
-            level["_pattern_grid_cols"] = max_cols
-            level["_pattern_grid_rows"] = max_rows
+                    # If no layer-specific positions, fallback to standard pattern
+                    if not layer_positions:
+                        layer_positions = self._generate_aesthetic_positions(
+                            layer_cols, layer_rows,
+                            target_count=1000,
+                            pattern_index=params.pattern_index
+                        )
 
-            for layer_idx in active_layers:
-                # In pattern mode, DO NOT filter by layer grid - use ALL master positions
-                # All layers share the exact same pattern positions for visual consistency
-                layer_positions = list(master_positions)
+                    # Update layer grid size in level data
+                    layer_key = f"layer_{layer_idx}"
+                    level[layer_key]["col"] = str(layer_cols)
+                    level[layer_key]["row"] = str(layer_rows)
 
-                # Add to all_layer_positions
-                for pos in layer_positions:
-                    all_layer_positions.append((layer_idx, pos))
+                    # Add to all_layer_positions
+                    for pos in layer_positions:
+                        all_layer_positions.append((layer_idx, pos))
+                        all_locked_positions.add(pos)
 
-            _logger.info(f"[PATTERN_SHAPE] All layers share full pattern ({len(master_positions)} positions), "
-                        f"total={len(all_layer_positions)}")
+                    logger.debug(f"[LAYERED_PATTERN] Layer {layer_idx}: {len(layer_positions)} positions")
 
-            # CRITICAL: Update ALL layer col/row to uniform grid size for pattern consistency
-            # This ensures odd layers don't filter out positions
-            for layer_idx in active_layers:
-                layer_key = f"layer_{layer_idx}"
-                level[layer_key]["col"] = str(max_cols)
-                level[layer_key]["row"] = str(max_rows)
+                # Store pattern lock flag
+                level["_preserve_pattern"] = True
+                level["_pattern_locked_positions"] = all_locked_positions
+                level["_pattern_grid_cols"] = cols + 1
+                level["_pattern_grid_rows"] = rows + 1
+
+                logger.info(f"[LAYERED_PATTERN] Total positions={len(all_layer_positions)}, "
+                           f"unique_positions={len(all_locked_positions)}")
+
+            else:
+                # STANDARD PATTERN MODE: All layers share same positions
+                # Generate master pattern positions using the LARGEST grid size (even layer grid)
+                # Even layers use cols+1 x rows+1, odd layers use cols x rows
+                # We generate for the larger grid to get the FULL pattern shape
+                max_cols = cols + 1  # Even layer column count
+                max_rows = rows + 1  # Even layer row count
+                master_positions = self._generate_aesthetic_positions(
+                    max_cols, max_rows,  # Use LARGEST grid size to get full pattern
+                    target_count=1000,  # Request many positions to get full pattern shape
+                    pattern_index=params.pattern_index
+                )
+
+                logger.debug(f"[PATTERN_SHAPE] pattern_index={params.pattern_index}, "
+                             f"master_positions={len(master_positions)}, "
+                             f"active_layers={active_layers}")
+
+                # ALL layers will share the SAME pattern positions
+                # The FULL pattern shape is used on each layer for visual clarity
+                # This creates a stacked 3D effect while maintaining the recognizable shape
+
+                # CRITICAL: PRESERVE EXACT PATTERN SHAPE - no modification!
+                # Do NOT add or remove positions to maintain the designed visual pattern.
+                # The tile type distribution will handle 3-divisibility requirements
+                # by ensuring the total across all layers works out correctly.
+                remainder = len(master_positions) % 3
+                if remainder != 0:
+                    _logger.info(f"[PATTERN_SHAPE] Pattern has {len(master_positions)} positions (remainder {remainder}). "
+                                f"Preserving exact shape - tile types will be adjusted for playability.")
+
+                # Ensure minimum of 6 positions
+                if len(master_positions) < 6:
+                    _logger.warning(f"[PATTERN_SHAPE] Pattern has only {len(master_positions)} positions, minimum is 6")
+
+                # CRITICAL: Store pattern lock flag and positions in level metadata
+                # This prevents later functions from adding/removing tiles outside pattern
+                level["_preserve_pattern"] = True
+                level["_pattern_locked_positions"] = set(master_positions)
+
+                # Store pattern metadata
+                level["_pattern_grid_cols"] = max_cols
+                level["_pattern_grid_rows"] = max_rows
+
+                # PATTERN MODE: Generate pattern for each layer based on its actual grid size
+                # - Even layers (0, 2, 4...): cols+1 x rows+1 (larger grid) - use master pattern
+                # - Odd layers (1, 3, 5...): cols x rows (smaller grid) - generate sized pattern
+                for layer_idx in active_layers:
+                    is_odd_layer = layer_idx % 2 == 1
+
+                    # Calculate actual layer grid size (following alternating rule)
+                    if is_odd_layer:
+                        layer_cols = cols  # Smaller grid for odd layers
+                        layer_rows = rows
+                        # Generate pattern for smaller grid (uses medium6 or other size-specific template)
+                        layer_positions = self._generate_aesthetic_positions(
+                            layer_cols, layer_rows,
+                            target_count=1000,
+                            pattern_index=params.pattern_index
+                        )
+                    else:
+                        layer_cols = cols + 1  # Larger grid for even layers
+                        layer_rows = rows + 1
+                        # Use master pattern for even layers
+                        layer_positions = list(master_positions)
+
+                    # Update layer grid size in level data
+                    layer_key = f"layer_{layer_idx}"
+                    level[layer_key]["col"] = str(layer_cols)
+                    level[layer_key]["row"] = str(layer_rows)
+
+                    # Add to all_layer_positions
+                    for pos in layer_positions:
+                        all_layer_positions.append((layer_idx, pos))
+
+                logger.info(f"[PATTERN_SHAPE] Pattern with alternating layer sizes, "
+                           f"total positions={len(all_layer_positions)}")
 
         else:
             # Standard per-layer pattern generation (original logic)
@@ -2418,10 +2486,18 @@ class LevelGenerator:
         for layer_idx in active_layers:
             level[f"layer_{layer_idx}"]["tiles"] = {}
 
-        # HIGH DIFFICULTY: Spread same-type tiles apart for increased challenge
-        # Low/Medium difficulty: Random distribution (original behavior)
-        if target >= 0.6:
-            # Spread assignment: same type tiles are placed far apart
+        # PATTERN MODE: Special tile distribution to prevent same-type blocking
+        # When all layers share the same positions, we must ensure different types
+        # are assigned to the same position across layers to prevent blocking issues
+        is_pattern_mode = level.get("_preserve_pattern", False)
+
+        if is_pattern_mode:
+            # Pattern mode: Assign tiles to prevent same-type blocking
+            self._assign_tiles_pattern_mode(
+                level, all_layer_positions, tile_assignments, tile_types, active_layers
+            )
+        elif target >= 0.6:
+            # HIGH DIFFICULTY: Spread same-type tiles apart for increased challenge
             self._assign_tiles_with_spread(
                 level, all_layer_positions, tile_assignments, tile_types, target
             )
@@ -2446,6 +2522,240 @@ class LevelGenerator:
             level[layer_key]["num"] = str(len(level[layer_key]["tiles"]))
 
         return level
+
+    def _assign_tiles_pattern_mode(
+        self,
+        level: Dict[str, Any],
+        all_layer_positions: List[Tuple[int, str]],
+        tile_assignments: List[str],
+        tile_types: List[str],
+        active_layers: List[int]
+    ) -> None:
+        """Assign tiles in pattern mode to prevent same-type blocking.
+
+        In pattern mode, all layers share the same positions. To prevent deadlock,
+        we ensure that tiles at the same position across layers have DIFFERENT types.
+        This prevents same-type blocking where a tile blocks another tile of the same type.
+
+        CRITICAL: All tile types MUST have counts divisible by 3 for playable levels.
+
+        Strategy:
+        1. Group positions by their (x, y) coordinate
+        2. Ensure total tiles is divisible by 3 (remove excess if needed)
+        3. Distribute tiles ensuring each type gets a multiple of 3
+        4. For each position, assign rotating tile types across layers
+        """
+        from collections import defaultdict
+
+        # CRITICAL: When tile_types contains only 't0' (placeholder for client-side randomization),
+        # we need to expand to actual tile types for pattern mode distribution.
+        # Otherwise, all tiles will be 't0' causing same-type blocking in validation.
+        if len(tile_types) == 1 and tile_types[0] == "t0":
+            # Get useTileCount from level to determine how many actual types to use
+            use_tile_count = int(level.get("useTileCount", 6))
+            # Expand t0 to t1, t2, ..., t{useTileCount}
+            tile_types = [f"t{i}" for i in range(1, use_tile_count + 1)]
+
+        # Group positions by coordinate
+        positions_by_coord: Dict[str, List[int]] = defaultdict(list)
+        for layer_idx, pos in all_layer_positions:
+            positions_by_coord[pos].append(layer_idx)
+
+        # Sort layers in each position (bottom to top)
+        for pos in positions_by_coord:
+            positions_by_coord[pos].sort()
+
+        # CRITICAL FIX: Ensure total tiles is divisible by 3
+        # If not, we need to remove excess positions while preserving pattern shape
+        total_tiles = len(all_layer_positions)
+        excess = total_tiles % 3
+
+        if excess > 0:
+            # Need to remove 'excess' number of positions to make total divisible by 3
+            # Strategy: Remove positions from the least stacked coords (single-layer positions first)
+            # This minimizes impact on pattern shape
+
+            all_positions_sorted = sorted(
+                positions_by_coord.keys(),
+                key=lambda p: (len(positions_by_coord[p]), p)  # Sort by layer count (ascending), then by position
+            )
+
+            removed_count = 0
+            positions_to_skip = set()
+
+            for pos in all_positions_sorted:
+                if removed_count >= excess:
+                    break
+                layers = positions_by_coord[pos]
+                # Remove from top layer only to minimize pattern impact
+                if len(layers) > 0:
+                    top_layer = layers[-1]
+                    layer_key = f"layer_{top_layer}"
+                    if pos in level[layer_key]["tiles"]:
+                        del level[layer_key]["tiles"][pos]
+                        level[layer_key]["num"] = str(int(level[layer_key]["num"]) - 1)
+                    # Update positions_by_coord
+                    positions_by_coord[pos] = layers[:-1]
+                    if len(positions_by_coord[pos]) == 0:
+                        positions_to_skip.add(pos)
+                    removed_count += 1
+
+            # Remove empty positions
+            for pos in positions_to_skip:
+                del positions_by_coord[pos]
+
+            # Rebuild all_layer_positions after removal
+            all_layer_positions = []
+            for pos, layers in positions_by_coord.items():
+                for layer_idx in layers:
+                    all_layer_positions.append((layer_idx, pos))
+
+            total_tiles = len(all_layer_positions)
+            logger.debug(f"[PATTERN_MODE] Adjusted total tiles to {total_tiles} (removed {removed_count} for 3-divisibility)")
+
+        num_types = len(tile_types)
+
+        # Calculate tiles per type ensuring each is divisible by 3
+        # Strategy: Distribute as evenly as possible with each being a multiple of 3
+        base_per_type = (total_tiles // num_types // 3) * 3
+        if base_per_type < 3:
+            base_per_type = 3
+
+        # Track how many tiles of each type we've assigned
+        type_counts = {t: 0 for t in tile_types}
+        type_targets = {t: base_per_type for t in tile_types}
+
+        # Distribute remaining tiles (must be multiples of 3)
+        remaining = total_tiles - (base_per_type * num_types)
+
+        # remaining must be distributed as multiples of 3 to each type
+        type_idx = 0
+        while remaining >= 3:
+            type_targets[tile_types[type_idx % num_types]] += 3
+            remaining -= 3
+            type_idx += 1
+
+        # If there's still a remainder (0, 1, or 2), we need to remove more positions
+        # This should rarely happen if we did the initial adjustment correctly
+        if remaining > 0:
+            logger.warning(f"[PATTERN_MODE] Unexpected remainder {remaining} after distribution, adjusting...")
+            # Remove additional positions to make it work
+            all_positions_list = list(positions_by_coord.keys())
+            for _ in range(remaining):
+                if all_positions_list:
+                    pos = all_positions_list.pop()
+                    layers = positions_by_coord.get(pos, [])
+                    if layers:
+                        top_layer = layers[-1]
+                        layer_key = f"layer_{top_layer}"
+                        if pos in level[layer_key]["tiles"]:
+                            del level[layer_key]["tiles"][pos]
+                            level[layer_key]["num"] = str(int(level[layer_key]["num"]) - 1)
+                        positions_by_coord[pos] = layers[:-1]
+                        if len(positions_by_coord[pos]) == 0:
+                            del positions_by_coord[pos]
+
+            # Recalculate
+            total_tiles -= remaining
+            remaining = total_tiles - (base_per_type * num_types)
+            type_idx = 0
+            type_targets = {t: base_per_type for t in tile_types}
+            while remaining >= 3:
+                type_targets[tile_types[type_idx % num_types]] += 3
+                remaining -= 3
+                type_idx += 1
+
+        # Shuffle positions for randomness
+        all_positions = list(positions_by_coord.keys())
+        random.shuffle(all_positions)
+
+        # Assign tiles position by position
+        # For each position, rotate through types to prevent same-type stacking
+        type_rotation = list(tile_types)
+        random.shuffle(type_rotation)
+        rotation_idx = 0
+
+        for pos in all_positions:
+            layers = positions_by_coord[pos]
+            num_layers_at_pos = len(layers)
+
+            # Assign different types to each layer at this position
+            for i, layer_idx in enumerate(layers):
+                # Pick a type that's different from adjacent layers at same position
+                attempts = 0
+                while attempts < num_types * 2:
+                    candidate_type = type_rotation[(rotation_idx + i + attempts) % num_types]
+
+                    # Check if we can use this type (haven't exceeded target)
+                    if type_counts[candidate_type] < type_targets[candidate_type]:
+                        # For middle layers, avoid same type as layer below if possible
+                        if i > 0 and attempts < num_types:
+                            prev_layer_key = f"layer_{layers[i-1]}"
+                            prev_tile = level[prev_layer_key]["tiles"].get(pos)
+                            if prev_tile and prev_tile[0] == candidate_type:
+                                attempts += 1
+                                continue
+
+                        # Assign this type
+                        layer_key = f"layer_{layer_idx}"
+                        level[layer_key]["tiles"][pos] = [candidate_type, ""]
+                        type_counts[candidate_type] += 1
+                        break
+
+                    attempts += 1
+                else:
+                    # Fallback: assign any available type
+                    for t in tile_types:
+                        if type_counts[t] < type_targets[t]:
+                            layer_key = f"layer_{layer_idx}"
+                            level[layer_key]["tiles"][pos] = [t, ""]
+                            type_counts[t] += 1
+                            break
+                    else:
+                        # Last resort: just pick any type
+                        t = random.choice(tile_types)
+                        layer_key = f"layer_{layer_idx}"
+                        level[layer_key]["tiles"][pos] = [t, ""]
+                        type_counts[t] += 1
+
+            # Rotate starting point for next position group
+            rotation_idx = (rotation_idx + 1) % num_types
+
+        # Final validation: ensure all tile types are divisible by 3
+        non_divisible = {t: c for t, c in type_counts.items() if c % 3 != 0}
+        if non_divisible:
+            logger.warning(f"[PATTERN_MODE] Non-divisible counts found: {non_divisible}, attempting fix...")
+            # Redistribute to ensure divisibility
+            for tile_type, count in non_divisible.items():
+                excess = count % 3
+                # Need to reassign 'excess' tiles to other types
+                # Find positions with this tile type and reassign some
+                for layer_idx in active_layers:
+                    if excess == 0:
+                        break
+                    layer_key = f"layer_{layer_idx}"
+                    tiles = level[layer_key]["tiles"]
+                    for pos, tile_data in list(tiles.items()):
+                        if excess == 0:
+                            break
+                        if tile_data[0] == tile_type:
+                            # Find a type that needs more tiles
+                            for other_type in tile_types:
+                                if other_type != tile_type and type_counts[other_type] % 3 != 0:
+                                    other_need = 3 - (type_counts[other_type] % 3)
+                                    if other_need > 0:
+                                        tiles[pos] = [other_type, ""]
+                                        type_counts[tile_type] -= 1
+                                        type_counts[other_type] += 1
+                                        excess -= 1
+                                        break
+
+        # Post-fix validation
+        non_divisible_final = {t: c for t, c in type_counts.items() if c % 3 != 0}
+        if non_divisible_final:
+            logger.error(f"[PATTERN_MODE] CRITICAL: Still have non-divisible counts: {non_divisible_final}")
+        else:
+            logger.debug(f"[PATTERN_MODE] All tile types divisible by 3: {type_counts}")
 
     def _assign_tiles_with_spread(
         self,
@@ -2856,9 +3166,9 @@ class LevelGenerator:
         # Pattern 8: Heart shape (pixel art style, scales to grid size)
         def heart_shape():
             positions = []
-            # Define heart templates for different grid sizes
-            if cols <= 5 or rows <= 5:
-                # Small heart for tiny grids
+            # Define heart templates for different grid sizes (symmetric designs)
+            if cols <= 5:
+                # Small heart for tiny grids (5 columns)
                 template = [
                     " # # ",
                     "#####",
@@ -2866,18 +3176,28 @@ class LevelGenerator:
                     " ### ",
                     "  #  ",
                 ]
-            elif cols <= 7 or rows <= 7:
-                # Medium heart for 6-7 sized grids
+            elif cols == 6:
+                # 6-column symmetric heart
                 template = [
-                    " ##  ## ",
-                    "########",
-                    "########",
-                    " ###### ",
-                    "  ####  ",
-                    "   ##   ",
+                    " #  # ",
+                    "######",
+                    "######",
+                    " #### ",
+                    "  ##  ",
+                    "  ##  ",
+                ]
+            elif cols == 7:
+                # 7-column symmetric heart (centered)
+                template = [
+                    ".##.##.",
+                    "#######",
+                    "#######",
+                    ".#####.",
+                    "..###..",
+                    "...#...",
                 ]
             else:
-                # Large heart for 8+ sized grids
+                # Large heart for 8+ sized grids (8 columns)
                 template = [
                     " ##  ## ",
                     "########",
@@ -8920,6 +9240,16 @@ class LevelGenerator:
         grid_width = level.get("gridWidth", 7)
         grid_height = level.get("gridHeight", 7)
 
+        # PATTERN MODE: Check if pattern positions should be preserved
+        preserve_pattern = level.get("_preserve_pattern", False)
+        pattern_locked_positions = level.get("_pattern_locked_positions", set())
+
+        # PATTERN MODE: Skip relocation entirely to preserve pattern shape
+        # Goal placement in pattern mode already ensures valid positioning
+        if preserve_pattern:
+            logger.info(f"[_relocate_tiles_from_goal_outputs] Skipping relocation in pattern mode to preserve shape")
+            return level
+
         # Collect all goal output positions (positions that must be clear)
         goal_output_positions = set()
         goal_positions = set()
@@ -9205,10 +9535,28 @@ class LevelGenerator:
         without adding or removing any tiles (to preserve visual pattern shape).
         """
         # CRITICAL: Check if pattern mode is active
-        # In pattern mode, we ONLY redistribute tile types, never add/remove tiles
+        # In pattern mode, try redistribution first, but allow deletion if needed for playability
         preserve_pattern = level.get("_preserve_pattern", False)
         if preserve_pattern:
-            return self._redistribute_tile_types_for_divisibility(level, params)
+            level = self._redistribute_tile_types_for_divisibility(level, params)
+            # Check if redistribution was successful
+            num_layers_check = level.get("layer", 8)
+            type_counts_check: Dict[str, int] = {}
+            for i in range(num_layers_check):
+                tiles = level.get(f"layer_{i}", {}).get("tiles", {})
+                for tile_data in tiles.values():
+                    if isinstance(tile_data, list) and tile_data:
+                        tile_type = tile_data[0]
+                        if tile_type not in self.GOAL_TYPES and not tile_type.startswith("craft_") and not tile_type.startswith("stack_"):
+                            type_counts_check[tile_type] = type_counts_check.get(tile_type, 0) + 1
+
+            bad_types = [(t, c) for t, c in type_counts_check.items() if c % 3 != 0]
+            if not bad_types:
+                logger.debug("[PATTERN_MODE] Redistribution successful - all types divisible by 3")
+                return level
+            else:
+                logger.warning(f"[PATTERN_MODE] Redistribution failed, bad types: {bad_types}. Continuing to full fix...")
+                # Continue to full fix below (allow minimal deletion if needed)
 
         num_layers = level.get("layer", 8)
         use_tile_count = level.get("useTileCount", 15)
@@ -9926,8 +10274,10 @@ class LevelGenerator:
         num_layers = level.get("layer", 8)
         use_tile_count = level.get("useTileCount", 15)
 
-        # Count current tiles
+        # Count current tiles (including color-named tiles like "red", "blue", etc.)
         current_tiles = 0
+        # Define valid matchable tile types (t-prefixed and color names)
+        color_tiles = {"red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"}
         for i in range(num_layers):
             layer_key = f"layer_{i}"
             tiles = level.get(layer_key, {}).get("tiles", {})
@@ -9937,7 +10287,7 @@ class LevelGenerator:
                     if tile_type.startswith("craft_") or tile_type.startswith("stack_"):
                         if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
                             current_tiles += int(tile_data[2][0]) if tile_data[2][0] else 0
-                    elif tile_type.startswith("t"):
+                    elif tile_type.startswith("t") or tile_type in color_tiles:
                         current_tiles += 1
 
         if current_tiles >= min_required:
@@ -10109,9 +10459,10 @@ class LevelGenerator:
                 type_counts[tile_type] = type_counts.get(tile_type, 0) + 1
 
         # If total is not divisible by 3, remove tiles
-        # PATTERN MODE: Skip tile deletion - patterns must preserve tile positions
+        # PATTERN MODE: Allow minimal deletion - playability is priority
+        # "클리어 불가능한 레벨 절대로 생성되면안됨"
         total_remainder = total_matchable % 3
-        if total_remainder != 0 and not preserve_pattern:
+        if total_remainder != 0:
             tiles_to_remove = total_remainder
 
             # Find removable tiles - prefer tiles without attributes, but allow any regular tile
@@ -10246,12 +10597,11 @@ class LevelGenerator:
                         # type_a: rem1 -> rem0, type_b: rem1 -> rem2
             else:
                 # Single rem1 or rem2 with no pair - can't fix with swaps
-                # PATTERN MODE: Can't delete tiles - must preserve positions
+                # PATTERN MODE: We must still ensure playability - minimal tile deletion is acceptable
+                # "클리어 불가능한 레벨 절대로 생성되면안됨" is the priority
                 if preserve_pattern:
-                    # In pattern mode, we accept imperfect type distribution
-                    # rather than breaking the pattern shape
-                    logger.warning("[_force_fix_tile_counts] Pattern mode: skipping tile deletion for type balance")
-                    break
+                    logger.warning("[_force_fix_tile_counts] Pattern mode: minimal tile deletion required for playability")
+                    # Allow deletion to continue below - playability is more important than perfect pattern shape
 
                 # Need to remove or add tiles
                 if rem2 and type_positions.get(rem2[0]):

@@ -8,6 +8,7 @@ import { saveLocalLevel } from '../../services/localLevelsApi';
 import { TILE_TYPES } from '../../types';
 import type { GenerationParams, GoalConfig, ObstacleCountConfig, LayerTileConfig, LayerObstacleConfig } from '../../types';
 import { Button, Tooltip } from '../ui';
+import { PatternSelector } from '../common/PatternSelector';
 import clsx from 'clsx';
 import { Pencil, Play, RotateCcw, CheckCircle, AlertCircle } from 'lucide-react';
 
@@ -212,6 +213,9 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
   const [layerTileConfigs, setLayerTileConfigs] = useState<LayerTileConfig[]>([]);
   const [layerObstacleConfigs, setLayerObstacleConfigs] = useState<LayerObstacleConfig[]>([]);
 
+  // Pattern selection (undefined = auto-select, number = specific pattern index)
+  const [selectedPatternIndex, setSelectedPatternIndex] = useState<number | undefined>(undefined);
+
   // Clean up layer configs when maxLayers changes
   useEffect(() => {
     // Remove configs with layer index >= maxLayers
@@ -384,6 +388,9 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
         // Per-layer configs take priority over basic settings
         layer_tile_configs: layerTileConfigs.length > 0 ? layerTileConfigs : undefined,
         layer_obstacle_configs: hasAdvancedLayerObstacles ? layerObstacleConfigs : undefined,
+        // Pattern settings: when pattern_index is set, all layers use the same pattern shape
+        pattern_type: selectedPatternIndex !== undefined ? 'aesthetic' : undefined,
+        pattern_index: selectedPatternIndex,
       };
 
       if (count === 1) {
@@ -556,6 +563,26 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
             ))}
           </select>
         </div>
+      </div>
+
+      {/* Pattern Selection */}
+      <div>
+        <label className="text-sm font-medium text-gray-300 block mb-2">
+          패턴 모양
+          <span className="ml-2 text-xs text-gray-500">
+            {selectedPatternIndex !== undefined ? '모든 레이어에 동일 패턴 적용' : '레이어별 자동 선택'}
+          </span>
+        </label>
+        <PatternSelector
+          value={selectedPatternIndex}
+          onChange={setSelectedPatternIndex}
+          showPopular={true}
+        />
+        {selectedPatternIndex !== undefined && (
+          <p className="text-xs text-blue-400 mt-1">
+            💡 선택한 패턴이 모든 레이어에 동일하게 적용됩니다
+          </p>
+        )}
       </div>
 
       {/* Tile Types */}

@@ -50,8 +50,8 @@ import { ProductionExport } from './ProductionExport';
 import { BatchApprovalPanel } from './BatchApprovalPanel';
 import { BatchVerifyPanel } from './BatchVerifyPanel';
 import { LevelDistributionChart } from './LevelDistributionChart';
-import { PatternSelector } from '../common/PatternSelector';
-import { getPatternByIndex, BOSS_PATTERNS, SPECIAL_PATTERNS } from '../../constants/patterns';
+// PatternSelector import removed - using inline grid instead
+import { getPatternByIndex, BOSS_PATTERNS, SPECIAL_PATTERNS, PATTERN_CATEGORIES } from '../../constants/patterns';
 
 /**
  * 레벨 번호에 따른 예상 useTileCount 범위 계산
@@ -617,6 +617,9 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
               match_score: matchScore,
               bot_clear_rates: botClearRates,
               validation_attempts: validationAttempts,
+              // 패턴 생성 정보 저장
+              pattern_index: patternIndex,
+              pattern_type: patternType,
             };
 
             if (meta.playtest_required) {
@@ -2054,6 +2057,63 @@ function TestTab({
     }
   };
 
+  // 개별 레벨 검증 (리스트에서 개별 레벨 검증 버튼 클릭 시)
+  const handleValidateSingleLevel = async (level: ProductionLevel) => {
+    const levelNumber = level.meta.level_number;
+
+    // 이미 검증 중이면 무시
+    if (validatingLevels.has(levelNumber)) return;
+
+    setValidatingLevels(prev => new Set(prev).add(levelNumber));
+
+    try {
+      const result = await analyzeAutoPlay(level.level_json, {
+        iterations: autoTestIterations,
+        targetDifficulty: level.meta.target_difficulty,
+      });
+
+      const matchScore = calculateMatchScoreFromBots(result.bot_stats);
+      const botClearRates = {
+        novice: result.bot_stats.find(s => s.profile === 'novice')?.clear_rate || 0,
+        casual: result.bot_stats.find(s => s.profile === 'casual')?.clear_rate || 0,
+        average: result.bot_stats.find(s => s.profile === 'average')?.clear_rate || 0,
+        expert: result.bot_stats.find(s => s.profile === 'expert')?.clear_rate || 0,
+        optimal: result.bot_stats.find(s => s.profile === 'optimal')?.clear_rate || 0,
+      };
+
+      // Save to production storage
+      const updatedMeta = {
+        ...level.meta,
+        bot_clear_rates: botClearRates,
+        match_score: matchScore,
+        verified: true,
+        verification_passed: matchScore >= 70,
+      };
+
+      await saveProductionLevels(batchId, [{
+        meta: updatedMeta,
+        level_json: level.level_json,
+      }]);
+
+      const passStatus = matchScore >= 70 ? '✓ 통과' : '✗ 미달';
+      addNotification(
+        matchScore >= 70 ? 'success' : 'warning',
+        `Lv.${levelNumber} 검증 완료: ${matchScore.toFixed(0)}% ${passStatus}`
+      );
+      loadLevels();
+      onStatsUpdate();
+    } catch (err) {
+      console.error('Level validation failed:', err);
+      addNotification('error', `Lv.${levelNumber} 검증 실패: ${err instanceof Error ? err.message : '알 수 없는 오류'}`);
+    } finally {
+      setValidatingLevels(prev => {
+        const next = new Set(prev);
+        next.delete(levelNumber);
+        return next;
+      });
+    }
+  };
+
   // Sequential auto process: test → regenerate if failed → repeat until pass (70%+)
   const handleSequentialProcess = async (targetLevelNumbers: number[]) => {
     if (targetLevelNumbers.length === 0) {
@@ -2407,6 +2467,7 @@ function TestTab({
   // Regeneration state
   const [regeneratingLevels, setRegeneratingLevels] = useState<Set<number>>(new Set());
   const [enhancingLevels, setEnhancingLevels] = useState<Set<number>>(new Set());
+  const [validatingLevels, setValidatingLevels] = useState<Set<number>>(new Set());  // 개별 검증 진행 중인 레벨
   const [isBatchRegenerating, setIsBatchRegenerating] = useState(false);
   const [regenerationThreshold, setRegenerationThreshold] = useState(70);
   const [selectedRegenLevels, setSelectedRegenLevels] = useState<Set<number>>(new Set());
@@ -2527,13 +2588,19 @@ function TestTab({
         }
       }
 
-      // Pattern index: 사용자 선택 우선, 없으면 보스/특수 레벨만 자동 선택
+      // Pattern index: 사용자 선택 > 기존 레벨의 패턴 > 보스/특수 레벨 자동 선택
       let patternIndex: number | undefined = userPatternIndex;
-      if (patternIndex === undefined && patternType === 'aesthetic') {
-        if (isBossLevel) {
-          patternIndex = BOSS_PATTERNS[Math.floor(Math.random() * BOSS_PATTERNS.length)];
-        } else if (isSpecialShape) {
-          patternIndex = SPECIAL_PATTERNS[Math.floor(Math.random() * SPECIAL_PATTERNS.length)];
+      if (patternIndex === undefined) {
+        // 기존 레벨에 패턴이 있으면 동일한 패턴으로 재생성
+        if (level.meta.pattern_index !== undefined) {
+          patternIndex = level.meta.pattern_index;
+          patternType = level.meta.pattern_type || 'aesthetic';
+        } else if (patternType === 'aesthetic') {
+          if (isBossLevel) {
+            patternIndex = BOSS_PATTERNS[Math.floor(Math.random() * BOSS_PATTERNS.length)];
+          } else if (isSpecialShape) {
+            patternIndex = SPECIAL_PATTERNS[Math.floor(Math.random() * SPECIAL_PATTERNS.length)];
+          }
         }
       }
 
@@ -2628,6 +2695,9 @@ function TestTab({
           regen_attempts: (level.meta.regen_attempts || 0) + 1,
           regen_lower_bound: undefined,
           regen_upper_bound: undefined,
+          // 패턴 정보 보존 (사용자 선택 또는 기존 패턴)
+          pattern_index: patternIndex,
+          pattern_type: patternType,
         },
         level_json: result.level_json,
       }]);
@@ -2789,9 +2859,13 @@ function TestTab({
         symmetryMode = symmetryRoll < 0.05 ? 'none' : symmetryRoll < 0.40 ? 'horizontal' : symmetryRoll < 0.75 ? 'vertical' : 'both';
       }
 
-      // Pattern index for boss/special levels
+      // Pattern index: 기존 레벨의 패턴 우선 > 보스/특수 레벨 자동 선택
       let patternIndex: number | undefined = undefined;
-      if (patternType === 'aesthetic') {
+      if (level.meta.pattern_index !== undefined) {
+        // 기존 레벨에 패턴이 있으면 동일한 패턴으로 재생성
+        patternIndex = level.meta.pattern_index;
+        patternType = level.meta.pattern_type || 'aesthetic';
+      } else if (patternType === 'aesthetic') {
         if (isBossLevel) {
           const bossPatterns = [8, 15, 16, 45, 46, 17, 18];
           patternIndex = bossPatterns[Math.floor(Math.random() * bossPatterns.length)];
@@ -2885,6 +2959,9 @@ function TestTab({
           regen_attempts: (level.meta.regen_attempts || 0) + 1,
           regen_lower_bound: undefined,
           regen_upper_bound: undefined,
+          // 패턴 정보 보존
+          pattern_index: patternIndex,
+          pattern_type: patternType,
         },
         level_json: bestResult.level_json,
       }]);
@@ -3564,9 +3641,11 @@ function TestTab({
                   />
                   <span className="text-gray-400 flex-1">전체 선택</span>
                   <span className="w-12 text-center text-gray-500">레벨</span>
+                  <span className="w-16 text-center text-gray-500">패턴</span>
                   <span className="w-14 text-center text-gray-500">일치도</span>
                   <span className="w-14 text-center text-gray-500">등급</span>
                   <span className="w-14 text-center text-gray-500">목표</span>
+                  <span className="w-14 text-center text-gray-500">검증</span>
                   {isBatchRegenerating && <span className="w-16 text-center text-gray-500">상태</span>}
                 </div>
                 {/* Scrollable List */}
@@ -3604,6 +3683,15 @@ function TestTab({
                         <span className="flex-1 text-gray-300">
                         </span>
                         <span className="w-12 text-center text-gray-300 font-medium">Lv.{level.meta.level_number}</span>
+                        <span className="w-16 text-center text-xs">
+                          {level.meta.pattern_index !== undefined ? (
+                            <span className="text-purple-400" title={getPatternByIndex(level.meta.pattern_index)?.name || `패턴 ${level.meta.pattern_index}`}>
+                              {getPatternByIndex(level.meta.pattern_index)?.icon || '🎨'}
+                            </span>
+                          ) : (
+                            <span className="text-gray-600">-</span>
+                          )}
+                        </span>
                         <span className={`w-14 text-center font-bold ${
                           isDone && levelProgress?.matchScore !== undefined
                             ? (levelProgress.matchScore >= regenerationThreshold ? 'text-green-400' : 'text-yellow-400')
@@ -3621,6 +3709,17 @@ function TestTab({
                           level.meta.grade === 'C' ? 'text-orange-400' : 'text-red-400'
                         }`}>{level.meta.grade}</span>
                         <span className="w-14 text-center text-gray-400">{(level.meta.target_difficulty * 100).toFixed(0)}%</span>
+                        <button
+                          className="w-14 text-center text-xs px-1.5 py-0.5 bg-blue-600/50 hover:bg-blue-600 text-blue-200 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            handleValidateSingleLevel(level);
+                          }}
+                          disabled={isBatchRegenerating || validatingLevels.has(level.meta.level_number)}
+                        >
+                          {validatingLevels.has(level.meta.level_number) ? '⟳' : '검증'}
+                        </button>
                         {isBatchRegenerating && (
                           <span className={`w-16 text-center font-medium ${
                             progressStatus === 'generating' ? 'text-blue-400' :
@@ -4166,8 +4265,48 @@ function TestTab({
                       <div className="text-xs text-gray-400">
                         난이도: {level.meta.actual_difficulty.toFixed(3)} ({(level.meta.actual_difficulty * 100).toFixed(0)}%)
                       </div>
+                      {level.meta.generated_at && (
+                        <div className="text-[10px] text-gray-500">
+                          {new Date(level.meta.generated_at).toLocaleString('ko-KR', {
+                            month: 'numeric',
+                            day: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </div>
+                      )}
                     </div>
                     <div className="flex items-center gap-2">
+                      {/* Pattern indicator */}
+                      {level.meta.pattern_index !== undefined && (
+                        <span
+                          className="text-xs px-1 py-0.5 rounded bg-purple-900/50 text-purple-300"
+                          title={getPatternByIndex(level.meta.pattern_index)?.name || `패턴 ${level.meta.pattern_index}`}
+                        >
+                          {getPatternByIndex(level.meta.pattern_index)?.icon || '🎨'}
+                        </span>
+                      )}
+                      {/* Validate button */}
+                      {(() => {
+                        const isValidating = validatingLevels.has(level.meta.level_number);
+                        return (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleValidateSingleLevel(level);
+                            }}
+                            disabled={isValidating || isBatchRegenerating}
+                            className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                              isValidating
+                                ? 'bg-cyan-600 text-white cursor-not-allowed animate-pulse'
+                                : 'bg-cyan-700 hover:bg-cyan-600 text-cyan-100'
+                            }`}
+                            title="봇 시뮬레이션으로 검증"
+                          >
+                            {isValidating ? <span className="animate-spin inline-block">⟳</span> : '검증'}
+                          </button>
+                        );
+                      })()}
                       {/* Regenerate button with status */}
                       {(() => {
                         const levelProgress = regenProgressMap.get(level.meta.level_number);
@@ -4182,18 +4321,18 @@ function TestTab({
                               openRegenModal(level.meta.level_number);
                             }}
                             disabled={isRegen || isBatchRegenerating}
-                            className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${
+                            className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
                               isRegen
                                 ? 'bg-yellow-600 text-white cursor-not-allowed animate-pulse'
                                 : isDone
                                   ? 'bg-green-600 hover:bg-green-500 text-white'
                                   : isFailed
                                     ? 'bg-red-600 hover:bg-red-500 text-white'
-                                    : 'bg-blue-600 hover:bg-blue-500 text-white'
+                                    : 'bg-orange-600 hover:bg-orange-500 text-white'
                             }`}
                             title={isRegen ? '재생성 중...' : isDone ? '재생성 완료 - 다시 재생성' : isFailed ? '재생성 실패 - 다시 시도' : '이 레벨만 재생성'}
                           >
-                            {isRegen ? <span className="animate-spin inline-block">⟳</span> : isDone ? '✓' : isFailed ? '!' : '🔄'}
+                            {isRegen ? <span className="animate-spin inline-block">⟳</span> : isDone ? '✓ 완료' : isFailed ? '! 실패' : '재생성'}
                           </button>
                         );
                       })()}
@@ -4641,7 +4780,7 @@ function TestTab({
           />
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
             <div
-              className="bg-gray-800 rounded-xl border border-gray-600 shadow-2xl w-full max-w-md"
+              className="bg-gray-800 rounded-xl border border-gray-600 shadow-2xl w-full max-w-2xl"
               onClick={(e) => e.stopPropagation()}
             >
               <div className="p-4 border-b border-gray-700">
@@ -4702,41 +4841,76 @@ function TestTab({
                     <label className="block text-sm font-medium text-gray-300 mb-2">
                       맵 패턴
                     </label>
-                    <PatternSelector
-                      value={regenPatternIndex}
-                      onChange={setRegenPatternIndex}
-                      showPopular={true}
-                    />
+                    {/* Auto selection button */}
+                    <button
+                      onClick={() => setRegenPatternIndex(undefined)}
+                      className={`mb-2 px-3 py-1.5 rounded-lg text-sm flex items-center gap-2 transition-colors w-full justify-center ${
+                        regenPatternIndex === undefined
+                          ? 'bg-blue-600 text-white border border-blue-500'
+                          : 'bg-gray-700 text-gray-300 border border-gray-600 hover:border-gray-500'
+                      }`}
+                    >
+                      <span>🎲</span>
+                      <span>자동 선택 (보스 레벨용 패턴 자동 지정)</span>
+                    </button>
+                    {/* Scrollable Pattern Grid */}
+                    <div className="max-h-72 overflow-y-auto bg-gray-900/50 rounded-lg p-3 border border-gray-700">
+                      {PATTERN_CATEGORIES.map(category => (
+                        <div key={category.id} className="mb-3 last:mb-0">
+                          <div className="text-xs text-gray-400 mb-1.5 sticky top-0 bg-gray-900/95 px-1 py-0.5 font-medium">
+                            {category.nameKo}
+                          </div>
+                          <div className="grid grid-cols-10 gap-1.5">
+                            {category.patterns.map(pattern => (
+                              <button
+                                key={pattern.index}
+                                onClick={() => setRegenPatternIndex(pattern.index)}
+                                className={`p-2 rounded-lg text-xl transition-colors ${
+                                  regenPatternIndex === pattern.index
+                                    ? 'bg-blue-600 text-white ring-2 ring-blue-400 scale-110'
+                                    : 'bg-gray-700 hover:bg-gray-600 text-gray-200 hover:scale-105'
+                                }`}
+                                title={`${pattern.nameKo} (${pattern.index})`}
+                              >
+                                {pattern.icon}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
 
-                {/* Symmetry Mode Selection */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">
-                    대칭 모드
-                  </label>
-                  <div className="grid grid-cols-2 gap-2">
-                    {[
-                      { value: 'none', label: '없음', icon: '⊘' },
-                      { value: 'horizontal', label: '수평', icon: '↔️' },
-                      { value: 'vertical', label: '수직', icon: '↕️' },
-                      { value: 'both', label: '양방향', icon: '✚' },
-                    ].map(option => (
-                      <button
-                        key={option.value}
-                        onClick={() => setRegenSymmetryMode(option.value as typeof regenSymmetryMode)}
-                        className={`flex items-center gap-2 px-3 py-2 rounded-lg border transition-colors ${
-                          regenSymmetryMode === option.value
-                            ? 'bg-blue-600 border-blue-500 text-white'
-                            : 'bg-gray-700 border-gray-600 text-gray-300 hover:border-gray-500'
-                        }`}
-                      >
-                        <span>{option.icon}</span>
-                        <span className="text-sm">{option.label}</span>
-                      </button>
-                    ))}
+                {/* Symmetry Mode Selection - Only shown in quick mode */}
+                {regenGenerationMode === 'quick' && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-2">
+                      대칭 모드
+                    </label>
+                    <div className="grid grid-cols-2 gap-2">
+                      {[
+                        { value: 'none', label: '없음', icon: '⊘' },
+                        { value: 'horizontal', label: '수평', icon: '↔️' },
+                        { value: 'vertical', label: '수직', icon: '↕️' },
+                        { value: 'both', label: '양방향', icon: '✚' },
+                      ].map(option => (
+                        <button
+                          key={option.value}
+                          onClick={() => setRegenSymmetryMode(option.value as typeof regenSymmetryMode)}
+                          className={`flex items-center gap-2 px-3 py-2 rounded-lg border transition-colors ${
+                            regenSymmetryMode === option.value
+                              ? 'bg-blue-600 border-blue-500 text-white'
+                              : 'bg-gray-700 border-gray-600 text-gray-300 hover:border-gray-500'
+                          }`}
+                        >
+                          <span>{option.icon}</span>
+                          <span className="text-sm">{option.label}</span>
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                </div>
+                )}
 
                 {/* Preview Info */}
                 <div className="bg-gray-700/50 rounded-lg p-3">
@@ -4745,22 +4919,26 @@ function TestTab({
                     <span className="text-gray-300">
                       모드: {regenGenerationMode === 'quick' ? '⚡ 빠른 생성' : '✨ 패턴 생성'}
                     </span>
-                    <span className="text-gray-500">|</span>
                     {regenGenerationMode === 'pattern' && (
                       <>
+                        <span className="text-gray-500">|</span>
                         <span className="text-gray-300">
                           패턴: {regenPatternIndex !== undefined
                             ? `${getPatternByIndex(regenPatternIndex)?.icon} ${getPatternByIndex(regenPatternIndex)?.nameKo}`
                             : '🎲 자동 선택'}
                         </span>
-                        <span className="text-gray-500">|</span>
                       </>
                     )}
-                    <span className="text-gray-300">
-                      대칭: {regenSymmetryMode === 'none' ? '없음' :
-                             regenSymmetryMode === 'horizontal' ? '수평' :
-                             regenSymmetryMode === 'vertical' ? '수직' : '양방향'}
-                    </span>
+                    {regenGenerationMode === 'quick' && (
+                      <>
+                        <span className="text-gray-500">|</span>
+                        <span className="text-gray-300">
+                          대칭: {regenSymmetryMode === 'none' ? '없음' :
+                                 regenSymmetryMode === 'horizontal' ? '수평' :
+                                 regenSymmetryMode === 'vertical' ? '수직' : '양방향'}
+                        </span>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>

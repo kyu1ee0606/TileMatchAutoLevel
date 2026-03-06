@@ -145,6 +145,14 @@ export const PATTERN_CATEGORIES: PatternCategory[] = [
       { index: 63, name: 'Frame with Center', nameKo: '센터 프레임', icon: '⊡' },
     ],
   },
+  {
+    id: 'layered',
+    name: 'Layered Patterns',
+    nameKo: '레이어드',
+    patterns: [
+      { index: 64, name: 'Nested Frames', nameKo: '중첩 프레임', icon: '🔳' },
+    ],
+  },
 ];
 
 // 전체 패턴 플랫 리스트

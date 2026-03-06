@@ -124,7 +124,7 @@ class LayerPatternConfig:
     """Configuration for pattern placement on a specific layer."""
     layer: int
     pattern_type: str  # 'random', 'geometric', 'clustered', 'aesthetic'
-    pattern_index: Optional[int] = None  # 0-63 for aesthetic mode
+    pattern_index: Optional[int] = None  # 0-99 for aesthetic mode (64+ for layered patterns)
 
 
 @dataclass
@@ -148,7 +148,7 @@ class GenerationParams:
     # Symmetry and pattern options
     symmetry_mode: Optional[str] = None  # 'none', 'horizontal', 'vertical', 'both'
     pattern_type: Optional[str] = None  # 'random', 'geometric', 'clustered', 'aesthetic'
-    pattern_index: Optional[int] = None  # 0-63 for specific aesthetic pattern (None = auto-select)
+    pattern_index: Optional[int] = None  # 0-99 for specific aesthetic pattern (None = auto-select)
     # Gimmick intensity control
     gimmick_intensity: float = 1.0  # 0.0=no gimmicks, 1.0=normal, 2.0=double
     # Tutorial gimmick settings (for gimmick unlock levels)

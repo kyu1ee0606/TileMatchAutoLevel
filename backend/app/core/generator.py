@@ -9810,7 +9810,8 @@ class LevelGenerator:
         # IMPORTANT: Skip adding tiles if we already removed tiles for total adjustment
         # Adding tiles would undo the total divisibility fix
         # CRITICAL: For symmetric patterns, skip random tile addition to preserve symmetry!
-        if not tiles_were_removed and symmetry_mode == "none":
+        # PATTERN MODE: Also skip adding tiles to preserve pattern shape
+        if not tiles_were_removed and symmetry_mode == "none" and not preserve_pattern:
             for tile_type, tiles_needed in types_needing_add:
                 for _ in range(tiles_needed):
                     if not available_positions:
@@ -10003,7 +10004,8 @@ class LevelGenerator:
                 elif valid_tile_types:
                     target_type = valid_tile_types[0]
 
-                if target_type and available_positions:
+                # PATTERN MODE: Skip adding balance tiles to preserve pattern shape
+                if target_type and available_positions and not preserve_pattern:
                     for _ in range(complement_needed):
                         if not available_positions:
                             break

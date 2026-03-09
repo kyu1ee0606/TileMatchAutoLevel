@@ -191,30 +191,38 @@ PATTERN_TEMPLATES: Dict[int, Dict] = {
     6: {
         'name': 'corner_anchored',
         'small': [
-            "## ##",
+            "#####",
             "#   #",
-            "     ",
             "#   #",
-            "## ##",
+            "#   #",
+            "#####",
+        ],
+        'medium6': [
+            "######",
+            "##  ##",
+            "#    #",
+            "#    #",
+            "##  ##",
+            "######",
         ],
         'medium': [
+            "#######",
             "##   ##",
             "#     #",
-            "       ",
-            "       ",
-            "       ",
+            "#     #",
             "#     #",
             "##   ##",
+            "#######",
         ],
         'large': [
+            "########",
             "###  ###",
             "##    ##",
             "#      #",
-            "        ",
-            "        ",
             "#      #",
             "##    ##",
             "###  ###",
+            "########",
         ],
     },
     7: {
@@ -2037,6 +2045,9 @@ def get_template(pattern_index: int, cols: int, rows: int) -> Optional[List[str]
         return pattern.get('medium7') or pattern.get('medium')
     elif cols <= 7 or rows <= 7:
         return pattern.get('medium')
+    elif cols >= 9 or rows >= 9:
+        # Try xlarge for 9x9+ grids first, fall back to large
+        return pattern.get('xlarge') or pattern.get('large')
     else:
         return pattern.get('large')
 

@@ -29,7 +29,7 @@ export const PATTERN_CATEGORIES: PatternCategory[] = [
       { index: 3, name: 'Cross', nameKo: '십자가', icon: '✚' },
       { index: 4, name: 'Donut', nameKo: '도넛', icon: '◎' },
       { index: 5, name: 'Concentric Diamond', nameKo: '동심 다이아몬드', icon: '◈' },
-      { index: 6, name: 'Corner Anchored', nameKo: '코너 앵커', icon: '⌗' },
+      { index: 6, name: 'Corner Frame', nameKo: '코너 테두리', icon: '□' },
       { index: 7, name: 'Hexagonal', nameKo: '육각형', icon: '⬡' },
       { index: 8, name: 'Heart', nameKo: '하트', icon: '❤️' },
       { index: 9, name: 'T-Shape', nameKo: 'T자', icon: '⊤' },
@@ -126,7 +126,7 @@ export const PATTERN_CATEGORIES: PatternCategory[] = [
       { index: 51, name: 'Vertical Bridge', nameKo: '세로 브릿지', icon: '║' },
       { index: 52, name: 'Three Islands Triangle', nameKo: '삼각 섬', icon: '∴' },
       { index: 53, name: 'Four Islands Grid', nameKo: '사각 섬', icon: '⊕' },
-      { index: 54, name: 'Archipelago', nameKo: '군도', icon: '🗾' },
+      { index: 54, name: 'Corner + Center Circle', nameKo: '코너+중앙원', icon: '◉' },
       { index: 55, name: 'Central Hub', nameKo: '중앙 허브', icon: '⊛' },
     ],
   },
@@ -136,7 +136,7 @@ export const PATTERN_CATEGORIES: PatternCategory[] = [
     nameKo: 'GBoost',
     patterns: [
       { index: 56, name: 'Corner Blocks', nameKo: '코너 블록', icon: '⌐' },
-      { index: 57, name: 'Octagon Ring', nameKo: '팔각 링', icon: '⯃' },
+      { index: 57, name: 'Corner + Center Square', nameKo: '코너+중앙네모', icon: '▣' },
       { index: 58, name: 'Diagonal Staircase', nameKo: '대각 계단', icon: '⤡' },
       { index: 59, name: 'Symmetric Wings', nameKo: '대칭 날개', icon: '🪽' },
       { index: 60, name: 'Scattered Clusters', nameKo: '산재 클러스터', icon: '⁘' },
@@ -167,6 +167,18 @@ export const getPatternByIndex = (index: number): Pattern | undefined => {
 export const BOSS_PATTERNS = [8, 15, 16, 45, 46, 17, 18]; // 하트, 별, 나비, 꽃 등
 export const SPECIAL_PATTERNS = [3, 4, 20, 23, 24, 30, 33]; // 십자가, 도넛, 문자, 삼각형 등
 export const EASY_PATTERNS = [0, 1, 2, 3, 4, 8]; // 단순 도형
+
+// 일반 레벨용 패턴 (보스/특수 외 레벨)
+// 기본 도형 + 기하학 + 프레임/섬 패턴 (너무 화려하지 않은 것들)
+export const GENERAL_PATTERNS = [
+  0, 1, 2, 3, 4, 5, 6, 7, 9,           // 기본 도형 (하트 8 제외)
+  10, 11, 12, 13, 14,                   // 화살표
+  20, 21, 22, 23, 24, 25, 26, 27, 28, 29, // 문자
+  30, 31, 32, 33, 34, 35, 36, 37, 38, 39, // 기하학
+  40, 41, 42, 43, 44,                   // 프레임
+  50, 51, 52, 53, 54, 55,               // 섬/브릿지
+  56, 57, 58, 59, 60, 61, 62, 63,       // GBoost 패턴
+];
 
 // 인기 패턴 (빠른 선택용)
 export const POPULAR_PATTERNS = [

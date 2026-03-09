@@ -2324,32 +2324,54 @@ class LevelGenerator:
                 level["_pattern_grid_cols"] = max_cols
                 level["_pattern_grid_rows"] = max_rows
 
-                # PATTERN MODE: Generate pattern for each layer based on its actual grid size
-                # - Even layers (0, 2, 4...): cols+1 x rows+1 (larger grid) - use master pattern
-                # - Odd layers (1, 3, 5...): cols x rows (smaller grid) - generate sized pattern
+                # PATTERN MODE with PYRAMID EFFECT: Generate pattern for each layer
+                # Higher layers get progressively smaller for 3D depth effect
+                # Shrink rate: 0.9 = each layer is 90% of base size
+                pyramid_shrink_rate = 0.9
+                max_layer_idx = max(active_layers) if active_layers else 0
+
                 for layer_idx in active_layers:
                     is_odd_layer = layer_idx % 2 == 1
 
-                    # Calculate actual layer grid size (following alternating rule)
-                    if is_odd_layer:
-                        layer_cols = cols  # Smaller grid for odd layers
-                        layer_rows = rows
-                        # Generate pattern for smaller grid (uses medium6 or other size-specific template)
-                        layer_positions = self._generate_aesthetic_positions(
-                            layer_cols, layer_rows,
-                            target_count=1000,
-                            pattern_index=params.pattern_index
-                        )
-                    else:
-                        layer_cols = cols + 1  # Larger grid for even layers
-                        layer_rows = rows + 1
-                        # Use master pattern for even layers
-                        layer_positions = list(master_positions)
+                    # Calculate base layer grid size (following alternating rule)
+                    base_cols = cols if is_odd_layer else cols + 1
+                    base_rows = rows if is_odd_layer else rows + 1
 
-                    # Update layer grid size in level data
+                    # Apply pyramid shrink effect for higher layers
+                    if layer_idx > 0:
+                        shrink_factor = pyramid_shrink_rate ** layer_idx
+                        layer_cols = max(4, int(base_cols * shrink_factor))
+                        layer_rows = max(4, int(base_rows * shrink_factor))
+                    else:
+                        layer_cols = base_cols
+                        layer_rows = base_rows
+
+                    # Generate pattern for this layer's grid size
+                    layer_positions = self._generate_aesthetic_positions(
+                        layer_cols, layer_rows,
+                        target_count=1000,
+                        pattern_index=params.pattern_index
+                    )
+
+                    # Calculate center offset for depth emphasis (turtle shell effect)
+                    layer_offset_x = (base_cols - layer_cols) // 2
+                    layer_offset_y = (base_rows - layer_rows) // 2
+
+                    # Apply offset to center smaller layers
+                    if layer_offset_x > 0 or layer_offset_y > 0:
+                        offset_positions = []
+                        for pos in layer_positions:
+                            x, y = map(int, pos.split("_"))
+                            new_x = x + layer_offset_x
+                            new_y = y + layer_offset_y
+                            if 0 <= new_x < base_cols and 0 <= new_y < base_rows:
+                                offset_positions.append(f"{new_x}_{new_y}")
+                        layer_positions = offset_positions
+
+                    # Update layer grid size in level data (use base size for grid bounds)
                     layer_key = f"layer_{layer_idx}"
-                    level[layer_key]["col"] = str(layer_cols)
-                    level[layer_key]["row"] = str(layer_rows)
+                    level[layer_key]["col"] = str(base_cols)
+                    level[layer_key]["row"] = str(base_rows)
 
                     # Add to all_layer_positions
                     for pos in layer_positions:
@@ -2360,9 +2382,11 @@ class LevelGenerator:
 
         else:
             # Standard per-layer pattern generation (original logic)
-            # Layer scaling disabled - all layers use full dimensions
+            # OPTION B: Enable pyramid/turtle effect - upper layers get progressively smaller
             max_layer_idx = max(active_layers) if active_layers else 0
-            layer_shrink_rate = 1.0  # No shrink - preserve pattern shapes
+            # Shrink rate: 0.9 = each layer is 90% of the previous
+            # Layer 0: 100%, Layer 1: 90%, Layer 2: 81%, Layer 3: 73%, Layer 4: 66%
+            layer_shrink_rate = 0.9  # Pyramid effect enabled
 
             for layer_idx in active_layers:
                 layer_key = f"layer_{layer_idx}"
@@ -3111,10 +3135,12 @@ class LevelGenerator:
                         positions.append(f"{x}_{y}")
             return positions
 
-        # Pattern 4: Donut shape (hollow center)
+        # Pattern 4: Donut shape (hollow center) - 테두리 굵기 2칸
         def donut_shape():
-            outer_radius = int((target_count / 2.5) ** 0.5) + 2
-            inner_radius = max(1, outer_radius // 3)
+            # 그리드 기반 반지름 계산 (더 두꺼운 테두리)
+            outer_radius = min(cols, rows) * 0.45
+            border_width = 2  # 테두리 굵기 2칸으로 증가
+            inner_radius = max(1, outer_radius - border_width)
             positions = []
             for x in range(cols):
                 for y in range(rows):
@@ -3123,31 +3149,65 @@ class LevelGenerator:
                         positions.append(f"{x}_{y}")
             return positions
 
-        # Pattern 5: Concentric diamond
+        # Pattern 5: Concentric diamond - 테두리 굵기 2칸 링 형태
         def concentric_diamond():
             positions = []
-            outer_radius = int((target_count * 2) ** 0.5)
+            # 그리드 기반 반지름 (다이아몬드 형태)
+            outer_radius = min(cols, rows) * 0.45
+            border_width = 2  # 테두리 굵기 2칸으로 증가
+            inner_radius = max(0, outer_radius - border_width)
             for x in range(cols):
                 for y in range(rows):
                     dist = abs(x - center_x + 0.5) + abs(y - center_y + 0.5)
-                    if dist <= outer_radius:
+                    # 링 형태: 내부 반지름과 외부 반지름 사이만 포함
+                    if inner_radius <= dist <= outer_radius:
                         positions.append(f"{x}_{y}")
             return positions
 
-        # Pattern 6: Corner-anchored pattern
+        # Pattern 6: Corner Anchored - 4꼭짓점 삼각형 + 1타일 연결
+        # 각 코너에서 삼각형 모양 + 꼭짓점 사이 1타일 너비로 연결
         def corner_anchored():
             positions = []
-            corner_size = max(1, min(cols, rows) // 4)
-            for x in range(cols):
-                for y in range(rows):
-                    is_corner = (
-                        (x < corner_size and y < corner_size) or
-                        (x < corner_size and y >= rows - corner_size) or
-                        (x >= cols - corner_size and y < corner_size) or
-                        (x >= cols - corner_size and y >= rows - corner_size)
-                    )
-                    if not is_corner:
-                        positions.append(f"{x}_{y}")
+            # Corner triangle size based on grid
+            corner_size = max(2, min(cols, rows) // 3)
+
+            # 1. Top-left corner triangle
+            for y in range(corner_size):
+                for x in range(corner_size - y):
+                    positions.append(f"{x}_{y}")
+
+            # 2. Top-right corner triangle
+            for y in range(corner_size):
+                for x in range(cols - corner_size + y, cols):
+                    positions.append(f"{x}_{y}")
+
+            # 3. Bottom-left corner triangle
+            for y in range(rows - corner_size, rows):
+                for x in range(y - (rows - corner_size) + 1):
+                    positions.append(f"{x}_{y}")
+
+            # 4. Bottom-right corner triangle
+            for y in range(rows - corner_size, rows):
+                for x in range(cols - (y - (rows - corner_size)) - 1, cols):
+                    positions.append(f"{x}_{y}")
+
+            # 5. Connect corners with 1-tile bridges
+            # Top edge (connecting top-left to top-right)
+            for x in range(corner_size, cols - corner_size):
+                positions.append(f"{x}_0")
+
+            # Bottom edge (connecting bottom-left to bottom-right)
+            for x in range(corner_size, cols - corner_size):
+                positions.append(f"{x}_{rows - 1}")
+
+            # Left edge (connecting top-left to bottom-left)
+            for y in range(corner_size, rows - corner_size):
+                positions.append(f"0_{y}")
+
+            # Right edge (connecting top-right to bottom-right)
+            for y in range(corner_size, rows - corner_size):
+                positions.append(f"{cols - 1}_{y}")
+
             return positions
 
         # Pattern 7: Hexagonal-ish pattern
@@ -3320,13 +3380,14 @@ class LevelGenerator:
                         positions.append(f"{x}_{y}")
             return positions
 
-        # Pattern 14: Chevron (double arrow)
+        # Pattern 14: Chevron (double arrow) - 테두리 굵기 2~3칸으로 증가
         def chevron_pattern():
             positions = []
-            thickness = max(2, min(cols, rows) // 4)
+            # 테두리 굵기 2~3칸으로 증가
+            thickness = max(3, min(cols, rows) // 3)
             for x in range(cols):
                 for y in range(rows):
-                    # V shape
+                    # V shape - 더 두꺼운 굽은 테두리
                     v_dist = abs(y - (rows - 1 - abs(x - center_x + 0.5) * rows / cols * 0.8))
                     if v_dist <= thickness:
                         positions.append(f"{x}_{y}")
@@ -3915,26 +3976,34 @@ class LevelGenerator:
                         positions.append(f"{x}_{y}")
             return positions
 
-        # Pattern 36: Pyramid
+        # Pattern 36: Pyramid - 위아래로 더 길쭉하게 (세로 확장)
         def pyramid():
             positions = []
-            levels = min(rows, cols // 2)
+            # 세로로 더 길게 (rows 전체 사용, 가로는 좁게)
+            levels = rows  # 전체 행 사용
+            base_width = max(3, cols // 2)  # 기본 너비는 절반
             for level in range(levels):
                 y = rows - 1 - level
-                width = (level + 1) * 2 - 1
+                # 위로 갈수록 좁아지는 너비 (더 뾰족한 피라미드)
+                progress = level / max(1, levels - 1)
+                width = max(1, int(base_width * (1 - progress * 0.8)))
                 start_x = int((cols - width) / 2)
                 for x in range(start_x, min(cols, start_x + width)):
                     if 0 <= x < cols and 0 <= y < rows:
                         positions.append(f"{x}_{y}")
             return positions
 
-        # Pattern 37: Inverted Pyramid
+        # Pattern 37: Inverted Pyramid - 위아래로 더 길쭉하게 (세로 확장)
         def inverted_pyramid():
             positions = []
-            levels = min(rows, cols // 2)
+            # 세로로 더 길게 (rows 전체 사용)
+            levels = rows
+            base_width = max(3, cols // 2)
             for level in range(levels):
                 y = level
-                width = (levels - level) * 2 - 1
+                # 아래로 갈수록 좁아지는 너비
+                progress = level / max(1, levels - 1)
+                width = max(1, int(base_width * (1 - progress * 0.8)))
                 start_x = int((cols - width) / 2)
                 for x in range(start_x, min(cols, start_x + width)):
                     if 0 <= x < cols:
@@ -4341,36 +4410,28 @@ class LevelGenerator:
                         positions.append(f"{x}_{y}")
             return positions
 
-        # Pattern 54: Archipelago (distributed islands without bridges)
-        def archipelago():
-            """Multiple small islands distributed across the grid - Tile Explorer style."""
+        # Pattern 54: Corner with Center Circle - 4꼭짓점 + 중앙 원형
+        def corner_with_center_circle():
+            """4 corners with a circular spawn in the center."""
             positions = []
-            # Create a grid-based island distribution for more regular spacing
-            island_count_x = max(2, cols // 4)
-            island_count_y = max(2, rows // 4)
-
-            # Calculate spacing
-            spacing_x = cols / (island_count_x + 1)
-            spacing_y = rows / (island_count_y + 1)
-
-            # Generate island centers with slight randomization
-            islands = []
-            for ix in range(island_count_x):
-                for iy in range(island_count_y):
-                    # Base position with some randomness
-                    cx = spacing_x * (ix + 1) + random.uniform(-spacing_x * 0.2, spacing_x * 0.2)
-                    cy = spacing_y * (iy + 1) + random.uniform(-spacing_y * 0.2, spacing_y * 0.2)
-                    # Variable island size
-                    radius = random.uniform(1.5, min(spacing_x, spacing_y) * 0.45)
-                    islands.append((cx, cy, radius))
+            corner_size = max(2, min(cols, rows) // 3)
+            center_radius = max(1.5, min(cols, rows) / 5)
 
             for x in range(cols):
                 for y in range(rows):
-                    for cx, cy, radius in islands:
-                        dist = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
-                        if dist <= radius:
-                            positions.append(f"{x}_{y}")
-                            break
+                    # 4 꼭짓점 영역
+                    is_corner = (
+                        (x < corner_size and y < corner_size) or
+                        (x < corner_size and y >= rows - corner_size) or
+                        (x >= cols - corner_size and y < corner_size) or
+                        (x >= cols - corner_size and y >= rows - corner_size)
+                    )
+                    # 중앙 원형 영역
+                    dist_from_center = ((x - center_x + 0.5) ** 2 + (y - center_y + 0.5) ** 2) ** 0.5
+                    is_center_circle = dist_from_center <= center_radius
+
+                    if is_corner or is_center_circle:
+                        positions.append(f"{x}_{y}")
             return positions
 
         # Pattern 55: Central Hub with Spokes
@@ -4448,22 +4509,31 @@ class LevelGenerator:
                         positions.append(f"{x}_{y}")
             return positions
 
-        # Pattern 57: GBoost Octagon Ring (inspired by level_50)
-        # Octagonal ring shape with hollow center
-        def gboost_octagon_ring():
-            """Octagonal ring pattern with hollow center (level_50 style)."""
+        # Pattern 57: Corner with Center Square - 4꼭짓점 + 중앙 네모
+        def corner_with_center_square():
+            """4 corners with a square spawn in the center."""
             positions = []
-            outer_radius = min(cols, rows) * 0.45
-            inner_radius = outer_radius * 0.35
+            corner_size = max(2, min(cols, rows) // 3)
+            center_size = max(2, min(cols, rows) // 4)
+            center_half = center_size // 2
 
             for x in range(cols):
                 for y in range(rows):
-                    dx = abs(x - center_x + 0.5)
-                    dy = abs(y - center_y + 0.5)
-                    # Octagon distance (Chebyshev-ish with corner cut)
-                    dist = max(dx, dy) + min(dx, dy) * 0.41
+                    # 4 꼭짓점 영역
+                    is_corner = (
+                        (x < corner_size and y < corner_size) or
+                        (x < corner_size and y >= rows - corner_size) or
+                        (x >= cols - corner_size and y < corner_size) or
+                        (x >= cols - corner_size and y >= rows - corner_size)
+                    )
+                    # 중앙 네모 영역
+                    cx, cy = cols // 2, rows // 2
+                    is_center_square = (
+                        cx - center_half <= x < cx + center_half and
+                        cy - center_half <= y < cy + center_half
+                    )
 
-                    if inner_radius <= dist <= outer_radius:
+                    if is_corner or is_center_square:
                         positions.append(f"{x}_{y}")
             return positions
 
@@ -4683,12 +4753,12 @@ class LevelGenerator:
             ("bridge_vertical", bridge_vertical),         # 51
             ("three_islands_triangle", three_islands_triangle),  # 52
             ("four_islands_grid", four_islands_grid),     # 53
-            ("archipelago", archipelago),                 # 54
+            ("corner_with_center_circle", corner_with_center_circle),  # 54
             ("hub_and_spokes", hub_and_spokes),           # 55
             # Category 9: GBoost Human-Designed Patterns (56-63)
             # Derived from analysis of 221 human-designed production levels
             ("gboost_corner_blocks", gboost_corner_blocks),     # 56
-            ("gboost_octagon_ring", gboost_octagon_ring),       # 57
+            ("corner_with_center_square", corner_with_center_square),  # 57
             ("gboost_diagonal_staircase", gboost_diagonal_staircase),  # 58
             ("gboost_symmetric_wings", gboost_symmetric_wings), # 59
             ("gboost_scattered_clusters", gboost_scattered_clusters),  # 60

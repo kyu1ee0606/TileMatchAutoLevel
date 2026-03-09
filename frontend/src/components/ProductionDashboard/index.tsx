@@ -376,7 +376,45 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
           localIdx: number;
           levelNumber: number;
           targetDifficulty: number;
+          patternIndex: number;  // Pre-computed pattern index
         }
+
+        // OPTION D: Pre-compute pattern indices to prevent consecutive same patterns
+        // Each level gets a pattern different from the previous level
+        const preComputePatternIndices = (count: number, startLevelNumber: number): number[] => {
+          const indices: number[] = [];
+          let previousIndex = -1;
+
+          for (let i = 0; i < count; i++) {
+            const levelNumber = startLevelNumber + i;
+            const isBossLevel = levelNumber % 10 === 0 && levelNumber > 0;
+            const isSpecialShape = levelNumber % 10 === 9;
+
+            let pool: number[];
+            if (isBossLevel) {
+              pool = [...BOSS_PATTERNS];
+            } else if (isSpecialShape) {
+              pool = [...SPECIAL_PATTERNS];
+            } else {
+              // General levels: all 64 patterns
+              pool = Array.from({ length: 64 }, (_, i) => i);
+            }
+
+            // Remove previous pattern from pool to prevent consecutive same pattern
+            if (previousIndex >= 0 && pool.length > 1) {
+              pool = pool.filter(p => p !== previousIndex);
+            }
+
+            // Random selection from filtered pool
+            const selectedIndex = pool[Math.floor(Math.random() * pool.length)];
+            indices.push(selectedIndex);
+            previousIndex = selectedIndex;
+          }
+
+          return indices;
+        };
+
+        const patternIndices = preComputePatternIndices(batch.levels_per_set, setIdx * batch.levels_per_set + 1);
 
         const levelTasks: LevelTask[] = [];
         for (let localIdx = 1; localIdx <= batch.levels_per_set; localIdx++) {
@@ -387,12 +425,17 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             const sawtoothBonus = localIdx === 10 ? 0.1 : localProgress * 0.05;
             targetDifficulty = Math.min(0.95, baseDifficulty + sawtoothBonus);
           }
-          levelTasks.push({ localIdx, levelNumber, targetDifficulty });
+          levelTasks.push({
+            localIdx,
+            levelNumber,
+            targetDifficulty,
+            patternIndex: patternIndices[localIdx - 1]
+          });
         }
 
         // Helper: Generate a single level (returns ProductionLevel or null on failure)
         const generateOneLevel = async (task: LevelTask): Promise<ProductionLevel | null> => {
-          const { localIdx, levelNumber, targetDifficulty } = task;
+          const { localIdx, levelNumber, targetDifficulty, patternIndex } = task;
 
           // Local helper: Calculate match score from bot stats (asymmetric penalty)
           // [v14.2] 방안 B+D: maxGap 가중치 감소(0.4→0.3) + 어려움 패널티 완화(1.0→0.7)
@@ -415,18 +458,9 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             const isSpecialShape = levelNumber % 10 === 9;
             const isBossLevel = levelNumber % 10 === 0 && levelNumber > 0;
 
-            // Pattern type selection
-            const patternRoll = Math.random();
-            let patternType: 'aesthetic' | 'geometric' | 'clustered';
-            if (isEarlyLevel) {
-              patternType = patternRoll < 0.50 ? 'geometric' : patternRoll < 0.90 ? 'aesthetic' : 'clustered';
-            } else if (isBossLevel) {
-              patternType = patternRoll < 0.75 ? 'aesthetic' : patternRoll < 0.95 ? 'geometric' : 'clustered';
-            } else if (isSpecialShape) {
-              patternType = patternRoll < 0.50 ? 'aesthetic' : patternRoll < 0.75 ? 'geometric' : 'clustered';
-            } else {
-              patternType = patternRoll < 0.60 ? 'aesthetic' : patternRoll < 0.85 ? 'geometric' : 'clustered';
-            }
+            // Pattern type: 항상 aesthetic 사용 (64개 패턴 중 선택)
+            // geometric/clustered 제거 - 모든 레벨이 명확한 모양을 가지도록
+            const patternType: 'aesthetic' = 'aesthetic';
 
             // Symmetry mode selection
             const symmetryRoll = Math.random();
@@ -453,17 +487,9 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             const goalDirection = goalDirections[Math.floor(Math.random() * goalDirections.length)];
             const goalType = (['craft', 'stack'] as const)[Math.floor(Math.random() * 2)];
 
-            // Pattern index
-            let patternIndex: number | undefined = undefined;
-            if (patternType === 'aesthetic') {
-              if (isBossLevel) {
-                const bossPatterns = [8, 15, 16, 45, 46, 17, 18];
-                patternIndex = bossPatterns[Math.floor(Math.random() * bossPatterns.length)];
-              } else if (isSpecialShape) {
-                const specialPatterns = [3, 4, 20, 23, 24, 30, 33];
-                patternIndex = specialPatterns[Math.floor(Math.random() * specialPatterns.length)];
-              }
-            }
+            // Pattern index: Use pre-computed value from task
+            // OPTION D: Consecutive same pattern prevention applied at task creation
+            // (patternIndex is already set in task from preComputePatternIndices)
 
             // Grid size
             let gridSize: [number, number] = [7, 7];
@@ -1128,17 +1154,8 @@ function OverviewTab({ stats, batch, batchId }: { stats: ProductionStats; batch:
         const isSpecialShape = levelNumber % 10 === 9;
         const isBossLevel = levelNumber % 10 === 0 && levelNumber > 0;
 
-        const patternRoll = Math.random();
-        let patternType: 'aesthetic' | 'geometric' | 'clustered';
-        if (isEarlyLevel) {
-          patternType = patternRoll < 0.50 ? 'geometric' : patternRoll < 0.90 ? 'aesthetic' : 'clustered';
-        } else if (isBossLevel) {
-          patternType = patternRoll < 0.75 ? 'aesthetic' : patternRoll < 0.95 ? 'geometric' : 'clustered';
-        } else if (isSpecialShape) {
-          patternType = patternRoll < 0.50 ? 'aesthetic' : patternRoll < 0.75 ? 'geometric' : 'clustered';
-        } else {
-          patternType = patternRoll < 0.60 ? 'aesthetic' : patternRoll < 0.85 ? 'geometric' : 'clustered';
-        }
+        // Pattern type: 항상 aesthetic 사용 (64개 패턴 중 선택)
+        const patternType: 'aesthetic' = 'aesthetic';
 
         const symmetryRoll = Math.random();
         let symmetryMode: 'none' | 'horizontal' | 'vertical' | 'both';
@@ -2554,22 +2571,8 @@ function TestTab({
       const isSpecialShape = levelNumber % 10 === 9;
       const isBossLevel = levelNumber % 10 === 0 && levelNumber > 0;
 
-      // Pattern type: 사용자가 패턴을 선택했으면 aesthetic, 아니면 자동 선택
-      let patternType: 'aesthetic' | 'geometric' | 'clustered';
-      if (userPatternIndex !== undefined) {
-        patternType = 'aesthetic'; // 사용자 패턴 선택 시 무조건 aesthetic
-      } else {
-        const patternRoll = Math.random();
-        if (isEarlyLevel) {
-          patternType = patternRoll < 0.50 ? 'geometric' : patternRoll < 0.90 ? 'aesthetic' : 'clustered';
-        } else if (isBossLevel) {
-          patternType = patternRoll < 0.75 ? 'aesthetic' : patternRoll < 0.95 ? 'geometric' : 'clustered';
-        } else if (isSpecialShape) {
-          patternType = patternRoll < 0.50 ? 'aesthetic' : patternRoll < 0.75 ? 'geometric' : 'clustered';
-        } else {
-          patternType = patternRoll < 0.60 ? 'aesthetic' : patternRoll < 0.85 ? 'geometric' : 'clustered';
-        }
-      }
+      // Pattern type: 항상 aesthetic 사용 (64개 패턴 중 선택)
+      const patternType: 'aesthetic' = 'aesthetic';
 
       // Symmetry mode: 사용자 선택 우선, 없으면 자동 선택
       let symmetryMode: 'none' | 'horizontal' | 'vertical' | 'both';
@@ -2588,18 +2591,21 @@ function TestTab({
         }
       }
 
-      // Pattern index: 사용자 선택 > 기존 레벨의 패턴 > 보스/특수 레벨 자동 선택
+      // Pattern index: 사용자 선택 > 기존 레벨 패턴 > 자동 선택
       let patternIndex: number | undefined = userPatternIndex;
       if (patternIndex === undefined) {
         // 기존 레벨에 패턴이 있으면 동일한 패턴으로 재생성
         if (level.meta.pattern_index !== undefined) {
           patternIndex = level.meta.pattern_index;
-          patternType = level.meta.pattern_type || 'aesthetic';
-        } else if (patternType === 'aesthetic') {
+        } else {
+          // 모든 레벨에 패턴 지정 (빠른 생성)
           if (isBossLevel) {
             patternIndex = BOSS_PATTERNS[Math.floor(Math.random() * BOSS_PATTERNS.length)];
           } else if (isSpecialShape) {
             patternIndex = SPECIAL_PATTERNS[Math.floor(Math.random() * SPECIAL_PATTERNS.length)];
+          } else {
+            // 일반 레벨: 전체 패턴 풀에서 랜덤 선택 (0-63)
+            patternIndex = Math.floor(Math.random() * 64);
           }
         }
       }
@@ -2828,23 +2834,13 @@ function TestTab({
       // 기믹 강도를 목표 난이도로 제한 (과도한 기믹으로 난이도 초과 방지)
       const gimmickIntensity = Math.min(targetDifficulty, levelNumber / 500);
 
-      // === 미형 로직: 프로덕션 초기 생성과 동일한 레벨 타입 기반 패턴 선택 ===
+      // === 레벨 타입 기반 패턴 선택 ===
       const isEarlyLevel = levelNumber <= 30;
       const isSpecialShape = levelNumber % 10 === 9;
       const isBossLevel = levelNumber % 10 === 0 && levelNumber > 0;
 
-      // Pattern type selection (프로덕션과 동일)
-      const patternRoll = Math.random();
-      let patternType: 'aesthetic' | 'geometric' | 'clustered';
-      if (isEarlyLevel) {
-        patternType = patternRoll < 0.50 ? 'geometric' : patternRoll < 0.90 ? 'aesthetic' : 'clustered';
-      } else if (isBossLevel) {
-        patternType = patternRoll < 0.75 ? 'aesthetic' : patternRoll < 0.95 ? 'geometric' : 'clustered';
-      } else if (isSpecialShape) {
-        patternType = patternRoll < 0.50 ? 'aesthetic' : patternRoll < 0.75 ? 'geometric' : 'clustered';
-      } else {
-        patternType = patternRoll < 0.60 ? 'aesthetic' : patternRoll < 0.85 ? 'geometric' : 'clustered';
-      }
+      // Pattern type: 항상 aesthetic 사용 (64개 패턴 중 선택)
+      const patternType: 'aesthetic' = 'aesthetic';
 
       // Symmetry mode selection (프로덕션과 동일)
       const symmetryRoll = Math.random();
@@ -2859,19 +2855,21 @@ function TestTab({
         symmetryMode = symmetryRoll < 0.05 ? 'none' : symmetryRoll < 0.40 ? 'horizontal' : symmetryRoll < 0.75 ? 'vertical' : 'both';
       }
 
-      // Pattern index: 기존 레벨의 패턴 우선 > 보스/특수 레벨 자동 선택
+      // Pattern index: 기존 레벨 패턴 > 자동 선택
       let patternIndex: number | undefined = undefined;
       if (level.meta.pattern_index !== undefined) {
         // 기존 레벨에 패턴이 있으면 동일한 패턴으로 재생성
         patternIndex = level.meta.pattern_index;
-        patternType = level.meta.pattern_type || 'aesthetic';
-      } else if (patternType === 'aesthetic') {
+      } else {
+        // 모든 레벨에 패턴 지정 (빠른 생성)
+        // undefined면 백엔드에서 64개 패턴 모두 시도하여 매우 느림
         if (isBossLevel) {
-          const bossPatterns = [8, 15, 16, 45, 46, 17, 18];
-          patternIndex = bossPatterns[Math.floor(Math.random() * bossPatterns.length)];
+          patternIndex = BOSS_PATTERNS[Math.floor(Math.random() * BOSS_PATTERNS.length)];
         } else if (isSpecialShape) {
-          const specialPatterns = [3, 4, 20, 23, 24, 30, 33];
-          patternIndex = specialPatterns[Math.floor(Math.random() * specialPatterns.length)];
+          patternIndex = SPECIAL_PATTERNS[Math.floor(Math.random() * SPECIAL_PATTERNS.length)];
+        } else {
+          // 일반 레벨: 전체 패턴 풀에서 랜덤 선택 (0-63)
+          patternIndex = Math.floor(Math.random() * 64);
         }
       }
 

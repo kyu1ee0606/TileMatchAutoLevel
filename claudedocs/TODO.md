@@ -1,7 +1,7 @@
 # TileMatchAutoLevel - TODO 리스트
 
-**최종 업데이트**: 2026-03-04
-**프로젝트 버전**: MVP + 레벨 생성 자동화 + UX 개선 + 봇 시뮬레이터 v15.2
+**최종 업데이트**: 2026-03-10
+**프로젝트 버전**: MVP + 레벨 생성 자동화 + UX 개선 + 봇 시뮬레이터 v15.7
 
 ---
 
@@ -53,64 +53,6 @@
 
 ---
 
-#### 대기 중 [기믹] HARD 티어 레벨 구현
-**담당자**: 미정
-**생성일**: 2025-12-30
-**관련 파일**: `backend/app/models/benchmark_level.py`, `generate_benchmark_levels.py`
-
-**작업 내용**:
-HARD 티어 10개 레벨 생성 및 등록
-
-**목표 클리어율**:
-- Novice: 10%
-- Casual: 25%
-- Average: 50%
-- Expert: 80%
-- Optimal: 95%
-
-**체크리스트**:
-- [ ] generate_benchmark_levels.py로 HARD 티어 레벨 10개 생성
-- [ ] 자동 보정(calibration)으로 목표 클리어율 달성
-- [ ] 100회 반복 검증 통과 확인
-- [ ] benchmark_level.py에 레벨 등록
-- [ ] API 테스트 및 프론트엔드 연동 확인
-
-**실행 프롬프트**:
-```bash
-python3 generate_benchmark_levels.py --tier hard --count 10 --calibrate --validate --output hard_tier.json
-```
-
----
-
-#### 대기 중 [기믹] MEDIUM 티어 재설계
-**담당자**: 미정
-**생성일**: 2025-12-30
-**관련 파일**: `backend/app/models/benchmark_level.py`
-
-**문제 요약**:
-현재 MEDIUM 티어가 너무 쉬움 (98.9-100% 클리어율)
-
-**목표 클리어율**:
-- Novice: 30%
-- Casual: 55%
-- Average: 75%
-- Expert: 90%
-- Optimal: 98%
-
-**체크리스트**:
-- [ ] 현재 MEDIUM 레벨 분석 및 문제점 파악
-- [ ] generate_benchmark_levels.py로 새 레벨 생성
-- [ ] 자동 보정으로 목표 클리어율 달성
-- [ ] 기존 레벨 교체
-- [ ] 검증 및 테스트
-
-**실행 프롬프트**:
-```bash
-python3 generate_benchmark_levels.py --tier medium --count 10 --calibrate --validate --output redesigned_medium.json
-```
-
----
-
 #### 대기 중 [프론트엔드] 봇 시뮬레이션 뷰어 개선
 **담당자**: 미정
 **생성일**: 2025-12-30
@@ -145,42 +87,6 @@ BotTileGrid.tsx 파일이 수정됨 (git status에서 확인)
 - [x] 에디터로 레벨 로드 기능
 
 ---
-
-#### 대기 중 [기믹] EXPERT 티어 구현
-**담당자**: 미정
-**생성일**: 2025-12-30
-**관련 파일**: `backend/app/models/benchmark_level.py`
-
-**목표 클리어율**:
-- Novice: 2%
-- Casual: 10%
-- Average: 30%
-- Expert: 65%
-- Optimal: 90%
-
-**체크리스트**:
-- [ ] HARD 티어 완료 후 진행
-- [ ] 10개 레벨 생성 및 검증
-- [ ] benchmark_level.py에 등록
-
----
-
-#### 대기 중 [기믹] IMPOSSIBLE 티어 구현
-**담당자**: 미정
-**생성일**: 2025-12-30
-**관련 파일**: `backend/app/models/benchmark_level.py`
-
-**목표 클리어율**:
-- Novice: 0%
-- Casual: 2%
-- Average: 10%
-- Expert: 40%
-- Optimal: 75%
-
-**체크리스트**:
-- [ ] EXPERT 티어 완료 후 진행
-- [ ] 10개 레벨 생성 및 검증
-- [ ] benchmark_level.py에 등록
 
 ---
 
@@ -243,6 +149,58 @@ BotTileGrid.tsx 파일이 수정됨 (git status에서 확인)
 ---
 
 ## 완료된 작업
+
+### 완료 [개선][백엔드] 패턴 밀도 동적 조정 (v15.7)
+**담당자**: Claude
+**완료일**: 2026-03-10
+**관련 파일**: `backend/app/core/generator.py`
+
+**구현 내용**:
+- `target_difficulty` 파라미터를 패턴 생성 함수에 전달
+- 난이도에 따른 패턴 밀도 자동 조정 (높은 난이도 = 더 밀집된 패턴)
+
+---
+
+### 완료 [개선][프론트엔드] 레벨 생성 실패율 개선 (v15.6)
+**담당자**: Claude
+**완료일**: 2026-03-09
+**관련 파일**: `frontend/src/components/ProductionDashboard/index.tsx`
+
+**구현 내용**:
+- 점진적 허용오차: 5% → 7.5% → 10% (시도 횟수에 따라)
+- API 실패 시 1회 재시도 로직 추가
+- 후보 다양성 증가: 레이어 ±1, 기믹 강도 ±20%
+- MAX_ATTEMPTS: 5 → 6 증가
+
+**문서**: [CHANGELOG_20260309_GENERATION_FAILURE_IMPROVEMENT.md](CHANGELOG_20260309_GENERATION_FAILURE_IMPROVEMENT.md)
+
+---
+
+### 완료 [개선][백엔드] 패턴 다양성 개선 (v15.5)
+**담당자**: Claude
+**완료일**: 2026-03-09
+**관련 파일**: `backend/app/core/generator.py`, `frontend/src/components/ProductionDashboard/index.tsx`
+
+**구현 내용**:
+- 피라미드 효과: 상위 레이어가 점점 작아지는 3D 깊이감 적용 (shrink_rate 0.9)
+- 연속 패턴 방지: 연속 레벨에서 동일 패턴 재사용 방지
+- 패턴 6 (Corner Anchored) 개선: 4꼭짓점 + 1타일 브릿지 연결
+
+**문서**: [CHANGELOG_20260309_PATTERN_SYSTEM_UNIFICATION.md](CHANGELOG_20260309_PATTERN_SYSTEM_UNIFICATION.md)
+
+---
+
+### 완료 [개선][프론트엔드] 패턴 시스템 통합 (v15.4)
+**담당자**: Claude
+**완료일**: 2026-03-09
+**관련 파일**: `frontend/src/components/ProductionDashboard/index.tsx`
+
+**구현 내용**:
+- 64개 aesthetic 패턴만 사용 (geometric/clustered 제거)
+- 보스/특수/일반 레벨별 패턴 풀 선택
+- 모든 레벨에 pattern_index 명시적 지정 → 64배 성능 개선
+
+---
 
 ### 완료 [버그][백엔드] useTileCount Fallback 버그 수정
 **담당자**: Claude
@@ -535,17 +493,13 @@ BotTileGrid.tsx 파일이 수정됨 (git status에서 확인)
 
 | 기능 | 상태 | 비고 |
 |------|------|------|
-| 봇 시뮬레이터 | 완료 | 15개 기믹, 5종 봇 |
-| 레벨 생성기 | 완료 | 장애물 생성 포함 |
+| 봇 시뮬레이터 | 완료 | 15개 기믹, 5종 봇, v15.7 |
+| 레벨 생성기 | 완료 | 64개 패턴, 피라미드 효과 |
+| 프로덕션 대시보드 | 완료 | 1500레벨 자동 생성/검증 |
 | 레벨 검증기 | 완료 | CLI 도구 |
 | 대시보드 API | 완료 | 4개 엔드포인트 |
 | 로컬 레벨 관리 | 완료 | CRUD API |
-| EASY 티어 | 완료 | 10개 레벨 |
-| MEDIUM 티어 | 재설계 필요 | 너무 쉬움 |
-| HARD 티어 | 대기 중 | 도구 준비 완료 |
-| EXPERT 티어 | 대기 중 | |
-| IMPOSSIBLE 티어 | 대기 중 | |
-| 게임부스트 연동 | 대기 중 | placeholder 구현됨 |
+| 게임부스트 연동 | 완료 | 업로드/다운로드/삭제 |
 
 ### 봇 프로필
 

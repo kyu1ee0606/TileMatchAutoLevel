@@ -9536,8 +9536,20 @@ class LevelGenerator:
         num_layers = level.get("layer", 8)
         use_tile_count = level.get("useTileCount", 15)
 
-        # Collect valid tile types
-        valid_tile_types = [f"t{i}" for i in range(1, use_tile_count + 1)]
+        # Collect valid tile types - INCLUDE t0!
+        valid_tile_types = [f"t{i}" for i in range(0, use_tile_count + 1)]
+
+        # Step 0: Count goal internal tiles (they contribute to t0 count)
+        goal_internal_t0_count = 0
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for pos, tile_data in tiles.items():
+                if isinstance(tile_data, list) and len(tile_data) > 2:
+                    tile_type = tile_data[0]
+                    if tile_type.startswith("craft_") or tile_type.startswith("stack_"):
+                        if isinstance(tile_data[2], list) and tile_data[2]:
+                            goal_internal_t0_count += int(tile_data[2][0]) if tile_data[2][0] else 0
 
         # Step 1: Count each tile type and collect positions
         type_counts: Dict[str, int] = {}
@@ -9560,12 +9572,24 @@ class LevelGenerator:
         if not type_counts:
             return level
 
+        # Add goal internal t0 count to type_counts for calculation
+        # (but we can't change goal tiles, so we adjust grid t0 instead)
+        effective_t0_count = type_counts.get("t0", 0) + goal_internal_t0_count
+        t0_adjustment_needed = effective_t0_count % 3
+        if t0_adjustment_needed != 0:
+            logger.debug(f"[REDISTRIBUTE] t0 grid={type_counts.get('t0', 0)} + goal_internal={goal_internal_t0_count} = {effective_t0_count} (remainder={t0_adjustment_needed})")
+
         # Step 2: Identify types with remainder
+        # CRITICAL: For t0, consider goal internal tiles when calculating remainder
         rem1_types = []  # types with count % 3 == 1 (need to change 1 or add 2)
         rem2_types = []  # types with count % 3 == 2 (need to change 2 or add 1)
 
         for tile_type, count in type_counts.items():
-            remainder = count % 3
+            # For t0, use effective count (grid + goal internal)
+            if tile_type == "t0" and goal_internal_t0_count > 0:
+                remainder = effective_t0_count % 3
+            else:
+                remainder = count % 3
             if remainder == 1:
                 rem1_types.append(tile_type)
             elif remainder == 2:
@@ -9593,25 +9617,33 @@ class LevelGenerator:
                     # Now both should be divisible by 3
 
         # Step 4: Handle remaining rem1 types (need to convert 1 tile to get 0 remainder)
-        # Strategy: Change to a type that already has count divisible by 3
-        for from_type in rem1_types:
-            # Find a target type that won't break divisibility
-            # Changing 1 tile: from_type loses 1 (rem1 -> rem0), to_type gains 1
-            # We need to_type to also become divisible, so pick one with rem2
-            # But we're out of rem2 types, so pick any type with count divisible by 3
-            # That type will now have rem1, but we can pair it later
-
-            # Simple approach: convert 1 tile from rem1 to a type with remainder=2
-            # But if no rem2, just pick any divisible type
+        # CRITICAL FIX: Only use existing types with count >= 3 to prevent creating 2-count types
+        for from_type in list(rem1_types):  # Use list() to avoid modification during iteration
+            # Best target: type with remainder=2 (both become divisible)
             target_type = None
             for t, c in type_counts.items():
-                if c % 3 == 0 and t != from_type and type_positions.get(t):
+                if c % 3 == 2 and t != from_type and t in type_positions:
                     target_type = t
                     break
 
+            # Second best: type with count >= 6 and divisible by 3 (can afford to become rem1)
             if not target_type:
-                # Fall back to any valid type
-                target_type = random.choice(valid_tile_types)
+                for t, c in type_counts.items():
+                    if c >= 6 and c % 3 == 0 and t != from_type and t in type_positions:
+                        target_type = t
+                        break
+
+            # Third: type with count >= 3 (minimum safe)
+            if not target_type:
+                for t, c in sorted(type_counts.items(), key=lambda x: -x[1]):  # Highest count first
+                    if c >= 3 and t != from_type and t in type_positions:
+                        target_type = t
+                        break
+
+            # NEVER use random.choice - only use existing types
+            if not target_type:
+                logger.warning(f"[REDISTRIBUTE] No safe target for rem1 type {from_type}, skipping")
+                continue
 
             if type_positions.get(from_type):
                 layer_idx, pos = type_positions[from_type].pop()
@@ -9621,14 +9653,14 @@ class LevelGenerator:
                     level[layer_key]["tiles"][pos] = [target_type, old_data[1] if len(old_data) > 1 else ""]
                     type_counts[from_type] -= 1
                     type_counts[target_type] = type_counts.get(target_type, 0) + 1
+                    rem1_types.remove(from_type)  # Successfully handled
 
         # Step 5: Handle remaining rem2 types
-        for from_type in rem2_types:
-            # Need to change 2 tiles, or find rem1 to pair with
-            # Change 2 tiles to the same type that has remainder=1
+        for from_type in list(rem2_types):
+            # Best target: type with remainder=1 (both become divisible after transfer)
             target_type = None
             for t, c in type_counts.items():
-                if c % 3 == 1 and t != from_type:
+                if c % 3 == 1 and t != from_type and t in type_positions:
                     target_type = t
                     break
 
@@ -9641,20 +9673,67 @@ class LevelGenerator:
                     level[layer_key]["tiles"][pos] = [target_type, old_data[1] if len(old_data) > 1 else ""]
                     type_counts[from_type] -= 1
                     type_counts[target_type] = type_counts.get(target_type, 0) + 1
+                    rem2_types.remove(from_type)
             elif type_positions.get(from_type) and len(type_positions[from_type]) >= 2:
-                # Change 2 tiles to a type with remainder=0
+                # Change 2 tiles to an existing type with high count (to minimize impact)
+                best_target = None
+                for t, c in sorted(type_counts.items(), key=lambda x: -x[1]):
+                    if c >= 3 and c % 3 == 0 and t != from_type and t in type_positions:
+                        best_target = t
+                        break
+                if not best_target:
+                    # Use highest count type as fallback
+                    for t, c in sorted(type_counts.items(), key=lambda x: -x[1]):
+                        if t != from_type and t in type_positions:
+                            best_target = t
+                            break
+
+                if not best_target:
+                    logger.warning(f"[REDISTRIBUTE] No safe target for rem2 type {from_type}, skipping")
+                    continue
+
+                tiles_changed = 0
                 for _ in range(2):
                     if not type_positions[from_type]:
                         break
                     layer_idx, pos = type_positions[from_type].pop()
                     layer_key = f"layer_{layer_idx}"
                     if pos in level[layer_key]["tiles"]:
-                        # Pick a random valid type
-                        target = random.choice(valid_tile_types)
+                        # Use best_target instead of random.choice
                         old_data = level[layer_key]["tiles"][pos]
-                        level[layer_key]["tiles"][pos] = [target, old_data[1] if len(old_data) > 1 else ""]
+                        level[layer_key]["tiles"][pos] = [best_target, old_data[1] if len(old_data) > 1 else ""]
                         type_counts[from_type] -= 1
-                        type_counts[target] = type_counts.get(target, 0) + 1
+                        type_counts[best_target] = type_counts.get(best_target, 0) + 1
+                        tiles_changed += 1
+
+                if tiles_changed == 2:
+                    rem2_types.remove(from_type)
+
+        # Final validation: Check if all types are now divisible by 3
+        final_counts: Dict[str, int] = {}
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            for pos, tile_data in tiles.items():
+                if isinstance(tile_data, list) and len(tile_data) > 0:
+                    tile_type = tile_data[0]
+                    if not tile_type.startswith("craft_") and not tile_type.startswith("stack_") and tile_type not in self.GOAL_TYPES:
+                        final_counts[tile_type] = final_counts.get(tile_type, 0) + 1
+
+        bad_types = []
+        for tile_type, count in final_counts.items():
+            # For t0, add goal internal count
+            if tile_type == "t0":
+                effective = count + goal_internal_t0_count
+                if effective % 3 != 0:
+                    bad_types.append((tile_type, count, f"grid={count}+goal={goal_internal_t0_count}={effective}"))
+            elif count % 3 != 0:
+                bad_types.append((tile_type, count, f"count={count}"))
+
+        if bad_types:
+            logger.warning(f"[REDISTRIBUTE] Final validation failed - bad types: {bad_types}")
+        else:
+            logger.debug(f"[REDISTRIBUTE] Final validation passed - all {len(final_counts)} types divisible by 3")
 
         return level
 
@@ -10956,14 +11035,73 @@ class LevelGenerator:
                         type_positions[type_b].append((layer_idx, pos))
                         # type_a: rem1 -> rem0, type_b: rem1 -> rem2
             else:
-                # Single rem1 or rem2 with no pair - can't fix with swaps
-                # PATTERN MODE: We must still ensure playability - minimal tile deletion is acceptable
-                # "클리어 불가능한 레벨 절대로 생성되면안됨" is the priority
+                # Single rem1 or rem2 with no pair - can't fix with simple swaps
+                # PATTERN MODE: Redistribute to existing types instead of deleting
                 if preserve_pattern:
-                    logger.warning("[_force_fix_tile_counts] Pattern mode: minimal tile deletion required for playability")
-                    # Allow deletion to continue below - playability is more important than perfect pattern shape
+                    # Try redistribution first: move tiles to a type with high count
+                    redistributed = False
 
-                # Need to remove or add tiles
+                    if rem2 and type_positions.get(rem2[0]):
+                        # Move 2 tiles from rem2 type to a rem0 type with high count
+                        type_a = rem2[0]
+                        # Find best target: type with highest count that's divisible by 3
+                        best_target = None
+                        for t, c in sorted(type_counts.items(), key=lambda x: -x[1]):
+                            if c % 3 == 0 and c >= 6 and t != type_a and t in type_positions:
+                                best_target = t
+                                break
+                        if not best_target:
+                            for t, c in sorted(type_counts.items(), key=lambda x: -x[1]):
+                                if c % 3 == 0 and c >= 3 and t != type_a and t in type_positions:
+                                    best_target = t
+                                    break
+
+                        if best_target and len(type_positions.get(type_a, [])) >= 2:
+                            moved = 0
+                            while moved < 2 and type_positions[type_a]:
+                                layer_idx, pos = type_positions[type_a].pop()
+                                layer_key = f"layer_{layer_idx}"
+                                if pos in level.get(layer_key, {}).get("tiles", {}):
+                                    level[layer_key]["tiles"][pos][0] = best_target
+                                    type_counts[type_a] -= 1
+                                    type_counts[best_target] = type_counts.get(best_target, 0) + 1
+                                    if best_target not in type_positions:
+                                        type_positions[best_target] = []
+                                    type_positions[best_target].append((layer_idx, pos))
+                                    moved += 1
+                            if moved == 2:
+                                redistributed = True
+                                logger.debug(f"[FORCE_FIX_PATTERN] Redistributed 2 tiles from {type_a} to {best_target}")
+
+                    elif rem1 and type_positions.get(rem1[0]):
+                        # Move 1 tile from rem1 type to a rem0 type
+                        type_a = rem1[0]
+                        best_target = None
+                        for t, c in sorted(type_counts.items(), key=lambda x: -x[1]):
+                            if c % 3 == 0 and c >= 3 and t != type_a and t in type_positions:
+                                best_target = t
+                                break
+
+                        if best_target and type_positions.get(type_a):
+                            layer_idx, pos = type_positions[type_a].pop()
+                            layer_key = f"layer_{layer_idx}"
+                            if pos in level.get(layer_key, {}).get("tiles", {}):
+                                level[layer_key]["tiles"][pos][0] = best_target
+                                type_counts[type_a] -= 1
+                                type_counts[best_target] = type_counts.get(best_target, 0) + 1
+                                if best_target not in type_positions:
+                                    type_positions[best_target] = []
+                                type_positions[best_target].append((layer_idx, pos))
+                                redistributed = True
+                                logger.debug(f"[FORCE_FIX_PATTERN] Redistributed 1 tile from {type_a} to {best_target}")
+
+                    if redistributed:
+                        continue  # Continue loop to handle the new type distribution
+
+                    # If redistribution failed, fall through to deletion
+                    logger.warning("[_force_fix_tile_counts] Pattern mode: redistribution failed, minimal tile deletion required")
+
+                # Need to remove tiles (non-pattern mode or failed redistribution)
                 if rem2 and type_positions.get(rem2[0]):
                     # Remove 2 tiles from rem2 type to make it rem0
                     type_a = rem2[0]

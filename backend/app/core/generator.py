@@ -9767,68 +9767,99 @@ class LevelGenerator:
             added_count = 0
 
             # PATTERN MODE FIX: When preserve_pattern is True, NEVER delete tiles
-            # Instead, always add tiles to reach 3-divisibility
-            # This preserves the visual pattern shape
+            # Priority-based approach to preserve pattern shape:
+            # 1. Adjust goal (craft/stack) internal tile count
+            # 2. Tile type redistribution (if total already divisible)
+            # 3. Add tiles adjacent to pattern (last resort)
             if preserve_pattern:
-                # Collect existing tile positions to find adjacent empty slots
-                existing_positions: Set[Tuple[int, int]] = set()
-                for i in range(num_layers):
-                    layer_key = f"layer_{i}"
-                    tiles = level.get(layer_key, {}).get("tiles", {})
-                    for pos in tiles.keys():
-                        parts = pos.split("_")
-                        if len(parts) == 2:
-                            existing_positions.add((int(parts[0]), int(parts[1])))
+                pattern_fix_success = False
 
-                # Find positions adjacent to existing pattern tiles (to maintain cohesion)
-                def get_adjacent_empty_positions(layer_idx: int) -> List[str]:
-                    is_odd_layer = layer_idx % 2 == 1
-                    layer_cols = cols if is_odd_layer else cols + 1
-                    layer_rows = rows if is_odd_layer else rows + 1
-                    layer_tiles = level.get(f"layer_{layer_idx}", {}).get("tiles", {})
-                    used = set(layer_tiles.keys())
+                # === PRIORITY 1: Adjust goal internal tile count ===
+                # This preserves pattern shape 100% by changing goal's internal t0 count
+                if goal_tiles_with_internal and not pattern_fix_success:
+                    # Need to add (3 - remainder) to make total divisible by 3
+                    tiles_to_add_to_goal = 3 - total_remainder
+                    goal_idx = 0
+                    added_to_goal = 0
 
-                    adjacent_empty = []
-                    for pos in used:
-                        parts = pos.split("_")
-                        if len(parts) != 2:
-                            continue
-                        x, y = int(parts[0]), int(parts[1])
-                        # Check 4-directional neighbors
-                        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                            nx, ny = x + dx, y + dy
-                            if 0 <= nx < layer_cols and 0 <= ny < layer_rows:
-                                neighbor_pos = f"{nx}_{ny}"
-                                if neighbor_pos not in used and neighbor_pos not in adjacent_empty:
-                                    adjacent_empty.append(neighbor_pos)
-                    return adjacent_empty
+                    while added_to_goal < tiles_to_add_to_goal and goal_idx < len(goal_tiles_with_internal) * 3:
+                        layer_idx, pos, tile_data = goal_tiles_with_internal[goal_idx % len(goal_tiles_with_internal)]
+                        if isinstance(tile_data[2], list) and tile_data[2]:
+                            current_count = int(tile_data[2][0]) if tile_data[2][0] else 0
+                            tile_data[2][0] = current_count + 1
+                            added_to_goal += 1
+                            total_matchable += 1
+                        goal_idx += 1
 
-                # Try to add tiles adjacent to existing pattern
-                for i in range(num_layers):
-                    if added_count >= tiles_to_add:
-                        break
-                    layer_key = f"layer_{i}"
-                    layer_data = level.get(layer_key, {})
-                    tiles = layer_data.get("tiles", {})
-                    if not tiles:
-                        continue
+                    if added_to_goal >= tiles_to_add_to_goal:
+                        pattern_fix_success = True
+                        logger.info(f"[PATTERN_MODE] Added {added_to_goal} to goal internal tiles for 3-divisibility (shape preserved)")
 
-                    adjacent_positions = get_adjacent_empty_positions(i)
-                    random.shuffle(adjacent_positions)
+                        # Update goalCount
+                        goalCount = {}
+                        for _, _, td in goal_tiles_with_internal:
+                            tile_type = td[0]
+                            internal_count = int(td[2][0]) if isinstance(td[2], list) and td[2] else 0
+                            goalCount[tile_type] = goalCount.get(tile_type, 0) + internal_count
+                        level["goalCount"] = goalCount
 
-                    for pos in adjacent_positions:
+                # === PRIORITY 2: Tile type redistribution ===
+                # If no goal tiles but total is somehow already 3-divisible after redistribution
+                # This is handled by _redistribute_tile_types_for_divisibility earlier
+
+                # === PRIORITY 3: Add tiles adjacent to pattern (last resort) ===
+                if not pattern_fix_success:
+                    logger.warning("[PATTERN_MODE] No goal tiles available, falling back to adjacent tile addition")
+
+                    # Find positions adjacent to existing pattern tiles (to maintain cohesion)
+                    def get_adjacent_empty_positions(layer_idx: int) -> List[str]:
+                        is_odd_layer = layer_idx % 2 == 1
+                        layer_cols = cols if is_odd_layer else cols + 1
+                        layer_rows = rows if is_odd_layer else rows + 1
+                        layer_tiles = level.get(f"layer_{layer_idx}", {}).get("tiles", {})
+                        used = set(layer_tiles.keys())
+
+                        adjacent_empty = []
+                        for pos in used:
+                            parts = pos.split("_")
+                            if len(parts) != 2:
+                                continue
+                            x, y = int(parts[0]), int(parts[1])
+                            # Check 4-directional neighbors
+                            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                                nx, ny = x + dx, y + dy
+                                if 0 <= nx < layer_cols and 0 <= ny < layer_rows:
+                                    neighbor_pos = f"{nx}_{ny}"
+                                    if neighbor_pos not in used and neighbor_pos not in adjacent_empty:
+                                        adjacent_empty.append(neighbor_pos)
+                        return adjacent_empty
+
+                    # Try to add tiles adjacent to existing pattern
+                    for i in range(num_layers):
                         if added_count >= tiles_to_add:
                             break
-                        # Add a t1 tile to this position
-                        level[layer_key]["tiles"][pos] = ["t1", ""]
-                        level[layer_key]["num"] = str(len(level[layer_key]["tiles"]))
-                        added_count += 1
-                        logger.debug(f"[PATTERN_MODE] Added tile at {pos} on layer {i} for 3-divisibility")
+                        layer_key = f"layer_{i}"
+                        layer_data = level.get(layer_key, {})
+                        tiles = layer_data.get("tiles", {})
+                        if not tiles:
+                            continue
 
-                if added_count >= tiles_to_add:
-                    logger.info(f"[PATTERN_MODE] Successfully added {added_count} tiles to preserve pattern shape")
-                else:
-                    logger.warning(f"[PATTERN_MODE] Could only add {added_count}/{tiles_to_add} tiles - may need fallback")
+                        adjacent_positions = get_adjacent_empty_positions(i)
+                        random.shuffle(adjacent_positions)
+
+                        for pos in adjacent_positions:
+                            if added_count >= tiles_to_add:
+                                break
+                            # Add a t1 tile to this position
+                            level[layer_key]["tiles"][pos] = ["t1", ""]
+                            level[layer_key]["num"] = str(len(level[layer_key]["tiles"]))
+                            added_count += 1
+                            logger.debug(f"[PATTERN_MODE] Added tile at {pos} on layer {i} for 3-divisibility")
+
+                    if added_count >= tiles_to_add:
+                        logger.info(f"[PATTERN_MODE] Fallback: Added {added_count} tiles adjacent to pattern")
+                    else:
+                        logger.warning(f"[PATTERN_MODE] Fallback: Could only add {added_count}/{tiles_to_add} tiles")
 
             # For symmetric patterns (non-pattern mode), try to remove tiles to make total divisible
             # Strategy: Since symmetric addition is complex, use tile type redistribution
@@ -10669,55 +10700,99 @@ class LevelGenerator:
 
         if total_remainder != 0:
             if preserve_pattern:
-                # PATTERN MODE: Add tiles instead of removing to preserve shape
+                # PATTERN MODE: Priority-based approach to preserve shape
+                # 1. Adjust goal internal tile count (preserves shape 100%)
+                # 2. Add tiles adjacent to pattern (last resort)
                 tiles_to_add = 3 - total_remainder
-                added_count = 0
+                pattern_fix_success = False
 
-                # Helper: Find positions adjacent to existing tiles
-                def get_adjacent_empty_positions_for_layer(layer_idx: int) -> List[str]:
-                    is_odd_layer = layer_idx % 2 == 1
-                    layer_cols = cols if is_odd_layer else cols + 1
-                    layer_rows = rows if is_odd_layer else rows + 1
-                    layer_tiles = level.get(f"layer_{layer_idx}", {}).get("tiles", {})
-                    used = set(layer_tiles.keys())
-
-                    adjacent_empty = []
-                    for pos in used:
-                        parts = pos.split("_")
-                        if len(parts) != 2:
-                            continue
-                        x, y = int(parts[0]), int(parts[1])
-                        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                            nx, ny = x + dx, y + dy
-                            if 0 <= nx < layer_cols and 0 <= ny < layer_rows:
-                                neighbor_pos = f"{nx}_{ny}"
-                                if neighbor_pos not in used and neighbor_pos not in adjacent_empty:
-                                    adjacent_empty.append(neighbor_pos)
-                    return adjacent_empty
-
+                # === PRIORITY 1: Adjust goal internal tile count ===
+                # Collect goal tiles with internal counts
+                force_goal_tiles = []
                 for i in range(num_layers):
-                    if added_count >= tiles_to_add:
-                        break
                     layer_key = f"layer_{i}"
-                    if not level.get(layer_key, {}).get("tiles", {}):
-                        continue
+                    tiles = level.get(layer_key, {}).get("tiles", {})
+                    for pos, tile_data in tiles.items():
+                        if isinstance(tile_data, list) and len(tile_data) > 0:
+                            tile_type = tile_data[0]
+                            if tile_type.startswith("craft_") or tile_type.startswith("stack_"):
+                                if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
+                                    force_goal_tiles.append((i, pos, tile_data))
 
-                    adjacent_positions = get_adjacent_empty_positions_for_layer(i)
-                    random.shuffle(adjacent_positions)
+                if force_goal_tiles:
+                    goal_idx = 0
+                    added_to_goal = 0
+                    while added_to_goal < tiles_to_add and goal_idx < len(force_goal_tiles) * 3:
+                        layer_idx, pos, tile_data = force_goal_tiles[goal_idx % len(force_goal_tiles)]
+                        if isinstance(tile_data[2], list) and tile_data[2]:
+                            current_count = int(tile_data[2][0]) if tile_data[2][0] else 0
+                            tile_data[2][0] = current_count + 1
+                            added_to_goal += 1
+                            total_matchable += 1
+                        goal_idx += 1
 
-                    for pos in adjacent_positions:
+                    if added_to_goal >= tiles_to_add:
+                        pattern_fix_success = True
+                        logger.info(f"[FORCE_FIX_PATTERN] Added {added_to_goal} to goal internal tiles (shape preserved)")
+
+                        # Update goalCount
+                        goalCount = {}
+                        for _, _, td in force_goal_tiles:
+                            tile_type = td[0]
+                            internal_count = int(td[2][0]) if isinstance(td[2], list) and td[2] else 0
+                            goalCount[tile_type] = goalCount.get(tile_type, 0) + internal_count
+                        level["goalCount"] = goalCount
+
+                # === PRIORITY 2: Add tiles adjacent to pattern (last resort) ===
+                if not pattern_fix_success:
+                    added_count = 0
+                    logger.warning("[FORCE_FIX_PATTERN] No goal tiles, falling back to adjacent tile addition")
+
+                    # Helper: Find positions adjacent to existing tiles
+                    def get_adjacent_empty_positions_for_layer(layer_idx: int) -> List[str]:
+                        is_odd_layer = layer_idx % 2 == 1
+                        layer_cols = cols if is_odd_layer else cols + 1
+                        layer_rows = rows if is_odd_layer else rows + 1
+                        layer_tiles = level.get(f"layer_{layer_idx}", {}).get("tiles", {})
+                        used = set(layer_tiles.keys())
+
+                        adjacent_empty = []
+                        for pos in used:
+                            parts = pos.split("_")
+                            if len(parts) != 2:
+                                continue
+                            x, y = int(parts[0]), int(parts[1])
+                            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                                nx, ny = x + dx, y + dy
+                                if 0 <= nx < layer_cols and 0 <= ny < layer_rows:
+                                    neighbor_pos = f"{nx}_{ny}"
+                                    if neighbor_pos not in used and neighbor_pos not in adjacent_empty:
+                                        adjacent_empty.append(neighbor_pos)
+                        return adjacent_empty
+
+                    for i in range(num_layers):
                         if added_count >= tiles_to_add:
                             break
-                        level[layer_key]["tiles"][pos] = ["t1", ""]
-                        level[layer_key]["num"] = str(len(level[layer_key]["tiles"]))
-                        added_count += 1
-                        total_matchable += 1
-                        logger.debug(f"[FORCE_FIX_PATTERN] Added tile at {pos} on layer {i}")
+                        layer_key = f"layer_{i}"
+                        if not level.get(layer_key, {}).get("tiles", {}):
+                            continue
 
-                if added_count >= tiles_to_add:
-                    logger.info(f"[FORCE_FIX_PATTERN] Added {added_count} tiles to preserve pattern and achieve 3-divisibility")
-                else:
-                    logger.warning(f"[FORCE_FIX_PATTERN] Could only add {added_count}/{tiles_to_add} tiles")
+                        adjacent_positions = get_adjacent_empty_positions_for_layer(i)
+                        random.shuffle(adjacent_positions)
+
+                        for pos in adjacent_positions:
+                            if added_count >= tiles_to_add:
+                                break
+                            level[layer_key]["tiles"][pos] = ["t1", ""]
+                            level[layer_key]["num"] = str(len(level[layer_key]["tiles"]))
+                            added_count += 1
+                            total_matchable += 1
+                            logger.debug(f"[FORCE_FIX_PATTERN] Added tile at {pos} on layer {i}")
+
+                    if added_count >= tiles_to_add:
+                        logger.info(f"[FORCE_FIX_PATTERN] Fallback: Added {added_count} adjacent tiles")
+                    else:
+                        logger.warning(f"[FORCE_FIX_PATTERN] Fallback: Could only add {added_count}/{tiles_to_add} tiles")
             else:
                 # Non-pattern mode: remove tiles as before
                 tiles_to_remove = total_remainder

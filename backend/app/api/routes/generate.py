@@ -2202,7 +2202,8 @@ def enhance_level(
     target_rates = calculate_target_clear_rates(request.target_difficulty)
 
     # --- Step 1: Measure current state ---
-    bot_types = [BotType.NOVICE, BotType.CASUAL, BotType.AVERAGE, BotType.EXPERT, BotType.OPTIMAL]
+    # [v15.14] 검증용 봇: AVERAGE/EXPERT/OPTIMAL 3개만 사용 (NOVICE 랜덤, CASUAL 변동성 높음)
+    bot_types = [BotType.AVERAGE, BotType.EXPERT, BotType.OPTIMAL]
     max_moves_val = level_json.get("max_moves", 50)
 
     def _run_simulation(lj: Dict) -> Dict[str, float]:

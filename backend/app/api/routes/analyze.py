@@ -43,13 +43,17 @@ BOT_DISPLAY_NAMES = {
 }
 
 # Bot weights for difficulty calculation (mid-tier bots weighted higher)
+# [v15.14] NOVICE(랜덤), CASUAL(신뢰도 낮음) 제외 - AVERAGE/EXPERT/OPTIMAL만 검증에 사용
 BOT_WEIGHTS = {
-    "novice": 1.0,
-    "casual": 1.5,
+    "novice": 0.0,   # 제외: 45% 실수율로 거의 랜덤 - 신뢰도 낮음
+    "casual": 0.0,   # 제외: 25% 실수율 - 변동성 높음
     "average": 2.0,  # Most weight on average player
     "expert": 1.5,
-    "optimal": 1.0,
+    "optimal": 1.0,  # 최적 플레이 기준선
 }
+
+# [v15.14] 검증용 봇 목록 - 신뢰도 높은 봇만 포함
+VALIDATION_BOT_PROFILES = ["average", "expert", "optimal"]
 
 
 def calculate_target_clear_rates(target_difficulty: float) -> Dict[str, float]:
@@ -450,10 +454,11 @@ def analyze_autoplay(
         target_rates = calculate_target_clear_rates(difficulty_for_targets)
 
         # Determine which bot profiles to use
+        # [v15.14] 기본값: CASUAL/AVERAGE/EXPERT 3개 봇만 사용 (검증 신뢰도 향상)
         if request.bot_profiles:
             profiles = [p.lower() for p in request.bot_profiles if p.lower() in BASE_TARGET_CLEAR_RATES]
         else:
-            profiles = list(BASE_TARGET_CLEAR_RATES.keys())
+            profiles = VALIDATION_BOT_PROFILES.copy()
 
         if not profiles:
             raise HTTPException(

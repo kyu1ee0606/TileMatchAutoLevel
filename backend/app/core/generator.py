@@ -9754,7 +9754,7 @@ class LevelGenerator:
         # Adjust total to be divisible by 3 (NOT modifying goal counts)
         # User-specified goal internal counts should be preserved
         # Strategy: Try to add tiles first, if not possible then remove tiles
-        # CRITICAL: For symmetric patterns, we must add/remove tiles symmetrically!
+        # CRITICAL: For pattern mode, NEVER remove tiles - only add to preserve shape!
         total_remainder = total_matchable % 3
         tiles_were_removed = False  # Track if we removed tiles for total adjustment
         symmetry_mode = params.symmetry_mode or "none"
@@ -9766,10 +9766,74 @@ class LevelGenerator:
             tiles_to_add = 3 - total_remainder
             added_count = 0
 
-            # For symmetric patterns, we need to add/remove tiles to reach divisible by 3
+            # PATTERN MODE FIX: When preserve_pattern is True, NEVER delete tiles
+            # Instead, always add tiles to reach 3-divisibility
+            # This preserves the visual pattern shape
+            if preserve_pattern:
+                # Collect existing tile positions to find adjacent empty slots
+                existing_positions: Set[Tuple[int, int]] = set()
+                for i in range(num_layers):
+                    layer_key = f"layer_{i}"
+                    tiles = level.get(layer_key, {}).get("tiles", {})
+                    for pos in tiles.keys():
+                        parts = pos.split("_")
+                        if len(parts) == 2:
+                            existing_positions.add((int(parts[0]), int(parts[1])))
+
+                # Find positions adjacent to existing pattern tiles (to maintain cohesion)
+                def get_adjacent_empty_positions(layer_idx: int) -> List[str]:
+                    is_odd_layer = layer_idx % 2 == 1
+                    layer_cols = cols if is_odd_layer else cols + 1
+                    layer_rows = rows if is_odd_layer else rows + 1
+                    layer_tiles = level.get(f"layer_{layer_idx}", {}).get("tiles", {})
+                    used = set(layer_tiles.keys())
+
+                    adjacent_empty = []
+                    for pos in used:
+                        parts = pos.split("_")
+                        if len(parts) != 2:
+                            continue
+                        x, y = int(parts[0]), int(parts[1])
+                        # Check 4-directional neighbors
+                        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                            nx, ny = x + dx, y + dy
+                            if 0 <= nx < layer_cols and 0 <= ny < layer_rows:
+                                neighbor_pos = f"{nx}_{ny}"
+                                if neighbor_pos not in used and neighbor_pos not in adjacent_empty:
+                                    adjacent_empty.append(neighbor_pos)
+                    return adjacent_empty
+
+                # Try to add tiles adjacent to existing pattern
+                for i in range(num_layers):
+                    if added_count >= tiles_to_add:
+                        break
+                    layer_key = f"layer_{i}"
+                    layer_data = level.get(layer_key, {})
+                    tiles = layer_data.get("tiles", {})
+                    if not tiles:
+                        continue
+
+                    adjacent_positions = get_adjacent_empty_positions(i)
+                    random.shuffle(adjacent_positions)
+
+                    for pos in adjacent_positions:
+                        if added_count >= tiles_to_add:
+                            break
+                        # Add a t1 tile to this position
+                        level[layer_key]["tiles"][pos] = ["t1", ""]
+                        level[layer_key]["num"] = str(len(level[layer_key]["tiles"]))
+                        added_count += 1
+                        logger.debug(f"[PATTERN_MODE] Added tile at {pos} on layer {i} for 3-divisibility")
+
+                if added_count >= tiles_to_add:
+                    logger.info(f"[PATTERN_MODE] Successfully added {added_count} tiles to preserve pattern shape")
+                else:
+                    logger.warning(f"[PATTERN_MODE] Could only add {added_count}/{tiles_to_add} tiles - may need fallback")
+
+            # For symmetric patterns (non-pattern mode), try to remove tiles to make total divisible
             # Strategy: Since symmetric addition is complex, use tile type redistribution
             # If redistribution fails, we'll use _force_fix_tile_counts later
-            if symmetry_mode in ("horizontal", "vertical", "both"):
+            elif symmetry_mode in ("horizontal", "vertical", "both"):
                 # For symmetric patterns, try to remove tiles to make total divisible
                 # Remove remainder tiles (1 or 2) from center positions or paired positions
                 cols, rows = params.grid_size
@@ -9835,8 +9899,8 @@ class LevelGenerator:
 
             # If adding tiles failed (no available positions), remove tiles instead
             # If remainder=1, remove 1 tile. If remainder=2, remove 2 tiles.
-            # CRITICAL: For symmetric patterns, we SKIP removal to preserve symmetry!
-            if added_count < tiles_to_add and symmetry_mode == "none":
+            # CRITICAL: For symmetric patterns OR pattern mode, we SKIP removal to preserve shape!
+            if added_count < tiles_to_add and symmetry_mode == "none" and not preserve_pattern:
                 tiles_to_remove = total_remainder  # 1 or 2
                 removed_count = 0
 
@@ -9869,6 +9933,8 @@ class LevelGenerator:
 
                 if removed_count > 0:
                     tiles_were_removed = True
+            elif added_count < tiles_to_add and preserve_pattern:
+                logger.info(f"[PATTERN_MODE] Skipped tile removal to preserve pattern shape (need {tiles_to_add - added_count} more tiles)")
 
         # Step 1: Count each tile type across all layers
         # IMPORTANT: Also count internal tiles in craft/stack containers as t0
@@ -10596,38 +10662,91 @@ class LevelGenerator:
             for tile_type in t0_assignments:
                 type_counts[tile_type] = type_counts.get(tile_type, 0) + 1
 
-        # If total is not divisible by 3, remove tiles
-        # PATTERN MODE: Allow minimal deletion - playability is priority
-        # "클리어 불가능한 레벨 절대로 생성되면안됨"
+        # If total is not divisible by 3, adjust tiles
+        # PATTERN MODE: NEVER delete - always add tiles to preserve shape
         total_remainder = total_matchable % 3
+        cols, rows = params.grid_size if params and params.grid_size else (7, 7)
+
         if total_remainder != 0:
-            tiles_to_remove = total_remainder
+            if preserve_pattern:
+                # PATTERN MODE: Add tiles instead of removing to preserve shape
+                tiles_to_add = 3 - total_remainder
+                added_count = 0
 
-            # Find removable tiles - prefer tiles without attributes, but allow any regular tile
-            removable_no_attr = []
-            removable_with_attr = []
-            for i in range(num_layers):
-                layer_key = f"layer_{i}"
-                tiles = level.get(layer_key, {}).get("tiles", {})
-                for pos, tile_data in tiles.items():
-                    if isinstance(tile_data, list) and len(tile_data) >= 2:
-                        tile_type = tile_data[0]
-                        attr = tile_data[1] if len(tile_data) > 1 else ""
-                        if tile_type not in self.GOAL_TYPES and not tile_type.startswith("craft_") and not tile_type.startswith("stack_"):
-                            if not attr:
-                                removable_no_attr.append((i, pos, tile_type))
-                            else:
-                                removable_with_attr.append((i, pos, tile_type))
+                # Helper: Find positions adjacent to existing tiles
+                def get_adjacent_empty_positions_for_layer(layer_idx: int) -> List[str]:
+                    is_odd_layer = layer_idx % 2 == 1
+                    layer_cols = cols if is_odd_layer else cols + 1
+                    layer_rows = rows if is_odd_layer else rows + 1
+                    layer_tiles = level.get(f"layer_{layer_idx}", {}).get("tiles", {})
+                    used = set(layer_tiles.keys())
 
-            # Combine: prefer no-attr tiles, but use attr tiles if needed
-            removable = removable_no_attr + removable_with_attr
+                    adjacent_empty = []
+                    for pos in used:
+                        parts = pos.split("_")
+                        if len(parts) != 2:
+                            continue
+                        x, y = int(parts[0]), int(parts[1])
+                        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                            nx, ny = x + dx, y + dy
+                            if 0 <= nx < layer_cols and 0 <= ny < layer_rows:
+                                neighbor_pos = f"{nx}_{ny}"
+                                if neighbor_pos not in used and neighbor_pos not in adjacent_empty:
+                                    adjacent_empty.append(neighbor_pos)
+                    return adjacent_empty
 
-            random.shuffle(removable)
-            for layer_idx, pos, _ in removable[:tiles_to_remove]:
-                layer_key = f"layer_{layer_idx}"
-                if pos in level.get(layer_key, {}).get("tiles", {}):
-                    del level[layer_key]["tiles"][pos]
-                    level[layer_key]["num"] = str(len(level[layer_key]["tiles"]))
+                for i in range(num_layers):
+                    if added_count >= tiles_to_add:
+                        break
+                    layer_key = f"layer_{i}"
+                    if not level.get(layer_key, {}).get("tiles", {}):
+                        continue
+
+                    adjacent_positions = get_adjacent_empty_positions_for_layer(i)
+                    random.shuffle(adjacent_positions)
+
+                    for pos in adjacent_positions:
+                        if added_count >= tiles_to_add:
+                            break
+                        level[layer_key]["tiles"][pos] = ["t1", ""]
+                        level[layer_key]["num"] = str(len(level[layer_key]["tiles"]))
+                        added_count += 1
+                        total_matchable += 1
+                        logger.debug(f"[FORCE_FIX_PATTERN] Added tile at {pos} on layer {i}")
+
+                if added_count >= tiles_to_add:
+                    logger.info(f"[FORCE_FIX_PATTERN] Added {added_count} tiles to preserve pattern and achieve 3-divisibility")
+                else:
+                    logger.warning(f"[FORCE_FIX_PATTERN] Could only add {added_count}/{tiles_to_add} tiles")
+            else:
+                # Non-pattern mode: remove tiles as before
+                tiles_to_remove = total_remainder
+
+                # Find removable tiles - prefer tiles without attributes, but allow any regular tile
+                removable_no_attr = []
+                removable_with_attr = []
+                for i in range(num_layers):
+                    layer_key = f"layer_{i}"
+                    tiles = level.get(layer_key, {}).get("tiles", {})
+                    for pos, tile_data in tiles.items():
+                        if isinstance(tile_data, list) and len(tile_data) >= 2:
+                            tile_type = tile_data[0]
+                            attr = tile_data[1] if len(tile_data) > 1 else ""
+                            if tile_type not in self.GOAL_TYPES and not tile_type.startswith("craft_") and not tile_type.startswith("stack_"):
+                                if not attr:
+                                    removable_no_attr.append((i, pos, tile_type))
+                                else:
+                                    removable_with_attr.append((i, pos, tile_type))
+
+                # Combine: prefer no-attr tiles, but use attr tiles if needed
+                removable = removable_no_attr + removable_with_attr
+
+                random.shuffle(removable)
+                for layer_idx, pos, _ in removable[:tiles_to_remove]:
+                    layer_key = f"layer_{layer_idx}"
+                    if pos in level.get(layer_key, {}).get("tiles", {}):
+                        del level[layer_key]["tiles"][pos]
+                        level[layer_key]["num"] = str(len(level[layer_key]["tiles"]))
 
         # Recount and fix type distribution
         # CRITICAL: Must include t0 distribution to accurately identify which types need fixing

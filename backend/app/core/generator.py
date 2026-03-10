@@ -9309,7 +9309,12 @@ class LevelGenerator:
                 t0_count += int(tile_data[2][0])
 
         t0_remainder = t0_count % 3
-        if t0_remainder != 0 and goal_tiles:
+        # PATTERN MODE: Skip goal adjustment here - let _ensure_tile_count_divisible_by_3 handle it
+        # This prevents duplicate adjustments that cause goal counts to balloon
+        preserve_pattern = level.get("_preserve_pattern", False)
+        already_fixed = level.get("_goal_divisibility_fixed", False)
+
+        if t0_remainder != 0 and goal_tiles and not preserve_pattern and not already_fixed:
             # Need to add (3 - remainder) internal tiles to make t0 divisible by 3
             tiles_to_add_t0 = 3 - t0_remainder  # 1 or 2
 
@@ -9328,7 +9333,10 @@ class LevelGenerator:
                 if goal_idx > len(goal_tiles) * 3:
                     break
 
+            level["_goal_divisibility_fixed"] = True  # Mark as fixed
             logger.info(f"[_fix_goal_counts] Adjusted goal internals (t0) to {t0_count} (divisible by 3)")
+        elif preserve_pattern:
+            logger.debug("[_fix_goal_counts] Pattern mode: skipping goal adjustment (will be handled later)")
 
         # Step 4: Total divisibility will be handled by _ensure_tile_count_divisible_by_3
         # DO NOT add more to goals here - that would break t0 divisibility
@@ -9771,8 +9779,12 @@ class LevelGenerator:
             # 1. Adjust goal (craft/stack) internal tile count
             # 2. Tile type redistribution (if total already divisible)
             # 3. Add tiles adjacent to pattern (last resort)
+            #
+            # CRITICAL: Check if already fixed to prevent duplicate adjustments
             if preserve_pattern:
-                pattern_fix_success = False
+                # Check if goal adjustment was already done
+                already_fixed = level.get("_goal_divisibility_fixed", False)
+                pattern_fix_success = already_fixed
 
                 # === PRIORITY 1: Adjust goal internal tile count ===
                 # This preserves pattern shape 100% by changing goal's internal t0 count
@@ -9793,6 +9805,7 @@ class LevelGenerator:
 
                     if added_to_goal >= tiles_to_add_to_goal:
                         pattern_fix_success = True
+                        level["_goal_divisibility_fixed"] = True  # Mark as fixed
                         logger.info(f"[PATTERN_MODE] Added {added_to_goal} to goal internal tiles for 3-divisibility (shape preserved)")
 
                         # Update goalCount
@@ -10177,7 +10190,10 @@ class LevelGenerator:
         t0_in_broken = [r for t, r in still_broken if t == "t0"]
         other_broken = [(t, r) for t, r in still_broken if t != "t0"]
 
-        if t0_in_broken and goal_tiles_with_internal:
+        # CRITICAL: Check if already fixed to prevent duplicate adjustments
+        already_fixed_t0 = level.get("_goal_divisibility_fixed", False)
+
+        if t0_in_broken and goal_tiles_with_internal and not already_fixed_t0:
             t0_remainder = t0_in_broken[0]  # 1 or 2
             t0_count_current = type_counts_final.get("t0", 0)
 
@@ -10215,6 +10231,7 @@ class LevelGenerator:
                         level["goalCount"][goal_type] = level["goalCount"].get(goal_type, 0) + 1
 
             if added_to_goal > 0:
+                level["_goal_divisibility_fixed"] = True  # Mark as fixed
                 logger.info(
                     f"[_ensure_tile_count_divisible_by_3] Added {added_to_goal} to goal internal tiles "
                     f"to fix t0 remainder ({t0_remainder})"
@@ -10624,7 +10641,10 @@ class LevelGenerator:
                             goal_tiles.append((i, pos, tile_data))
 
         t0_remainder = t0_count % 3
-        if t0_remainder != 0 and goal_tiles:
+        # CRITICAL: Check if already fixed to prevent duplicate adjustments
+        already_fixed = level.get("_goal_divisibility_fixed", False)
+
+        if t0_remainder != 0 and goal_tiles and not already_fixed:
             # Add (3 - remainder) to goal internal counts to make t0 divisible by 3
             tiles_to_add = 3 - t0_remainder
             goal_idx = 0
@@ -10637,6 +10657,9 @@ class LevelGenerator:
                 goal_idx += 1
                 if goal_idx > len(goal_tiles) * 3:
                     break
+            level["_goal_divisibility_fixed"] = True  # Mark as fixed
+        elif already_fixed and t0_remainder != 0:
+            logger.debug("[_force_fix_tile_counts] Skipping t0 adjustment (already fixed)")
 
             # Update goalCount
             goalCount = {}
@@ -10703,37 +10726,42 @@ class LevelGenerator:
                 # PATTERN MODE: Priority-based approach to preserve shape
                 # 1. Adjust goal internal tile count (preserves shape 100%)
                 # 2. Add tiles adjacent to pattern (last resort)
+                #
+                # CRITICAL: Check if already fixed to prevent duplicate adjustments
+                already_fixed = level.get("_goal_divisibility_fixed", False)
                 tiles_to_add = 3 - total_remainder
-                pattern_fix_success = False
+                pattern_fix_success = already_fixed
 
                 # === PRIORITY 1: Adjust goal internal tile count ===
                 # Collect goal tiles with internal counts
-                force_goal_tiles = []
-                for i in range(num_layers):
-                    layer_key = f"layer_{i}"
-                    tiles = level.get(layer_key, {}).get("tiles", {})
-                    for pos, tile_data in tiles.items():
-                        if isinstance(tile_data, list) and len(tile_data) > 0:
-                            tile_type = tile_data[0]
-                            if tile_type.startswith("craft_") or tile_type.startswith("stack_"):
-                                if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
-                                    force_goal_tiles.append((i, pos, tile_data))
+                if not pattern_fix_success:
+                    force_goal_tiles = []
+                    for i in range(num_layers):
+                        layer_key = f"layer_{i}"
+                        tiles = level.get(layer_key, {}).get("tiles", {})
+                        for pos, tile_data in tiles.items():
+                            if isinstance(tile_data, list) and len(tile_data) > 0:
+                                tile_type = tile_data[0]
+                                if tile_type.startswith("craft_") or tile_type.startswith("stack_"):
+                                    if len(tile_data) > 2 and isinstance(tile_data[2], list) and tile_data[2]:
+                                        force_goal_tiles.append((i, pos, tile_data))
 
-                if force_goal_tiles:
-                    goal_idx = 0
-                    added_to_goal = 0
-                    while added_to_goal < tiles_to_add and goal_idx < len(force_goal_tiles) * 3:
-                        layer_idx, pos, tile_data = force_goal_tiles[goal_idx % len(force_goal_tiles)]
-                        if isinstance(tile_data[2], list) and tile_data[2]:
-                            current_count = int(tile_data[2][0]) if tile_data[2][0] else 0
-                            tile_data[2][0] = current_count + 1
-                            added_to_goal += 1
-                            total_matchable += 1
-                        goal_idx += 1
+                    if force_goal_tiles:
+                        goal_idx = 0
+                        added_to_goal = 0
+                        while added_to_goal < tiles_to_add and goal_idx < len(force_goal_tiles) * 3:
+                            layer_idx, pos, tile_data = force_goal_tiles[goal_idx % len(force_goal_tiles)]
+                            if isinstance(tile_data[2], list) and tile_data[2]:
+                                current_count = int(tile_data[2][0]) if tile_data[2][0] else 0
+                                tile_data[2][0] = current_count + 1
+                                added_to_goal += 1
+                                total_matchable += 1
+                            goal_idx += 1
 
-                    if added_to_goal >= tiles_to_add:
-                        pattern_fix_success = True
-                        logger.info(f"[FORCE_FIX_PATTERN] Added {added_to_goal} to goal internal tiles (shape preserved)")
+                        if added_to_goal >= tiles_to_add:
+                            pattern_fix_success = True
+                            level["_goal_divisibility_fixed"] = True  # Mark as fixed
+                            logger.info(f"[FORCE_FIX_PATTERN] Added {added_to_goal} to goal internal tiles (shape preserved)")
 
                         # Update goalCount
                         goalCount = {}
@@ -11073,7 +11101,10 @@ class LevelGenerator:
         # The issue is t0_count % 3 remainder being assigned to last type
         # Fix: Adjust goal internal tile counts to make t0_count divisible by 3
         t0_remainder = t0_count % 3
-        if t0_remainder != 0:
+        # CRITICAL: Check if already fixed to prevent duplicate adjustments
+        already_fixed = level.get("_goal_divisibility_fixed", False)
+
+        if t0_remainder != 0 and not already_fixed:
             tiles_to_add = 3 - t0_remainder
             # Find goal tiles to adjust
             goal_tiles = []
@@ -11102,7 +11133,10 @@ class LevelGenerator:
                 if goal_idx > len(goal_tiles) * 3:
                     break
 
-            # Update goalCount
+            # Mark as fixed and update goalCount
+            if added > 0:
+                level["_goal_divisibility_fixed"] = True
+
             if goal_tiles:
                 goalCount = {}
                 for layer_idx, pos, tile_data in goal_tiles:
@@ -11110,6 +11144,8 @@ class LevelGenerator:
                     internal_count = int(tile_data[2][0]) if isinstance(tile_data[2], list) and tile_data[2] else 0
                     goalCount[tile_type] = goalCount.get(tile_type, 0) + internal_count
                 level["goalCount"] = goalCount
+        elif already_fixed and t0_remainder != 0:
+            logger.debug("[_ensure_valid_t0_distribution] Skipping t0 adjustment (already fixed)")
 
         # Use best seed found
         level["randSeed"] = best_seed

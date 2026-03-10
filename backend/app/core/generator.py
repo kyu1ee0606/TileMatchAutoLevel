@@ -1107,6 +1107,75 @@ class LevelGenerator:
                 f"available_dock={available_dock}"
             )
 
+            # CRITICAL FIX: Convert out-of-range tile types to valid range
+            # When useTileCount is reduced, existing tiles may be out of range
+            # Strategy: Count current distribution, then redistribute to maintain 3-divisibility
+            num_layers = level.get("layer", 8)
+            valid_range = {f"t{i}" for i in range(1, new_tile_count + 1)}
+            valid_types_list = [f"t{i}" for i in range(1, new_tile_count + 1)]
+
+            # Step 1: Count tiles by type and identify out-of-range positions
+            type_counts: Dict[str, int] = {}
+            out_of_range_positions: List[Tuple[int, str]] = []  # (layer_idx, pos)
+
+            for i in range(num_layers):
+                layer_key = f"layer_{i}"
+                tiles = level.get(layer_key, {}).get("tiles", {})
+                for pos, tile_data in tiles.items():
+                    if isinstance(tile_data, list) and len(tile_data) > 0:
+                        tile_type = tile_data[0]
+                        if tile_type.startswith("craft_") or tile_type.startswith("stack_"):
+                            continue
+                        if tile_type.startswith("t"):
+                            if tile_type in valid_range:
+                                type_counts[tile_type] = type_counts.get(tile_type, 0) + 1
+                            else:
+                                out_of_range_positions.append((i, pos))
+
+            if out_of_range_positions:
+                # Step 2: Calculate how many tiles each valid type needs to be 3-divisible
+                # Total tiles to redistribute
+                tiles_to_redistribute = len(out_of_range_positions)
+
+                # Find types that need more tiles to be 3-divisible
+                type_needs: Dict[str, int] = {}
+                for t in valid_types_list:
+                    current = type_counts.get(t, 0)
+                    remainder = current % 3
+                    if remainder == 1:
+                        type_needs[t] = 2  # Need 2 more to make divisible
+                    elif remainder == 2:
+                        type_needs[t] = 1  # Need 1 more to make divisible
+                    else:
+                        type_needs[t] = 0  # Already divisible
+
+                # Step 3: Redistribute out-of-range tiles
+                redistributed = 0
+                for layer_idx, pos in out_of_range_positions:
+                    layer_key = f"layer_{layer_idx}"
+                    tile_data = level[layer_key]["tiles"].get(pos)
+                    if not tile_data:
+                        continue
+
+                    # Find best type to assign (prioritize types that need more)
+                    best_type = None
+                    for t in sorted(type_needs.keys(), key=lambda x: -type_needs.get(x, 0)):
+                        if type_needs.get(t, 0) > 0:
+                            best_type = t
+                            break
+
+                    if not best_type:
+                        # All types are divisible, pick one that can accept 3 more
+                        # Find type with lowest count
+                        best_type = min(valid_types_list, key=lambda x: type_counts.get(x, 0))
+
+                    tile_data[0] = best_type
+                    type_counts[best_type] = type_counts.get(best_type, 0) + 1
+                    type_needs[best_type] = max(0, type_needs.get(best_type, 0) - 1)
+                    redistributed += 1
+
+                logger.info(f"[_validate_dock_tile_compatibility] Redistributed {redistributed} tiles to valid range t1~t{new_tile_count}")
+
         return level
 
     def _validate_and_fix_key_tile_count(self, level: Dict[str, Any]) -> Dict[str, Any]:
@@ -1471,6 +1540,18 @@ class LevelGenerator:
         else:
             # No valid tiles, use default of 15 (matches TownPop client - t1~t15 균등 분배)
             use_tile_count = 15
+
+        # CRITICAL: Apply dock capacity limit EARLY to ensure tile_types are valid from the start
+        # 독 슬롯 수 대비 타일 종류가 너무 많으면 데드락 발생
+        # 안전 기준: useTileCount <= (7 - unlockTile) + 2
+        unlock_tile = 0
+        if hasattr(params, 'unlock_tile') and params.unlock_tile is not None:
+            unlock_tile = params.unlock_tile
+        available_dock = 7 - unlock_tile
+        safe_max_tile_count = available_dock + 2  # e.g., 9 for unlockTile=0
+        if use_tile_count > safe_max_tile_count:
+            logger.debug(f"[_create_base_structure] Limiting useTileCount from {use_tile_count} to {safe_max_tile_count} (dock capacity)")
+            use_tile_count = safe_max_tile_count
 
         level = {
             "layer": params.max_layers,
@@ -2485,6 +2566,18 @@ class LevelGenerator:
             # This is a simple workaround - the tile assignment handles extra positions
             pass  # Let the tile assignment code handle the non-divisibility
 
+        # CRITICAL FIX: Filter tile_types to match useTileCount
+        # This prevents creating tiles outside the valid range (e.g., t10~t15 when useTileCount=9)
+        use_tile_count = int(level.get("useTileCount", 6))
+        valid_range = {f"t{i}" for i in range(1, use_tile_count + 1)}
+        filtered_tile_types = [t for t in tile_types if t in valid_range or t == "t0"]
+        if filtered_tile_types:
+            tile_types = filtered_tile_types
+        else:
+            # Fallback: use all types in range
+            tile_types = [f"t{i}" for i in range(1, use_tile_count + 1)]
+        logger.debug(f"[TILE_ASSIGN] Filtered tile_types to useTileCount={use_tile_count}: {len(tile_types)} types")
+
         # CRITICAL: Distribute tile types ensuring each type has count divisible by 3
         # Calculate how many tiles of each type we need
         total_positions = len(all_layer_positions)
@@ -2575,14 +2668,24 @@ class LevelGenerator:
         """
         from collections import defaultdict
 
+        # CRITICAL: Get useTileCount from level to determine valid tile types
+        use_tile_count = int(level.get("useTileCount", 6))
+
         # CRITICAL: When tile_types contains only 't0' (placeholder for client-side randomization),
         # we need to expand to actual tile types for pattern mode distribution.
         # Otherwise, all tiles will be 't0' causing same-type blocking in validation.
         if len(tile_types) == 1 and tile_types[0] == "t0":
-            # Get useTileCount from level to determine how many actual types to use
-            use_tile_count = int(level.get("useTileCount", 6))
             # Expand t0 to t1, t2, ..., t{useTileCount}
             tile_types = [f"t{i}" for i in range(1, use_tile_count + 1)]
+        else:
+            # CRITICAL FIX: Ensure tile_types does not exceed useTileCount
+            # Filter to only types within valid range (t1 ~ t{useTileCount})
+            valid_range = {f"t{i}" for i in range(1, use_tile_count + 1)}
+            tile_types = [t for t in tile_types if t in valid_range]
+            # If no valid types remain, use all types in range
+            if not tile_types:
+                tile_types = [f"t{i}" for i in range(1, use_tile_count + 1)]
+            logger.debug(f"[PATTERN_MODE] Filtered tile_types to useTileCount={use_tile_count}: {tile_types}")
 
         # Group positions by coordinate
         positions_by_coord: Dict[str, List[int]] = defaultdict(list)

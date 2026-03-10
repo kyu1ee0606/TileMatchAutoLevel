@@ -1,7 +1,9 @@
 // Type definitions for Visual Simulation
 
 // Bot profile types
+// [v15.14] 검증용 봇: average, expert, optimal (novice/casual은 레거시 지원)
 export type BotProfile = 'novice' | 'casual' | 'average' | 'expert' | 'optimal';
+export type ValidationBotProfile = 'average' | 'expert' | 'optimal';
 
 // Playback speed options
 export type PlaybackSpeed = 1 | 2 | 4;

@@ -95,10 +95,8 @@ export function BatchVerifyPanel({ batchId, onComplete, onStatsUpdate }: BatchVe
           const levelNum = parseInt(result.level_id.replace('level_', ''));
           const level = batch.find(l => l.meta.level_number === levelNum);
           if (level) {
-            // bot_clear_rates를 올바른 타입으로 변환
+            // [v15.14] bot_clear_rates - novice/casual은 optional
             const botRates = {
-              novice: result.bot_clear_rates['novice'] ?? 0,
-              casual: result.bot_clear_rates['casual'] ?? 0,
               average: result.bot_clear_rates['average'] ?? 0,
               expert: result.bot_clear_rates['expert'] ?? 0,
               optimal: result.bot_clear_rates['optimal'] ?? 0,

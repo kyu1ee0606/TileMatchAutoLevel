@@ -16,9 +16,10 @@ interface AutoPlayPanelProps {
 }
 
 // Bot profile colors and Korean display names
+// [v15.14] 검증용 봇: average, expert, optimal (novice/casual은 레거시 지원)
 const BOT_CONFIG: Record<string, { color: string; name: string; icon: string }> = {
-  novice: { color: '#22c55e', name: '초보자', icon: '🌱' },
-  casual: { color: '#3b82f6', name: '캐주얼', icon: '🎮' },
+  novice: { color: '#22c55e', name: '초보자', icon: '🌱' },  // 레거시
+  casual: { color: '#3b82f6', name: '캐주얼', icon: '🎮' },  // 레거시
   average: { color: '#eab308', name: '일반', icon: '👤' },
   expert: { color: '#f97316', name: '숙련자', icon: '⭐' },
   optimal: { color: '#ef4444', name: '최적', icon: '🏆' },

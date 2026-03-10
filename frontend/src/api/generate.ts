@@ -122,7 +122,7 @@ export interface ValidatedGenerateRequest {
   tolerance?: number;            // Default: 15.0 (percentage)
   simulation_iterations?: number; // Default: 30
   use_best_match?: boolean;      // Default: true - always return best result after max_retries
-  use_core_bots_only?: boolean;  // Default: false - use only 3 core bots (casual/average/expert) for ~40% faster validation
+  use_core_bots_only?: boolean;  // Default: false - [v15.14] use only 3 core bots (average/expert/optimal) for validation
   // Auto gimmick selection parameters
   auto_select_gimmicks?: boolean;   // Enable auto gimmick selection based on difficulty
   available_gimmicks?: string[];    // Pool of available gimmicks for auto-selection

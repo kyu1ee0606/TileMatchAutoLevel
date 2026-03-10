@@ -39,16 +39,17 @@ export interface PlaytestResult {
 export interface AutoTestResult {
   tested_at: string;
   iterations: number;
+  // [v15.14] novice/casual은 optional (검증에서 제외됨)
   bot_clear_rates: {
-    novice: number;
-    casual: number;
+    novice?: number;
+    casual?: number;
     average: number;
     expert: number;
     optimal: number;
   };
   bot_target_rates: {
-    novice: number;
-    casual: number;
+    novice?: number;
+    casual?: number;
     average: number;
     expert: number;
     optimal: number;
@@ -136,9 +137,10 @@ export interface ProductionLevelMeta {
   grade: DifficultyGrade;
 
   // 봇 시뮬레이션 결과
+  // [v15.14] novice/casual은 optional (검증에서 제외됨)
   bot_clear_rates?: {
-    novice: number;
-    casual: number;
+    novice?: number;
+    casual?: number;
     average: number;
     expert: number;
     optimal: number;

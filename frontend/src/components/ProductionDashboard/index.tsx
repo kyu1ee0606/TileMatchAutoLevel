@@ -533,7 +533,8 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             let validationPassed = true;
             let validationAttempts = 1;
             let matchScore: number | undefined = undefined;
-            let botClearRates: { novice: number; casual: number; average: number; expert: number; optimal: number } | undefined = undefined;
+            // [v15.14] novice/casual은 optional (검증에서 제외됨)
+            let botClearRates: { novice?: number; casual?: number; average: number; expert: number; optimal: number } | undefined = undefined;
 
             // === 공통: 허용 오차 다중 후보 방식으로 정적 난이도 오차 0.05 이내 달성 ===
             // [v15.6] 개선: 점진적 허용오차 + 재시도 로직 + 후보 다양성 증가
@@ -649,9 +650,10 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             // === 검증 활성화 시: 봇 시뮬레이션으로 match_score 측정 ===
             if (useValidatedGeneration && validationConfig.simulation_iterations > 0) {
               try {
+                // [v15.14] 검증용 봇: average, expert, optimal (novice/casual 제외)
                 const botProfiles = useCoreBots
-                  ? ['casual', 'average', 'expert']  // 코어 3봇
-                  : ['novice', 'casual', 'average', 'expert', 'optimal'];  // 전체 5봇
+                  ? ['average', 'expert', 'optimal']  // 코어 3봇 (검증용)
+                  : ['average', 'expert', 'optimal'];  // 동일 (레거시 호환)
                 const simResult = await analyzeAutoPlay(result.level_json, {
                   iterations: validationConfig.simulation_iterations,
                   targetDifficulty: targetDifficulty,
@@ -659,8 +661,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
                 });
                 matchScore = calcMatchScore(simResult.bot_stats);
                 botClearRates = {
-                  novice: simResult.bot_stats.find(s => s.profile === 'novice')?.clear_rate || 0,
-                  casual: simResult.bot_stats.find(s => s.profile === 'casual')?.clear_rate || 0,
+                  // novice/casual은 검증에서 제외되므로 undefined
                   average: simResult.bot_stats.find(s => s.profile === 'average')?.clear_rate || 0,
                   expert: simResult.bot_stats.find(s => s.profile === 'expert')?.clear_rate || 0,
                   optimal: simResult.bot_stats.find(s => s.profile === 'optimal')?.clear_rate || 0,
@@ -1566,7 +1567,7 @@ function GenerateTab({
                     <span className="block text-yellow-400 mt-1">시뮬레이션 없이 빠르게 생성합니다 (캘리브레이션만 적용).</span>
                   )}
                   {useCoreBots && validationConfig.simulation_iterations > 0 && (
-                    <span className="block text-blue-400 mt-1">코어 3봇 (casual/average/expert)으로 ~40% 빠른 검증.</span>
+                    <span className="block text-blue-400 mt-1">코어 3봇 (average/expert/optimal)으로 ~40% 빠른 검증.</span>
                   )}
                 </p>
               </div>
@@ -2091,9 +2092,8 @@ function TestTab({
       });
 
       // Update level meta with bot test result
+      // [v15.14] novice/casual 제외 - 검증용 3봇만 사용
       const botClearRates = {
-        novice: result.bot_stats.find(s => s.profile === 'novice')?.clear_rate || 0,
-        casual: result.bot_stats.find(s => s.profile === 'casual')?.clear_rate || 0,
         average: result.bot_stats.find(s => s.profile === 'average')?.clear_rate || 0,
         expert: result.bot_stats.find(s => s.profile === 'expert')?.clear_rate || 0,
         optimal: result.bot_stats.find(s => s.profile === 'optimal')?.clear_rate || 0,
@@ -2138,9 +2138,8 @@ function TestTab({
       });
 
       const matchScore = calculateMatchScoreFromBots(result.bot_stats);
+      // [v15.14] novice/casual 제외 - 검증용 3봇만 사용
       const botClearRates = {
-        novice: result.bot_stats.find(s => s.profile === 'novice')?.clear_rate || 0,
-        casual: result.bot_stats.find(s => s.profile === 'casual')?.clear_rate || 0,
         average: result.bot_stats.find(s => s.profile === 'average')?.clear_rate || 0,
         expert: result.bot_stats.find(s => s.profile === 'expert')?.clear_rate || 0,
         optimal: result.bot_stats.find(s => s.profile === 'optimal')?.clear_rate || 0,
@@ -2238,9 +2237,8 @@ function TestTab({
           matchScore = calculateMatchScoreFromBots(result.bot_stats);
 
           // Save test result
+          // [v15.14] novice/casual 제외 - 검증용 3봇만 사용
           const botClearRates = {
-            novice: result.bot_stats.find(s => s.profile === 'novice')?.clear_rate || 0,
-            casual: result.bot_stats.find(s => s.profile === 'casual')?.clear_rate || 0,
             average: result.bot_stats.find(s => s.profile === 'average')?.clear_rate || 0,
             expert: result.bot_stats.find(s => s.profile === 'expert')?.clear_rate || 0,
             optimal: result.bot_stats.find(s => s.profile === 'optimal')?.clear_rate || 0,
@@ -2397,9 +2395,8 @@ function TestTab({
       };
 
       // Save result to level meta
+      // [v15.14] novice/casual 제외 - 검증용 3봇만 사용
       const botClearRates = {
-        novice: result.bot_stats.find(s => s.profile === 'novice')?.clear_rate || 0,
-        casual: result.bot_stats.find(s => s.profile === 'casual')?.clear_rate || 0,
         average: result.bot_stats.find(s => s.profile === 'average')?.clear_rate || 0,
         expert: result.bot_stats.find(s => s.profile === 'expert')?.clear_rate || 0,
         optimal: result.bot_stats.find(s => s.profile === 'optimal')?.clear_rate || 0,
@@ -2799,7 +2796,8 @@ function TestTab({
       const matchScore = result.match_score;
 
       // Save enhanced level
-      const botRates = result.bot_clear_rates as { novice: number; casual: number; average: number; expert: number; optimal: number };
+      // [v15.14] novice/casual은 optional
+      const botRates = result.bot_clear_rates as { novice?: number; casual?: number; average: number; expert: number; optimal: number };
       await saveProductionLevels(batchId, [{
         meta: {
           ...level.meta,
@@ -4550,12 +4548,13 @@ function TestTab({
                   <div className="flex items-center gap-3">
                     <span className="text-xs text-gray-400 shrink-0">봇 클리어율:</span>
                     <div className="flex-1 flex items-center gap-2">
-                      {(['novice', 'casual', 'average', 'expert', 'optimal'] as const).map(bot => {
+                      {/* [v15.14] 검증용 3봇만 표시 (average, expert, optimal) */}
+                      {(['average', 'expert', 'optimal'] as const).map(bot => {
                         const rate = selectedLevel.meta.bot_clear_rates?.[bot] ?? 0;
                         const percentage = Math.round(rate * 100);
-                        const botLabels: Record<string, string> = { novice: '초', casual: '캐', average: '보', expert: '전', optimal: '최' };
+                        const botLabels: Record<string, string> = { average: '보', expert: '전', optimal: '최' };
                         const botColors: Record<string, string> = {
-                          novice: 'bg-red-500', casual: 'bg-orange-500', average: 'bg-yellow-500', expert: 'bg-green-500', optimal: 'bg-blue-500'
+                          average: 'bg-yellow-500', expert: 'bg-green-500', optimal: 'bg-blue-500'
                         };
                         return (
                           <div key={bot} className="flex items-center gap-1" title={`${bot}: ${percentage}%`}>
@@ -4808,22 +4807,19 @@ function TestTab({
                       </div>
                     )}
                     {/* Bot Clear Rate Gauges */}
+                    {/* [v15.14] 검증용 3봇만 표시 (average, expert, optimal) */}
                     {selectedLevel?.meta.bot_clear_rates && (
                       <div className="w-full max-w-xs space-y-2 mt-2">
                         <div className="text-xs text-gray-400 text-center mb-2">봇별 클리어율</div>
-                        {(['novice', 'casual', 'average', 'expert', 'optimal'] as const).map(bot => {
+                        {(['average', 'expert', 'optimal'] as const).map(bot => {
                           const rate = selectedLevel.meta.bot_clear_rates?.[bot] ?? 0;
                           const percentage = Math.round(rate * 100);
                           const botLabels: Record<string, string> = {
-                            novice: '초보',
-                            casual: '캐주얼',
                             average: '보통',
                             expert: '전문가',
                             optimal: '최적'
                           };
                           const botColors: Record<string, string> = {
-                            novice: 'bg-red-500',
-                            casual: 'bg-orange-500',
                             average: 'bg-yellow-500',
                             expert: 'bg-green-500',
                             optimal: 'bg-blue-500'

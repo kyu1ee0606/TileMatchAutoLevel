@@ -20,7 +20,8 @@ import {
 import type { ProductionLevel } from '../../types/production';
 import type { DifficultyGrade } from '../../types';
 
-type YAxisMode = 'difficulty' | 'casual_rate' | 'average_rate' | 'expert_rate' | 'match_score';
+// [v15.14] casual_rate → optimal_rate (casual은 검증에서 제외됨)
+type YAxisMode = 'difficulty' | 'average_rate' | 'expert_rate' | 'optimal_rate' | 'match_score';
 type VerificationStatus = 'passed' | 'failed' | 'unverified' | 'missing';
 
 interface ChartDataPoint {
@@ -70,11 +71,12 @@ const GRADE_COLORS: Record<DifficultyGrade, string> = {
   D: '#ef4444',
 };
 
+// [v15.14] 검증용 3봇 클리어율만 표시 (casual 제외)
 const Y_AXIS_OPTIONS: { value: YAxisMode; label: string }[] = [
   { value: 'difficulty', label: '목표 난이도' },
-  { value: 'casual_rate', label: 'Casual 클리어율' },
   { value: 'average_rate', label: 'Average 클리어율' },
   { value: 'expert_rate', label: 'Expert 클리어율' },
+  { value: 'optimal_rate', label: 'Optimal 클리어율' },
   { value: 'match_score', label: '매치 점수' },
 ];
 
@@ -125,19 +127,20 @@ export function LevelDistributionChart({
       }
 
       // Get Y value based on mode
+      // [v15.14] 검증용 3봇 클리어율 (average, expert, optimal)
       let yValue: number;
       switch (yAxisMode) {
         case 'difficulty':
           yValue = level.meta.target_difficulty * 100;
-          break;
-        case 'casual_rate':
-          yValue = (level.meta.bot_clear_rates?.casual ?? 0) * 100;
           break;
         case 'average_rate':
           yValue = (level.meta.bot_clear_rates?.average ?? 0) * 100;
           break;
         case 'expert_rate':
           yValue = (level.meta.bot_clear_rates?.expert ?? 0) * 100;
+          break;
+        case 'optimal_rate':
+          yValue = (level.meta.bot_clear_rates?.optimal ?? 0) * 100;
           break;
         case 'match_score':
           yValue = level.meta.match_score ?? 0;
@@ -218,11 +221,12 @@ export function LevelDistributionChart({
               {meta.match_score.toFixed(1)}
             </span></p>
           )}
+          {/* [v15.14] 검증용 3봇 클리어율 (casual 제외) */}
           {meta.bot_clear_rates && (
             <>
-              <p>Casual: {(meta.bot_clear_rates.casual * 100).toFixed(0)}%</p>
               <p>Average: {(meta.bot_clear_rates.average * 100).toFixed(0)}%</p>
               <p>Expert: {(meta.bot_clear_rates.expert * 100).toFixed(0)}%</p>
+              <p>Optimal: {(meta.bot_clear_rates.optimal * 100).toFixed(0)}%</p>
             </>
           )}
           <p className="mt-1 pt-1 border-t border-gray-700">

@@ -1,7 +1,7 @@
 # TileMatchAutoLevel 프로젝트 인덱스
 
-**마지막 업데이트**: 2026-02-11
-**프로젝트 버전**: MVP + 레벨 생성 자동화 + UX 개선
+**마지막 업데이트**: 2026-03-09
+**프로젝트 버전**: MVP + 레벨 생성 자동화 + UX 개선 + 패턴 시스템 통합
 
 ---
 
@@ -242,6 +242,8 @@ TileMatchAutoLevel/
 | [AUDIT_Randomness_Removal.md](AUDIT_Randomness_Removal.md) | 랜덤성 제거 감사 |
 | [bot_simulation_accuracy_improvement_plan.md](bot_simulation_accuracy_improvement_plan.md) | 봇 시뮬레이션 정확도 개선 계획 |
 | [gimmick_unlock_design_for_client.md](gimmick_unlock_design_for_client.md) | 기믹 언락 클라이언트 설계 |
+| [CHANGELOG_20260306_PATTERN_REGENERATION_AND_VALIDATION.md](CHANGELOG_20260306_PATTERN_REGENERATION_AND_VALIDATION.md) | 패턴 재생성 및 검증 변경사항 |
+| [CHANGELOG_20260309_PATTERN_SYSTEM_UNIFICATION.md](CHANGELOG_20260309_PATTERN_SYSTEM_UNIFICATION.md) | 패턴 시스템 통합 (aesthetic 64개만 사용) |
 
 ---
 

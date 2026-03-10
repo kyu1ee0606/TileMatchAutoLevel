@@ -2257,7 +2257,8 @@ class LevelGenerator:
                         layer_positions = self._generate_aesthetic_positions(
                             layer_cols, layer_rows,
                             target_count=1000,
-                            pattern_index=params.pattern_index
+                            pattern_index=params.pattern_index,
+                            target_difficulty=params.target_difficulty  # v15.7: Pattern density adjustment
                         )
 
                     # Update layer grid size in level data
@@ -2291,7 +2292,8 @@ class LevelGenerator:
                 master_positions = self._generate_aesthetic_positions(
                     max_cols, max_rows,  # Use LARGEST grid size to get full pattern
                     target_count=1000,  # Request many positions to get full pattern shape
-                    pattern_index=params.pattern_index
+                    pattern_index=params.pattern_index,
+                    target_difficulty=params.target_difficulty  # v15.7: Pattern density adjustment
                 )
 
                 logger.debug(f"[PATTERN_SHAPE] pattern_index={params.pattern_index}, "
@@ -2350,7 +2352,8 @@ class LevelGenerator:
                     layer_positions = self._generate_aesthetic_positions(
                         layer_cols, layer_rows,
                         target_count=1000,
-                        pattern_index=params.pattern_index
+                        pattern_index=params.pattern_index,
+                        target_difficulty=params.target_difficulty  # v15.7: Pattern density adjustment
                     )
 
                     # Calculate center offset for depth emphasis (turtle shell effect)
@@ -2444,7 +2447,8 @@ class LevelGenerator:
                     layer_cols, layer_rows, target_count,
                     symmetry_mode=effective_symmetry_mode,
                     pattern_type=layer_pattern_type,
-                    pattern_index=layer_pattern_index  # Use varied pattern per layer
+                    pattern_index=layer_pattern_index,  # Use varied pattern per layer
+                    target_difficulty=params.target_difficulty  # v15.7: Pass for pattern density adjustment
                 )
 
                 # Phase 2: Apply center offset to positions so higher layers appear centered
@@ -2923,7 +2927,8 @@ class LevelGenerator:
     def _generate_layer_positions_for_count(
         self, cols: int, rows: int, target_count: int,
         symmetry_mode: Optional[str] = None, pattern_type: Optional[str] = None,
-        pattern_index: Optional[int] = None
+        pattern_index: Optional[int] = None,
+        target_difficulty: Optional[float] = None
     ) -> List[str]:
         """Generate tile positions for a layer with specific count."""
         # Clamp to available positions
@@ -2933,7 +2938,7 @@ class LevelGenerator:
             return []
 
         selected = self._generate_positions_with_pattern(
-            cols, rows, actual_count, symmetry_mode, pattern_type, pattern_index
+            cols, rows, actual_count, symmetry_mode, pattern_type, pattern_index, target_difficulty
         )
 
         # CRITICAL: When symmetry is applied, do NOT trim or pad randomly
@@ -2986,7 +2991,8 @@ class LevelGenerator:
     def _generate_positions_with_pattern(
         self, cols: int, rows: int, target_count: int,
         symmetry_mode: Optional[str] = None, pattern_type: Optional[str] = None,
-        pattern_index: Optional[int] = None
+        pattern_index: Optional[int] = None,
+        target_difficulty: Optional[float] = None
     ) -> List[str]:
         """Generate positions with symmetry and pattern options."""
         # Default to geometric pattern for more regular shapes
@@ -3026,7 +3032,7 @@ class LevelGenerator:
         # Generate base positions based on pattern type
         if pattern == "aesthetic":
             # Aesthetic mode: generate pattern then apply symmetry mirroring
-            raw_positions = self._generate_aesthetic_positions(cols, rows, target_count, pattern_index)
+            raw_positions = self._generate_aesthetic_positions(cols, rows, target_count, pattern_index, target_difficulty)
             # Apply symmetry to aesthetic patterns too
             base_positions = self._apply_symmetry_to_positions(cols, rows, raw_positions, symmetry, target_count)
         elif pattern == "geometric":
@@ -3040,7 +3046,8 @@ class LevelGenerator:
 
     def _generate_aesthetic_positions(
         self, cols: int, rows: int, target_count: int,
-        pattern_index: Optional[int] = None
+        pattern_index: Optional[int] = None,
+        target_difficulty: Optional[float] = None
     ) -> List[str]:
         """Generate visually appealing positions using 50 diverse patterns.
 
@@ -3062,16 +3069,75 @@ class LevelGenerator:
             target_count: Target number of tiles
             pattern_index: If specified (0-63), forces use of that specific pattern.
                           None = auto-select best pattern based on target_count.
+            target_difficulty: Target difficulty (0.0-1.0) for dynamic fill ratio calculation.
         """
         import math
         center_x, center_y = cols / 2.0, rows / 2.0
 
-        # PATTERN MODE FIX: When pattern_index is specified, use grid-based target_count
-        # This ensures patterns have consistent visual shape regardless of requested tile count
-        # Pattern functions use target_count to calculate radius/size, so we normalize it
+        # === PATTERN DENSITY WEIGHTS (v15.7) ===
+        # Patterns with higher tile density get lower fill ratio to compensate
+        # 1.0 = baseline, >1.0 = dense (reduce fill), <1.0 = sparse (increase fill)
+        PATTERN_DENSITY_WEIGHTS = {
+            # Basic shapes - generally baseline
+            0: 1.0,   # rectangle - baseline
+            1: 0.9,   # diamond - slightly less
+            2: 0.95,  # oval
+            3: 1.15,  # cross - more tiles (full width + height)
+            4: 0.8,   # donut - hollow center
+            5: 0.8,   # concentric diamond - ring shape
+            6: 0.85,  # corner anchored
+            7: 0.9,   # hexagonal
+            8: 1.1,   # heart - dense pixel art
+            9: 1.0,   # T-shape
+            # Arrows
+            10: 1.0, 11: 1.0, 12: 1.0, 13: 1.0, 14: 0.9,  # arrows, chevron
+            # Celestial - often dense
+            15: 1.2,  # star 5-pointed - many tiles
+            16: 1.25, # star 6-pointed - more tiles
+            17: 0.85, # crescent - sparse
+            18: 1.3,  # sun burst - VERY dense
+            19: 0.9,  # spiral
+            # Letters - variable
+            20: 1.1, 21: 0.8, 22: 0.85, 23: 0.9, 24: 1.0,  # H, I, L, U, X
+            25: 0.9, 26: 1.0, 27: 1.0, 28: 0.85, 29: 0.8,  # Y, Z, S, O, C
+            # Geometric
+            30: 0.9, 31: 0.9,  # triangles
+            32: 1.0, 33: 1.0,  # hourglass, bowtie
+            34: 0.85, 35: 0.85, # stairs
+            36: 0.9, 37: 0.9,  # pyramid
+            38: 0.95, 39: 1.0, # zigzag, wave
+            # Frames - typically sparse (border only)
+            40: 0.75, 41: 0.8, 42: 0.75, 43: 0.7, 44: 1.0,
+            # Artistic
+            45: 1.15, # butterfly - dense
+            46: 1.2,  # flower - dense
+            47: 0.7,  # scattered islands - sparse
+            48: 0.9, 49: 1.0,  # diagonal stripes, honeycomb
+            # Islands/Bridges
+            50: 0.8, 51: 0.8, 52: 0.7, 53: 0.75, 54: 0.8, 55: 0.85,
+            # GBoost
+            56: 0.75, 57: 0.8, 58: 0.85, 59: 0.9, 60: 0.7, 61: 0.9, 62: 0.85, 63: 0.9,
+            # Layered
+            64: 0.85,
+        }
+
+        # PATTERN MODE FIX: When pattern_index is specified, use dynamic fill ratio
+        # based on target_difficulty and pattern density weight
         if pattern_index is not None:
-            # Use ~50% of grid area for clear pattern visibility
-            target_count = int(cols * rows * 0.5)
+            # Base fill ratio from target difficulty (0.1 → 30%, 0.5 → 50%, 0.9 → 70%)
+            if target_difficulty is not None:
+                base_fill_ratio = 0.25 + target_difficulty * 0.5  # 0.25 ~ 0.75
+            else:
+                base_fill_ratio = 0.5  # Default 50%
+
+            # Apply pattern density weight
+            density_weight = PATTERN_DENSITY_WEIGHTS.get(pattern_index, 1.0)
+            adjusted_fill_ratio = base_fill_ratio / density_weight
+
+            # Clamp to reasonable range (25% ~ 70%)
+            adjusted_fill_ratio = max(0.25, min(0.70, adjusted_fill_ratio))
+
+            target_count = int(cols * rows * adjusted_fill_ratio)
 
         # ============ Category 1: Basic Shapes (0-9) ============
 

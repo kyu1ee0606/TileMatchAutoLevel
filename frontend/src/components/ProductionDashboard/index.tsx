@@ -536,21 +536,69 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             let botClearRates: { novice: number; casual: number; average: number; expert: number; optimal: number } | undefined = undefined;
 
             // === 공통: 허용 오차 다중 후보 방식으로 정적 난이도 오차 0.05 이내 달성 ===
-            const DIFFICULTY_TOLERANCE = 5.0; // 0.05 in 0-1 scale = 5.0 in 0-100 scale
+            // [v15.6] 개선: 점진적 허용오차 + 재시도 로직 + 후보 다양성 증가
+            const BASE_TOLERANCE = 5.0; // 0.05 in 0-1 scale = 5.0 in 0-100 scale
             const CANDIDATES_PER_ATTEMPT = 3;
-            const MAX_ATTEMPTS = 5;
+            const MAX_ATTEMPTS = 6; // 5 → 6 증가
             const targetScore = targetDifficulty * 100;
 
             let bestResult: GenerationResult | null = null;
             let bestGap = Infinity;
             let actualAttempts = 0;
+            let totalCandidatesGenerated = 0;
+
+            // Helper: 단일 후보 생성 (1회 재시도 포함)
+            const generateOneCandidate = async (
+              candidateGoalDirection: 's' | 'n' | 'e' | 'w',
+              candidateGoalType: 'craft' | 'stack',
+              layerVariation: number,
+              intensityMultiplier: number
+            ): Promise<GenerationResult | null> => {
+              const candidateParams = {
+                ...params,
+                // 레이어 수 변화로 다양성 증가
+                min_layers: Math.max(2, (params.min_layers ?? 2) + layerVariation),
+                max_layers: Math.min(7, (params.max_layers ?? 5) + layerVariation),
+                goals: [{
+                  type: candidateGoalType,
+                  direction: candidateGoalDirection,
+                  count: Math.max(2, Math.floor(3 + targetDifficulty * 2))
+                }],
+              };
+              const candidateGimmickOptions = {
+                ...gimmickOptions,
+                // 기믹 강도 변화로 다양성 증가
+                gimmick_intensity: Math.min(targetDifficulty * intensityMultiplier, levelNumber / 500),
+              };
+
+              try {
+                return await generateLevel(candidateParams, candidateGimmickOptions);
+              } catch {
+                // 첫 번째 실패 시 1회 재시도
+                try {
+                  return await generateLevel(candidateParams, candidateGimmickOptions);
+                } catch {
+                  return null;
+                }
+              }
+            };
 
             for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
               actualAttempts = attempt + 1;
+
+              // 점진적 허용오차: attempt가 증가할수록 오차 허용 범위 확대
+              // attempt 0-2: 5.0, attempt 3-4: 7.5, attempt 5: 10.0
+              const currentTolerance = attempt < 3 ? BASE_TOLERANCE :
+                                        attempt < 5 ? BASE_TOLERANCE * 1.5 :
+                                        BASE_TOLERANCE * 2.0;
+
+              // 후보 다양성: 레이어 수와 기믹 강도를 변화시켜 다양한 난이도 생성
+              const layerVariations = [-1, 0, 1]; // 레이어 ±1
+              const intensityMultipliers = [0.8, 1.0, 1.2]; // 기믹 강도 ±20%
+
               const candidates = await Promise.all(
-                Array.from({ length: CANDIDATES_PER_ATTEMPT }, () => {
+                Array.from({ length: CANDIDATES_PER_ATTEMPT }, (_, idx) => {
                   // 미형 로직 유지: pattern_type, symmetry_mode, pattern_index는 기존 params 사용
-                  // Goal direction도 대칭 모드 기반으로 선택 (일관성 유지)
                   let candidateGoalDirections: Array<'s' | 'n' | 'e' | 'w'>;
                   if (symmetryMode === 'both' || symmetryMode === 'vertical') {
                     candidateGoalDirections = Math.random() < 0.7 ? ['s', 'n'] : ['e', 'w'];
@@ -562,23 +610,15 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
                   const candidateGoalDirection = candidateGoalDirections[Math.floor(Math.random() * candidateGoalDirections.length)];
                   const candidateGoalType = (['craft', 'stack'] as const)[Math.floor(Math.random() * 2)];
 
-                  return generateLevel(
-                    {
-                      ...params,
-                      goals: [{
-                        type: candidateGoalType,
-                        direction: candidateGoalDirection,
-                        count: Math.max(2, Math.floor(3 + targetDifficulty * 2))
-                      }],
-                    },
-                    {
-                      ...gimmickOptions,
-                      // 기믹 강도를 목표 난이도로 제한 (과도한 기믹으로 난이도 초과 방지)
-                      gimmick_intensity: Math.min(targetDifficulty, levelNumber / 500),
-                    }
-                  ).catch(() => null);
+                  // 각 후보마다 다른 변화 적용
+                  const layerVar = layerVariations[idx % layerVariations.length];
+                  const intensityMult = intensityMultipliers[idx % intensityMultipliers.length];
+
+                  return generateOneCandidate(candidateGoalDirection, candidateGoalType, layerVar, intensityMult);
                 })
               );
+
+              totalCandidatesGenerated += CANDIDATES_PER_ATTEMPT;
 
               for (const c of candidates) {
                 if (!c) continue;
@@ -589,11 +629,19 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
                 }
               }
 
-              if (bestGap <= DIFFICULTY_TOLERANCE) break; // 허용 오차 이내 → 즉시 채택
+              // 현재 허용오차 이내면 즉시 채택
+              if (bestGap <= currentTolerance) break;
             }
 
             if (!bestResult) {
-              throw new Error(`${MAX_ATTEMPTS * CANDIDATES_PER_ATTEMPT}개 후보 모두 실패`);
+              // 모든 API 호출 실패 (네트워크 오류 등)
+              console.error(`Level ${levelNumber}: All ${totalCandidatesGenerated} candidates failed (API errors)`);
+              throw new Error(`${totalCandidatesGenerated}개 후보 모두 API 실패`);
+            }
+
+            // Best-match 폴백: 허용오차 초과해도 최선의 결과 사용 (경고 로그)
+            if (bestGap > BASE_TOLERANCE) {
+              console.warn(`Level ${levelNumber}: Using best-match fallback (gap: ${bestGap.toFixed(1)}%, tolerance: ${BASE_TOLERANCE}%)`);
             }
             result = bestResult;
             validationAttempts = actualAttempts;
@@ -2819,9 +2867,10 @@ function TestTab({
     const REGEN_CONCURRENCY = 20; // 동시성 증가로 속도 개선
 
     // 3. 레벨 1개 재생성: 반복 생성으로 오차 0.05 이내 달성 (프로덕션과 동일)
-    const DIFFICULTY_TOLERANCE = 5.0; // 0.05 in 0-1 scale = 5.0 in 0-100 scale (프로덕션과 동일)
+    // [v15.6] 개선: 점진적 허용오차 + 재시도 로직
+    const BASE_TOLERANCE = 5.0; // 0.05 in 0-1 scale = 5.0 in 0-100 scale (프로덕션과 동일)
     const CANDIDATES_PER_ATTEMPT = 3;
-    const MAX_ATTEMPTS = 5; // 최대 15개 후보
+    const MAX_ATTEMPTS = 6; // 최대 18개 후보 (5→6 증가)
 
     const regenerateOne = async (levelNumber: number): Promise<void> => {
       const level = levels.find(l => l.meta.level_number === levelNumber);
@@ -2889,10 +2938,57 @@ function TestTab({
 
       let bestResult: GenerationResult | null = null;
       let bestGap = Infinity;
+      let totalCandidates = 0;
+
+      // Helper: 단일 후보 생성 (1회 재시도 포함)
+      const generateOneCandidate = async (
+        goalDirection: 's' | 'n' | 'e' | 'w',
+        goalType: 'craft' | 'stack',
+        layerVar: number,
+        intensityMult: number
+      ): Promise<GenerationResult | null> => {
+        const params = {
+          target_difficulty: targetDifficulty,
+          grid_size: gridSize,
+          min_layers: Math.max(2, minLayers + layerVar),
+          max_layers: Math.min(7, maxLayers + layerVar),
+          tile_types: undefined,
+          obstacle_types: [],
+          goals: [{ type: goalType, direction: goalDirection, count: Math.max(2, Math.floor(3 + targetDifficulty * 2)) }],
+          symmetry_mode: symmetryMode,
+          pattern_type: patternType,
+          pattern_index: patternIndex,
+        };
+        const gimmickOpts = {
+          auto_select_gimmicks: true,
+          available_gimmicks: ['chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport', 'unknown'],
+          gimmick_intensity: gimmickIntensity * intensityMult,
+          gimmick_unlock_levels: gimmickUnlockLevels,
+          level_number: levelNumber,
+        };
+        try {
+          return await generateLevel(params, gimmickOpts);
+        } catch {
+          // 1회 재시도
+          try {
+            return await generateLevel(params, gimmickOpts);
+          } catch {
+            return null;
+          }
+        }
+      };
+
+      const layerVariations = [-1, 0, 1];
+      const intensityMultipliers = [0.8, 1.0, 1.2];
 
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        // 점진적 허용오차
+        const currentTolerance = attempt < 3 ? BASE_TOLERANCE :
+                                  attempt < 5 ? BASE_TOLERANCE * 1.5 :
+                                  BASE_TOLERANCE * 2.0;
+
         const candidates = await Promise.all(
-          Array.from({ length: CANDIDATES_PER_ATTEMPT }, () => {
+          Array.from({ length: CANDIDATES_PER_ATTEMPT }, (_, idx) => {
             // Goal direction selection (프로덕션과 동일 - 대칭 모드 기반)
             let goalDirections: Array<'s' | 'n' | 'e' | 'w'>;
             if (symmetryMode === 'both' || symmetryMode === 'vertical') {
@@ -2904,30 +3000,14 @@ function TestTab({
             }
             const goalDirection = goalDirections[Math.floor(Math.random() * goalDirections.length)];
             const goalType = (['craft', 'stack'] as const)[Math.floor(Math.random() * 2)];
+            const layerVar = layerVariations[idx % layerVariations.length];
+            const intensityMult = intensityMultipliers[idx % intensityMultipliers.length];
 
-            return generateLevel(
-              {
-                target_difficulty: targetDifficulty,
-                grid_size: gridSize,
-                min_layers: minLayers,
-                max_layers: maxLayers,
-                tile_types: undefined, // 백엔드에서 level_number 기반 자동 선택
-                obstacle_types: [],
-                goals: [{ type: goalType, direction: goalDirection, count: Math.max(2, Math.floor(3 + targetDifficulty * 2)) }],
-                symmetry_mode: symmetryMode,
-                pattern_type: patternType,
-                pattern_index: patternIndex,
-              },
-              {
-                auto_select_gimmicks: true,
-                available_gimmicks: ['chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport', 'unknown'],
-                gimmick_intensity: gimmickIntensity,
-                gimmick_unlock_levels: gimmickUnlockLevels,
-                level_number: levelNumber,
-              }
-            ).catch(() => null);
+            return generateOneCandidate(goalDirection, goalType, layerVar, intensityMult);
           })
         );
+
+        totalCandidates += CANDIDATES_PER_ATTEMPT;
 
         for (const c of candidates) {
           if (!c) continue;
@@ -2938,10 +3018,17 @@ function TestTab({
           }
         }
 
-        if (bestGap <= DIFFICULTY_TOLERANCE) break; // 허용 오차 이내 → 즉시 채택
+        if (bestGap <= currentTolerance) break; // 현재 허용 오차 이내 → 즉시 채택
       }
 
-      if (!bestResult) throw new Error(`${MAX_ATTEMPTS * CANDIDATES_PER_ATTEMPT}개 후보 모두 실패`);
+      if (!bestResult) {
+        console.error(`Regen level ${levelNumber}: All ${totalCandidates} candidates failed (API errors)`);
+        throw new Error(`${totalCandidates}개 후보 모두 API 실패`);
+      }
+
+      if (bestGap > BASE_TOLERANCE) {
+        console.warn(`Regen level ${levelNumber}: Using best-match fallback (gap: ${bestGap.toFixed(1)}%)`);
+      }
 
       // Save - match_score/bot_clear_rates는 비워둠 (일괄 테스트에서 측정)
       setRegenProgressMap(prev => new Map(prev).set(levelNumber, { status: 'saving' }));

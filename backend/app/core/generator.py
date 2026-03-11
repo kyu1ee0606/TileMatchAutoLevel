@@ -151,9 +151,8 @@ def get_gboost_style_gimmicks(level_number: int) -> Dict[str, Any]:
 LEVEL_CONFIG_TABLE = [
     # (max_level, min_layers, max_layers, grid_size, tile_range, tile_types, description)
     (3,    1, 2, 4, (9, 18),   4,  "Tutorial - 튜토리얼 (1-3)"),
-    (5,    3, 4, 4, (18, 36),  5,  "Tutorial - 후반 튜토리얼 (4-5)"),      # 4x4 그리드
-    (10,   3, 4, 5, (18, 36),  5,  "Tutorial - 후반 튜토리얼 (6-10)"),     # 5x5 그리드
-    (30,   3, 4, 6, (24, 48),  6,  "Early - 초반 (11-30)"),
+    (10,   3, 4, 5, (30, 36),  5,  "Tutorial - 후반 튜토리얼 (4-10)"),     # 6x6/5x5 그리드, 최소 30타일
+    (30,   3, 4, 6, (30, 48),  6,  "Early - 초반 (11-30)"),                # 최소 30타일
     (60,   3, 4, 7, (30, 50),  8,  "Early-Mid - 초중반 (31-60)"),
     (100,  4, 5, 8, (50, 80),  9,  "Mid - 중반 (61-100)"),
     (225,  4, 5, 8, (60, 90),  9,  "Mid-Late - 중후반 (101-225)"),
@@ -615,7 +614,7 @@ class LevelGenerator:
         # Only fixed layout levels (2, 3) and explicit per-layer configs are strict
         # NOTE: total_tile_count alone does NOT trigger strict mode - it's used as a
         # max_tiles limit during difficulty adjustment instead (see line ~720)
-        is_fixed_layout_level = params.level_number in (2, 3)
+        is_fixed_layout_level = params.level_number in (1, 2, 3)
         has_strict_tile_config = (
             is_fixed_layout_level or
             (bool(params.layer_tile_configs) and len(params.layer_tile_configs) > 0)
@@ -1903,6 +1902,46 @@ class LevelGenerator:
 
         return configs
 
+    def _create_fixed_layout_level_1(
+        self, level: Dict[str, Any], params: GenerationParams
+    ) -> Dict[str, Any]:
+        """Create fixed layout for level 1.
+
+        Layout (4x4 grid):
+        - layer_0 only: 4×4 full grid = 12 tiles (4×3 rectangle for divisibility by 3)
+        - Total: 12 tiles (divisible by 3)
+
+        Grid layout (4x4):
+        [####]
+        [####]
+        [####]
+        [    ]  <- empty row for 3-divisibility
+        """
+        tile_types = params.tile_types
+        if not tile_types and params.level_number:
+            tile_types = get_tile_types_for_level(params.level_number)
+        elif not tile_types:
+            tile_types = self.DEFAULT_TILE_TYPES
+
+        # Set level to 1 layer
+        level["layer"] = 1
+
+        # Layer 0: 4×3 rectangle = 12 tiles (4x4 grid)
+        # CRITICAL: Layer dimensions must be SQUARE (col == row)
+        level["layer_0"] = {
+            "col": "4",  # 4x4 grid
+            "row": "4",  # MUST equal col for square grid
+            "tiles": {},
+            "num": "0",
+        }
+        # Fill 4×3 rectangle (12 tiles - divisible by 3)
+        for x in range(4):
+            for y in range(3):
+                pos_key = f"{x}_{y}"
+                level["layer_0"]["tiles"][pos_key] = ["t0", ""]
+
+        return level
+
     def _create_fixed_layout_level_2(
         self, level: Dict[str, Any], params: GenerationParams
     ) -> Dict[str, Any]:
@@ -1957,15 +1996,19 @@ class LevelGenerator:
     ) -> Dict[str, Any]:
         """Create fixed layout for level 3.
 
-        Layout (4x4/5x5 grid, same as level 4):
-        - layer_0 (bottom, 5x5): 4×3 rectangle (12 tiles)
-        - layer_1 (top, 4x4): 2×3 rectangle (6 tiles)
-        - Total: 18 tiles (divisible by 3)
+        Layout:
+        - layer_0 (bottom, 5x5): Full 5×5 grid = 25 tiles
+        - layer_1 (top, 4x4): 2 tiles at diagonal center positions
+        - Total: 27 tiles (divisible by 3)
 
         layer_0 (5x5):        layer_1 (4x4):
-        [####]                [##]
-        [####]                [##]
-        [####]                [##]
+        [#####]               [    ]
+        [#####]               [ #  ]  <- (1,1)
+        [#####]               [  # ]  <- (2,2)
+        [#####]               [    ]
+        [#####]
+
+        NOTE: 2 diagonal center tiles at (1,1) and (2,2) ensure 3-divisibility
         """
         tile_types = params.tile_types
         if not tile_types and params.level_number:
@@ -1976,32 +2019,32 @@ class LevelGenerator:
         # Set level to 2 layers
         level["layer"] = 2
 
-        # Layer 0: 4×3 rectangle = 12 tiles (5x5 grid)
+        # Layer 0: Full 5×5 grid = 25 tiles
         # CRITICAL: Layer dimensions must be SQUARE (col == row)
         level["layer_0"] = {
-            "col": "5",  # 5x5 grid (same as level 4-5)
+            "col": "5",  # 5x5 grid
             "row": "5",  # MUST equal col for square grid
             "tiles": {},
             "num": "0",
         }
-        for x in range(4):
-            for y in range(3):
+        # Fill entire 5×5 grid (25 tiles)
+        for x in range(5):
+            for y in range(5):
                 pos_key = f"{x}_{y}"
                 level["layer_0"]["tiles"][pos_key] = ["t0", ""]
 
-        # Layer 1: 2×3 rectangle = 6 tiles (4x4 grid)
+        # Layer 1: 2 tiles at diagonal center positions (4x4 grid)
         # CRITICAL: Layer dimensions must be SQUARE (col == row)
         level["layer_1"] = {
-            "col": "4",  # 4x4 grid (same as level 4-5)
+            "col": "4",  # 4x4 grid
             "row": "4",  # MUST equal col for square grid
             "tiles": {},
             "num": "0",
         }
-        # Single 2×3 rectangle
-        for x in range(2):
-            for y in range(3):
-                pos_key = f"{x}_{y}"
-                level["layer_1"]["tiles"][pos_key] = ["t0", ""]
+        # Diagonal center tiles at (1,1) and (2,2)
+        # 25 + 2 = 27 tiles (divisible by 3)
+        level["layer_1"]["tiles"]["1_1"] = ["t0", ""]
+        level["layer_1"]["tiles"]["2_2"] = ["t0", ""]
 
         return level
 
@@ -2010,7 +2053,9 @@ class LevelGenerator:
     ) -> Dict[str, Any]:
         """Populate layers with tiles based on difficulty and user configuration."""
         # SPECIAL CASE: Fixed layouts for specific levels (production requirement)
-        if params.level_number == 2:
+        if params.level_number == 1:
+            return self._create_fixed_layout_level_1(level, params)
+        elif params.level_number == 2:
             return self._create_fixed_layout_level_2(level, params)
         elif params.level_number == 3:
             return self._create_fixed_layout_level_3(level, params)
@@ -7886,7 +7931,7 @@ class LevelGenerator:
         """
         # Use None check instead of falsy check to allow empty list
         # Fixed layout levels (2, 3) are early tutorial levels without craft/stack goals
-        is_fixed_layout_level = params.level_number in (2, 3)
+        is_fixed_layout_level = params.level_number in (1, 2, 3)
         if is_fixed_layout_level:
             goals = params.goals if params.goals is not None else []
         else:

@@ -620,7 +620,7 @@ GIMMICK_NOTICE_RATES = {
     "grass": (0.85, 0.92, 0.98, 1.0, 1.0),
 
     # Active gimmicks - require attention and understanding
-    "bomb": (0.35, 0.55, 0.80, 0.95, 1.0),      # Bomb countdown - often missed
+    "bomb": (0.50, 0.75, 0.95, 1.0, 1.0),       # Bomb countdown - improved awareness
     "curtain": (0.40, 0.60, 0.80, 0.95, 1.0),   # State tracking required
     "frog": (0.45, 0.65, 0.85, 0.95, 1.0),      # Movement prediction
     "teleporter": (0.40, 0.55, 0.75, 0.90, 1.0),  # Shuffle prediction hard
@@ -3456,6 +3456,7 @@ class BotSimulator:
                 base_score -= grass_penalty
 
             # 4. LINK tiles: Bonus for completing link pairs (clears 2 tiles at once)
+            # [v15.17] Enhanced bonus - links are very efficient (2 tiles per move)
             if tile_state and tile_state.effect_type in (
                 TileEffectType.LINK_EAST, TileEffectType.LINK_WEST,
                 TileEffectType.LINK_SOUTH, TileEffectType.LINK_NORTH
@@ -3463,9 +3464,9 @@ class BotSimulator:
                 # Link tiles are valuable - they clear 2 tiles in one move
                 if dock_count >= 4:
                     # Extra bonus when dock is filling - link moves are efficient
-                    base_score += profile.blocking_awareness * 5.0
+                    base_score += profile.blocking_awareness * 15.0
                 else:
-                    base_score += profile.blocking_awareness * 2.0
+                    base_score += profile.blocking_awareness * 8.0
 
             # 5. BOMB tiles: CRITICAL - Must pick before explosion!
             # Bombs explode when their countdown reaches 0
@@ -3522,7 +3523,66 @@ class BotSimulator:
                                 base_score -= 30.0   # Moderate penalty
                 # else: bomb_noticed=False - bot doesn't notice bomb, no score adjustment
 
-            # 6. General effect tile deadlock detection
+            # ============================================================
+            # 6. [v15.17] UNKNOWN tiles: Early reveal bonus
+            # UNKNOWN hides tile type - revealing early reduces uncertainty
+            # Higher priority when dock is filling (need to plan matches)
+            # ============================================================
+            if tile_state and tile_state.effect_type == TileEffectType.UNKNOWN:
+                unknown_bonus = 15.0 * profile.blocking_awareness
+                # Higher bonus when dock is filling - information is more valuable
+                if dock_count >= 4:
+                    unknown_bonus *= 1.5
+                elif dock_count >= 3:
+                    unknown_bonus *= 1.2
+                base_score += unknown_bonus
+
+            # ============================================================
+            # 7. [v15.17] ICE tiles: Break bonus for adjacent tiles
+            # Picking adjacent to ICE reduces its layers
+            # Prioritize breaking ICE to free up tiles
+            # ============================================================
+            if tile_state:
+                ice_break_bonus = 0.0
+                for nx, ny in adjacent_neighbors:
+                    neighbor_pos = f"{nx}_{ny}"
+                    if neighbor_pos in layer_tiles:
+                        neighbor_tile = layer_tiles[neighbor_pos]
+                        if (not neighbor_tile.picked and
+                            neighbor_tile.effect_type == TileEffectType.ICE):
+                            remaining_ice = neighbor_tile.effect_data.get("remaining", 0)
+                            if remaining_ice > 0:
+                                # Check if ice is accessible (not blocked)
+                                if not self._is_blocked_by_upper(state, neighbor_tile):
+                                    if remaining_ice == 1:
+                                        # Last layer - will fully break ICE
+                                        ice_break_bonus = max(ice_break_bonus, 25.0 * profile.blocking_awareness)
+                                    else:
+                                        # Multiple layers remaining
+                                        ice_break_bonus = max(ice_break_bonus, 12.0 * profile.blocking_awareness)
+                                else:
+                                    # ICE is blocked but still helps
+                                    ice_break_bonus = max(ice_break_bonus, 5.0 * profile.blocking_awareness)
+                if ice_break_bonus > 0:
+                    base_score += ice_break_bonus
+
+            # ============================================================
+            # 8. [v15.17] CURTAIN tiles: Open/closed state scoring
+            # Prefer picking open curtains (known type) over closed (unknown)
+            # ============================================================
+            if tile_state and tile_state.effect_type == TileEffectType.CURTAIN:
+                curtain_is_open = tile_state.effect_data.get("is_open", True)
+                if curtain_is_open:
+                    # Open curtain - we know the type, safe to pick
+                    base_score += 10.0 * profile.blocking_awareness
+                else:
+                    # Closed curtain - unknown type, risky when dock is filling
+                    if dock_count >= 5:
+                        base_score -= 8.0 * profile.blocking_awareness
+                    elif dock_count >= 4:
+                        base_score -= 4.0 * profile.blocking_awareness
+
+            # 9. General effect tile deadlock detection
             # If many effect tiles remain and accessible tiles are limited
             accessible = self._get_accessible_tiles(state)
             effect_tiles = sum(

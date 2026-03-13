@@ -3538,33 +3538,48 @@ class BotSimulator:
                 base_score += unknown_bonus
 
             # ============================================================
-            # 7. [v15.17] ICE tiles: Break bonus for adjacent tiles
-            # Picking adjacent to ICE reduces its layers
-            # Prioritize breaking ICE to free up tiles
+            # 7. [v15.17] ICE tiles: Exposed ICE clearing bonus
+            # ICE MECHANICS: When ICE is EXPOSED (not blocked), picking ANY tile
+            # reduces its layer count. When count reaches 0, ICE breaks and tile
+            # becomes pickable.
+            # Strategy:
+            #   - If exposed ICE exists, every tile pick helps clear it (progress bonus)
+            #   - Prioritize unblocking ICE (bonus for removing blocking tiles)
             # ============================================================
             if tile_state:
-                ice_break_bonus = 0.0
-                for nx, ny in adjacent_neighbors:
-                    neighbor_pos = f"{nx}_{ny}"
-                    if neighbor_pos in layer_tiles:
-                        neighbor_tile = layer_tiles[neighbor_pos]
-                        if (not neighbor_tile.picked and
-                            neighbor_tile.effect_type == TileEffectType.ICE):
-                            remaining_ice = neighbor_tile.effect_data.get("remaining", 0)
-                            if remaining_ice > 0:
-                                # Check if ice is accessible (not blocked)
-                                if not self._is_blocked_by_upper(state, neighbor_tile):
-                                    if remaining_ice == 1:
-                                        # Last layer - will fully break ICE
-                                        ice_break_bonus = max(ice_break_bonus, 25.0 * profile.blocking_awareness)
-                                    else:
-                                        # Multiple layers remaining
-                                        ice_break_bonus = max(ice_break_bonus, 12.0 * profile.blocking_awareness)
-                                else:
-                                    # ICE is blocked but still helps
-                                    ice_break_bonus = max(ice_break_bonus, 5.0 * profile.blocking_awareness)
-                if ice_break_bonus > 0:
-                    base_score += ice_break_bonus
+                # Use ice_tiles tracking dict for efficiency
+                exposed_ice_count = 0
+                blocked_ice_count = 0
+
+                for ice_key, remaining in state.ice_tiles.items():
+                    if remaining <= 0:
+                        continue
+                    # Parse layerIdx_x_y format
+                    parts = ice_key.split('_')
+                    if len(parts) >= 3:
+                        l_idx = int(parts[0])
+                        pos_key = f"{parts[1]}_{parts[2]}"
+                        ice_tile = state.tiles.get(l_idx, {}).get(pos_key)
+                        if ice_tile and not ice_tile.picked:
+                            if not self._is_blocked_by_upper(state, ice_tile):
+                                # ICE is exposed - any pick will reduce its count
+                                exposed_ice_count += 1
+                            else:
+                                # ICE is blocked - need to clear blocking tiles first
+                                blocked_ice_count += 1
+
+                # Bonus 1: If exposed ICE exists, this pick helps clear it
+                if exposed_ice_count > 0:
+                    # More exposed ICE = more valuable each pick becomes
+                    ice_progress_bonus = min(exposed_ice_count * 8.0, 30.0) * profile.blocking_awareness
+                    base_score += ice_progress_bonus
+
+                # Bonus 2: Extra priority for moves that might unblock ICE
+                # (This is heuristic - checking actual blocking is expensive)
+                if blocked_ice_count > 0 and tile.layer_idx > 0:
+                    # Tiles on higher layers more likely to be blocking something
+                    unblock_bonus = 8.0 * profile.blocking_awareness
+                    base_score += unblock_bonus
 
             # ============================================================
             # 8. [v15.17] CURTAIN tiles: Open/closed state scoring

@@ -639,6 +639,19 @@ GIMMICK_NOTICE_RATES = {
     "stack_w": (0.60, 0.75, 0.90, 0.98, 1.0),
 }
 
+# [v15.15] Chain isolation danger awareness by bot type
+# Probability that bot recognizes picking a tile will isolate a chain
+# (leaving it with no horizontal neighbors, making game impossible)
+# Format: {BotType: probability}
+# Higher-level bots are more likely to foresee this danger
+CHAIN_ISOLATION_AWARENESS = {
+    BotType.NOVICE: 0.50,      # 50% - sometimes notices
+    BotType.CASUAL: 0.70,      # 70% - usually notices
+    BotType.AVERAGE: 0.90,     # 90% - almost always notices
+    BotType.EXPERT: 1.00,      # 100% - always notices
+    BotType.OPTIMAL: 1.00,     # 100% - always notices (perfect play)
+}
+
 
 class BotSimulator:
     """
@@ -1753,6 +1766,11 @@ class BotSimulator:
             state.failed = True
             return True
 
+        # Check impossible chain tiles (locked + no horizontal adjacent tiles to unlock)
+        if self._check_chain_impossible(state):
+            state.failed = True
+            return True
+
         return False
 
     def _is_dock_full(self, state: GameState) -> bool:
@@ -1868,6 +1886,47 @@ class BotSimulator:
             # (Each pick clears 3 tiles from dock, but we only count non-ice as pick sources)
             if total_picks_needed > total_remaining_non_ice:
                 return True
+
+        return False
+
+    def _check_chain_impossible(self, state: GameState) -> bool:
+        """Check if any locked chain tile cannot be unlocked due to no horizontal adjacent tiles.
+
+        A chain tile is impossible to unlock when:
+        - It is still locked (not yet unlocked)
+        - There are no remaining unpicked horizontal adjacent tiles (left or right)
+        - Chain unlocks ONLY when a horizontal adjacent tile is picked
+
+        Returns True if game is in impossible state.
+        """
+        for layer_idx, layer_tiles in state.tiles.items():
+            for pos_key, tile in layer_tiles.items():
+                if tile.picked:
+                    continue
+
+                # Only check chain tiles
+                if tile.effect_type != TileEffectType.CHAIN:
+                    continue
+
+                # Skip if already unlocked
+                if tile.effect_data.get("unlocked", False):
+                    continue
+
+                # Chain is locked - check if any horizontal neighbor exists
+                x, y = tile.x_idx, tile.y_idx
+                horizontal_neighbors = [(x - 1, y), (x + 1, y)]
+
+                has_horizontal_neighbor = False
+                for nx, ny in horizontal_neighbors:
+                    neighbor_pos = f"{nx}_{ny}"
+                    neighbor = layer_tiles.get(neighbor_pos)
+                    if neighbor and not neighbor.picked:
+                        has_horizontal_neighbor = True
+                        break
+
+                # If no horizontal neighbors remain, chain can never be unlocked
+                if not has_horizontal_neighbor:
+                    return True
 
         return False
 
@@ -3209,6 +3268,9 @@ class BotSimulator:
 
                 # 2a. CHAIN UNLOCK BONUS: Bonus for picking tiles that unlock chains
                 # Chain unlocks when HORIZONTAL adjacent tile is picked (and chain is not blocked)
+                # Difficulty factors:
+                #   - Exposed (not blocked) vs Hidden (blocked by upper layer)
+                #   - Number of horizontal neighbors: 1 (critical) vs 2 (safe)
                 chain_unlock_bonus = 0.0
                 horizontal_neighbors = [(move_x - 1, move_y), (move_x + 1, move_y)]
                 for nx, ny in horizontal_neighbors:
@@ -3218,20 +3280,36 @@ class BotSimulator:
                         if (not neighbor_tile.picked and
                             neighbor_tile.effect_type == TileEffectType.CHAIN and
                             not neighbor_tile.effect_data.get("unlocked", False)):
-                            # This move will unlock a chain tile!
+                            # Count how many horizontal neighbors the chain has
+                            chain_x, chain_y = neighbor_tile.x_idx, neighbor_tile.y_idx
+                            chain_h_neighbors = [(chain_x - 1, chain_y), (chain_x + 1, chain_y)]
+                            chain_neighbor_count = sum(
+                                1 for cx, cy in chain_h_neighbors
+                                if f"{cx}_{cy}" in layer_tiles and not layer_tiles[f"{cx}_{cy}"].picked
+                            )
+
+                            # Neighbor count multiplier: 1 neighbor = critical (2.0x), 2 neighbors = safe (1.0x)
+                            neighbor_multiplier = 2.0 if chain_neighbor_count == 1 else 1.0
+
                             # Check if chain tile is blocked (if blocked, unlock won't happen)
                             if not self._is_blocked_by_upper(state, neighbor_tile):
-                                # Chain will be unlocked immediately - HIGH PRIORITY
-                                chain_unlock_bonus = max(chain_unlock_bonus, 25.0 * profile.blocking_awareness * gimmick_bonus_multiplier)
+                                # Chain is EXPOSED and will be unlocked immediately - HIGH PRIORITY
+                                # Base: 60, with neighbor multiplier: 60-120
+                                chain_unlock_bonus = max(chain_unlock_bonus, 60.0 * neighbor_multiplier * profile.blocking_awareness * gimmick_bonus_multiplier)
                             else:
-                                # Chain is blocked, but this move helps progress toward unlock
-                                chain_unlock_bonus = max(chain_unlock_bonus, 5.0 * profile.blocking_awareness * gimmick_bonus_multiplier)
+                                # Chain is HIDDEN (blocked), but this move helps progress toward unlock
+                                # Base: 20, with neighbor multiplier: 20-40
+                                chain_unlock_bonus = max(chain_unlock_bonus, 20.0 * neighbor_multiplier * profile.blocking_awareness * gimmick_bonus_multiplier)
 
                 if chain_unlock_bonus > 0:
                     base_score += chain_unlock_bonus
 
                 # 2b. GRASS REDUCE BONUS: Bonus for picking tiles that reduce grass layers
                 # Grass reduces when 4-directional adjacent tile is picked (and grass is not blocked)
+                # Difficulty factors:
+                #   - Exposed (not blocked) vs Hidden (blocked by upper layer)
+                #   - Remaining grass layers: 1 (last layer, critical) vs 2+ (normal)
+                #   - Number of adjacent tiles: fewer = more critical
                 grass_reduce_bonus = 0.0
                 adjacent_neighbors = [
                     (move_x - 1, move_y), (move_x + 1, move_y),
@@ -3245,17 +3323,40 @@ class BotSimulator:
                             neighbor_tile.effect_type == TileEffectType.GRASS):
                             remaining_grass = neighbor_tile.effect_data.get("remaining", 0)
                             if remaining_grass > 0:
+                                # Count how many adjacent tiles the grass has (accessibility)
+                                grass_x, grass_y = neighbor_tile.x_idx, neighbor_tile.y_idx
+                                grass_adj_positions = [
+                                    (grass_x - 1, grass_y), (grass_x + 1, grass_y),
+                                    (grass_x, grass_y - 1), (grass_x, grass_y + 1)
+                                ]
+                                grass_adj_count = sum(
+                                    1 for gx, gy in grass_adj_positions
+                                    if f"{gx}_{gy}" in layer_tiles and not layer_tiles[f"{gx}_{gy}"].picked
+                                )
+
+                                # Accessibility multiplier: fewer neighbors = more critical
+                                # 1 neighbor = 2.0x, 2 neighbors = 1.5x, 3+ neighbors = 1.0x
+                                if grass_adj_count <= 1:
+                                    adj_multiplier = 2.0
+                                elif grass_adj_count == 2:
+                                    adj_multiplier = 1.5
+                                else:
+                                    adj_multiplier = 1.0
+
                                 # Check if grass tile is blocked
                                 if not self._is_blocked_by_upper(state, neighbor_tile):
                                     if remaining_grass == 1:
-                                        # This move will fully unlock the grass tile - HIGH PRIORITY
-                                        grass_reduce_bonus = max(grass_reduce_bonus, 20.0 * profile.blocking_awareness * gimmick_bonus_multiplier)
+                                        # EXPOSED + LAST LAYER: This move will fully unlock - HIGHEST PRIORITY
+                                        # Base: 30, with adj multiplier: 30-60
+                                        grass_reduce_bonus = max(grass_reduce_bonus, 30.0 * adj_multiplier * profile.blocking_awareness * gimmick_bonus_multiplier)
                                     else:
-                                        # This move reduces grass layers - MEDIUM PRIORITY
-                                        grass_reduce_bonus = max(grass_reduce_bonus, 10.0 * profile.blocking_awareness * gimmick_bonus_multiplier)
+                                        # EXPOSED + layers remaining: reduces grass - HIGH PRIORITY
+                                        # Base: 15, with adj multiplier: 15-30
+                                        grass_reduce_bonus = max(grass_reduce_bonus, 15.0 * adj_multiplier * profile.blocking_awareness * gimmick_bonus_multiplier)
                                 else:
-                                    # Grass is blocked, but reducing helps
-                                    grass_reduce_bonus = max(grass_reduce_bonus, 3.0 * profile.blocking_awareness * gimmick_bonus_multiplier)
+                                    # HIDDEN (blocked): still helps progress
+                                    # Base: 5, with adj multiplier: 5-10
+                                    grass_reduce_bonus = max(grass_reduce_bonus, 5.0 * adj_multiplier * profile.blocking_awareness * gimmick_bonus_multiplier)
 
                 if grass_reduce_bonus > 0:
                     base_score += grass_reduce_bonus
@@ -3281,6 +3382,58 @@ class BotSimulator:
                 # chain_preference 기반 패널티 스케일링 (0.2 ~ 1.2)
                 chain_penalty *= (0.2 + profile.chain_preference)
                 base_score -= chain_penalty
+
+            # ============================================================
+            # 3b. [v15.15] CHAIN ISOLATION DANGER - Critical game over prevention
+            # Detect if this move would isolate a locked chain tile
+            # (leave it with no horizontal neighbors = game impossible)
+            # Probability-based awareness: higher-level bots more likely to notice
+            #
+            # IMPORTANT: If this move is adjacent to the chain AND chain is not blocked,
+            # the chain will be UNLOCKED by this move, so no penalty should apply.
+            # ============================================================
+            if tile_state and locked_chain_positions:
+                move_pos = tile_state.position_key
+                move_layer = tile_state.layer_idx
+                move_x, move_y = tile_state.x_idx, tile_state.y_idx
+
+                for chain_layer_idx, chain_pos, chain_tile in locked_chain_positions:
+                    # Only check chains in the same layer
+                    if chain_layer_idx != move_layer:
+                        continue
+
+                    chain_x, chain_y = chain_tile.x_idx, chain_tile.y_idx
+                    horizontal_neighbors = [
+                        (chain_x - 1, chain_y),
+                        (chain_x + 1, chain_y)
+                    ]
+
+                    # Check if THIS move is adjacent to the chain (would unlock it)
+                    is_move_adjacent_to_chain = (move_x, move_y) in horizontal_neighbors
+
+                    # If move is adjacent AND chain is not blocked, it will UNLOCK the chain
+                    # No isolation danger - skip penalty (chain becomes pickable)
+                    if is_move_adjacent_to_chain and not self._is_blocked_by_upper(state, chain_tile):
+                        continue
+
+                    # Count remaining horizontal neighbors after this move
+                    remaining_neighbors = 0
+                    for nx, ny in horizontal_neighbors:
+                        neighbor_pos = f"{nx}_{ny}"
+                        if neighbor_pos == move_pos:
+                            # This tile would be removed by this move
+                            continue
+                        layer_tiles = state.tiles.get(chain_layer_idx, {})
+                        neighbor = layer_tiles.get(neighbor_pos)
+                        if neighbor and not neighbor.picked:
+                            remaining_neighbors += 1
+
+                    # If this move would leave chain with NO horizontal neighbors
+                    # AND the move doesn't unlock the chain (already checked above)
+                    if remaining_neighbors == 0:
+                        # CRITICAL: This move would cause guaranteed game over
+                        # Apply massive penalty (no probability check for isolation)
+                        base_score -= 1000.0 * profile.blocking_awareness
 
             # 4. GRASS tiles: Penalize moves that don't help reduce grass when grass exists
             blocking_grass = 0
@@ -3703,14 +3856,23 @@ class BotSimulator:
         if self._rng.random() < adjusted_mistake_rate:
             return self._rng.choice(moves)
 
-        # CRITICAL: Always prefer moves that complete a match (3-in-dock)
-        matching_moves = [m for m in moves if m.will_match]
+        # CRITICAL: Filter out dangerous moves that would cause game over
+        # Score threshold: -100 indicates critical danger (e.g., chain isolation)
+        DANGEROUS_SCORE_THRESHOLD = -100.0
+        safe_moves = [m for m in moves if m.score > DANGEROUS_SCORE_THRESHOLD]
+
+        # If all moves are dangerous, we must pick the least bad one
+        if not safe_moves:
+            safe_moves = moves  # Fallback to all moves
+
+        # Prefer moves that complete a match (3-in-dock) among safe moves
+        matching_moves = [m for m in safe_moves if m.will_match]
         if matching_moves:
-            # Among matching moves, prefer by score
+            # Among safe matching moves, prefer by score
             return max(matching_moves, key=lambda m: m.score)
 
-        # Sort by score
-        sorted_moves = sorted(moves, key=lambda m: m.score, reverse=True)
+        # Sort safe moves by score
+        sorted_moves = sorted(safe_moves, key=lambda m: m.score, reverse=True)
 
         # ============================================================
         # PATIENCE PARAMETER INTEGRATION

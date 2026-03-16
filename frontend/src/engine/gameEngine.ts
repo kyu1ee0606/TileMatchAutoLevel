@@ -8,6 +8,8 @@
  * - 기믹 시스템 (ice, chain, grass, link, frog, bomb, curtain, teleport)
  */
 
+import { TileDistributor } from './tileDistributor';
+
 // ==================== 타입 정의 ====================
 
 export enum TileEffectType {
@@ -227,212 +229,53 @@ export class GameEngine {
   }
 
   /**
-   * t0 타일들을 3의 배수 규칙에 맞게 분배
-   * 백엔드 TileDistributor.assign_t0_tiles와 동일한 로직
+   * t0 타일들을 인게임과 동일하게 분배
+   * TileDistributor.assignT0Tiles를 사용하여 zWellRandom + C# ShuffleEmptyTiles 로직 적용
    *
-   * CRITICAL: useTileCount를 사용하여 t1~t{useTileCount} 범위로 분배해야 함
-   * CRITICAL: unlockTile > 0일 경우 첫 unlockTile * 3개의 타일은 "key"로 할당
+   * @param t0Count - 분배할 t0 타일 수
+   * @param useTileCount - 사용할 타일 타입 개수 (레벨 JSON의 useTileCount)
+   * @param randSeed - 랜덤 시드 (레벨 JSON의 randSeed)
+   * @param shuffleTile - 추가 셔플 횟수 (레벨 JSON의 xShuffleTile)
+   * @param typeImbalance - 타입 불균형 설정 (레벨 JSON의 xTypeImbalance, 0-10)
+   * @param unlockTile - key 타일 세트 수 (레벨 JSON의 unlockTile)
+   * @param existingTileCounts - 기존 사전 할당된 타일 카운트 (3의 배수 보정용)
    */
   private distributeT0Tiles(
     t0Count: number,
-    existingTileCounts: Map<string, number>,
-    seed: number = 42,
-    unlockTile: number = 0,  // key 기믹: 버퍼 잠금 수
-    useTileCount: number = 0  // 사용할 타일 타입 개수 (레벨 JSON의 useTileCount)
+    useTileCount: number,
+    randSeed: number,
+    shuffleTile: number = 0,
+    typeImbalance: number = 0,
+    unlockTile: number = 0,
+    existingTileCounts: Map<string, number> = new Map()
   ): string[] {
     if (t0Count === 0) return [];
+    // useTileCount가 0이면 기본값 6 사용 (백엔드와 동일)
+    const effectiveUseTileCount = useTileCount > 0 ? useTileCount : 6;
 
-    const assignments: string[] = [];
-    let remainingT0 = t0Count;
+    console.log(`[distributeT0Tiles] Using TileDistributor.assignT0Tiles:`, {
+      t0Count,
+      useTileCount: effectiveUseTileCount,
+      randSeed,
+      shuffleTile,
+      typeImbalance,
+      unlockTile,
+      existingTileCounts: Object.fromEntries(existingTileCounts)
+    });
 
-    // CRITICAL: key 타일 먼저 할당 (unlockTile * 3개)
-    // 백엔드 TileDistributor와 동일하게 첫 unlockTile 그룹은 key 타일로 변환
-    if (unlockTile > 0) {
-      const keyTilesNeeded = unlockTile * 3;
-      const keyTilesToAdd = Math.min(keyTilesNeeded, remainingT0);
-      for (let i = 0; i < keyTilesToAdd; i++) {
-        assignments.push('key');
-      }
-      remainingT0 -= keyTilesToAdd;
-      console.log(`[distributeT0Tiles] Assigned ${keyTilesToAdd} key tiles (unlockTile=${unlockTile})`);
-    }
+    // TileDistributor 사용 - 인게임과 동일한 zWellRandom + 셔플 로직
+    const assignments = TileDistributor.assignT0Tiles(
+      t0Count,
+      effectiveUseTileCount,
+      randSeed,
+      shuffleTile,
+      typeImbalance,
+      unlockTile,
+      0,  // tileTypeOffset - 기본값 0 (t1~t{useTileCount} 사용)
+      existingTileCounts
+    );
 
-    if (remainingT0 === 0) return assignments;
-
-    // 사용 가능한 타일 타입 결정
-    // CRITICAL FIX: useTileCount가 지정되면 t1~t{useTileCount} 사용 (백엔드와 동일)
-    // useTileCount가 없으면 기존 타일 타입에서 추출 (폴백)
-    let availableTypes: string[];
-    if (useTileCount > 0) {
-      // useTileCount 기반으로 타일 타입 결정 (백엔드 TileDistributor와 동일)
-      availableTypes = [];
-      for (let i = 1; i <= useTileCount; i++) {
-        availableTypes.push(`t${i}`);
-      }
-      console.log(`[distributeT0Tiles] Using useTileCount=${useTileCount}, availableTypes:`, availableTypes);
-    } else if (existingTileCounts.size > 0) {
-      // 폴백: 기존 타일 타입에서 추출
-      availableTypes = Array.from(existingTileCounts.keys())
-        .filter(t => t.startsWith('t') && t.slice(1).match(/^\d+$/))
-        .sort((a, b) => parseInt(a.slice(1)) - parseInt(b.slice(1)));
-      if (availableTypes.length === 0) {
-        availableTypes = RANDOM_TILE_POOL.slice(0, 8);
-      }
-      console.log(`[distributeT0Tiles] Fallback to existingTileCounts, availableTypes:`, availableTypes);
-    } else {
-      availableTypes = RANDOM_TILE_POOL.slice(0, 8);
-      console.log(`[distributeT0Tiles] Fallback to RANDOM_TILE_POOL, availableTypes:`, availableTypes);
-    }
-
-    // 각 타입별로 3의 배수가 되기 위해 필요한 타일 수 계산
-    const typeNeeds = new Map<string, number>();
-    for (const tileType of availableTypes) {
-      const existing = existingTileCounts.get(tileType) || 0;
-      const remainder = existing % 3;
-      if (remainder === 0) {
-        typeNeeds.set(tileType, 0);
-      } else {
-        typeNeeds.set(tileType, 3 - remainder);
-      }
-    }
-
-    // 1단계: 3의 배수를 완성하기 위해 필요한 타일 먼저 할당
-    const typesNeeding = Array.from(typeNeeds.entries())
-      .filter(([_, need]) => need > 0)
-      .sort((a, b) => a[1] - b[1]);
-
-    for (const [tileType, need] of typesNeeding) {
-      if (remainingT0 >= need) {
-        for (let i = 0; i < need; i++) {
-          assignments.push(tileType);
-        }
-        remainingT0 -= need;
-        typeNeeds.set(tileType, 0);
-      }
-    }
-
-    // 2단계: 남은 t0 타일들을 3개씩 묶어서 분배
-    if (remainingT0 > 0) {
-      const completeSets = Math.floor(remainingT0 / 3);
-      const finalRemainder = remainingT0 % 3;
-
-      if (completeSets > 0) {
-        const numTypes = availableTypes.length;
-        const setsPerType = Math.floor(completeSets / numTypes);
-        const extraSets = completeSets % numTypes;
-
-        for (let i = 0; i < numTypes; i++) {
-          const tileType = availableTypes[i];
-          const setsForThisType = setsPerType + (i < extraSets ? 1 : 0);
-          for (let j = 0; j < setsForThisType * 3; j++) {
-            assignments.push(tileType);
-          }
-        }
-      }
-
-      // 3단계: 나머지 처리 (1~2개 남은 경우)
-      // 기존 할당에서 빌려와서 3의 배수로 맞춤
-      if (finalRemainder > 0 && assignments.length > 0) {
-        const assignCounts = new Map<string, number>();
-        for (const t of assignments) {
-          assignCounts.set(t, (assignCounts.get(t) || 0) + 1);
-        }
-
-        const tilesToBorrow = 3 - finalRemainder;
-        let borrowFromType: string | null = null;
-        let borrowToType: string | null = null;
-
-        for (const tileType of availableTypes) {
-          const current = assignCounts.get(tileType) || 0;
-          if (current >= tilesToBorrow) {
-            borrowFromType = tileType;
-            break;
-          }
-        }
-
-        for (const tileType of availableTypes) {
-          if (tileType !== borrowFromType) {
-            borrowToType = tileType;
-            break;
-          }
-        }
-
-        if (borrowFromType && borrowToType) {
-          // borrowFromType에서 tilesToBorrow개 제거
-          let removed = 0;
-          const newAssignments: string[] = [];
-          for (const t of assignments) {
-            if (t === borrowFromType && removed < tilesToBorrow) {
-              removed++;
-              continue;
-            }
-            newAssignments.push(t);
-          }
-          assignments.length = 0;
-          assignments.push(...newAssignments);
-
-          // borrowToType으로 3개 추가
-          for (let i = 0; i < 3; i++) {
-            assignments.push(borrowToType);
-          }
-        }
-      }
-    }
-
-    // 4단계: 최종 검증 및 수정 - 모든 타입이 3의 배수인지 확인
-    for (let iteration = 0; iteration < 10; iteration++) {
-      const assignCounts = new Map<string, number>();
-      for (const t of assignments) {
-        assignCounts.set(t, (assignCounts.get(t) || 0) + 1);
-      }
-
-      const finalCounts = new Map<string, number>();
-      for (const tileType of availableTypes) {
-        const existing = existingTileCounts.get(tileType) || 0;
-        const assigned = assignCounts.get(tileType) || 0;
-        finalCounts.set(tileType, existing + assigned);
-      }
-
-      const brokenTypes: Array<[string, number]> = [];
-      for (const [tileType, count] of finalCounts) {
-        if (count % 3 !== 0) {
-          brokenTypes.push([tileType, count % 3]);
-        }
-      }
-
-      if (brokenTypes.length === 0) break;
-
-      // 나머지가 1인 타입과 2인 타입 짝짓기
-      const rem1Types = brokenTypes.filter(([_, r]) => r === 1).map(([t]) => t);
-      const rem2Types = brokenTypes.filter(([_, r]) => r === 2).map(([t]) => t);
-
-      let madeChange = false;
-      while (rem1Types.length > 0 && rem2Types.length > 0) {
-        const fromType = rem1Types.pop()!;
-        const toType = rem2Types.pop()!;
-
-        for (let i = 0; i < assignments.length; i++) {
-          if (assignments[i] === fromType) {
-            assignments[i] = toType;
-            madeChange = true;
-            break;
-          }
-        }
-      }
-
-      if (!madeChange) break;
-    }
-
-    // 셔플 (시드 기반 랜덤)
-    const seededRandom = (s: number) => {
-      const x = Math.sin(s) * 10000;
-      return x - Math.floor(x);
-    };
-    for (let i = assignments.length - 1; i > 0; i--) {
-      const j = Math.floor(seededRandom(seed + i) * (i + 1));
-      [assignments[i], assignments[j]] = [assignments[j], assignments[i]];
-    }
-
+    console.log(`[distributeT0Tiles] Result (first 20):`, assignments.slice(0, 20));
     return assignments;
   }
 
@@ -607,21 +450,39 @@ export class GameEngine {
       }
     }
 
-    // ========== t0 타일 타입 분배 (3의 배수 규칙 보장) ==========
-    // CRITICAL: 레벨 JSON의 useTileCount와 randSeed를 사용하여 백엔드와 동일한 분배
-    const useTileCount = typeof levelJson.useTileCount === 'number'
-      ? levelJson.useTileCount : 0;
+    // ========== t0 타일 타입 분배 (인게임과 동일한 로직) ==========
+    // CRITICAL: zWellRandom + C# ShuffleEmptyTiles 로직 사용
+    const DEFAULT_USE_TILE_COUNT = 6;  // 백엔드와 동일한 기본값
+    let useTileCount = typeof levelJson.useTileCount === 'number'
+      ? levelJson.useTileCount : DEFAULT_USE_TILE_COUNT;
+    if (useTileCount <= 0) {
+      useTileCount = DEFAULT_USE_TILE_COUNT;
+    }
     const randSeed = typeof levelJson.randSeed === 'number'
       ? levelJson.randSeed : 42;
+    // 추가 파라미터: xShuffleTile, xTypeImbalance (인게임 분배 로직용)
+    const shuffleTile = typeof levelJson.xShuffleTile === 'number'
+      ? levelJson.xShuffleTile : 0;
+    const typeImbalance = typeof levelJson.xTypeImbalance === 'number'
+      ? levelJson.xTypeImbalance : 0;
 
-    console.log(`[Init] t0 distribution params: useTileCount=${useTileCount}, randSeed=${randSeed}, unlockTile=${this.state.lockedSlots}`);
+    console.log(`[Init] t0 distribution params:`, {
+      useTileCount,
+      randSeed,
+      shuffleTile,
+      typeImbalance,
+      unlockTile: this.state.lockedSlots,
+      t0Count: t0Positions.length
+    });
 
     const t0Assignments = this.distributeT0Tiles(
-      t0Positions.length,
-      existingTileCounts,
-      randSeed, // 레벨 JSON의 randSeed 사용
-      this.state.lockedSlots, // unlockTile - key 타일 생성에 사용
-      useTileCount // useTileCount 전달 (t1~t{useTileCount} 범위로 분배)
+      t0Positions.length,      // t0Count
+      useTileCount,            // useTileCount
+      randSeed,                // randSeed
+      shuffleTile,             // xShuffleTile
+      typeImbalance,           // xTypeImbalance
+      this.state.lockedSlots,  // unlockTile
+      existingTileCounts       // existingTileCounts for toAddIndexList
     );
 
     // 할당 맵 구성

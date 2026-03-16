@@ -4570,6 +4570,51 @@ function TestTab({
                   </button>
                 </div>
               )}
+
+              {/* Batch Regeneration Progress for Range Selection */}
+              {(isBatchRegenerating || regenProgressMap.size > 0) && batchRegenTotal > 0 && (() => {
+                const entries = [...regenProgressMap.values()];
+                const doneCount = entries.filter(p => p.status === 'done').length;
+                const failCount = entries.filter(p => p.status === 'failed').length;
+                const completedCount = doneCount + failCount;
+                const generatingCount = entries.filter(p => p.status === 'generating').length;
+                const savingCount = entries.filter(p => p.status === 'saving').length;
+                const waitingCount = entries.filter(p => p.status === 'waiting').length;
+                const progressPct = (completedCount / batchRegenTotal) * 100;
+                const isFinished = !isBatchRegenerating && completedCount === batchRegenTotal;
+                return (
+                  <div className={`border rounded-lg p-2 space-y-1 mt-1 ${isFinished ? 'bg-gray-800/80 border-gray-600' : 'bg-gray-900/60 border-gray-600'}`}>
+                    <div className="flex items-center justify-between text-[10px]">
+                      <span className="text-gray-300 font-medium">
+                        {isFinished ? '✅ 완료' : '⏳ 진행중'}
+                      </span>
+                      <div className="flex items-center gap-1">
+                        <span className="text-green-400 font-bold">{doneCount}</span>
+                        {failCount > 0 && <span className="text-red-400">+{failCount}</span>}
+                        <span className="text-gray-500">/ {batchRegenTotal}</span>
+                        {isFinished && (
+                          <button
+                            onClick={() => { setRegenProgressMap(new Map()); setBatchRegenTotal(0); }}
+                            className="text-gray-500 hover:text-gray-300 ml-1"
+                          >✕</button>
+                        )}
+                      </div>
+                    </div>
+                    <div className="w-full h-1.5 bg-gray-700 rounded-full overflow-hidden">
+                      <div className="h-full rounded-full transition-all duration-300"
+                        style={{ width: `${progressPct}%`, background: failCount > 0 ? '#ef4444' : '#22c55e' }}
+                      />
+                    </div>
+                    {isBatchRegenerating && (
+                      <div className="flex items-center gap-2 text-[10px] text-gray-400">
+                        {generatingCount > 0 && <span className="text-blue-400">⟳ {generatingCount}</span>}
+                        {savingCount > 0 && <span className="text-purple-400">💾 {savingCount}</span>}
+                        {waitingCount > 0 && <span className="text-gray-500">⏸ {waitingCount}</span>}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
           )}
         </div>

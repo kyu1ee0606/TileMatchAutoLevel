@@ -2644,6 +2644,10 @@ function TestTab({
   const [isBatchRegenerating, setIsBatchRegenerating] = useState(false);
   const [regenerationThreshold, setRegenerationThreshold] = useState(70);
   const [selectedRegenLevels, setSelectedRegenLevels] = useState<Set<number>>(new Set());
+  // Range selection state for batch regeneration
+  const [rangeSelectMode, setRangeSelectMode] = useState(false);
+  const [rangeStart, setRangeStart] = useState(1);
+  const [rangeEnd, setRangeEnd] = useState(100);
 
   // Regeneration Modal state (모양 선택 기능)
   const [regenModalOpen, setRegenModalOpen] = useState(false);
@@ -3238,6 +3242,54 @@ function TestTab({
       addNotification('success', `선택 레벨 재생성 완료: ${result.successCount}개 성공, ${result.failCount}개 실패`);
     }
   };
+
+  // Select levels within range from filtered levels list
+  const handleSelectRange = useCallback(() => {
+    const start = Math.min(rangeStart, rangeEnd);
+    const end = Math.max(rangeStart, rangeEnd);
+    const levelsInRange = levels.filter(l =>
+      l.meta.level_number >= start && l.meta.level_number <= end
+    );
+    if (levelsInRange.length === 0) {
+      addNotification('info', `범위 ${start}~${end}에 레벨이 없습니다.`);
+      return;
+    }
+    setSelectedRegenLevels(new Set(levelsInRange.map(l => l.meta.level_number)));
+    addNotification('success', `${levelsInRange.length}개 레벨 선택됨 (${start}~${end})`);
+  }, [rangeStart, rangeEnd, levels, addNotification]);
+
+  // Add range to existing selection
+  const handleAddRangeToSelection = useCallback(() => {
+    const start = Math.min(rangeStart, rangeEnd);
+    const end = Math.max(rangeStart, rangeEnd);
+    const levelsInRange = levels.filter(l =>
+      l.meta.level_number >= start && l.meta.level_number <= end
+    );
+    if (levelsInRange.length === 0) {
+      addNotification('info', `범위 ${start}~${end}에 레벨이 없습니다.`);
+      return;
+    }
+    setSelectedRegenLevels(prev => {
+      const next = new Set(prev);
+      levelsInRange.forEach(l => next.add(l.meta.level_number));
+      return next;
+    });
+    addNotification('success', `${levelsInRange.length}개 레벨 추가됨`);
+  }, [rangeStart, rangeEnd, levels, addNotification]);
+
+  // Quick select first/last N levels
+  const handleQuickSelect = useCallback((type: 'first' | 'last', count: number) => {
+    const sorted = [...levels].sort((a, b) => a.meta.level_number - b.meta.level_number);
+    const selected = type === 'first' ? sorted.slice(0, count) : sorted.slice(-count);
+    if (selected.length === 0) {
+      addNotification('info', '선택할 레벨이 없습니다.');
+      return;
+    }
+    setSelectedRegenLevels(new Set(selected.map(l => l.meta.level_number)));
+    const first = selected[0].meta.level_number;
+    const last = selected[selected.length - 1].meta.level_number;
+    addNotification('success', `${selected.length}개 레벨 선택됨 (${first}~${last})`);
+  }, [levels, addNotification]);
 
   // Filtered levels based on search and filter
   const filteredLevels = useMemo(() => {
@@ -4418,6 +4470,108 @@ function TestTab({
             <option value="approved">승인됨</option>
             <option value="needs_rework">수정필요</option>
           </select>
+
+          {/* Range Selection Toggle */}
+          <button
+            onClick={() => setRangeSelectMode(!rangeSelectMode)}
+            className={`w-full px-3 py-1.5 text-xs rounded transition-colors ${
+              rangeSelectMode ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+            }`}
+          >
+            🎯 범위 선택 {rangeSelectMode ? '▲' : '▼'}
+          </button>
+
+          {/* Range Selection Panel */}
+          {rangeSelectMode && (
+            <div className="bg-gray-900/50 rounded-lg p-2 space-y-2 border border-gray-600">
+              {/* Range Inputs */}
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  value={rangeStart}
+                  onChange={(e) => setRangeStart(Math.max(1, parseInt(e.target.value) || 1))}
+                  className="flex-1 px-2 py-1 text-sm bg-gray-700 border border-gray-600 rounded text-center"
+                  placeholder="시작"
+                  min={1}
+                />
+                <span className="text-gray-500 text-sm">~</span>
+                <input
+                  type="number"
+                  value={rangeEnd}
+                  onChange={(e) => setRangeEnd(Math.max(1, parseInt(e.target.value) || 1))}
+                  className="flex-1 px-2 py-1 text-sm bg-gray-700 border border-gray-600 rounded text-center"
+                  placeholder="끝"
+                  min={1}
+                />
+              </div>
+
+              {/* Range Action Buttons */}
+              <div className="flex gap-1">
+                <button
+                  onClick={handleSelectRange}
+                  disabled={isBatchRegenerating}
+                  className="flex-1 px-2 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded disabled:opacity-50"
+                >
+                  범위 선택
+                </button>
+                <button
+                  onClick={handleAddRangeToSelection}
+                  disabled={isBatchRegenerating}
+                  className="flex-1 px-2 py-1 text-xs bg-purple-600 hover:bg-purple-500 text-white rounded disabled:opacity-50"
+                >
+                  추가 선택
+                </button>
+              </div>
+
+              {/* Quick Select Buttons */}
+              <div className="flex flex-wrap gap-1">
+                <button
+                  onClick={() => handleQuickSelect('first', 50)}
+                  disabled={isBatchRegenerating}
+                  className="px-2 py-1 text-[10px] bg-gray-700 hover:bg-gray-600 text-gray-300 rounded disabled:opacity-50"
+                >
+                  처음 50
+                </button>
+                <button
+                  onClick={() => handleQuickSelect('last', 50)}
+                  disabled={isBatchRegenerating}
+                  className="px-2 py-1 text-[10px] bg-gray-700 hover:bg-gray-600 text-gray-300 rounded disabled:opacity-50"
+                >
+                  마지막 50
+                </button>
+                <button
+                  onClick={() => handleQuickSelect('first', 100)}
+                  disabled={isBatchRegenerating}
+                  className="px-2 py-1 text-[10px] bg-gray-700 hover:bg-gray-600 text-gray-300 rounded disabled:opacity-50"
+                >
+                  처음 100
+                </button>
+                <button
+                  onClick={() => setSelectedRegenLevels(new Set())}
+                  disabled={isBatchRegenerating}
+                  className="px-2 py-1 text-[10px] bg-red-700/50 hover:bg-red-600/50 text-red-300 rounded disabled:opacity-50"
+                >
+                  선택 해제
+                </button>
+              </div>
+
+              {/* Selection Count & Actions */}
+              {selectedRegenLevels.size > 0 && (
+                <div className="flex items-center gap-2 pt-1 border-t border-gray-700">
+                  <span className="text-xs text-indigo-400 flex-1">
+                    {selectedRegenLevels.size}개 선택됨
+                  </span>
+                  <button
+                    onClick={handleRegenerateSelected}
+                    disabled={isBatchRegenerating}
+                    className="px-2 py-1 text-xs bg-orange-600 hover:bg-orange-500 text-white rounded disabled:opacity-50"
+                  >
+                    {isBatchRegenerating ? '재생성 중...' : `🔄 ${selectedRegenLevels.size}개 재생성`}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Level list */}
@@ -4441,34 +4595,59 @@ function TestTab({
             </div>
           ) : (
             <div className="divide-y divide-gray-700">
-              {filteredLevels.map((level) => (
+              {filteredLevels.map((level) => {
+                const isChecked = selectedRegenLevels.has(level.meta.level_number);
+                return (
                 <div
                   key={level.meta.level_number}
                   onClick={() => handleSelectLevel(level)}
                   className={`p-3 cursor-pointer transition-colors ${
                     selectedLevel?.meta.level_number === level.meta.level_number
                       ? 'bg-indigo-900/50'
-                      : 'hover:bg-gray-700/50'
+                      : isChecked
+                        ? 'bg-indigo-900/30'
+                        : 'hover:bg-gray-700/50'
                   }`}
                 >
                   <div className="flex items-center justify-between">
-                    <div>
-                      <div className="text-sm font-medium text-white">
-                        레벨 {level.meta.level_number}
-                      </div>
-                      <div className="text-xs text-gray-400">
-                        난이도: {level.meta.actual_difficulty.toFixed(3)} ({(level.meta.actual_difficulty * 100).toFixed(0)}%)
-                      </div>
-                      {level.meta.generated_at && (
-                        <div className="text-[10px] text-gray-500">
-                          {new Date(level.meta.generated_at).toLocaleString('ko-KR', {
-                            month: 'numeric',
-                            day: 'numeric',
-                            hour: '2-digit',
-                            minute: '2-digit',
-                          })}
-                        </div>
+                    <div className="flex items-center gap-2">
+                      {/* Checkbox for batch selection */}
+                      {rangeSelectMode && (
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={(e) => {
+                            e.stopPropagation();
+                            setSelectedRegenLevels(prev => {
+                              const next = new Set(prev);
+                              if (isChecked) next.delete(level.meta.level_number);
+                              else next.add(level.meta.level_number);
+                              return next;
+                            });
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                          className="w-4 h-4 rounded border-gray-500 accent-indigo-500"
+                          disabled={isBatchRegenerating}
+                        />
                       )}
+                      <div>
+                        <div className="text-sm font-medium text-white">
+                          레벨 {level.meta.level_number}
+                        </div>
+                        <div className="text-xs text-gray-400">
+                          난이도: {level.meta.actual_difficulty.toFixed(3)} ({(level.meta.actual_difficulty * 100).toFixed(0)}%)
+                        </div>
+                        {level.meta.generated_at && (
+                          <div className="text-[10px] text-gray-500">
+                            {new Date(level.meta.generated_at).toLocaleString('ko-KR', {
+                              month: 'numeric',
+                              day: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </div>
+                        )}
+                      </div>
                     </div>
                     <div className="flex items-center gap-2">
                       {/* Pattern indicator */}
@@ -4577,7 +4756,8 @@ function TestTab({
                     </div>
                   )}
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

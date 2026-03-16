@@ -166,6 +166,30 @@ interface ProductionDashboardProps {
   onLevelSelect?: (level: ProductionLevel) => void;
 }
 
+// 필수 기믹 언락 정보 (튜토리얼 스테이지)
+const GIMMICK_TUTORIAL_INFO: Array<{
+  level: number;
+  gimmick: string;
+  name: string;
+  type: 'goal' | 'obstacle';
+  difficulty: string;
+  description: string;
+}> = [
+  { level: 11, gimmick: 'craft', name: '공예', type: 'goal', difficulty: '⭐⭐⭐', description: '여러 타일을 모아 완성하는 목표 타일' },
+  { level: 21, gimmick: 'stack', name: '스택', type: 'goal', difficulty: '⭐⭐⭐', description: '쌓인 타일을 순서대로 제거' },
+  { level: 31, gimmick: 'ice', name: '얼음', type: 'obstacle', difficulty: '⭐⭐⭐', description: '얼어있는 타일, 매칭하면 해제' },
+  { level: 51, gimmick: 'link', name: '연결', type: 'obstacle', difficulty: '⭐⭐⭐⭐', description: '연결된 타일은 함께 이동' },
+  { level: 81, gimmick: 'chain', name: '사슬', type: 'obstacle', difficulty: '⭐⭐⭐', description: '사슬로 묶인 타일, 인접 매칭 시 해제' },
+  { level: 111, gimmick: 'key', name: '버퍼잠금', type: 'obstacle', difficulty: '⭐⭐⭐', description: '열쇠로 잠긴 슬롯 해제' },
+  { level: 151, gimmick: 'grass', name: '풀', type: 'obstacle', difficulty: '⭐⭐⭐', description: '풀 위의 타일, 매칭하면 풀 제거' },
+  { level: 191, gimmick: 'unknown', name: '상자', type: 'obstacle', difficulty: '⭐⭐', description: '내용물이 숨겨진 상자 타일' },
+  { level: 241, gimmick: 'curtain', name: '커튼', type: 'obstacle', difficulty: '⭐⭐', description: '커튼 뒤에 숨겨진 타일' },
+  { level: 291, gimmick: 'bomb', name: '폭탄', type: 'obstacle', difficulty: '⭐⭐⭐⭐', description: '시간 내 제거 필요' },
+  { level: 341, gimmick: 'time_attack', name: '타임어택', type: 'obstacle', difficulty: '⭐⭐⭐⭐', description: '제한 시간 내 클리어' },
+  { level: 391, gimmick: 'frog', name: '개구리', type: 'obstacle', difficulty: '⭐⭐⭐⭐⭐', description: '타일을 먹는 개구리' },
+  { level: 441, gimmick: 'teleport', name: '텔레포터', type: 'obstacle', difficulty: '⭐⭐⭐', description: '타일이 이동하는 포탈' },
+];
+
 export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps) {
   const { addNotification } = useUIStore();
   const [activeTab, setActiveTab] = useState<DashboardTab>('overview');
@@ -173,6 +197,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
   const [stats, setStats] = useState<ProductionStats | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [showGimmickInfo, setShowGimmickInfo] = useState(false);
 
   // Generation state
   const [isGenerating, setIsGenerating] = useState(false);
@@ -946,9 +971,19 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
     <div className="space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-white">
-          프로덕션 레벨 관리
-        </h2>
+        <div className="flex items-center gap-3">
+          <h2 className="text-lg font-semibold text-white">
+            프로덕션 레벨 관리
+          </h2>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setShowGimmickInfo(true)}
+            title="필수 기믹 스테이지 정보"
+          >
+            📋 기믹 언락 정보
+          </Button>
+        </div>
         <div className="flex gap-2">
           <Button
             variant="secondary"
@@ -966,6 +1001,82 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
           </Button>
         </div>
       </div>
+
+      {/* 기믹 언락 정보 모달 */}
+      {showGimmickInfo && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+          <div className="bg-gray-800 rounded-xl p-6 max-w-2xl w-full mx-4 max-h-[80vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-xl font-bold text-white">📋 필수 기믹 언락 스테이지</h3>
+              <button
+                onClick={() => setShowGimmickInfo(false)}
+                className="text-gray-400 hover:text-white text-2xl"
+              >
+                ×
+              </button>
+            </div>
+            <p className="text-sm text-gray-400 mb-4">
+              각 스테이지에서 해당 기믹이 처음 등장하며, 반드시 해당 기믹이 포함되어야 합니다.
+            </p>
+            <div className="space-y-2">
+              {GIMMICK_TUTORIAL_INFO.map((info) => (
+                <div
+                  key={info.level}
+                  className={`p-3 rounded-lg border ${
+                    info.type === 'goal'
+                      ? 'bg-indigo-900/30 border-indigo-600/50'
+                      : 'bg-gray-700/50 border-gray-600/50'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <span className="text-2xl font-bold text-indigo-400 w-12">
+                        {info.level}
+                      </span>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-white">{info.name}</span>
+                          <span className="text-xs px-2 py-0.5 rounded bg-gray-600 text-gray-300">
+                            {info.gimmick}
+                          </span>
+                          <span className={`text-xs px-2 py-0.5 rounded ${
+                            info.type === 'goal'
+                              ? 'bg-indigo-600 text-indigo-100'
+                              : 'bg-emerald-600 text-emerald-100'
+                          }`}>
+                            {info.type === 'goal' ? '목표 타일' : '장애물'}
+                          </span>
+                        </div>
+                        <p className="text-sm text-gray-400 mt-0.5">{info.description}</p>
+                      </div>
+                    </div>
+                    <div className="text-yellow-400 text-sm whitespace-nowrap">
+                      {info.difficulty}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="mt-6 pt-4 border-t border-gray-700">
+              <div className="flex gap-4 text-sm text-gray-400">
+                <div className="flex items-center gap-2">
+                  <span className="w-3 h-3 rounded bg-indigo-600"></span>
+                  <span>목표 타일 (goals): craft, stack</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="w-3 h-3 rounded bg-emerald-600"></span>
+                  <span>장애물 (obstacles): ice, chain, etc.</span>
+                </div>
+              </div>
+            </div>
+            <div className="mt-4 flex justify-end">
+              <Button onClick={() => setShowGimmickInfo(false)}>
+                닫기
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Batch Selector */}
       {batches.length > 0 && (

@@ -241,6 +241,37 @@ class TileDistributor:
         return result
 
     @staticmethod
+    def get_to_add_index_list(existing_tile_counts: Dict[str, int]) -> List[int]:
+        """Get list of tile indices to add for balancing existing tiles to multiples of 3.
+
+        Matches C# GetToAddIndexList() logic.
+
+        Args:
+            existing_tile_counts: Dict of tile type (e.g., "t1", "t2") to count
+
+        Returns:
+            List of tile indices (1-16) to add before random distribution
+        """
+        to_add_index_list: List[int] = []
+
+        # Check each tile type (t1-t15, key=t16)
+        for tile_idx in range(1, 17):
+            tile_type = "key" if tile_idx == 16 else f"t{tile_idx}"
+            count = existing_tile_counts.get(tile_type, 0)
+
+            if count == 0:
+                continue  # Skip tiles not used in level
+
+            odd_count = count % 3
+            if odd_count != 0:
+                # Add (3 - odd_count) tiles to make it divisible by 3
+                to_add = 3 - odd_count
+                for _ in range(to_add):
+                    to_add_index_list.append(tile_idx)
+
+        return to_add_index_list
+
+    @staticmethod
     def assign_t0_tiles(
         t0_count: int,
         use_tile_count: int,
@@ -248,13 +279,15 @@ class TileDistributor:
         shuffle_tile: int = 0,
         type_imbalance: int = 0,
         unlock_tile: int = 0,
-        tile_type_offset: int = 0
+        tile_type_offset: int = 0,
+        existing_tile_counts: Optional[Dict[str, int]] = None
     ) -> List[str]:
         """Complete t0 tile assignment matching in-game logic.
 
         This is the main entry point that combines:
-        1. DistributeTiles() - Generate tile type index list
-        2. ShuffleEmptyTiles() - Shuffle tile positions
+        1. GetToAddIndexList() - Balance existing tiles to multiples of 3
+        2. DistributeTiles() - Generate tile type index list
+        3. ShuffleEmptyTiles() - Shuffle tile positions
 
         Args:
             t0_count: Total number of t0 tiles to assign
@@ -264,6 +297,7 @@ class TileDistributor:
             type_imbalance: Imbalance setting (xTypeImbalance from level, 0-10)
             unlock_tile: Number of key tile sets (xUnlockTile from level)
             tile_type_offset: Offset to add to tile type indices (e.g., 10 for t11~t15)
+            existing_tile_counts: Dict of existing tile counts for toAddIndexList calculation
 
         Returns:
             List of tile type strings in shuffled order (e.g., ["t3", "t1", "t2", ...])
@@ -280,7 +314,7 @@ class TileDistributor:
         # Imbalance slider value (0.0 - 1.0)
         imbalance_value = type_imbalance / 10.0
 
-        # Generate tile type indices
+        # Generate tile type indices from DistributeTiles
         type_indices = TileDistributor.distribute_tiles(
             set_length=set_count,
             tile_type_count=use_tile_count,
@@ -288,27 +322,43 @@ class TileDistributor:
             imbalance_slider_value=imbalance_value
         )
 
-        # Convert to tile type strings and expand to individual tiles
-        # Each index in type_indices represents 3 tiles
-        # Apply tile_type_offset to match existing tile types in the level
-        # NOTE: KEY_TILE_INDEX (16) must be converted to "key", not "t16+offset"
-        assignments = []
-        for type_idx in type_indices:
-            if type_idx == TileDistributor.KEY_TILE_INDEX:
-                tile_type = "key"
-            else:
-                tile_type = f"t{type_idx + tile_type_offset}"
-            assignments.extend([tile_type] * 3)
+        # Get toAddIndexList for balancing existing tiles (C# GetToAddIndexList)
+        to_add_index_list = TileDistributor.get_to_add_index_list(
+            existing_tile_counts or {}
+        )
 
-        # Handle remainder tiles (if t0_count % 3 != 0)
-        remainder = t0_count % 3
-        if remainder > 0 and type_indices:
-            last_idx = type_indices[-1]
-            if last_idx == TileDistributor.KEY_TILE_INDEX:
-                last_type = "key"
+        # Convert to tile type strings using C# assignment logic:
+        # 1. First consume toAddIndexList
+        # 2. Then use curIndex = setCount / 3 for typeIndices
+        assignments: List[str] = []
+        to_add_idx = 0
+        assign_set_count = 0
+
+        for i in range(t0_count):
+            if to_add_idx < len(to_add_index_list):
+                # First consume toAddIndexList
+                type_idx = to_add_index_list[to_add_idx]
+                to_add_idx += 1
+                if type_idx == TileDistributor.KEY_TILE_INDEX:
+                    tile_type = "key"
+                else:
+                    tile_type = f"t{type_idx + tile_type_offset}"
             else:
-                last_type = f"t{last_idx + tile_type_offset}"
-            assignments.extend([last_type] * remainder)
+                # Then use typeIndices with curIndex = setCount / 3
+                cur_index = assign_set_count // 3
+                assign_set_count += 1
+
+                if cur_index < len(type_indices):
+                    type_idx = type_indices[cur_index]
+                    if type_idx == TileDistributor.KEY_TILE_INDEX:
+                        tile_type = "key"
+                    else:
+                        tile_type = f"t{type_idx + tile_type_offset}"
+                else:
+                    # Fallback: use first type or t1
+                    tile_type = f"t{1 + tile_type_offset}"
+
+            assignments.append(tile_type)
 
         # Shuffle tile positions
         shuffle_count = t0_count + shuffle_tile
@@ -1006,6 +1056,7 @@ class BotSimulator:
                         if stack_info and isinstance(stack_info, list) and len(stack_info) > 0:
                             internal_count = int(stack_info[0]) if stack_info[0] else 1
                             # Add internal t0 tiles for distribution
+                            # Order: bottom to top (stack_idx 0, 1, 2, ...)
                             for stack_idx in range(internal_count):
                                 t0_tiles.append((layer_idx, f"{pos}_stack_{stack_idx}", tile_data))
                     elif tile_type == "t0":
@@ -1048,7 +1099,8 @@ class BotSimulator:
             shuffle_tile=shuffle_tile,
             type_imbalance=type_imbalance,
             unlock_tile=effective_unlock_tile,  # Use adjusted value to prevent double key generation
-            tile_type_offset=tile_type_offset
+            tile_type_offset=tile_type_offset,
+            existing_tile_counts=existing_tile_counts  # For GetToAddIndexList logic
         )
 
         # Create a mapping for quick lookup

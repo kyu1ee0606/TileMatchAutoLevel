@@ -121,19 +121,39 @@ class VisualSimulator:
         type_imbalance = level_json.get("xTypeImbalance", 0)
         unlock_tile = level_json.get("xUnlockTile", 0)
 
-        # Collect all t0 tiles
+        # Collect all t0 tiles and existing tile counts (for GetToAddIndexList)
         t0_tiles: List[Tuple[int, str]] = []
+        existing_tile_counts: Dict[str, int] = {}
+
         for layer_idx in range(num_layers):
             layer_key = f"layer_{layer_idx}"
             layer_data = level_json.get(layer_key, {})
             layer_tiles = layer_data.get("tiles", {})
 
             for pos, tile_data in layer_tiles.items():
-                if isinstance(tile_data, list) and tile_data and tile_data[0] == "t0":
-                    t0_tiles.append((layer_idx, pos))
+                if isinstance(tile_data, list) and tile_data:
+                    tile_type = tile_data[0]
+                    if tile_type == "t0":
+                        t0_tiles.append((layer_idx, pos))
+                    elif isinstance(tile_type, str) and tile_type.startswith("t") and tile_type[1:].isdigit():
+                        # Regular t1~t15 tile - count for GetToAddIndexList
+                        tile_num = int(tile_type[1:])
+                        if 1 <= tile_num <= 15:
+                            existing_tile_counts[tile_type] = existing_tile_counts.get(tile_type, 0) + 1
+                    elif tile_type == "key":
+                        existing_tile_counts["key"] = existing_tile_counts.get("key", 0) + 1
 
         if not t0_tiles:
             return {}
+
+        # Detect tile type offset from existing tiles
+        tile_type_offset = 0
+        if existing_tile_counts:
+            t_types = [t for t in existing_tile_counts.keys() if t.startswith("t") and t[1:].isdigit()]
+            if t_types:
+                min_tile_num = min(int(t[1:]) for t in t_types)
+                if min_tile_num > use_tile_count:
+                    tile_type_offset = min_tile_num - 1
 
         # Use TileDistributor for exact in-game matching
         assignments = TileDistributor.assign_t0_tiles(
@@ -142,7 +162,9 @@ class VisualSimulator:
             rand_seed=rand_seed,
             shuffle_tile=shuffle_tile,
             type_imbalance=type_imbalance,
-            unlock_tile=unlock_tile
+            unlock_tile=unlock_tile,
+            tile_type_offset=tile_type_offset,
+            existing_tile_counts=existing_tile_counts
         )
 
         # Build mapping
@@ -200,16 +222,35 @@ class VisualSimulator:
         # Extract stack/craft tile types from initialized state
         # This ensures frontend visualization uses the same types as simulation
         # Note: tile_types array is in bottom-to-top order (index 0 = bottom, index -1 = top)
+        # CRITICAL: For craft tiles, the top tile may have been emitted to state.tiles
+        # and removed from stacked_tiles. We need to check both locations.
         stack_craft_types_map: Dict[str, List[str]] = {}
+
+        # Build a lookup map for emitted tiles (tiles in state.tiles with original_full_key)
+        emitted_tiles: Dict[str, TileState] = {}
+        for layer_tiles in state.tiles.values():
+            for tile in layer_tiles.values():
+                if tile.original_full_key:
+                    emitted_tiles[tile.original_full_key] = tile
+
         for craft_box_key, tile_keys in state.craft_boxes.items():
             # craft_box_key is "layer_idx_x_y", tile_keys are full keys with stack index
             tile_types = []
             for key in tile_keys:
+                # First try stacked_tiles (for non-emitted tiles)
                 tile = state.stacked_tiles.get(key)
                 if tile:
                     tile_types.append(tile.tile_type)
+                else:
+                    # Tile may have been emitted - check state.tiles via original_full_key
+                    emitted_tile = emitted_tiles.get(key)
+                    if emitted_tile:
+                        tile_types.append(emitted_tile.tile_type)
             if tile_types:
-                stack_craft_types_map[craft_box_key] = tile_types
+                # tile_types was built in bottom-to-top order (index 0 = bottom, index n-1 = top)
+                # Frontend displays in array order, so we reverse to top-to-bottom (pick order)
+                # This matches in-game display order where top tile is shown/picked first
+                stack_craft_types_map[craft_box_key] = tile_types[::-1]
 
         # Extract tile type assignments from initialized state
         # This ensures frontend visualization uses the exact same types as simulation

@@ -10702,7 +10702,8 @@ class LevelGenerator:
                 shuffle_tile=shuffle_tile,
                 type_imbalance=type_imbalance,
                 unlock_tile=unlock_tile,
-                tile_type_offset=tile_type_offset
+                tile_type_offset=tile_type_offset,
+                existing_tile_counts=type_counts  # For GetToAddIndexList logic
             )
 
             # Count the distributed t0 tiles by type
@@ -10938,7 +10939,8 @@ class LevelGenerator:
                 shuffle_tile=level.get("xShuffleTile", 0),
                 type_imbalance=level.get("xTypeImbalance", 0),
                 unlock_tile=level.get("unlockTile", level.get("xUnlockTile", 0)),
-                tile_type_offset=tile_type_offset
+                tile_type_offset=tile_type_offset,
+                existing_tile_counts=type_counts  # For GetToAddIndexList logic
             )
             for tile_type in t0_assignments:
                 type_counts[tile_type] = type_counts.get(tile_type, 0) + 1
@@ -11115,7 +11117,8 @@ class LevelGenerator:
                 shuffle_tile=level.get("xShuffleTile", 0),
                 type_imbalance=level.get("xTypeImbalance", 0),
                 unlock_tile=level.get("unlockTile", level.get("xUnlockTile", 0)),
-                tile_type_offset=tile_type_offset
+                tile_type_offset=tile_type_offset,
+                existing_tile_counts=type_counts  # For GetToAddIndexList logic
             )
             for tile_type in t0_assignments:
                 type_counts[tile_type] = type_counts.get(tile_type, 0) + 1
@@ -11351,7 +11354,8 @@ class LevelGenerator:
                 shuffle_tile=level.get("xShuffleTile", 0),
                 type_imbalance=level.get("xTypeImbalance", 0),
                 unlock_tile=level.get("unlockTile", level.get("xUnlockTile", 0)),
-                tile_type_offset=tile_type_offset
+                tile_type_offset=tile_type_offset,
+                existing_tile_counts=regular_type_counts  # For GetToAddIndexList logic
             )
 
             # Combine with regular tiles
@@ -11490,6 +11494,9 @@ class LevelGenerator:
 
         # Get t0 assignments
         if t0_positions:
+            # Build existing_tile_counts from regular_tiles
+            existing_tile_counts = {t: len(positions) for t, positions in regular_tiles.items()}
+
             t0_assignments = TileDistributor.assign_t0_tiles(
                 t0_count=len(t0_positions),
                 use_tile_count=use_tile_count,
@@ -11497,7 +11504,8 @@ class LevelGenerator:
                 shuffle_tile=level.get("xShuffleTile", 0),
                 type_imbalance=level.get("xTypeImbalance", 0),
                 unlock_tile=level.get("unlockTile", level.get("xUnlockTile", 0)),
-                tile_type_offset=0
+                tile_type_offset=0,
+                existing_tile_counts=existing_tile_counts  # For GetToAddIndexList logic
             )
 
             # Combine t0 assignments with their layer info

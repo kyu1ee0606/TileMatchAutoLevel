@@ -351,7 +351,9 @@ export class GameEngine {
           }
 
           // 모든 내부 타일은 t0으로 처리됨
-          for (let stackIdx = 0; stackIdx < totalCount; stackIdx++) {
+          // CRITICAL: stackIdx 0이 top (첫 번째로 pick되는 타일)이므로
+          // 인게임과 동일한 순서로 top→bottom (stackIdx: totalCount-1 → 0)으로 분배
+          for (let stackIdx = totalCount - 1; stackIdx >= 0; stackIdx--) {
             const fullKey = `${layerIdx}_${xIdx}_${yIdx}_${stackIdx}`;
             t0Positions.push({ layerIdx, pos, key: fullKey });
           }

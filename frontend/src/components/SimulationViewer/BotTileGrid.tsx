@@ -123,7 +123,8 @@ export function BotTileGrid({
 
   // Helper function to get converted stack/craft tile types from backend response
   // Stack/craft tiles have format: [tileType, attribute, [count, "t1_t2_t3..."]]
-  // Note: The types array is in bottom-to-top order (index 0 = bottom, index n-1 = top)
+  // Note: The types array is in top-to-bottom order (index 0 = top, index n-1 = bottom)
+  // This matches in-game pick order where index 0 is picked first
   const getConvertedStackTileTypes = useCallback((layerIdx: number, pos: string): string[] | null => {
     if (!convertedTiles) return null;
     const layerData = convertedTiles[String(layerIdx)];
@@ -191,9 +192,10 @@ export function BotTileGrid({
             const convertedTypes = getConvertedStackTileTypes(layerIdx, pos) || initialStackInfo.tileTypes;
 
             // Calculate topmost tile type for display (use converted types)
-            // Initial state: totalCount tiles, topmost is at index totalCount - 1
-            const visIdx = initialStackInfo.totalCount - 1;
-            const topTileType = convertedTypes[visIdx] || convertedTypes[convertedTypes.length - 1] || 't0';
+            // Backend sends in top-to-bottom order: index 0 = top (first to pick)
+            // pickedCount starts at 0, so top tile is at index 0
+            const pickedCount = 0;
+            const topTileType = convertedTypes[pickedCount] || convertedTypes[0] || 't0';
 
             // Store original stack/craft tile with metadata (using converted types)
             // Start with full count - will be decremented during move replay
@@ -231,9 +233,11 @@ export function BotTileGrid({
                 });
 
                 // Update topTileType to the next tile
+                // Backend sends top-to-bottom: index 0 = first pick, index 1 = second pick, etc.
+                // After picking 1 tile, next tile is at index (totalCount - newRemaining)
                 if (newRemaining > 0) {
-                  const nextVisIdx = newRemaining - 1;
-                  const nextTileType = convertedTypes[nextVisIdx] || 't0';
+                  const nextPickIdx = craftExtData.stackInfo.totalCount - newRemaining;
+                  const nextTileType = convertedTypes[nextPickIdx] || 't0';
                   craftExtData.topTileType = nextTileType;
                 } else {
                   // Craft only has 1 tile - remove craft box after emitting

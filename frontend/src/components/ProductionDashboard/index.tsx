@@ -524,7 +524,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
 
             const gimmickOptions = {
               auto_select_gimmicks: true,
-              available_gimmicks: ['chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport', 'unknown'],
+              available_gimmicks: ['craft', 'stack', 'chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport', 'unknown'],
               gimmick_unlock_levels: batch.gimmick_unlock_levels,
               level_number: levelNumber,
             };
@@ -1262,7 +1262,7 @@ function OverviewTab({ stats, batch, batchId }: { stats: ProductionStats; batch:
           },
           {
             auto_select_gimmicks: true,
-            available_gimmicks: ['chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport', 'unknown'],
+            available_gimmicks: ['craft', 'stack', 'chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport', 'unknown'],
             gimmick_intensity: gimmickIntensity,
             gimmick_unlock_levels: currentBatch.gimmick_unlock_levels || PROFESSIONAL_GIMMICK_UNLOCK_LEVELS,
             level_number: levelNumber,
@@ -2706,7 +2706,7 @@ function TestTab({
               },
               {
                 auto_select_gimmicks: true,
-                available_gimmicks: ['chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport', 'unknown'],
+                available_gimmicks: ['craft', 'stack', 'chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport', 'unknown'],
                 gimmick_intensity: gimmickIntensity,
                 gimmick_unlock_levels: currentBatch.gimmick_unlock_levels || PROFESSIONAL_GIMMICK_UNLOCK_LEVELS,
                 level_number: levelNumber,
@@ -2959,7 +2959,7 @@ function TestTab({
         };
         const gimmickOpts = {
           auto_select_gimmicks: true,
-          available_gimmicks: ['chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport', 'unknown'],
+          available_gimmicks: ['craft', 'stack', 'chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport', 'unknown'],
           gimmick_intensity: gimmickIntensity * intensityMult,
           gimmick_unlock_levels: gimmickUnlockLevels,
           level_number: levelNumber,

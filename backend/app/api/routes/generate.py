@@ -238,38 +238,41 @@ def get_tutorial_config(level_number: int | None) -> dict | None:
 # - key: unlockTile 필드로 버퍼 잠금 타일 수 설정
 # - time_attack: timea 필드로 제한 시간(초) 설정
 # =========================================================
+# =========================================================
+# 기믹 언락 레벨 (leveling_config.py와 동기화 - v6 +1 적용)
+# =========================================================
 DEFAULT_GIMMICK_UNLOCK_LEVELS = {
-    "craft": 10,        # 1번째 기믹 - 공예 (⭐⭐⭐)
-    "stack": 20,        # 2번째 기믹 - 스택 (⭐⭐⭐)
-    "ice": 30,          # 3번째 기믹 - 얼음 (⭐⭐⭐)
-    "link": 50,         # 4번째 기믹 - 연결 (⭐⭐⭐⭐)
-    "chain": 80,        # 5번째 기믹 - 사슬 (⭐⭐⭐)
-    "key": 110,         # 6번째 기믹 - 버퍼잠금 (⭐⭐⭐) ★신규
-    "grass": 150,       # 7번째 기믹 - 풀 (⭐⭐⭐)
-    "unknown": 190,     # 8번째 기믹 - 상자 (⭐⭐)
-    "curtain": 240,     # 9번째 기믹 - 커튼 (⭐⭐)
-    "bomb": 290,        # 10번째 기믹 - 폭탄 (⭐⭐⭐⭐)
-    "time_attack": 340, # 11번째 기믹 - 타임어택 (⭐⭐⭐⭐) ★신규
-    "frog": 390,        # 12번째 기믹 - 개구리 (⭐⭐⭐⭐⭐)
-    "teleport": 440,    # 13번째 기믹 - 텔레포터 (⭐⭐⭐)
+    "craft": 11,        # 1번째 기믹 - 공예 (⭐⭐⭐)
+    "stack": 21,        # 2번째 기믹 - 스택 (⭐⭐⭐)
+    "ice": 31,          # 3번째 기믹 - 얼음 (⭐⭐⭐)
+    "link": 51,         # 4번째 기믹 - 연결 (⭐⭐⭐⭐)
+    "chain": 81,        # 5번째 기믹 - 사슬 (⭐⭐⭐)
+    "key": 111,         # 6번째 기믹 - 버퍼잠금 (⭐⭐⭐) ★신규
+    "grass": 151,       # 7번째 기믹 - 풀 (⭐⭐⭐)
+    "unknown": 191,     # 8번째 기믹 - 상자 (⭐⭐)
+    "curtain": 241,     # 9번째 기믹 - 커튼 (⭐⭐)
+    "bomb": 291,        # 10번째 기믹 - 폭탄 (⭐⭐⭐⭐)
+    "time_attack": 341, # 11번째 기믹 - 타임어택 (⭐⭐⭐⭐) ★신규
+    "frog": 391,        # 12번째 기믹 - 개구리 (⭐⭐⭐⭐⭐)
+    "teleport": 441,    # 13번째 기믹 - 텔레포터 (⭐⭐⭐)
 }
 
-# Legacy simple unlock levels - 이제 사용 안함 (호환성 유지용)
-# 새로운 언락 순서로 통일
+# Legacy simple unlock levels - DEFAULT_GIMMICK_UNLOCK_LEVELS와 동일하게 유지
+# (호환성 유지용)
 SIMPLE_GIMMICK_UNLOCK_LEVELS = {
-    "craft": 10,
-    "stack": 20,
-    "ice": 30,
-    "link": 50,
-    "chain": 80,
-    "key": 110,
-    "grass": 150,
-    "unknown": 190,
-    "curtain": 240,
-    "bomb": 290,
-    "time_attack": 340,
-    "frog": 390,
-    "teleport": 440,
+    "craft": 11,
+    "stack": 21,
+    "ice": 31,
+    "link": 51,
+    "chain": 81,
+    "key": 111,
+    "grass": 151,
+    "unknown": 191,
+    "curtain": 241,
+    "bomb": 291,
+    "time_attack": 341,
+    "frog": 391,
+    "teleport": 441,
 }
 
 

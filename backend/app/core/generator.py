@@ -11,6 +11,37 @@ from .pattern_templates import get_pattern_positions, get_pattern_name, PATTERN_
 logger = logging.getLogger(__name__)
 
 
+# ============ Tile Distribution Uniformity by Difficulty ============
+# 난이도별 타일 분포 균등도 설정
+# 높은 균등도 = 쉬운 레벨 (모든 타입 동일 수량)
+# 낮은 균등도 = 어려운 레벨 (의도적 불균형 허용)
+TILE_UNIFORMITY_BY_DIFFICULTY = {
+    # (min_difficulty, max_difficulty): uniformity (0.0 ~ 1.0)
+    (0.0, 0.2): 1.0,    # S등급: 완전 균등 - 가장 쉬움
+    (0.2, 0.35): 0.95,  # A등급: 거의 균등
+    (0.35, 0.5): 0.85,  # B등급: 약간 불균형 허용
+    (0.5, 0.7): 0.75,   # C등급: 불균형 허용
+    (0.7, 0.85): 0.65,  # D등급: 상당한 불균형
+    (0.85, 1.0): 0.50,  # E등급: 의도적 불균형 - 가장 어려움
+}
+
+
+def get_tile_uniformity(target_difficulty: float) -> float:
+    """
+    난이도에 따른 타일 분포 균등도 반환.
+
+    Args:
+        target_difficulty: 목표 난이도 (0.0 ~ 1.0)
+
+    Returns:
+        균등도 (0.0 = 불균등 허용, 1.0 = 완전 균등)
+    """
+    for (min_diff, max_diff), uniformity in TILE_UNIFORMITY_BY_DIFFICULTY.items():
+        if min_diff <= target_difficulty < max_diff:
+            return uniformity
+    return 0.5  # 기본값
+
+
 # ============ GBoost-Style Level Range Gimmick Configuration ============
 # 인게임 확정 기믹 언락 스케줄 (2026.02 최종 확정 - 13개 기믹)
 # Gimmicks are progressively introduced to match the natural learning curve
@@ -2638,10 +2669,60 @@ class LevelGenerator:
         for tile_type in tile_types:
             tile_assignments.extend([tile_type] * tiles_per_type)
 
-        # If we have more positions than assignments, add more tiles (in groups of 3)
-        while len(tile_assignments) < len(all_layer_positions):
-            tile_type = random.choice(tile_types)
-            tile_assignments.extend([tile_type] * 3)
+        # [v15.28] Round-robin 기반 균등 분배 (random.choice 대체)
+        # 부족분을 순환 방식으로 분배하여 타입별 균등성 보장
+        remaining_count = len(all_layer_positions) - len(tile_assignments)
+        if remaining_count > 0:
+            # 균등도에 따른 분배 방식 결정
+            uniformity = get_tile_uniformity(target)
+
+            if uniformity >= 0.9:
+                # 높은 균등도: 완전 round-robin (순환)
+                type_idx = 0
+                while len(tile_assignments) < len(all_layer_positions):
+                    tile_type = tile_types[type_idx % num_tile_types]
+                    tile_assignments.extend([tile_type] * 3)
+                    type_idx += 1
+            elif uniformity >= 0.7:
+                # 중간 균등도: 가중치 기반 round-robin
+                # 현재 가장 적은 타입 우선 선택
+                from collections import Counter
+                while len(tile_assignments) < len(all_layer_positions):
+                    type_counts = Counter(tile_assignments)
+                    # 가장 적은 타입들 찾기
+                    min_count = min(type_counts.get(t, 0) for t in tile_types)
+                    underrepresented = [t for t in tile_types if type_counts.get(t, 0) == min_count]
+                    tile_type = random.choice(underrepresented)
+                    tile_assignments.extend([tile_type] * 3)
+            else:
+                # 낮은 균등도: 가중치 적용된 랜덤 (불균형 허용)
+                # 기존 분포에 따라 가중치 부여 - 적은 타입이 더 높은 확률
+                from collections import Counter
+                while len(tile_assignments) < len(all_layer_positions):
+                    type_counts = Counter(tile_assignments)
+                    # 역가중치 계산: 적은 타입 = 높은 가중치
+                    max_count = max(type_counts.get(t, 0) for t in tile_types) + 1
+                    weights = [max_count - type_counts.get(t, 0) + 1 for t in tile_types]
+
+                    # 균등도에 따라 가중치 강도 조절
+                    # 낮은 균등도 = 더 평탄한 가중치 (불균형 허용)
+                    weight_power = uniformity * 2  # 0.0~0.7 → 0.0~1.4
+                    adjusted_weights = [w ** weight_power for w in weights]
+
+                    # 가중치 기반 선택
+                    total_weight = sum(adjusted_weights)
+                    r = random.random() * total_weight
+                    cumulative = 0
+                    selected_type = tile_types[0]
+                    for i, w in enumerate(adjusted_weights):
+                        cumulative += w
+                        if r <= cumulative:
+                            selected_type = tile_types[i]
+                            break
+                    tile_assignments.extend([selected_type] * 3)
+
+            logger.debug(f"[TILE_DIST] uniformity={uniformity:.2f}, "
+                        f"remaining={remaining_count}, final_count={len(tile_assignments)}")
 
         # If we have more assignments than positions, trim to match
         # (positions are already divisible by 3 from earlier check)

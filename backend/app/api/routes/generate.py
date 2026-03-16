@@ -363,22 +363,28 @@ def filter_goals_by_unlock_level(
 
 def get_tutorial_gimmick(
     level_number: int | None,
-    unlock_levels: Dict[str, int] | None
+    unlock_levels: Dict[str, int] | None = None  # Ignored - always use canonical
 ) -> str | None:
     """
     Check if this level is a tutorial level (first level where a gimmick unlocks).
     Returns the gimmick name if this is a tutorial level, None otherwise.
 
     Tutorial levels should feature the new gimmick prominently with easier settings.
+
+    CRITICAL: Always uses DEFAULT_GIMMICK_UNLOCK_LEVELS to ensure consistency.
+    The unlock_levels parameter is kept for API compatibility but ignored.
     """
     if level_number is None:
         return None
 
-    actual_unlock_levels = unlock_levels or DEFAULT_GIMMICK_UNLOCK_LEVELS
+    # CRITICAL: Always use canonical unlock levels for tutorial detection
+    # This ensures tutorial gimmicks are correctly identified regardless of passed values
+    canonical_unlock_levels = DEFAULT_GIMMICK_UNLOCK_LEVELS
 
     # Check if any gimmick unlocks at exactly this level
-    for gimmick, unlock_level in actual_unlock_levels.items():
+    for gimmick, unlock_level in canonical_unlock_levels.items():
         if unlock_level == level_number:
+            logger.info(f"[TUTORIAL_GIMMICK] Level {level_number}: tutorial_gimmick='{gimmick}' (canonical unlock_level={unlock_level})")
             return gimmick
 
     return None

@@ -418,32 +418,40 @@ def select_gimmicks_with_unlock_probability(
     if max_types == 0:
         return []
 
-    # Find the tutorial gimmick (newly unlocked at this level)
+    # CRITICAL: Always use DEFAULT_GIMMICK_UNLOCK_LEVELS for tutorial detection
+    # This ensures tutorial gimmicks are correctly identified regardless of passed unlock_levels
+    canonical_unlock_levels = DEFAULT_GIMMICK_UNLOCK_LEVELS
+
+    # Find the tutorial gimmick (newly unlocked at this level) using canonical levels
     tutorial_gimmick = None
-    for gimmick, unlock_level in unlock_levels.items():
+    for gimmick, unlock_level in canonical_unlock_levels.items():
         if unlock_level == level_number:
             tutorial_gimmick = gimmick
+            logger.info(f"[GIMMICK_SELECT] Level {level_number}: Found tutorial gimmick '{tutorial_gimmick}' (unlock_level={unlock_level})")
             break
 
-    # Get all unlocked gimmicks at this level
+    # Get all unlocked gimmicks at this level (using passed unlock_levels for flexibility)
+    # But merge with canonical for tutorial gimmick
+    effective_unlock_levels = {**canonical_unlock_levels, **(unlock_levels or {})}
     unlocked_gimmicks = [
-        g for g, unlock_lvl in unlock_levels.items()
+        g for g, unlock_lvl in effective_unlock_levels.items()
         if unlock_lvl <= level_number
     ]
 
     # If available_gimmicks provided, filter to only those
+    # BUT always keep tutorial_gimmick if it exists
     if available_gimmicks:
-        unlocked_gimmicks = [g for g in unlocked_gimmicks if g in available_gimmicks]
+        unlocked_gimmicks = [g for g in unlocked_gimmicks if g in available_gimmicks or g == tutorial_gimmick]
 
     if not unlocked_gimmicks:
         return []
 
     selected = []
 
-    # Step 1: Tutorial gimmick is ALWAYS included (if it exists and is unlocked)
-    if tutorial_gimmick and tutorial_gimmick in unlocked_gimmicks:
+    # Step 1: Tutorial gimmick is ALWAYS included (forced - no conditions)
+    if tutorial_gimmick:
         selected.append(tutorial_gimmick)
-        logger.info(f"[GIMMICK_SELECT] Level {level_number}: Tutorial gimmick '{tutorial_gimmick}' ALWAYS included")
+        logger.info(f"[GIMMICK_SELECT] Level {level_number}: Tutorial gimmick '{tutorial_gimmick}' FORCED (mandatory)")
 
     # Step 2: For other unlocked gimmicks, include with probability
     other_gimmicks = [g for g in unlocked_gimmicks if g != tutorial_gimmick]

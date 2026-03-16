@@ -1487,23 +1487,41 @@ def generate_validated_level(
     COMPLEX_GIMMICKS = {"ice", "bomb", "crate", "stack", "craft", "teleport"}
     SIMPLE_GIMMICKS = {"chain", "grass", "frog", "curtain"}
 
+    # CRITICAL: tutorial_gimmick은 난이도 제한에서 제외 (반드시 포함)
+    # 레벨 11: craft, 레벨 21: stack, 레벨 31: ice 등
+    preserved_tutorial = tutorial_gimmick if tutorial_gimmick in current_obstacle_types else None
+
     if request.target_difficulty <= 0.2:
-        # S등급 (매우 쉬움): 기믹 완전 제거
+        # S등급 (매우 쉬움): 기믹 완전 제거 (단, tutorial_gimmick 제외)
         if current_obstacle_types:
-            logger.info(f"[GIMMICK_LIMIT] S-grade: removing all gimmicks {current_obstacle_types} for target_difficulty={request.target_difficulty:.2f}")
-            current_obstacle_types = []
+            logger.info(f"[GIMMICK_LIMIT] S-grade: removing gimmicks {current_obstacle_types} for target_difficulty={request.target_difficulty:.2f}")
+            current_obstacle_types = [preserved_tutorial] if preserved_tutorial else []
+            if preserved_tutorial:
+                logger.info(f"[GIMMICK_LIMIT] S-grade: preserved tutorial_gimmick '{preserved_tutorial}'")
     elif request.target_difficulty <= 0.35:
-        # A등급 (쉬움): 복잡한 기믹 제거, 최대 1개만
+        # A등급 (쉬움): 복잡한 기믹 제거, 최대 1개만 (단, tutorial_gimmick 우선)
         simple_only = [g for g in current_obstacle_types if g in SIMPLE_GIMMICKS]
-        if len(current_obstacle_types) != len(simple_only) or len(simple_only) > 1:
-            logger.info(f"[GIMMICK_LIMIT] A-grade: limiting gimmicks from {current_obstacle_types} to {simple_only[:1]} for target_difficulty={request.target_difficulty:.2f}")
-            current_obstacle_types = simple_only[:1]  # 최대 1개
+        if preserved_tutorial and preserved_tutorial not in simple_only:
+            # tutorial_gimmick이 복잡한 기믹이어도 포함
+            limited = [preserved_tutorial]
+            logger.info(f"[GIMMICK_LIMIT] A-grade: preserved tutorial_gimmick '{preserved_tutorial}' (complex but required)")
+        elif len(current_obstacle_types) != len(simple_only) or len(simple_only) > 1:
+            limited = simple_only[:1] if simple_only else ([preserved_tutorial] if preserved_tutorial else [])
+            logger.info(f"[GIMMICK_LIMIT] A-grade: limiting gimmicks from {current_obstacle_types} to {limited} for target_difficulty={request.target_difficulty:.2f}")
+        else:
+            limited = simple_only[:1]
+        current_obstacle_types = limited
     elif request.target_difficulty <= 0.5:
-        # B등급 (보통): 복잡한 기믹 최대 1개, 전체 최대 2개
+        # B등급 (보통): 복잡한 기믹 최대 1개, 전체 최대 2개 (tutorial_gimmick 우선 포함)
         simple = [g for g in current_obstacle_types if g in SIMPLE_GIMMICKS]
         complex = [g for g in current_obstacle_types if g in COMPLEX_GIMMICKS]
         if len(complex) > 1 or len(current_obstacle_types) > 2:
-            limited = simple[:1] + complex[:1]
+            # tutorial_gimmick이 있으면 우선 포함
+            if preserved_tutorial:
+                others = [g for g in current_obstacle_types if g != preserved_tutorial][:1]
+                limited = [preserved_tutorial] + others
+            else:
+                limited = simple[:1] + complex[:1]
             logger.info(f"[GIMMICK_LIMIT] B-grade: limiting gimmicks from {current_obstacle_types} to {limited} for target_difficulty={request.target_difficulty:.2f}")
             current_obstacle_types = limited
     elif request.target_difficulty <= 0.7:

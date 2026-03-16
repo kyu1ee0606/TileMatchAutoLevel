@@ -2659,15 +2659,76 @@ class LevelGenerator:
         total_positions = len(all_layer_positions)
         num_tile_types = len(tile_types)
 
-        # Each type should get roughly equal share, but must be divisible by 3
-        tiles_per_type = (total_positions // num_tile_types // 3) * 3
-        if tiles_per_type < 3:
-            tiles_per_type = 3
+        # [v15.28] 균등도 기반 타일 분배
+        # 난이도에 따라 타입별 분배량 조절
+        uniformity = get_tile_uniformity(target)
 
-        # Create a list of tile types to assign (each type appears in multiples of 3)
+        # 기본 균등 분배량 계산
+        base_tiles_per_type = (total_positions // num_tile_types // 3) * 3
+        if base_tiles_per_type < 3:
+            base_tiles_per_type = 3
+
+        # 균등도에 따른 타입별 분배량 조정
+        # 낮은 균등도 = 일부 타입에 더 많이, 다른 타입에 더 적게
         tile_assignments = []
-        for tile_type in tile_types:
-            tile_assignments.extend([tile_type] * tiles_per_type)
+
+        if uniformity >= 0.9:
+            # 높은 균등도: 모든 타입에 동일 분배
+            for tile_type in tile_types:
+                tile_assignments.extend([tile_type] * base_tiles_per_type)
+        else:
+            # 낮은 균등도: 타입별 차등 분배
+            # variance_strength: 균등도가 낮을수록 큰 변동
+            # uniformity 0.5 → strength 2, uniformity 0.7 → strength 1
+            variance_strength = int((1.0 - uniformity) * 4) + 1  # 1 ~ 3
+
+            # 타입별 분배량 계산
+            type_allocations = {}
+            total_allocated = 0
+
+            # 타입을 랜덤하게 "많음/적음" 그룹으로 분류
+            shuffled_types = list(tile_types)
+            random.shuffle(shuffled_types)
+            half = len(shuffled_types) // 2
+
+            for i, tile_type in enumerate(shuffled_types):
+                if i < half:
+                    # 전반부: 더 많이 할당 (+3 ~ +9)
+                    adjustment = random.randint(1, variance_strength) * 3
+                else:
+                    # 후반부: 더 적게 할당 (-3 ~ -9)
+                    adjustment = -random.randint(1, variance_strength) * 3
+
+                allocation = max(3, base_tiles_per_type + adjustment)
+                # 3의 배수로 보정
+                allocation = (allocation // 3) * 3
+
+                type_allocations[tile_type] = allocation
+                total_allocated += allocation
+
+            # 총 타일 수 맞추기 (3의 배수 유지)
+            diff = total_positions - total_allocated
+            while abs(diff) >= 3:
+                if diff > 0:
+                    # 부족: 랜덤 타입에 3개 추가
+                    t = random.choice(tile_types)
+                    type_allocations[t] += 3
+                    diff -= 3
+                else:
+                    # 초과: 가장 많은 타입에서 3개 제거
+                    max_type = max(type_allocations, key=type_allocations.get)
+                    if type_allocations[max_type] > 3:
+                        type_allocations[max_type] -= 3
+                        diff += 3
+                    else:
+                        break
+
+            # 분배량에 따라 타일 생성
+            for tile_type, count in type_allocations.items():
+                tile_assignments.extend([tile_type] * count)
+
+            logger.info(f"[TILE_DIST] uniformity={uniformity:.2f}, "
+                       f"allocations={type_allocations}")
 
         # [v15.28] Round-robin 기반 균등 분배 (random.choice 대체)
         # 부족분을 순환 방식으로 분배하여 타입별 균등성 보장

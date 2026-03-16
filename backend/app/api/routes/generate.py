@@ -311,19 +311,24 @@ def filter_obstacles_by_unlock_level(
 def filter_goals_by_unlock_level(
     goals: List[Dict] | None,
     level_number: int | None,
-    unlock_levels: Dict[str, int] | None
+    unlock_levels: Dict[str, int] | None,
+    tutorial_gimmick: str | None = None
 ) -> List[Dict] | None:
     """
-    Filter goals based on unlock levels.
+    Filter goals based on unlock levels and tutorial gimmick.
     craft_* goals require "craft" to be unlocked, stack_* goals require "stack".
+
+    CRITICAL: If tutorial_gimmick is "craft" or "stack", ensure goals use that type.
+    This ensures level 21 (stack tutorial) uses stack_* goals, not craft_* goals.
 
     Args:
         goals: List of goal configurations (e.g., [{"type": "craft_s", "count": 3}])
         level_number: Current level number (1-based)
         unlock_levels: Dict mapping gimmick names to unlock level numbers
+        tutorial_gimmick: The tutorial gimmick for this level (if any)
 
     Returns:
-        Filtered list of unlocked goals, or empty list if no goals are unlocked
+        Filtered list of unlocked goals, or appropriate default goals
     """
     if level_number is None:
         return goals
@@ -331,15 +336,31 @@ def filter_goals_by_unlock_level(
     # Use default unlock levels if not provided
     actual_unlock_levels = unlock_levels or DEFAULT_GIMMICK_UNLOCK_LEVELS
 
+    # CRITICAL: If tutorial_gimmick is craft or stack, force use that goal type
+    # This ensures level 11 uses craft_*, level 21 uses stack_*
+    if tutorial_gimmick in ("craft", "stack"):
+        # Tutorial level for craft/stack - use the tutorial gimmick type
+        goal_type = f"{tutorial_gimmick}_s"  # Default to south direction
+        logger.info(f"[GOALS_FILTER] Level {level_number}: Tutorial gimmick '{tutorial_gimmick}' "
+                   f"→ forcing goal type '{goal_type}'")
+        return [{"type": goal_type, "count": 3}]
+
     # If goals is None, check if craft/stack are unlocked
     # and return appropriate default or empty list
     if goals is None:
         craft_unlock = actual_unlock_levels.get("craft", 50)
-        if level_number >= craft_unlock:
-            # craft is unlocked, use default craft_s goal
-            return None  # Let generator use its default
+        stack_unlock = actual_unlock_levels.get("stack", 50)
+
+        # Prefer stack if both are unlocked and no explicit goals
+        if level_number >= stack_unlock:
+            # Stack is unlocked - randomly choose between craft and stack
+            # This adds variety after both are available
+            return None  # Let generator use its default (craft_s)
+        elif level_number >= craft_unlock:
+            # Only craft is unlocked
+            return None  # Let generator use its default (craft_s)
         else:
-            # craft is not unlocked, use empty goals
+            # Neither unlocked, use empty goals
             return []
 
     # Filter goals based on unlock levels
@@ -970,10 +991,12 @@ def generate_level(
                 f"pattern_index={pattern_index}")
 
     # Filter goals by unlock level (craft/stack goals only available after unlock)
+    # CRITICAL: Pass tutorial_gimmick to ensure level 21 uses stack_*, not craft_*
     filtered_goals = filter_goals_by_unlock_level(
         goals,
         request.level_number,
-        request.gimmick_unlock_levels
+        request.gimmick_unlock_levels,
+        tutorial_gimmick=tutorial_gimmick
     )
 
     params = GenerationParams(
@@ -1033,13 +1056,15 @@ def generate_level(
                 if attempt >= 2:
                     # Use simplest possible parameters, but STILL preserve tutorial gimmick
                     # CRITICAL: Keep tile_types as None for proper useTileCount based on level_number
+                    # CRITICAL: Use tutorial_gimmick for goals if it's craft/stack
+                    fallback_goal_type = tutorial_gimmick if tutorial_gimmick in ("craft", "stack") else "craft"
                     params = GenerationParams(
                         target_difficulty=params.target_difficulty,
                         grid_size=(6, 6),  # Simple grid
                         max_layers=4,  # Few layers
                         tile_types=None,  # Let level_number-based auto-selection work
                         obstacle_types=[tutorial_gimmick] if tutorial_gimmick else [],  # Keep tutorial gimmick
-                        goals=[{"type": "craft", "direction": "s", "count": 3}],
+                        goals=[{"type": f"{fallback_goal_type}_s", "count": 3}],
                         symmetry_mode="horizontal",
                         pattern_type="geometric",
                         tutorial_gimmick=tutorial_gimmick,  # PRESERVE tutorial gimmick
@@ -1260,11 +1285,19 @@ def generate_validated_level(
             for g in request.goals
         ]
 
+    # Get tutorial gimmick for this level (same logic as generate_level)
+    tutorial_gimmick = get_tutorial_gimmick(
+        request.level_number,
+        request.gimmick_unlock_levels
+    )
+
     # Filter goals by unlock level (craft/stack goals only available after unlock)
+    # CRITICAL: Pass tutorial_gimmick to ensure level 21 uses stack_*, not craft_*
     goals = filter_goals_by_unlock_level(
         goals,
         request.level_number,
-        request.gimmick_unlock_levels
+        request.gimmick_unlock_levels,
+        tutorial_gimmick=tutorial_gimmick
     )
 
     best_result = None

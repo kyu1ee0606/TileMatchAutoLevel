@@ -2001,6 +2001,7 @@ function TestTab({
     results: { level_number: number; attempts: number; final_score: number; success: boolean }[];
   }>({ currentIndex: 0, total: 0, currentLevel: 0, currentAttempt: 0, maxAttempts: 5, status: 'idle', results: [] });
   const [selectedSequentialLevels, setSelectedSequentialLevels] = useState<Set<number>>(new Set());
+  const [lastClickedSequentialLevel, setLastClickedSequentialLevel] = useState<number | null>(null);
   const sequentialAbortRef = useRef<AbortController | null>(null);
 
   // Batch auto test state
@@ -2648,6 +2649,7 @@ function TestTab({
   const [rangeSelectMode, setRangeSelectMode] = useState(false);
   const [rangeStart, setRangeStart] = useState(1);
   const [rangeEnd, setRangeEnd] = useState(100);
+  const [lastClickedRegenLevel, setLastClickedRegenLevel] = useState<number | null>(null);
 
   // Regeneration Modal state (모양 선택 기능)
   const [regenModalOpen, setRegenModalOpen] = useState(false);
@@ -3669,27 +3671,55 @@ function TestTab({
                   <span className="w-12 text-center">등급</span>
                 </div>
                 <div className="max-h-[150px] overflow-y-auto">
-                  {targetLevels.slice(0, 50).map(level => {
+                  {targetLevels.slice(0, 50).map((level, index) => {
                     const isUntested = !level.meta.match_score || level.meta.match_score === 0;
+                    const levelNum = level.meta.level_number;
                     return (
                       <label
-                        key={level.meta.level_number}
-                        className="flex items-center px-3 py-1.5 hover:bg-gray-700/30 cursor-pointer text-xs"
+                        key={levelNum}
+                        className={`flex items-center px-3 py-1.5 hover:bg-gray-700/30 cursor-pointer text-xs ${
+                          selectedSequentialLevels.has(levelNum) ? 'bg-indigo-900/30' : ''
+                        }`}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          const isChecked = selectedSequentialLevels.has(levelNum);
+
+                          if (e.shiftKey && lastClickedSequentialLevel !== null) {
+                            // Shift+Click: select range
+                            const displayedLevels = targetLevels.slice(0, 50);
+                            const lastIndex = displayedLevels.findIndex(l => l.meta.level_number === lastClickedSequentialLevel);
+                            const currentIndex = index;
+
+                            if (lastIndex !== -1) {
+                              const start = Math.min(lastIndex, currentIndex);
+                              const end = Math.max(lastIndex, currentIndex);
+                              const rangeItems = displayedLevels.slice(start, end + 1).map(l => l.meta.level_number);
+
+                              setSelectedSequentialLevels(prev => {
+                                const next = new Set(prev);
+                                rangeItems.forEach(n => next.add(n));
+                                return next;
+                              });
+                            }
+                          } else {
+                            // Normal click: toggle single item
+                            setSelectedSequentialLevels(prev => {
+                              const next = new Set(prev);
+                              if (isChecked) next.delete(levelNum);
+                              else next.add(levelNum);
+                              return next;
+                            });
+                            setLastClickedSequentialLevel(levelNum);
+                          }
+                        }}
                       >
                         <input
                           type="checkbox"
-                          checked={selectedSequentialLevels.has(level.meta.level_number)}
-                          onChange={(e) => {
-                            setSelectedSequentialLevels(prev => {
-                              const next = new Set(prev);
-                              if (e.target.checked) next.add(level.meta.level_number);
-                              else next.delete(level.meta.level_number);
-                              return next;
-                            });
-                          }}
-                          className="w-3 h-3"
+                          checked={selectedSequentialLevels.has(levelNum)}
+                          onChange={() => {}}
+                          className="w-3 h-3 pointer-events-none"
                         />
-                        <span className="ml-2 flex-1 text-gray-300">Lv.{level.meta.level_number}</span>
+                        <span className="ml-2 flex-1 text-gray-300">Lv.{levelNum}</span>
                         <span className={`w-14 text-center font-medium ${
                           isUntested ? 'text-gray-500' :
                           (level.meta.match_score || 0) >= 70 ? 'text-green-400' : 'text-red-400'
@@ -4656,21 +4686,43 @@ function TestTab({
                 >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                      {/* Checkbox for batch selection */}
+                      {/* Checkbox for batch selection with Shift+Click support */}
                       {rangeSelectMode && (
                         <input
                           type="checkbox"
                           checked={isChecked}
-                          onChange={(e) => {
+                          onChange={() => {}}
+                          onClick={(e) => {
                             e.stopPropagation();
-                            setSelectedRegenLevels(prev => {
-                              const next = new Set(prev);
-                              if (isChecked) next.delete(level.meta.level_number);
-                              else next.add(level.meta.level_number);
-                              return next;
-                            });
+                            const levelNum = level.meta.level_number;
+
+                            if (e.shiftKey && lastClickedRegenLevel !== null) {
+                              // Shift+Click: select range
+                              const lastIndex = filteredLevels.findIndex(l => l.meta.level_number === lastClickedRegenLevel);
+                              const currentIndex = filteredLevels.findIndex(l => l.meta.level_number === levelNum);
+
+                              if (lastIndex !== -1 && currentIndex !== -1) {
+                                const start = Math.min(lastIndex, currentIndex);
+                                const end = Math.max(lastIndex, currentIndex);
+                                const rangeItems = filteredLevels.slice(start, end + 1).map(l => l.meta.level_number);
+
+                                setSelectedRegenLevels(prev => {
+                                  const next = new Set(prev);
+                                  rangeItems.forEach(n => next.add(n));
+                                  return next;
+                                });
+                              }
+                            } else {
+                              // Normal click: toggle single item
+                              setSelectedRegenLevels(prev => {
+                                const next = new Set(prev);
+                                if (isChecked) next.delete(levelNum);
+                                else next.add(levelNum);
+                                return next;
+                              });
+                              setLastClickedRegenLevel(levelNum);
+                            }
                           }}
-                          onClick={(e) => e.stopPropagation()}
                           className="w-4 h-4 rounded border-gray-500 accent-indigo-500"
                           disabled={isBatchRegenerating}
                         />

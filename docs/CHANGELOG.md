@@ -1,5 +1,46 @@
 # TileMatch Level Designer - 변경 이력
 
+## 2026-03-16
+
+### 타일 분포 균등화 및 Tutorial Gimmick 수정 (v15.26 ~ v15.28)
+
+#### 주요 변경사항
+
+1. **Tutorial Gimmick Goals 자동 설정 (v15.26)**
+   - 레벨 21 재생성 시 stack 대신 craft가 생성되는 버그 수정
+   - `filter_goals_by_unlock_level()` 함수에 `tutorial_gimmick` 파라미터 추가
+   - craft/stack 튜토리얼 레벨에서 해당 기믹 강제 사용
+
+2. **기믹 언락 정보 팝업 UI (v15.27)**
+   - 프로덕션 대시보드에 "📋 기믹 언락 정보" 버튼 추가
+   - 13개 기믹의 언락 레벨, 유형, 난이도, 설명 표시
+
+3. **난이도 연동 타일 분포 균등화 시스템 (v15.28)**
+   - 난이도별 타일 분포 균등도 설정
+   - S등급: 완전 균등(1.0) → E등급: 의도적 불균형(0.5)
+   - 테스트 결과: S등급 71.6% vs D등급 54.8% 균등도 확인
+
+#### 난이도별 균등도 설정
+
+| 등급 | 난이도 범위 | 균등도 | 효과 |
+|------|------------|--------|------|
+| S | 0.0 ~ 0.2 | 1.0 | 완전 균등 |
+| A | 0.2 ~ 0.35 | 0.95 | 거의 균등 |
+| B | 0.35 ~ 0.5 | 0.85 | 약간 불균형 |
+| C | 0.5 ~ 0.7 | 0.75 | 불균형 허용 |
+| D | 0.7 ~ 0.85 | 0.65 | 상당한 불균형 |
+| E | 0.85 ~ 1.0 | 0.50 | 의도적 불균형 |
+
+#### 수정 파일
+- `backend/app/api/routes/generate.py` - tutorial_gimmick 처리
+- `backend/app/core/generator.py` - 타일 분포 균등화 로직
+- `frontend/src/components/ProductionDashboard/index.tsx` - 기믹 정보 팝업
+
+#### 관련 문서
+- `claudedocs/CHANGELOG_20260316_TILE_DISTRIBUTION_AND_TUTORIAL_GIMMICK.md` - 상세 설계 문서
+
+---
+
 ## 2026-02-23
 
 ### 타일 종류 수 시스템 리팩토링 (v2)

@@ -525,7 +525,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             const gimmickOptions = {
               auto_select_gimmicks: true,
               available_gimmicks: ['craft', 'stack', 'chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport', 'unknown'],
-              gimmick_unlock_levels: batch.gimmick_unlock_levels,
+              gimmick_unlock_levels: batch.gimmick_unlock_levels || PROFESSIONAL_GIMMICK_UNLOCK_LEVELS,
               level_number: levelNumber,
             };
 

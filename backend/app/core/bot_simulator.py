@@ -3051,7 +3051,29 @@ class BotSimulator:
                 same_type_on_board = max(0, count - 1)
 
         if same_type_on_board is not None and same_type_on_board >= 2:
-            base_score += profile.pattern_recognition * 2.0
+            # [v15.31] Enhanced type concentration bonus
+            # Prefer tiles with many same-type tiles available (easier to match later)
+            # This is CRITICAL for expert/optimal bots to avoid dock overflow
+            type_concentration_bonus = profile.pattern_recognition * 5.0
+
+            # Check dock state for enhanced bonus
+            dock_has_same_type = any(t.tile_type == move.tile_type for t in state.dock_tiles)
+            if dock_has_same_type:
+                # Already have this type in dock - great for matching!
+                type_concentration_bonus += 50.0 * profile.blocking_awareness
+            elif dock_count == 0:
+                # Empty dock - CRITICAL to establish type concentration early
+                # More tiles of same type = much higher bonus
+                # Scale: 3+ tiles = 45 bonus, 6+ tiles = 60 bonus, 9+ tiles = 75 bonus
+                type_concentration_bonus += min(same_type_on_board * 8.0, 75.0) * profile.blocking_awareness
+            elif dock_count <= 2:
+                # Few tiles in dock - still very valuable to concentrate types
+                type_concentration_bonus += min(same_type_on_board * 5.0, 50.0) * profile.blocking_awareness
+            elif dock_count <= 4:
+                # Moderate dock - concentrate types to avoid overflow
+                type_concentration_bonus += min(same_type_on_board * 3.0, 30.0) * profile.blocking_awareness
+
+            base_score += type_concentration_bonus
         elif same_type_on_board is not None and same_type_on_board == 0 and move.match_count < 2:
             # This type has no other accessible tiles - check hidden tiles for optimal bot
             # Phase 3: Only allow if ENABLE_HIDDEN_INFO_BLOCK is disabled (legacy behavior)
@@ -3323,6 +3345,7 @@ class BotSimulator:
                 # Difficulty factors:
                 #   - Exposed (not blocked) vs Hidden (blocked by upper layer)
                 #   - Number of horizontal neighbors: 1 (critical) vs 2 (safe)
+                # [v15.31] Dock state consideration: reduce bonus if adding new type to dock
                 chain_unlock_bonus = 0.0
                 horizontal_neighbors = [(move_x - 1, move_y), (move_x + 1, move_y)]
                 for nx, ny in horizontal_neighbors:
@@ -3354,6 +3377,25 @@ class BotSimulator:
                                 chain_unlock_bonus = max(chain_unlock_bonus, 20.0 * neighbor_multiplier * profile.blocking_awareness * gimmick_bonus_multiplier)
 
                 if chain_unlock_bonus > 0:
+                    # [v15.31] Balance chain unlock bonus with type matching priority
+                    # CRITICAL: Type concentration is MORE important than chain unlock at game start
+                    dock_has_same_type = any(t.tile_type == move.tile_type for t in state.dock_tiles)
+
+                    if dock_has_same_type:
+                        # BONUS: Can help match AND unlock chain - excellent move
+                        chain_unlock_bonus *= 1.5
+                    else:
+                        # REDUCE: Adding new type - chain unlock is much less valuable
+                        # Early game: focus on type concentration, not chain unlock
+                        if dock_count >= 4:
+                            chain_unlock_bonus *= 0.05  # Almost completely ignore
+                        elif dock_count >= 2:
+                            chain_unlock_bonus *= 0.15  # Heavily reduce
+                        else:
+                            # dock_count 0-1: CRITICAL early game phase
+                            # Type concentration must dominate - almost ignore chain unlock
+                            chain_unlock_bonus *= 0.1
+
                     base_score += chain_unlock_bonus
 
                 # 2b. GRASS REDUCE BONUS: Bonus for picking tiles that reduce grass layers
@@ -3411,38 +3453,37 @@ class BotSimulator:
                                     grass_reduce_bonus = max(grass_reduce_bonus, 5.0 * adj_multiplier * profile.blocking_awareness * gimmick_bonus_multiplier)
 
                 if grass_reduce_bonus > 0:
+                    # [v15.31] Balance grass reduce bonus with type matching priority
+                    # Same logic as chain: type concentration is more important early game
+                    dock_has_same_type = any(t.tile_type == move.tile_type for t in state.dock_tiles)
+
+                    if dock_has_same_type:
+                        grass_reduce_bonus *= 1.5  # BONUS: match + grass reduce
+                    else:
+                        # REDUCE: Adding new type - grass unlock is much less valuable
+                        if dock_count >= 4:
+                            grass_reduce_bonus *= 0.05  # Almost completely ignore
+                        elif dock_count >= 2:
+                            grass_reduce_bonus *= 0.15  # Heavily reduce
+                        else:
+                            # Early game: focus on type concentration
+                            grass_reduce_bonus *= 0.1
+
                     base_score += grass_reduce_bonus
 
-            # 3. CHAIN tiles: Penalize moves that don't help unlock when chains exist
-            locked_chains = 0
-            locked_chain_positions = []  # Track chain positions for smarter penalty
+            # 3. CHAIN tiles: Collect locked chain positions for isolation check
+            locked_chain_positions = []
             for layer_idx, layer in state.tiles.items():
                 for pos, tile in layer.items():
                     if not tile.picked and tile.effect_type == TileEffectType.CHAIN:
                         if not tile.effect_data.get("unlocked", False):
-                            locked_chains += 1
                             locked_chain_positions.append((layer_idx, pos, tile))
 
-            # Lower threshold for penalty (was >= 3, now >= 1 with scaled penalty)
-            # chain_preference가 낮으면 패널티도 낮음 (기믹 무시 허용)
-            if locked_chains >= 1 and dock_count >= 4 and not move.will_match:
-                # Calculate penalty based on chain count and dock pressure
-                chain_penalty = profile.blocking_awareness * (2.0 + locked_chains * 2.0)
-                # Higher penalty when dock is more full
-                dock_pressure = (dock_count - 3) / 4.0  # 0 at dock=3, 1 at dock=7
-                chain_penalty *= (1.0 + dock_pressure)
-                # chain_preference 기반 패널티 스케일링 (0.2 ~ 1.2)
-                chain_penalty *= (0.2 + profile.chain_preference)
-                base_score -= chain_penalty
-
             # ============================================================
-            # 3b. [v15.15] CHAIN ISOLATION DANGER - Critical game over prevention
-            # Detect if this move would isolate a locked chain tile
-            # (leave it with no horizontal neighbors = game impossible)
-            # Probability-based awareness: higher-level bots more likely to notice
-            #
-            # IMPORTANT: If this move is adjacent to the chain AND chain is not blocked,
-            # the chain will be UNLOCKED by this move, so no penalty should apply.
+            # [v15.31] CHAIN ISOLATION DANGER - Only penalize when:
+            # 1. Chain is BLOCKED by upper layer (can't be unlocked yet)
+            # 2. This move is adjacent to the chain (left/right)
+            # 3. This move would leave chain with NO horizontal neighbors (game over)
             # ============================================================
             if tile_state and locked_chain_positions:
                 move_pos = tile_state.position_key
@@ -3460,14 +3501,22 @@ class BotSimulator:
                         (chain_x + 1, chain_y)
                     ]
 
-                    # Check if THIS move is adjacent to the chain (would unlock it)
+                    # Check if THIS move is adjacent to the chain
                     is_move_adjacent_to_chain = (move_x, move_y) in horizontal_neighbors
 
-                    # If move is adjacent AND chain is not blocked, it will UNLOCK the chain
-                    # No isolation danger - skip penalty (chain becomes pickable)
-                    if is_move_adjacent_to_chain and not self._is_blocked_by_upper(state, chain_tile):
+                    # Skip if this move is NOT adjacent to the chain
+                    if not is_move_adjacent_to_chain:
                         continue
 
+                    # Check if chain is blocked by upper layer
+                    chain_is_blocked = self._is_blocked_by_upper(state, chain_tile)
+
+                    # If chain is NOT blocked and move is adjacent, it will UNLOCK the chain
+                    # No penalty - this is a GOOD move
+                    if not chain_is_blocked:
+                        continue
+
+                    # Chain IS blocked - check if this move would cause isolation
                     # Count remaining horizontal neighbors after this move
                     remaining_neighbors = 0
                     for nx, ny in horizontal_neighbors:
@@ -3481,31 +3530,72 @@ class BotSimulator:
                             remaining_neighbors += 1
 
                     # If this move would leave chain with NO horizontal neighbors
-                    # AND the move doesn't unlock the chain (already checked above)
+                    # while chain is still blocked = guaranteed game over
                     if remaining_neighbors == 0:
                         # CRITICAL: This move would cause guaranteed game over
-                        # Apply massive penalty (no probability check for isolation)
                         base_score -= 1000.0 * profile.blocking_awareness
 
-            # 4. GRASS tiles: Penalize moves that don't help reduce grass when grass exists
-            blocking_grass = 0
-            for layer in state.tiles.values():
-                for tile in layer.values():
+            # ============================================================
+            # 4. GRASS ISOLATION DANGER - Only penalize when:
+            # 1. Grass is BLOCKED by upper layer (can't be reduced yet)
+            # 2. This move is adjacent to the grass (up/down/left/right)
+            # 3. This move would leave grass with insufficient neighbors to clear
+            # ============================================================
+            grass_positions = []
+            for layer_idx, layer in state.tiles.items():
+                for pos, tile in layer.items():
                     if not tile.picked and tile.effect_type == TileEffectType.GRASS:
                         remaining_grass = tile.effect_data.get("remaining", 0)
                         if remaining_grass > 0:
-                            blocking_grass += 1
+                            grass_positions.append((layer_idx, pos, tile, remaining_grass))
 
-            # Lower threshold for penalty (was >= 3, now >= 1 with scaled penalty)
-            # chain_preference가 낮으면 패널티도 낮음 (기믹 무시 허용)
-            if blocking_grass >= 1 and dock_count >= 4 and not move.will_match:
-                # Calculate penalty based on grass count and dock pressure
-                grass_penalty = profile.blocking_awareness * (2.0 + blocking_grass * 1.5)
-                dock_pressure = (dock_count - 3) / 4.0
-                grass_penalty *= (1.0 + dock_pressure)
-                # chain_preference 기반 패널티 스케일링 (0.2 ~ 1.2)
-                grass_penalty *= (0.2 + profile.chain_preference)
-                base_score -= grass_penalty
+            if tile_state and grass_positions:
+                move_pos = tile_state.position_key
+                move_layer = tile_state.layer_idx
+                move_x, move_y = tile_state.x_idx, tile_state.y_idx
+
+                for grass_layer_idx, grass_pos, grass_tile, remaining_grass in grass_positions:
+                    # Only check grass in the same layer
+                    if grass_layer_idx != move_layer:
+                        continue
+
+                    grass_x, grass_y = grass_tile.x_idx, grass_tile.y_idx
+                    adjacent_neighbors = [
+                        (grass_x - 1, grass_y), (grass_x + 1, grass_y),
+                        (grass_x, grass_y - 1), (grass_x, grass_y + 1)
+                    ]
+
+                    # Check if THIS move is adjacent to the grass
+                    is_move_adjacent_to_grass = (move_x, move_y) in adjacent_neighbors
+
+                    # Skip if this move is NOT adjacent to the grass
+                    if not is_move_adjacent_to_grass:
+                        continue
+
+                    # Check if grass is blocked by upper layer
+                    grass_is_blocked = self._is_blocked_by_upper(state, grass_tile)
+
+                    # If grass is NOT blocked and move is adjacent, it will REDUCE the grass
+                    # No penalty - this is a GOOD move
+                    if not grass_is_blocked:
+                        continue
+
+                    # Grass IS blocked - check if this move would cause isolation
+                    # Count remaining adjacent neighbors after this move
+                    remaining_neighbors = 0
+                    for nx, ny in adjacent_neighbors:
+                        neighbor_pos = f"{nx}_{ny}"
+                        if neighbor_pos == move_pos:
+                            continue
+                        layer_tiles = state.tiles.get(grass_layer_idx, {})
+                        neighbor = layer_tiles.get(neighbor_pos)
+                        if neighbor and not neighbor.picked:
+                            remaining_neighbors += 1
+
+                    # If remaining neighbors < remaining grass layers = impossible to clear
+                    if remaining_neighbors < remaining_grass:
+                        # CRITICAL: This move would make grass impossible to clear
+                        base_score -= 800.0 * profile.blocking_awareness
 
             # 4. LINK tiles: Bonus for completing link pairs (clears 2 tiles at once)
             # [v15.17] Enhanced bonus - links are very efficient (2 tiles per move)

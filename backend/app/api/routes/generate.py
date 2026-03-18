@@ -568,82 +568,208 @@ def calculate_total_tiles(level_json: Dict) -> int:
     return total_tiles
 
 
+def calculate_gimmick_penalty(level_json: Dict[str, Any]) -> Dict[str, float]:
+    """
+    [v15.34] Calculate penalty factors for target clear rates based on gimmick combinations.
+
+    Returns penalty factors (0.0-1.0) for each bot type.
+    1.0 = no penalty, 0.5 = 50% reduction, etc.
+    """
+    penalties = {
+        "novice": 1.0,
+        "casual": 1.0,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0,
+    }
+
+    # Count gimmicks
+    unknown_count = 0
+    ice_count = 0
+    chain_count = 0
+    craft_goals = 0
+    active_layers = 0
+
+    num_layers = level_json.get("layer", 8)
+
+    for i in range(num_layers):
+        layer_key = f"layer_{i}"
+        layer_data = level_json.get(layer_key, {})
+        tiles = layer_data.get("tiles", {})
+
+        if tiles:
+            active_layers += 1
+            for pos, tile_data in tiles.items():
+                if len(tile_data) > 1:
+                    gimmick = tile_data[1]
+                    if gimmick == "unknown":
+                        unknown_count += 1
+                    elif gimmick == "ice":
+                        ice_count += 1
+                    elif gimmick == "chain":
+                        chain_count += 1
+
+                tile_type = tile_data[0] if tile_data else ""
+                if tile_type.startswith("craft"):
+                    craft_goals += 1
+
+    goal_count = level_json.get("goalCount", {})
+    for goal_type, count in goal_count.items():
+        if "craft" in goal_type.lower():
+            craft_goals = max(craft_goals, count)
+
+    # Apply penalties
+
+    # 1. High unknown count penalty
+    if unknown_count > 8:
+        excess = min(unknown_count - 8, 10)
+        penalties["average"] *= max(0.5, 1.0 - excess * 0.04)
+        penalties["expert"] *= max(0.6, 1.0 - excess * 0.03)
+        penalties["optimal"] *= max(0.7, 1.0 - excess * 0.02)
+
+    # 2. Unknown + Ice combo penalty
+    if unknown_count > 5 and ice_count > 0:
+        combo_factor = min(unknown_count * ice_count / 30.0, 0.3)
+        penalties["average"] *= (1.0 - combo_factor)
+        penalties["expert"] *= (1.0 - combo_factor * 0.8)
+        penalties["optimal"] *= (1.0 - combo_factor * 0.5)
+
+    # 3. Unknown + Chain combo penalty
+    if unknown_count > 5 and chain_count > 0:
+        combo_factor = min(unknown_count * chain_count / 40.0, 0.25)
+        penalties["average"] *= (1.0 - combo_factor)
+        penalties["expert"] *= (1.0 - combo_factor * 0.7)
+        penalties["optimal"] *= (1.0 - combo_factor * 0.4)
+
+    # 4. Craft goal penalty
+    if craft_goals > 0:
+        craft_penalty = min(craft_goals * 0.03, 0.15)
+        penalties["novice"] *= (1.0 - craft_penalty * 2)
+        penalties["casual"] *= (1.0 - craft_penalty * 1.5)
+        penalties["average"] *= (1.0 - craft_penalty)
+
+    # 5. Deep layer penalty
+    if active_layers > 4:
+        depth_penalty = (active_layers - 4) * 0.05
+        penalties["average"] *= (1.0 - min(depth_penalty, 0.15))
+        penalties["expert"] *= (1.0 - min(depth_penalty * 0.7, 0.1))
+
+    for bot in penalties:
+        penalties[bot] = max(0.3, min(1.0, penalties[bot]))
+
+    return penalties
+
+
+def calculate_adjusted_target_rates(
+    target_difficulty: float,
+    level_json: Dict[str, Any]
+) -> Dict[str, float]:
+    """
+    [v15.34] Calculate target clear rates with gimmick-based adjustments.
+    """
+    base_rates = calculate_target_clear_rates(target_difficulty)
+    penalties = calculate_gimmick_penalty(level_json)
+
+    adjusted_rates = {}
+    for bot_type, base_rate in base_rates.items():
+        penalty = penalties.get(bot_type, 1.0)
+        adjusted = base_rate * penalty
+        adjusted_rates[bot_type] = max(0.01, min(0.99, adjusted))
+
+    return adjusted_rates
+
+
 def calculate_target_clear_rates(target_difficulty: float) -> Dict[str, float]:
     """
     Calculate target clear rates based on target difficulty.
 
-    target_difficulty=0.0: Very easy, all bots ~99%
-    target_difficulty=0.5: Balanced (base rates)
+    target_difficulty=0.0: Very easy, but realistic considering game randomness
+    target_difficulty=0.5: Balanced (moderate targets)
     target_difficulty=1.0: Very hard, lower rates based on game mechanics
 
-    NOTE: Calibrated based on extensive game simulation testing.
-    For EASY levels (< 0.4), we expect all bots to have very high clear rates.
-    The tile matching game difficulty is primarily driven by:
-    - Tile type count (more types = harder to match before dock fills)
-    - Move constraint ratio (tighter moves = less room for suboptimal play)
-    - Bot skill levels have meaningful variance when properly constrained
+    NOTE: [v15.32] Unified with analyze.py - targets calibrated based on actual bot simulation results.
+    Even easy levels have inherent variance from tile distribution and gimmicks.
     """
     rates = {}
 
-    # EASY levels (0-0.4): Realistic targets considering game randomness
-    # [v14] Level 31+에서 기믹 해금 후 novice/casual 목표 하향
-    # 실제 테스트: ice+stack 기믹이 있으면 novice=28%, casual=30% 수준
-    # 기존 목표(77-82%)는 기믹 없는 레벨에서만 가능
-    if target_difficulty <= 0.4:
-        t = target_difficulty / 0.4  # 0 at difficulty 0, 1 at difficulty 0.4
-        easy_rates = {
-            "novice": 0.55 - t * 0.30,    # 55% -> 25% (Level31 실제: 32%)
-            "casual": 0.60 - t * 0.30,    # 60% -> 30% (Level31 실제: 30%)
-            "average": 0.80 - t * 0.20,   # 80% -> 60% (Level31 실제: 60%)
-            "expert": 0.95 - t * 0.05,    # 95% -> 90%
-            "optimal": 0.98 - t * 0.03,   # 98% -> 95%
+    # TUTORIAL levels (0-0.1): Very easy, all bots should clear 90%+
+    # [v14.2] 레벨 1-10 등 초반 튜토리얼 레벨 - 모든 봇 높은 클리어율 기대
+    if target_difficulty <= 0.1:
+        t = target_difficulty / 0.1
+        tutorial_rates = {
+            "novice": 0.95 - t * 0.05,    # 95% -> 90%
+            "casual": 0.98 - t * 0.03,    # 98% -> 95%
+            "average": 0.99 - t * 0.01,   # 99% -> 98%
+            "expert": 0.99,               # 99% 고정
+            "optimal": 0.99,              # 99% 고정
         }
         for bot_type in BASE_TARGET_RATES:
-            rates[bot_type] = easy_rates.get(bot_type, 0.85)
+            rates[bot_type] = tutorial_rates.get(bot_type, 0.95)
+    # EASY levels (0.1-0.4): Realistic targets
+    # [v14.2] Novice/Casual 목표 현실화 - 실제 봇 시뮬레이션 결과 기반
+    elif target_difficulty <= 0.4:
+        t = (target_difficulty - 0.1) / 0.3
+        easy_start = {
+            "novice": 0.90,    # TUTORIAL 끝값과 연결
+            "casual": 0.95,    # TUTORIAL 끝값과 연결
+            "average": 0.98,   # TUTORIAL 끝값과 연결
+            "expert": 0.99,    # TUTORIAL 끝값과 연결
+            "optimal": 0.99,   # TUTORIAL 끝값과 연결
+        }
+        easy_end = {
+            "novice": 0.10,    # MEDIUM 시작값과 연결
+            "casual": 0.20,    # MEDIUM 시작값과 연결
+            "average": 0.60,   # MEDIUM 시작값과 연결
+            "expert": 0.90,    # MEDIUM 시작값과 연결
+            "optimal": 0.95,   # MEDIUM 시작값과 연결
+        }
+        for bot_type in BASE_TARGET_RATES:
+            start = easy_start.get(bot_type, 0.95)
+            end = easy_end.get(bot_type, 0.60)
+            rates[bot_type] = start - t * (start - end)
     elif target_difficulty <= 0.6:
         # MEDIUM levels (0.4-0.6): Transition zone
-        # [v14.1] EASY 끝값 → HARD 시작값 연속성 유지
-        t = (target_difficulty - 0.4) / 0.2  # 0 at 0.4, 1 at 0.6
+        # [v14.2] Novice/Casual 목표 현실화 - 연속성 유지
+        t = (target_difficulty - 0.4) / 0.2
         medium_start = {
-            "novice": 0.25,    # EASY 끝값(55%-30%=25%)과 연결
-            "casual": 0.30,    # EASY 끝값(60%-30%=30%)과 연결
-            "average": 0.60,   # EASY 끝값(80%-20%=60%)과 연결
-            "expert": 0.90,    # EASY 끝값(95%-5%=90%)과 연결
-            "optimal": 0.95,   # EASY 끝값(98%-3%=95%)과 연결
+            "novice": 0.10,    # EASY 끝값과 연결 (현실화)
+            "casual": 0.20,    # EASY 끝값과 연결 (현실화)
+            "average": 0.60,   # EASY 끝값과 연결
+            "expert": 0.90,    # EASY 끝값과 연결
+            "optimal": 0.95,   # EASY 끝값과 연결
         }
         medium_end = {
-            "novice": 0.45,    # HARD 시작값과 연결 (v13: 0.60)
-            "casual": 0.55,    # HARD 시작값과 연결 (v13: 0.70)
-            "average": 0.72,   # HARD 시작값과 연결 (v13: 0.80)
-            "expert": 0.84,    # HARD 시작값과 연결 (v13: 0.88)
-            "optimal": 0.92,   # HARD 시작값과 연결 (v13: 0.95)
+            "novice": 0.05,    # HARD 시작값과 연결 (현실화)
+            "casual": 0.15,    # HARD 시작값과 연결 (현실화)
+            "average": 0.72,   # HARD 시작값과 연결
+            "expert": 0.84,    # HARD 시작값과 연결
+            "optimal": 0.92,   # HARD 시작값과 연결
         }
         for bot_type in BASE_TARGET_RATES:
             start = medium_start.get(bot_type, 0.70)
             end = medium_end.get(bot_type, 0.60)
-            rates[bot_type] = start + t * (end - start)  # start → end로 증가
+            rates[bot_type] = start + t * (end - start)  # start → end로 변화
     else:
-        # HARD levels (0.6-1.0): Significant difficulty for all but optimal
-        # [v13.1] 현실적 목표 조정: 실제 봇 시뮬레이션 결과 기반
-        # E등급(90%) 실제 결과: nov=0-12%, cas=24-32%, ave=48-88%, exp=80-92%, opt=92-100%
-        t = (target_difficulty - 0.6) / 0.4  # 0 at 0.6, 1 at 1.0
+        # HARD levels (0.6-1.0): Significant difficulty
+        # [v14.2] Novice/Casual 목표 현실화 - E등급 실제 결과 기반
+        t = (target_difficulty - 0.6) / 0.4
         hard_start = {
-            "novice": 0.45,    # 0.6 난이도: 45%
-            "casual": 0.55,    # 0.6 난이도: 55%
-            "average": 0.72,   # 0.6 난이도: 72%
-            "expert": 0.84,    # 0.6 난이도: 84%
-            "optimal": 0.92,   # 0.6 난이도: 92%
+            "novice": 0.05,    # MEDIUM 끝값과 연결 (현실화)
+            "casual": 0.15,    # MEDIUM 끝값과 연결 (현실화)
+            "average": 0.72,   # MEDIUM 끝값과 연결
+            "expert": 0.84,    # MEDIUM 끝값과 연결
+            "optimal": 0.92,   # MEDIUM 끝값과 연결
         }
         hard_end = {
-            "novice": 0.03,    # E등급: 3% (실제 0-12% 범위 하단)
-            "casual": 0.20,    # E등급: 20% (실제 12-40% 범위)
-            "average": 0.70,   # E등급: 70% (실제 60-96% 범위, 상향)
-            "expert": 0.85,    # E등급: 85% (실제 76-100% 범위)
-            "optimal": 0.92,   # E등급: 92% (실제 88-100% 범위)
+            "novice": 0.02,    # E등급: 2% (실제 0-5% 범위)
+            "casual": 0.08,    # E등급: 8% (실제 5-15% 범위)
+            "average": 0.60,   # E등급: 60% (실제 50-70% 범위)
+            "expert": 0.80,    # E등급: 80% (실제 75-90% 범위)
+            "optimal": 0.88,   # E등급: 88% (실제 85-95% 범위)
         }
         for bot_type in BASE_TARGET_RATES:
-            start = hard_start.get(bot_type, 0.70)
-            end = hard_end.get(bot_type, 0.40)
+            start = hard_start.get(bot_type, 0.60)
+            end = hard_end.get(bot_type, 0.35)
             rates[bot_type] = start - t * (start - end)
 
     # Clamp all rates
@@ -1721,8 +1847,9 @@ def generate_validated_level(
             # Otherwise use target_difficulty (normal generation case)
             # This ensures regeneration match_score is always against the ORIGINAL difficulty target,
             # even when target_difficulty has been adjusted by the binary search algorithm
+            # [v15.34] Use adjusted target rates that account for gimmick combinations
             scoring_diff = request.scoring_difficulty if request.scoring_difficulty is not None else request.target_difficulty
-            all_target_rates = calculate_target_clear_rates(scoring_diff)
+            all_target_rates = calculate_adjusted_target_rates(scoring_diff, level_json)
 
             # OPTIMIZATION: Run bot simulations in PARALLEL
             # Adaptive bot selection based on difficulty for faster validation:
@@ -1809,8 +1936,16 @@ def generate_validated_level(
                     match_score=match_score,
                 )
 
+            # [v15.32] Dynamic tolerance adjustment for hard levels
+            effective_tolerance = request.tolerance
+            if request.target_difficulty >= 0.7:
+                effective_tolerance = request.tolerance * 1.3  # 15% → 19.5%
+            elif request.target_difficulty >= 0.5:
+                t = (request.target_difficulty - 0.5) / 0.2
+                effective_tolerance = request.tolerance * (1.0 + t * 0.3)
+
             # Check if validation passed (skip if use_best_match is True - will return best at end)
-            if not request.use_best_match and avg_gap <= request.tolerance and max_gap <= request.tolerance * 1.5:
+            if not request.use_best_match and avg_gap <= effective_tolerance and max_gap <= effective_tolerance * 1.5:
                 # Validation passed with tolerance check
                 static_report = analyzer.analyze(level_json)
                 generation_time_ms = int((time.time() - start_time) * 1000)
@@ -2210,7 +2345,8 @@ def generate_validated_level(
         try:
             fallback = generate_fallback_level(generator, request.target_difficulty, goals)
             fallback_scoring_diff = request.scoring_difficulty if request.scoring_difficulty is not None else request.target_difficulty
-            target_rates = calculate_target_clear_rates(fallback_scoring_diff)
+            # [v15.34] Use adjusted target rates
+            target_rates = calculate_adjusted_target_rates(fallback_scoring_diff, fallback["level_json"])
 
             return ValidatedGenerateResponse(
                 level_json=fallback["level_json"],
@@ -2271,7 +2407,8 @@ def enhance_level(
     pool = _get_bot_pool()
 
     # Calculate target clear rates from the original target difficulty
-    target_rates = calculate_target_clear_rates(request.target_difficulty)
+    # [v15.34] Use adjusted target rates that account for gimmick combinations
+    target_rates = calculate_adjusted_target_rates(request.target_difficulty, level_json)
 
     # --- Step 1: Measure current state ---
     # [v15.14] 검증용 봇: AVERAGE/EXPERT/OPTIMAL 3개만 사용 (NOVICE 랜덤, CASUAL 변동성 높음)

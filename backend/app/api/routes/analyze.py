@@ -56,6 +56,141 @@ BOT_WEIGHTS = {
 VALIDATION_BOT_PROFILES = ["average", "expert", "optimal"]
 
 
+def calculate_gimmick_penalty(level_json: Dict[str, Any]) -> Dict[str, float]:
+    """
+    [v15.34] Calculate penalty factors for target clear rates based on gimmick combinations.
+
+    Returns penalty factors (0.0-1.0) for each bot type.
+    1.0 = no penalty, 0.5 = 50% reduction, etc.
+
+    Difficult combinations that bots struggle with:
+    - High unknown count (>8): Hard to plan ahead
+    - unknown + ice/chain: Blocking + hidden info
+    - craft goals: Requires specific tile combinations
+    - deep layers (>4): More blocking complexity
+    """
+    penalties = {
+        "novice": 1.0,
+        "casual": 1.0,
+        "average": 1.0,
+        "expert": 1.0,
+        "optimal": 1.0,
+    }
+
+    # Count gimmicks
+    unknown_count = 0
+    ice_count = 0
+    chain_count = 0
+    link_count = 0
+    craft_goals = 0
+    total_tiles = 0
+    active_layers = 0
+
+    num_layers = level_json.get("layer", 8)
+
+    for i in range(num_layers):
+        layer_key = f"layer_{i}"
+        layer_data = level_json.get(layer_key, {})
+        tiles = layer_data.get("tiles", {})
+
+        if tiles:
+            active_layers += 1
+            total_tiles += len(tiles)
+
+            for pos, tile_data in tiles.items():
+                if len(tile_data) > 1:
+                    gimmick = tile_data[1]
+                    if gimmick == "unknown":
+                        unknown_count += 1
+                    elif gimmick == "ice":
+                        ice_count += 1
+                    elif gimmick == "chain":
+                        chain_count += 1
+                    elif gimmick and gimmick.startswith("link"):
+                        link_count += 1
+
+                # Check for craft tiles
+                tile_type = tile_data[0] if tile_data else ""
+                if tile_type.startswith("craft"):
+                    craft_goals += 1
+
+    # Also check goalCount for craft requirements
+    goal_count = level_json.get("goalCount", {})
+    for goal_type, count in goal_count.items():
+        if "craft" in goal_type.lower():
+            craft_goals = max(craft_goals, count)
+
+    # === Apply penalties ===
+
+    # 1. High unknown count penalty (>8 unknown is problematic)
+    if unknown_count > 8:
+        excess = min(unknown_count - 8, 10)  # Cap excess at 10
+        # Average/Expert/Optimal struggle with unpredictability
+        penalties["average"] *= max(0.5, 1.0 - excess * 0.04)   # Up to 40% reduction
+        penalties["expert"] *= max(0.6, 1.0 - excess * 0.03)    # Up to 30% reduction
+        penalties["optimal"] *= max(0.7, 1.0 - excess * 0.02)   # Up to 20% reduction
+
+    # 2. Unknown + Ice combo penalty (hidden tiles under ice = no planning possible)
+    if unknown_count > 5 and ice_count > 0:
+        combo_factor = min(unknown_count * ice_count / 30.0, 0.3)  # Max 30% reduction
+        penalties["average"] *= (1.0 - combo_factor)
+        penalties["expert"] *= (1.0 - combo_factor * 0.8)
+        penalties["optimal"] *= (1.0 - combo_factor * 0.5)
+
+    # 3. Unknown + Chain combo penalty
+    if unknown_count > 5 and chain_count > 0:
+        combo_factor = min(unknown_count * chain_count / 40.0, 0.25)  # Max 25% reduction
+        penalties["average"] *= (1.0 - combo_factor)
+        penalties["expert"] *= (1.0 - combo_factor * 0.7)
+        penalties["optimal"] *= (1.0 - combo_factor * 0.4)
+
+    # 4. Craft goal penalty (craft tiles require specific combinations)
+    if craft_goals > 0:
+        craft_penalty = min(craft_goals * 0.03, 0.15)  # Max 15% reduction
+        penalties["novice"] *= (1.0 - craft_penalty * 2)  # Novice struggles most
+        penalties["casual"] *= (1.0 - craft_penalty * 1.5)
+        penalties["average"] *= (1.0 - craft_penalty)
+
+    # 5. Deep layer penalty (>4 active layers)
+    if active_layers > 4:
+        depth_penalty = (active_layers - 4) * 0.05  # 5% per extra layer
+        penalties["average"] *= (1.0 - min(depth_penalty, 0.15))
+        penalties["expert"] *= (1.0 - min(depth_penalty * 0.7, 0.1))
+
+    # Clamp all penalties
+    for bot in penalties:
+        penalties[bot] = max(0.3, min(1.0, penalties[bot]))  # Never below 30%
+
+    return penalties
+
+
+def calculate_adjusted_target_rates(
+    target_difficulty: float,
+    level_json: Dict[str, Any]
+) -> Dict[str, float]:
+    """
+    [v15.34] Calculate target clear rates with gimmick-based adjustments.
+
+    This function applies penalty factors based on difficult gimmick combinations
+    that cause bots to underperform relative to static difficulty analysis.
+    """
+    # Get base rates from difficulty
+    base_rates = calculate_target_clear_rates(target_difficulty)
+
+    # Get gimmick penalties
+    penalties = calculate_gimmick_penalty(level_json)
+
+    # Apply penalties to rates
+    adjusted_rates = {}
+    for bot_type, base_rate in base_rates.items():
+        penalty = penalties.get(bot_type, 1.0)
+        # Apply penalty but preserve minimum rates
+        adjusted = base_rate * penalty
+        adjusted_rates[bot_type] = max(0.01, min(0.99, adjusted))
+
+    return adjusted_rates
+
+
 def calculate_target_clear_rates(target_difficulty: float) -> Dict[str, float]:
     """
     Calculate target clear rates based on target difficulty.
@@ -451,7 +586,8 @@ def analyze_autoplay(
             # score 100 = hardest (D grade) → difficulty 1.0
             difficulty_for_targets = static_score / 100.0
 
-        target_rates = calculate_target_clear_rates(difficulty_for_targets)
+        # [v15.34] Use adjusted target rates that account for gimmick combinations
+        target_rates = calculate_adjusted_target_rates(difficulty_for_targets, level_json)
 
         # Determine which bot profiles to use
         # [v15.14] 기본값: CASUAL/AVERAGE/EXPERT 3개 봇만 사용 (검증 신뢰도 향상)
@@ -576,7 +712,8 @@ def _verify_single_level(
         if target_difficulty is None:
             target_difficulty = static_report.score / 100.0
 
-        target_rates = calculate_target_clear_rates(target_difficulty)
+        # [v15.34] Use adjusted target rates that account for gimmick combinations
+        target_rates = calculate_adjusted_target_rates(target_difficulty, level_json)
 
         # Select bot profiles
         if use_core_bots_only:
@@ -626,8 +763,19 @@ def _verify_single_level(
         # Calculate match score (100 - avg_gap, clamped to 0-100)
         match_score = max(0, min(100, 100 - avg_gap))
 
+        # [v15.32] Dynamic tolerance adjustment for hard levels
+        # Hard levels (target_difficulty >= 0.7) have inherently more variance
+        # due to complex gimmick combinations, so tolerance is expanded by 1.3x
+        effective_tolerance = tolerance
+        if target_difficulty >= 0.7:
+            effective_tolerance = tolerance * 1.3  # 15% → 19.5%
+        elif target_difficulty >= 0.5:
+            # Gradual increase for medium-hard levels
+            t = (target_difficulty - 0.5) / 0.2  # 0 at 0.5, 1 at 0.7
+            effective_tolerance = tolerance * (1.0 + t * 0.3)  # 15% → 19.5%
+
         # Determine if passed
-        passed = max_gap <= tolerance and all(r > 0 for r in actual_rates.values())
+        passed = max_gap <= effective_tolerance and all(r > 0 for r in actual_rates.values())
 
         return BatchVerifyResultItem(
             level_id=level_id,

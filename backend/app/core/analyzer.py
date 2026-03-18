@@ -262,46 +262,65 @@ class LevelAnalyzer:
                 score += count * weight * GIMMICK_BASE_WEIGHT
 
         # 기믹 시너지 효과 (조합 시 난이도 상승)
-        # 시너지 점수는 정규화 전 raw score에 추가되므로 적당히 조절
+        # [v15.33] 시너지 점수 상한선: 25점, 초과분 30%만 적용
+        synergy_score = 0.0
+
         # bomb + ice: 시간 압박 + 선택지 제한 = 매우 어려움
         if gimmick_data["bomb"] > 0 and gimmick_data["ice"] > 0:
-            synergy = min(gimmick_data["bomb"], gimmick_data["ice"]) * 0.5 * GIMMICK_BASE_WEIGHT
-            score += synergy
+            synergy_score += min(gimmick_data["bomb"], gimmick_data["ice"]) * 0.5 * GIMMICK_BASE_WEIGHT
 
         # bomb + frog: 시간 압박 + 예측 불가능 = 매우 어려움
         if gimmick_data["bomb"] > 0 and gimmick_data["frog"] > 0:
-            synergy = min(gimmick_data["bomb"], gimmick_data["frog"]) * 0.6 * GIMMICK_BASE_WEIGHT
-            score += synergy
+            synergy_score += min(gimmick_data["bomb"], gimmick_data["frog"]) * 0.6 * GIMMICK_BASE_WEIGHT
 
         # ice + frog: 블로킹 + 예측 불가능
         if gimmick_data["ice"] > 0 and gimmick_data["frog"] > 0:
-            synergy = min(gimmick_data["ice"], gimmick_data["frog"]) * 0.4 * GIMMICK_BASE_WEIGHT
-            score += synergy
+            synergy_score += min(gimmick_data["ice"], gimmick_data["frog"]) * 0.4 * GIMMICK_BASE_WEIGHT
 
         # link + ice/chain: 연결 해제 + 블로킹 조합
         if gimmick_data["link"] > 0 and (gimmick_data["ice"] > 0 or gimmick_data["chain"] > 0):
             blocking_count = gimmick_data["ice"] + gimmick_data["chain"]
-            synergy = min(gimmick_data["link"], blocking_count) * 0.4 * GIMMICK_BASE_WEIGHT
-            score += synergy
+            synergy_score += min(gimmick_data["link"], blocking_count) * 0.4 * GIMMICK_BASE_WEIGHT
+
+        # [v15.33] ice + unknown: 얼음 아래 뭐가 있는지 모름 = 계획 수립 불가
+        # unknown이 너무 많으면 캡 적용 (최대 8개까지만 시너지 계산)
+        effective_unknown = min(gimmick_data["unknown"], 8)
+        if gimmick_data["ice"] > 0 and effective_unknown > 0:
+            synergy_score += gimmick_data["ice"] * effective_unknown * 0.3 * GIMMICK_BASE_WEIGHT
+
+        # [v15.33] chain + unknown: 체인된 unknown 타일은 순서 예측 불가
+        if gimmick_data["chain"] > 0 and effective_unknown > 0:
+            synergy_score += gimmick_data["chain"] * effective_unknown * 0.25 * GIMMICK_BASE_WEIGHT
 
         # teleport + unknown: 숨겨진 타일이 계속 위치 변경 = 예측 불가 (v2 추가)
         if gimmick_data["teleport"] > 0 and gimmick_data["unknown"] > 0:
-            synergy = min(gimmick_data["teleport"], gimmick_data["unknown"]) * 0.5 * GIMMICK_BASE_WEIGHT
-            score += synergy
+            synergy_score += min(gimmick_data["teleport"], gimmick_data["unknown"]) * 0.5 * GIMMICK_BASE_WEIGHT
 
         # teleport + ice: 얼음 녹이기 전에 위치 변경 = 진행 방해 (v2 추가)
         if gimmick_data["teleport"] > 0 and gimmick_data["ice"] > 0:
-            synergy = min(gimmick_data["teleport"], gimmick_data["ice"]) * 0.4 * GIMMICK_BASE_WEIGHT
-            score += synergy
+            synergy_score += min(gimmick_data["teleport"], gimmick_data["ice"]) * 0.4 * GIMMICK_BASE_WEIGHT
 
         # time_attack + 다른 기믹 조합: 시간 압박 하에서 기믹 처리는 훨씬 어려움 (v2 추가)
         if metrics.has_time_attack:
             total_gimmicks = sum(gimmick_data.values())
             if total_gimmicks > 0:
                 # 기믹이 많을수록 시간 압박의 영향 증가
-                time_synergy = min(total_gimmicks, 10) * 0.3 * GIMMICK_BASE_WEIGHT
-                score += time_synergy
+                synergy_score += min(total_gimmicks, 10) * 0.3 * GIMMICK_BASE_WEIGHT
 
+        # [v15.33] excessive unknown penalty: 10개 초과 시 추가 페널티
+        # unknown이 너무 많으면 어떤 전략도 효과가 없음
+        if gimmick_data["unknown"] > 10:
+            excess_unknown = gimmick_data["unknown"] - 10
+            synergy_score += excess_unknown * 0.5 * GIMMICK_BASE_WEIGHT
+
+        # [v15.33] Apply synergy cap with stronger diminishing returns
+        # 상한선 25점으로 상향, 초과분은 30%만 적용 (더 강한 cap)
+        MAX_SYNERGY_SCORE = 25.0
+        if synergy_score > MAX_SYNERGY_SCORE:
+            excess = synergy_score - MAX_SYNERGY_SCORE
+            synergy_score = MAX_SYNERGY_SCORE + excess * 0.3
+
+        score += synergy_score
         return score
 
     def _calculate_score(self, metrics: LevelMetrics) -> float:

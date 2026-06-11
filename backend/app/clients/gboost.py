@@ -102,6 +102,15 @@ class GBoostClient:
         """
         Save level data to GBoost server using real_array.php API.
 
+        [v15.50] GBoost real_array.php는 `new` 파라미터에 따라 동작이 분기됨:
+            new=1 → 항상 새 레코드 생성 (id 충돌 시 새 idx로 추가, 기존 데이터 update 안 됨)
+            new=0 → 기존 레코드 update (id 없으면 저장 실패)
+        응답 본문에 `<id>=new` 또는 `<id>=upt` 키워드로 실제 동작이 표시됨.
+        기존: new=1 하드코딩 → 같은 level_id로 재업로드 시 매번 새 레코드만 추가되어
+               서버 데이터가 갱신되지 않음 (사용자 보고 증상).
+        수정: existing record 존재 여부에 따라 자동 분기. 응답 본문 검증으로 실제
+               성공 여부 확인. update 실패 시 (응답에 키워드 없음) create로 자동 재시도.
+
         Args:
             board_id: Board identifier (bid parameter).
             level_id: Level identifier (used as key in json).
@@ -116,46 +125,78 @@ class GBoostClient:
                 "error": "GBoost client not configured",
             }
 
-        # Townpop pattern: POST to real_array.php
         endpoint = f"{self.base_url}/real_array.php"
-
-        # Use level_id as-is (user controls the prefix)
         array_id = level_id
-
-        # Wrap level data with array_id as key (townpop pattern)
         json_data = {array_id: level_json}
+        json_payload = json.dumps(json_data)
 
-        # Form data for POST (townpop pattern)
-        form_data = {
-            "act": "save",
-            "gid": self.project_id,
-            "bid": board_id,
-            "new": "1",
-            "json": json.dumps(json_data),
-        }
-
-        try:
+        async def _do_post(new_flag: str) -> Dict[str, Any]:
+            form_data = {
+                "act": "save",
+                "gid": self.project_id,
+                "bid": board_id,
+                "new": new_flag,
+                "json": json_payload,
+            }
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     endpoint,
                     data=form_data,
                     timeout=aiohttp.ClientTimeout(total=30),
                 ) as response:
-                    result_text = await response.text()
+                    text = await response.text()
+                    return {"status": response.status, "text": text, "new_flag": new_flag}
 
-                    if response.status == 200:
-                        return {
-                            "success": True,
-                            "saved_at": datetime.utcnow().isoformat(),
-                            "message": f"Level {array_id} saved successfully",
-                            "data": result_text,
-                        }
-                    else:
-                        return {
-                            "success": False,
-                            "error": f"Server error: {result_text}",
-                            "status_code": response.status,
-                        }
+        def _detect_action(text: str) -> Optional[str]:
+            """Return 'new', 'upt', or None based on server response."""
+            if not text:
+                return None
+            head = text.split("\n", 1)[0].strip()
+            # Format: "<level_id>=new" or "<level_id>=upt"
+            if head.endswith("=new"):
+                return "new"
+            if head.endswith("=upt"):
+                return "upt"
+            return None
+
+        try:
+            # Step 1: 기존 레코드 존재 여부 확인 (load 시도)
+            exists = await self._exists(board_id, array_id)
+
+            # Step 2: 존재하면 update(new=0), 아니면 create(new=1)
+            primary_flag = "0" if exists else "1"
+            primary = await _do_post(primary_flag)
+            primary_action = _detect_action(primary["text"])
+
+            # Step 3: 의도한 동작이 응답에 반영 안 됐으면 반대 플래그로 재시도
+            if primary["status"] == 200 and primary_action is not None:
+                return {
+                    "success": True,
+                    "saved_at": datetime.utcnow().isoformat(),
+                    "message": f"Level {array_id} saved successfully ({primary_action})",
+                    "data": primary["text"],
+                    "action": primary_action,
+                }
+
+            # Fallback: 의도와 무관하게 반대 플래그로 한 번 더 시도
+            fallback_flag = "1" if primary_flag == "0" else "0"
+            fallback = await _do_post(fallback_flag)
+            fallback_action = _detect_action(fallback["text"])
+
+            if fallback["status"] == 200 and fallback_action is not None:
+                return {
+                    "success": True,
+                    "saved_at": datetime.utcnow().isoformat(),
+                    "message": f"Level {array_id} saved (fallback {fallback_action})",
+                    "data": fallback["text"],
+                    "action": fallback_action,
+                }
+
+            return {
+                "success": False,
+                "error": f"Server returned 200 but did not confirm save. primary({primary_flag})={primary['text'][:120]} fallback({fallback_flag})={fallback['text'][:120]}",
+                "status_code": primary["status"],
+            }
 
         except aiohttp.ClientError as e:
             return {
@@ -168,10 +209,42 @@ class GBoostClient:
                 "error": f"Unexpected error: {str(e)}",
             }
 
+    async def _exists(self, board_id: str, level_id: str) -> bool:
+        """Lightweight existence check via load endpoint."""
+        try:
+            endpoint = (
+                f"{self.base_url}/real_array.php?act=load"
+                f"&gid={self.project_id}&bid={board_id}&id={level_id}&filter="
+            )
+            async with aiohttp.ClientSession() as session:
+                async with session.get(endpoint, timeout=aiohttp.ClientTimeout(total=15)) as response:
+                    if response.status != 200:
+                        return False
+                    text = await response.text()
+                    if not text or text.strip() in ("", "{}", "[]"):
+                        return False
+                    try:
+                        data = json.loads(text)
+                    except Exception:
+                        return False
+                    # 서버는 존재 시 records를 포함하는 dict/list 반환, 없으면 빈 응답.
+                    if isinstance(data, dict):
+                        return any(
+                            isinstance(v, (list, dict)) and v
+                            for k, v in data.items()
+                            if k != "__keys"
+                        )
+                    if isinstance(data, list):
+                        return len(data) > 0
+                    return False
+        except Exception:
+            return False
+
     async def load_level(
         self,
         board_id: str,
         level_id: str,
+        project_id_override: str = "",
     ) -> Optional[Dict[str, Any]]:
         """
         Load level data from GBoost server using real_array.php API.
@@ -179,6 +252,7 @@ class GBoostClient:
         Args:
             board_id: Board identifier (bid parameter).
             level_id: Level identifier (id parameter).
+            project_id_override: 다른 프로젝트 ID (빈 문자열이면 기본값)
 
         Returns:
             Level JSON data or None if not found.
@@ -186,11 +260,9 @@ class GBoostClient:
         if not self.is_configured:
             return None
 
-        # Use level_id as-is (user controls the prefix)
         array_id = level_id
-
-        # Townpop pattern: GET from real_array.php
-        endpoint = f"{self.base_url}/real_array.php?act=load&gid={self.project_id}&bid={board_id}&id={array_id}&filter="
+        gid = project_id_override or self.project_id
+        endpoint = f"{self.base_url}/real_array.php?act=load&gid={gid}&bid={board_id}&id={array_id}&filter="
 
         try:
             async with aiohttp.ClientSession() as session:
@@ -244,6 +316,7 @@ class GBoostClient:
         board_id: str,
         prefix: str = "level_",
         limit: int = 100,
+        project_id_override: str = "",
     ) -> List[Dict[str, Any]]:
         """
         List levels from GBoost server.
@@ -260,7 +333,8 @@ class GBoostClient:
             return []
 
         # Load all data from the board (empty id = all)
-        endpoint = f"{self.base_url}/real_array.php?act=load&gid={self.project_id}&bid={board_id}&id=&filter="
+        gid = project_id_override or self.project_id
+        endpoint = f"{self.base_url}/real_array.php?act=load&gid={gid}&bid={board_id}&id=&filter="
 
         try:
             async with aiohttp.ClientSession() as session:

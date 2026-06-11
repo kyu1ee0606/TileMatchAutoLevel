@@ -1,9 +1,15 @@
 """FastAPI application entry point."""
-from fastapi import FastAPI
+import json
+import logging
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from .config import get_settings
 from .api.routes import analyze, generate, gboost, assess, simulate, leveling
+
+_diag_logger = logging.getLogger("diag.422")
 
 # Get settings
 settings = get_settings()
@@ -25,6 +31,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Diagnostic: log validation errors with body so we can see what FE sends
+@app.exception_handler(RequestValidationError)
+async def _log_validation_errors(request: Request, exc: RequestValidationError):
+    body = b""
+    try:
+        body = await request.body()
+    except Exception:
+        pass
+    body_preview = body[:2000].decode("utf-8", errors="replace")
+    errors = exc.errors()
+    _diag_logger.error(
+        "422 on %s %s | errors=%s | body=%s",
+        request.method, request.url.path, json.dumps(errors, default=str), body_preview,
+    )
+    return JSONResponse(status_code=422, content={"detail": errors})
+
 
 # Include routers
 app.include_router(analyze.router)

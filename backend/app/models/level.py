@@ -157,6 +157,16 @@ class GenerationParams:
     # Level number for research-based unknown ratio calculation
     # [연구 근거] Room 8 Studio: 레벨 175+ 히든 타일 본격 도입
     level_number: Optional[int] = None  # Current level number for gimmick unlock & unknown ratio
+    # [v15.40] 패턴 배치 크기 스텝 (이전 패턴 크기 대비 ±N)
+    # 레이어 그리드는 짝홀 교대 고정, 패턴 배치만 스텝으로 조절
+    # 예: [-1,-1,-1,-1] → L0=8, 패턴=8,7,6,5 (피라미드)
+    # None이면 기본값 [-1,-1,...] 사용
+    layer_steps: Optional[List[int]] = None
+    # [v15.40] 레이어별 개별 패턴 오버라이드
+    # 각 레이어에 다른 pattern_index와 크기를 지정
+    # 예: [{"layer":0,"pattern_index":8,"size":8},{"layer":1,"pattern_index":15,"size":7}]
+    # None이면 전체 pattern_index + layer_steps 사용
+    layer_pattern_overrides: Optional[List[Dict[str, Any]]] = None
     # Fast generation mode - skip internal deadlock checking
     skip_deadlock_check: bool = True  # Skip deadlock check for ultra-fast generation (use batch verify later)
 
@@ -231,6 +241,12 @@ class GenerationResult:
     actual_difficulty: float
     grade: DifficultyGrade
     generation_time_ms: int = 0
+    # Playability signal: True when generator could not fully resolve deadlocks
+    # (best clear_rate < acceptance threshold during _ensure_no_deadlock).
+    # Consumers should prefer candidates with this False during regeneration.
+    playability_warning: bool = False
+    # Best clear rate observed during deadlock resolution (0.0-1.0). 1.0 when not measured.
+    estimated_clear_rate: float = 1.0
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -239,6 +255,8 @@ class GenerationResult:
             "actual_difficulty": round(self.actual_difficulty, 3),
             "grade": self.grade.value,
             "generation_time_ms": self.generation_time_ms,
+            "playability_warning": self.playability_warning,
+            "estimated_clear_rate": round(self.estimated_clear_rate, 3),
         }
 
 

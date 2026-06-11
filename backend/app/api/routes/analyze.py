@@ -2,7 +2,7 @@
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from fastapi import APIRouter, Depends, HTTPException
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from ...models.schemas import (
     AnalyzeRequest,
@@ -16,10 +16,18 @@ from ...models.schemas import (
     BatchVerifyRequest,
     BatchVerifyResponse,
     BatchVerifyResultItem,
+    # [v15.35] 재생성 지원 스키마
+    BatchVerifyRegenerateRequest,
+    BatchVerifyRegenerateLevelItem,
+    # [v15.40] 중앙정렬 수정 스키마
+    FixCenteringRequest,
+    FixCenteringResponse,
+    FixCenteringResultItem,
 )
 from ...models.bot_profile import BotType, get_profile, PREDEFINED_PROFILES
 from ...core.analyzer import LevelAnalyzer
 from ...core.bot_simulator import BotSimulator
+from ...core.generator import LevelGenerator
 from ..deps import get_level_analyzer
 
 router = APIRouter(prefix="/api", tags=["analyze"])
@@ -874,4 +882,1449 @@ def batch_verify_levels(
         failed_count=failed_count,
         pass_rate=passed_count / len(results) if results else 0,
         execution_time_ms=execution_time_ms,
+        regenerated_count=0,  # 기존 API는 재생성 없음
     )
+
+
+# ============================================================
+# [v15.35] Batch Verify with Regeneration API
+# ============================================================
+
+@router.post("/analyze/batch-verify-regenerate", response_model=BatchVerifyResponse)
+def batch_verify_with_regeneration(
+    request: BatchVerifyRegenerateRequest,
+    analyzer: LevelAnalyzer = Depends(get_level_analyzer),
+) -> BatchVerifyResponse:
+    """
+    Batch verify levels with automatic regeneration for failed levels.
+
+    This endpoint verifies levels and automatically regenerates failed levels
+    using the validated generation API. This provides a "root cause" solution
+    by creating new levels that actually meet the target difficulty.
+
+    Args:
+        request: BatchVerifyRegenerateRequest with levels and regeneration options
+        analyzer: LevelAnalyzer dependency
+
+    Returns:
+        BatchVerifyResponse with verification results (including regenerated levels)
+    """
+    import logging
+    from ...core.generator import LevelGenerator, GenerationParams
+    from ..deps import get_level_generator
+    from .generate import resolve_symmetry_mode
+
+    logger = logging.getLogger(__name__)
+    start_time = time.time()
+
+    if not request.levels:
+        raise HTTPException(status_code=400, detail="No levels provided")
+
+    results: List[BatchVerifyResultItem] = []
+    regenerated_count = 0
+
+    # Phase 1: Initial verification (parallel)
+    logger.info(f"[BATCH_VERIFY_REGEN] Starting verification of {len(request.levels)} levels")
+
+    with ThreadPoolExecutor(max_workers=min(4, len(request.levels))) as executor:
+        futures = {
+            executor.submit(
+                _verify_single_level,
+                level_item.model_dump(),
+                request.iterations,
+                request.tolerance,
+                request.use_core_bots_only,
+                analyzer,
+                request.fast_mode,
+                request.early_termination,
+            ): (i, level_item)
+            for i, level_item in enumerate(request.levels)
+        }
+
+        initial_results: Dict[int, tuple] = {}  # idx -> (result, level_item)
+        for future in as_completed(futures):
+            idx, level_item = futures[future]
+            try:
+                result = future.result()
+                initial_results[idx] = (result, level_item)
+            except Exception as e:
+                logger.error(f"[BATCH_VERIFY_REGEN] Level {idx} verification failed: {e}")
+                initial_results[idx] = (
+                    BatchVerifyResultItem(
+                        level_id=level_item.level_id or f"level_{idx}",
+                        passed=False,
+                        issues=[f"검증 오류: {str(e)}"],
+                    ),
+                    level_item,
+                )
+
+    # Phase 2: Regeneration for failed levels (if enabled)
+    failed_indices = [
+        idx for idx, (result, _) in initial_results.items()
+        if not result.passed and request.enable_regeneration
+    ]
+
+    logger.info(f"[BATCH_VERIFY_REGEN] Initial verification complete: {len(request.levels) - len(failed_indices)} passed, {len(failed_indices)} failed")
+
+    if failed_indices and request.enable_regeneration:
+        logger.info(f"[BATCH_VERIFY_REGEN] Starting regeneration for {len(failed_indices)} failed levels")
+
+        for idx in failed_indices:
+            original_result, level_item = initial_results[idx]
+            level_id = original_result.level_id
+
+            # 원본 레벨에서 파라미터 추출
+            original_json = level_item.level_json
+            target_difficulty = level_item.target_difficulty or (original_json.get("target_difficulty", 0.5))
+
+            # 재생성 시도
+            best_result = original_result
+            best_new_json = None
+
+            for attempt in range(1, request.max_regeneration_retries + 1):
+                try:
+                    # 원본 파라미터 또는 level_json에서 추출
+                    grid_size = level_item.grid_size or original_json.get("grid_size", [8, 8])
+                    max_layers = level_item.max_layers or original_json.get("layer_count", 5)
+                    tile_types = level_item.tile_types or _extract_tile_types(original_json)
+                    obstacle_types = level_item.obstacle_types or _extract_obstacle_types(original_json)
+                    symmetry_mode = level_item.symmetry_mode or original_json.get("symmetry_mode", "vertical")
+                    pattern_type = level_item.pattern_type or original_json.get("pattern_type")
+                    # [v15.40] 재생성 시 pattern_index 보존 - 누락 시 모양이 깨짐
+                    pattern_index = level_item.pattern_index if hasattr(level_item, 'pattern_index') and level_item.pattern_index is not None else original_json.get("pattern_index")
+
+                    # goals 추출
+                    goals = original_json.get("goals", [{"type": "stack", "direction": "s", "count": 3}])
+
+                    # 재생성 파라미터 구성
+                    actual_symmetry = resolve_symmetry_mode(symmetry_mode, allow_none=False)
+
+                    params = GenerationParams(
+                        target_difficulty=target_difficulty,
+                        grid_size=tuple(grid_size) if isinstance(grid_size, list) else grid_size,
+                        max_layers=max_layers,
+                        tile_types=tile_types,
+                        obstacle_types=obstacle_types or [],
+                        goals=goals,
+                        symmetry_mode=actual_symmetry,
+                        pattern_type=pattern_type,
+                        pattern_index=pattern_index,
+                        level_number=level_item.level_number,
+                    )
+
+                    # 레벨 생성
+                    generator = get_level_generator()
+                    gen_result = generator.generate(params)
+                    new_json = gen_result.level_json
+                    new_json["target_difficulty"] = target_difficulty
+
+                    # 새 레벨 검증
+                    verify_result = _verify_single_level(
+                        {
+                            "level_json": new_json,
+                            "level_id": level_id,
+                            "target_difficulty": target_difficulty,
+                        },
+                        request.regeneration_iterations,
+                        request.regeneration_tolerance,
+                        request.use_core_bots_only,
+                        analyzer,
+                        request.fast_mode,
+                        request.early_termination,
+                    )
+
+                    logger.info(f"[BATCH_VERIFY_REGEN] Level {level_id} attempt {attempt}: "
+                               f"match_score={verify_result.match_score:.1f}, passed={verify_result.passed}")
+
+                    # 더 나은 결과면 업데이트
+                    if verify_result.match_score > best_result.match_score:
+                        best_result = verify_result
+                        best_new_json = new_json
+
+                    # 통과하면 조기 종료
+                    if verify_result.passed:
+                        break
+
+                except Exception as e:
+                    logger.warning(f"[BATCH_VERIFY_REGEN] Level {level_id} regeneration attempt {attempt} failed: {e}")
+                    continue
+
+            # 최종 결과 업데이트
+            if best_new_json is not None:
+                best_result.regenerated = True
+                best_result.regeneration_attempts = attempt
+                best_result.new_level_json = best_new_json
+                regenerated_count += 1
+                logger.info(f"[BATCH_VERIFY_REGEN] Level {level_id} regenerated: "
+                           f"passed={best_result.passed}, match_score={best_result.match_score:.1f}")
+
+            initial_results[idx] = (best_result, level_item)
+
+    # 결과 정렬 및 수집
+    for idx in sorted(initial_results.keys()):
+        result, _ = initial_results[idx]
+        results.append(result)
+
+    passed_count = sum(1 for r in results if r.passed)
+    failed_count = len(results) - passed_count
+    execution_time_ms = int((time.time() - start_time) * 1000)
+
+    logger.info(f"[BATCH_VERIFY_REGEN] Complete: {passed_count} passed, {failed_count} failed, "
+               f"{regenerated_count} regenerated, {execution_time_ms}ms")
+
+    return BatchVerifyResponse(
+        results=results,
+        total_levels=len(results),
+        passed_count=passed_count,
+        failed_count=failed_count,
+        pass_rate=passed_count / len(results) if results else 0,
+        execution_time_ms=execution_time_ms,
+        regenerated_count=regenerated_count,
+    )
+
+
+def _extract_tile_types(level_json: Dict[str, Any]) -> List[str]:
+    """Extract tile types from level JSON."""
+    tile_types = set()
+    layers = level_json.get("layers", [])
+    for layer in layers:
+        tiles = layer.get("tiles", [])
+        for tile in tiles:
+            tile_type = tile.get("type")
+            if tile_type and tile_type.startswith("t"):
+                tile_types.add(tile_type)
+    return list(tile_types) if tile_types else ["t0", "t1", "t2", "t3", "t4"]
+
+
+def _extract_obstacle_types(level_json: Dict[str, Any]) -> List[str]:
+    """Extract obstacle types from level JSON."""
+    obstacle_types = set()
+    layers = level_json.get("layers", [])
+    for layer in layers:
+        tiles = layer.get("tiles", [])
+        for tile in tiles:
+            obstacles = tile.get("obstacles", [])
+            for obs in obstacles:
+                obs_type = obs.get("type")
+                if obs_type:
+                    obstacle_types.add(obs_type)
+    return list(obstacle_types)
+
+
+def _calc_visual_center_diff(level: Dict[str, Any]) -> float:
+    """[v15.40] 레벨의 레이어 간 최대 시각적 중심 차이 계산."""
+    num_layers = level.get("layer", 1)
+    centers = []
+    for i in range(num_layers):
+        tiles = level.get(f"layer_{i}", {}).get("tiles", {})
+        if not tiles:
+            continue
+        cols = [int(p.split("_")[1]) for p in tiles.keys() if "_" in p]
+        if not cols:
+            continue
+        vc = (min(cols) + max(cols)) / 2 + (0.5 if i % 2 == 1 else 0)
+        centers.append(vc)
+    if len(centers) < 2:
+        return 0.0
+    return max(centers) - min(centers)
+
+
+@router.post("/analyze/fix-centering", response_model=FixCenteringResponse)
+async def fix_centering(request: FixCenteringRequest):
+    """[v15.40] 기존 레벨 데이터에 시각적 중앙정렬만 적용 (재생성 없음).
+
+    레벨의 타일 타입, 기믹, 난이도 등은 변경하지 않고
+    레이어 간 시각적 중심만 맞추도록 가장자리 타일을 트리밍합니다.
+    """
+    import copy
+    start_time = time.time()
+
+    generator = LevelGenerator()
+    results = []
+    modified_count = 0
+
+    for level_data in request.levels:
+        level_number = level_data.get("levelNumber", 0) or level_data.get("level_number", 0)
+
+        # 원본 diff 계산
+        diff_before = _calc_visual_center_diff(level_data)
+
+        # 깊은 복사 후 중앙정렬 적용
+        fixed_level = copy.deepcopy(level_data)
+        fixed_level = generator._fix_visual_centering(fixed_level)
+        fixed_level = generator._sync_layer_num_fields(fixed_level)
+
+        # 수정 후 diff 계산
+        diff_after = _calc_visual_center_diff(fixed_level)
+
+        was_modified = diff_before != diff_after
+
+        if was_modified:
+            modified_count += 1
+
+        results.append(FixCenteringResultItem(
+            level_number=level_number,
+            level_json=fixed_level,
+            was_modified=was_modified,
+            center_diff_before=round(diff_before, 2),
+            center_diff_after=round(diff_after, 2),
+        ))
+
+    processing_time_ms = int((time.time() - start_time) * 1000)
+
+    return FixCenteringResponse(
+        results=results,
+        total=len(results),
+        modified=modified_count,
+        processing_time_ms=processing_time_ms,
+    )
+
+
+@router.post("/debug/pattern-preview")
+async def debug_pattern_preview(
+    pattern_index: int = 0,
+    grid_cols: int = 8,
+    grid_rows: int = 8,
+):
+    """[v15.40] 패턴 디버그: 템플릿 원본 vs 실제 생성 비교.
+
+    레이어 1개만 생성하여 패턴 형태 보존 여부를 확인합니다.
+    """
+    generator = LevelGenerator()
+
+    # 1. 패턴 템플릿 원본
+    template = generator._generate_aesthetic_positions(
+        grid_cols, grid_rows, target_count=1000, pattern_index=pattern_index
+    )
+
+    # 2. 실제 레벨 생성 (레이어 1개)
+    from app.models.level import GenerationParams
+    params = GenerationParams(
+        level_number=50,
+        target_difficulty=0.2,
+        grid_size=(grid_cols - 1, grid_rows - 1),
+        min_layers=1,
+        max_layers=1,
+        pattern_index=pattern_index,
+        pattern_type="aesthetic",
+    )
+    result = generator.generate(params)
+    generated = result.level_json
+    actual_positions = list(generated.get("layer_0", {}).get("tiles", {}).keys())
+
+    # 3. 비교
+    template_set = set(template)
+    actual_set = set(actual_positions)
+    missing = sorted(template_set - actual_set)
+    extra = sorted(actual_set - template_set)
+
+    # 4. 그리드 시각화
+    grid = []
+    for y in range(grid_rows):
+        row = []
+        for x in range(grid_cols):
+            pos = f"{x}_{y}"
+            if pos in template_set and pos in actual_set:
+                row.append("match")
+            elif pos in template_set:
+                row.append("missing")
+            elif pos in actual_set:
+                row.append("extra")
+            else:
+                row.append("empty")
+        grid.append(row)
+
+    return {
+        "pattern_index": pattern_index,
+        "grid_cols": grid_cols,
+        "grid_rows": grid_rows,
+        "template_count": len(template),
+        "actual_count": len(actual_positions),
+        "missing_count": len(missing),
+        "extra_count": len(extra),
+        "match_rate": round((len(template_set & actual_set) / len(template_set) * 100) if template_set else 0, 1),
+        "template_positions": template,
+        "actual_positions": actual_positions,
+        "missing": missing,
+        "extra": extra,
+        "grid": grid,
+        "level_json": generated,
+    }
+
+
+@router.get("/debug/pattern-list")
+async def debug_pattern_list(grid_cols: int = 8, grid_rows: int = 8):
+    """[v15.40] 64개 기본 + 커스텀 패턴 목록 + 미니 프리뷰."""
+    generator = LevelGenerator()
+    patterns = []
+
+    # 커스텀 패턴에서 64+ 인덱스 수집
+    custom = _load_custom_patterns()
+    custom_indices = set()
+    for k in custom.keys():
+        try:
+            idx = int(k.split("_")[0])
+            if idx >= 64:
+                custom_indices.add(idx)
+        except ValueError:
+            pass
+
+    # 기본 64개 + 커스텀 인덱스
+    all_indices = list(range(64)) + sorted(custom_indices)
+
+    for idx in all_indices:
+        try:
+            positions = generator._generate_aesthetic_positions(
+                grid_cols, grid_rows, target_count=1000, pattern_index=idx
+            )
+            grid = [[0] * grid_cols for _ in range(grid_rows)]
+            for p in positions:
+                x, y = int(p.split("_")[0]), int(p.split("_")[1])
+                if 0 <= x < grid_cols and 0 <= y < grid_rows:
+                    grid[y][x] = 1
+
+            patterns.append({
+                "index": idx,
+                "count": len(positions),
+                "fill_rate": round(len(positions) / (grid_cols * grid_rows) * 100, 1),
+                "grid": grid,
+                "is_custom": idx >= 64,
+            })
+        except Exception:
+            patterns.append({"index": idx, "count": 0, "fill_rate": 0, "grid": [], "is_custom": idx >= 64})
+
+    return {"patterns": patterns, "grid_cols": grid_cols, "grid_rows": grid_rows}
+
+
+# ===== 커스텀 패턴 저장/로드 =====
+import os
+import json as json_module
+
+CUSTOM_PATTERNS_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "data", "custom_patterns.json")
+
+
+def _load_custom_patterns() -> Dict[str, Any]:
+    try:
+        with open(CUSTOM_PATTERNS_PATH, "r") as f:
+            return json_module.load(f)
+    except (FileNotFoundError, json_module.JSONDecodeError):
+        return {}
+
+
+def _save_custom_patterns(data: Dict[str, Any]):
+    os.makedirs(os.path.dirname(CUSTOM_PATTERNS_PATH), exist_ok=True)
+    with open(CUSTOM_PATTERNS_PATH, "w") as f:
+        json_module.dump(data, f, indent=2)
+
+
+PATTERN_CONFIG_PATH = os.path.join(os.path.dirname(CUSTOM_PATTERNS_PATH), "pattern_config.json")
+
+from pydantic import BaseModel as _BaseModel  # noqa: E402 — 아래 섹션들에서 공통 사용
+
+# ===== [v15.50] 레벨 템플릿 — 원본 레벨 통째 저장 (기믹 포함) =====
+LEVEL_TEMPLATES_PATH = os.path.join(os.path.dirname(CUSTOM_PATTERNS_PATH), "level_templates.json")
+
+
+def _load_level_templates() -> Dict[str, Any]:
+    try:
+        with open(LEVEL_TEMPLATES_PATH, "r") as f:
+            return json_module.load(f)
+    except (FileNotFoundError, json_module.JSONDecodeError):
+        return {"templates": {}}
+
+
+def _save_level_templates(data: Dict[str, Any]):
+    os.makedirs(os.path.dirname(LEVEL_TEMPLATES_PATH), exist_ok=True)
+    with open(LEVEL_TEMPLATES_PATH, "w") as f:
+        json_module.dump(data, f, indent=2)
+
+
+def _tile_effective_count(tile: Any) -> int:
+    """타일 1개의 실효 카운트 — stack_s는 extra[0] 만큼, 나머지는 1.
+    craft_s의 extra는 goal count이므로 타일 수 기여는 1."""
+    if not isinstance(tile, list) or len(tile) < 1:
+        return 1
+    t0 = tile[0] if isinstance(tile[0], str) else ""
+    if t0 == "stack_s":
+        extra = tile[2] if len(tile) >= 3 else None
+        if isinstance(extra, list) and len(extra) >= 1:
+            try:
+                return max(1, int(extra[0]))
+            except (ValueError, TypeError):
+                return 1
+        return 1
+    return 1
+
+
+def _summarize_level_template(level_json: Dict[str, Any]) -> Dict[str, Any]:
+    """레벨 JSON에서 메타 요약 추출. 권위 소스는 game의 `num` 필드 — 그 게임의 진짜 타일 카운트.
+    `num` 없거나 0이면 stack_s만 반영한 fallback 카운트."""
+    try:
+        num_layers = int(level_json.get("layer", 0) or 0)
+    except (TypeError, ValueError):
+        num_layers = 0
+    ingame_cols: List[int] = []
+    ingame_rows: List[int] = []
+    total_tiles = 0
+    total_positions = 0
+    gimmick_types: Dict[str, int] = {}
+    for i in range(num_layers):
+        ld = level_json.get(f"layer_{i}") or {}
+        if not isinstance(ld, dict):
+            continue
+        try:
+            col = int(ld.get("col") or 0)
+            row = int(ld.get("row") or 0)
+        except (TypeError, ValueError):
+            col, row = 0, 0
+        ingame_cols.append(col)
+        ingame_rows.append(row)
+
+        tiles_raw = ld.get("tiles")
+        tiles = tiles_raw if isinstance(tiles_raw, dict) else {}
+        position_count_layer = 0
+        fallback_eff_count = 0
+        if isinstance(tiles, dict):
+            position_count_layer = len(tiles)
+            for tile in tiles.values():
+                fallback_eff_count += _tile_effective_count(tile)
+                if isinstance(tile, list) and len(tile) >= 2:
+                    attr = tile[1] if isinstance(tile[1], str) else ""
+                    t0 = tile[0] if isinstance(tile[0], str) else ""
+                    if attr:
+                        gimmick_types[attr] = gimmick_types.get(attr, 0) + 1
+                    if t0 and t0 != "t0" and not t0.startswith("t"):
+                        gimmick_types[t0] = gimmick_types.get(t0, 0) + 1
+
+        # 권위 있는 num 필드 우선
+        game_num = ld.get("num")
+        try:
+            game_num_int = int(game_num) if game_num is not None else 0
+        except (TypeError, ValueError):
+            game_num_int = 0
+        effective = game_num_int if game_num_int > 0 else fallback_eff_count
+
+        total_tiles += effective
+        total_positions += position_count_layer
+
+    return {
+        "layer_count": num_layers,
+        "total_tiles": total_tiles,
+        "total_positions": total_positions,
+        "ingame_cols": ingame_cols,
+        "ingame_rows": ingame_rows,
+        "gimmick_types": gimmick_types,
+    }
+
+
+class LevelTemplateSaveRequest(_BaseModel):
+    template_id: Optional[str] = None  # None이면 자동 생성
+    name: str
+    source_project_id: Optional[str] = None
+    source_level_id: Optional[str] = None
+    level_json: Dict[str, Any]  # 원본 rawJson 통째로 (기믹, col/row, tiles 포함)
+
+
+@router.post("/debug/level-template-save")
+async def debug_level_template_save(request: LevelTemplateSaveRequest):
+    """레벨 JSON을 통째로 템플릿으로 저장. 기믹·위치 완전 보존."""
+    data = _load_level_templates()
+    templates = data.get("templates") or {}
+
+    # template_id 자동 생성: source_level_id 있으면 그대로, 없으면 name + timestamp
+    tid = request.template_id
+    if not tid:
+        if request.source_level_id:
+            tid = f"{request.source_project_id or 'local'}__{request.source_level_id}"
+        else:
+            tid = f"tpl_{int(time.time() * 1000)}"
+
+    summary = _summarize_level_template(request.level_json)
+    templates[tid] = {
+        "template_id": tid,
+        "name": request.name or tid,
+        "source_project_id": request.source_project_id,
+        "source_level_id": request.source_level_id,
+        "level_json": request.level_json,
+        "created_at": int(time.time() * 1000),
+        **summary,
+    }
+    data["templates"] = templates
+    _save_level_templates(data)
+    return {"saved": True, "template_id": tid, **summary}
+
+
+@router.get("/debug/level-templates")
+async def debug_level_templates_list():
+    """레벨 템플릿 목록 조회 — level_json은 제외하고 메타만 반환.
+    저장된 summary가 stale이면 즉시 재계산 + 저장 (num 필드 권위 기반)."""
+    data = _load_level_templates()
+    templates = data.get("templates") or {}
+    dirty = False
+    for tid, entry in list(templates.items()):
+        lj = entry.get("level_json")
+        if not isinstance(lj, dict):
+            continue
+        # total_positions 필드 없거나 stale일 가능성 → 재계산
+        fresh = _summarize_level_template(lj)
+        # 3배수 판정이 틀렸거나 필드 누락이면 갱신
+        if (entry.get("total_tiles") != fresh["total_tiles"]
+            or entry.get("total_positions") != fresh["total_positions"]
+            or entry.get("layer_count") != fresh["layer_count"]):
+            entry.update(fresh)
+            templates[tid] = entry
+            dirty = True
+    if dirty:
+        data["templates"] = templates
+        _save_level_templates(data)
+
+    result = []
+    for tid, entry in templates.items():
+        result.append({
+            "template_id": tid,
+            "name": entry.get("name", tid),
+            "source_project_id": entry.get("source_project_id"),
+            "source_level_id": entry.get("source_level_id"),
+            "created_at": entry.get("created_at"),
+            "layer_count": entry.get("layer_count", 0),
+            "total_tiles": entry.get("total_tiles", 0),
+            "total_positions": entry.get("total_positions"),
+            "ingame_cols": entry.get("ingame_cols", []),
+            "ingame_rows": entry.get("ingame_rows", []),
+            "gimmick_types": entry.get("gimmick_types", {}),
+            # [v15.53] 측정 난이도
+            "measured_difficulty": entry.get("measured_difficulty"),
+            "static_score": entry.get("static_score"),
+            "static_grade": entry.get("static_grade"),
+            "autoplay_score": entry.get("autoplay_score"),
+            "autoplay_grade": entry.get("autoplay_grade"),
+            "bot_clear_rates": entry.get("bot_clear_rates"),
+            "difficulty_measured_at": entry.get("difficulty_measured_at"),
+        })
+    # 최신순 정렬
+    result.sort(key=lambda t: t.get("created_at", 0), reverse=True)
+    return {"templates": result, "total": len(result)}
+
+
+@router.get("/debug/level-template/{template_id}")
+async def debug_level_template_get(template_id: str):
+    """특정 레벨 템플릿의 상세 (level_json 포함)."""
+    data = _load_level_templates()
+    templates = data.get("templates") or {}
+    entry = templates.get(template_id)
+    if not entry:
+        return {"error": "not_found", "template_id": template_id}
+    return entry
+
+
+class LevelTemplateLayerUpdate(_BaseModel):
+    layer: int
+    # 클라이언트가 추가한 셀 좌표 ("x_y" 문자열). 기존 포지션은 gimmick과 함께 그대로 유지됨.
+    added_positions: List[str] = []
+    # 제거된 셀 좌표. 기존 tiles에서 삭제.
+    removed_positions: List[str] = []
+    # 선택적: 새 col/row (레이어 크기 변경 시)
+    col: Optional[int] = None
+    row: Optional[int] = None
+
+
+class LevelTemplateUpdateRequest(_BaseModel):
+    layers: List[LevelTemplateLayerUpdate]
+    name: Optional[str] = None
+
+
+@router.post("/debug/level-template/{template_id}/update")
+async def debug_level_template_update(template_id: str, request: LevelTemplateUpdateRequest):
+    """템플릿 레이어별 편집 — 추가/삭제된 셀을 diff로 받아 반영. 기믹 보존."""
+    data = _load_level_templates()
+    templates = data.get("templates") or {}
+    entry = templates.get(template_id)
+    if not entry:
+        return {"error": "not_found", "template_id": template_id}
+
+    level_json = entry.get("level_json") or {}
+    if not isinstance(level_json, dict):
+        return {"error": "invalid_level_json", "template_id": template_id}
+
+    for lu in request.layers:
+        layer_key = f"layer_{lu.layer}"
+        ld = level_json.get(layer_key)
+        if not isinstance(ld, dict):
+            # 레이어가 없으면 생성
+            ld = {"col": str(lu.col or 8), "row": str(lu.row or 8), "tiles": {}, "num": "0"}
+            level_json[layer_key] = ld
+        tiles = ld.get("tiles")
+        if not isinstance(tiles, dict):
+            tiles = {}
+            ld["tiles"] = tiles
+
+        # 제거: 기믹 포함 타일도 완전 삭제
+        for pos in lu.removed_positions:
+            if pos in tiles:
+                del tiles[pos]
+
+        # 추가: 기존에 없던 셀만 신규로 ["t0", ""] 할당. 이미 있으면 건드리지 않음 (기믹 보존).
+        for pos in lu.added_positions:
+            if pos not in tiles:
+                tiles[pos] = ["t0", ""]
+
+        # col/row 변경 지원
+        if lu.col is not None:
+            ld["col"] = str(lu.col)
+        if lu.row is not None:
+            ld["row"] = str(lu.row)
+
+        ld["num"] = str(len(tiles))
+
+    # 전체 layer 수 갱신 (필요 시)
+    max_layer_idx = -1
+    for k in level_json.keys():
+        if k.startswith("layer_"):
+            try:
+                max_layer_idx = max(max_layer_idx, int(k.split("_")[1]))
+            except (ValueError, IndexError):
+                pass
+    if max_layer_idx >= 0:
+        level_json["layer"] = str(max_layer_idx + 1)
+
+    if request.name is not None and request.name.strip():
+        entry["name"] = request.name.strip()
+
+    # 메타 재계산
+    summary = _summarize_level_template(level_json)
+    entry.update(summary)
+    entry["level_json"] = level_json
+    entry["updated_at"] = int(time.time() * 1000)
+    templates[template_id] = entry
+    data["templates"] = templates
+    _save_level_templates(data)
+
+    return {
+        "updated": True,
+        "template_id": template_id,
+        **summary,
+    }
+
+
+def _normalize_level_json_strings(lj: Dict[str, Any]) -> Dict[str, Any]:
+    """level_json을 분석기/엔진 호환 형태로 정규화:
+    - 숫자 문자열 필드 → int (layer/col/row/num/goalCount/max_moves/useTileCount/autoCollectCount/randSeed)
+    - 빈 tiles (리스트 또는 기타) → {} (dict)
+    - 원본은 변경하지 않고 새 dict 반환."""
+    out = dict(lj)
+    if "layer" in out and isinstance(out["layer"], str):
+        try: out["layer"] = int(out["layer"])
+        except ValueError: pass
+    for k in list(out.keys()):
+        if not k.startswith("layer_"):
+            continue
+        layer_data = out[k]
+        if not isinstance(layer_data, dict):
+            continue
+        new_ld = dict(layer_data)
+        for f in ("col", "row", "num"):
+            if f in new_ld and isinstance(new_ld[f], str):
+                try: new_ld[f] = int(new_ld[f])
+                except ValueError: pass
+        # tiles: list(빈 배열) 또는 None → {} 로 강제 (빈 레이어 처리)
+        tiles = new_ld.get("tiles")
+        if tiles is None or isinstance(tiles, list):
+            new_ld["tiles"] = {}
+        out[k] = new_ld
+    for f in ("goalCount", "max_moves", "useTileCount", "autoCollectCount", "randSeed"):
+        if f in out and isinstance(out[f], str):
+            try: out[f] = int(out[f])
+            except ValueError: pass
+    return out
+
+
+class LevelTemplateFromTemplateRequest(_BaseModel):
+    template_id: str
+    level_number: Optional[int] = None          # 생성 레벨 번호 (번호별 타일 타입 결정용)
+    use_tile_count: Optional[int] = 6           # 몇 종류 타일 쓸지
+    randomize_tiles: bool = True                # 일반 t0 타일을 t1~t6로 재할당
+    random_seed: Optional[int] = None
+
+
+@router.post("/generate/from-template")
+async def generate_from_template(request: LevelTemplateFromTemplateRequest):
+    """템플릿 기반 프로덕션 레벨 생성. 기믹·위치·레이어 구조 보존, 일반 타일만 t1~t6 재할당.
+    응답은 GenerateResponse와 호환 (level_json + actual_difficulty + grade)."""
+    import copy
+    import random
+    from ...core.generator import select_color_balanced_tiles
+    from ...core.analyzer import LevelAnalyzer
+
+    data = _load_level_templates()
+    templates = data.get("templates") or {}
+    entry = templates.get(request.template_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"template_not_found: {request.template_id}")
+
+    raw_lj = entry.get("level_json") or {}
+    if not isinstance(raw_lj, dict):
+        raise HTTPException(status_code=400, detail="invalid_level_json")
+
+    # 1) 정규화 (string → int, list tiles → dict)
+    level_json = copy.deepcopy(_normalize_level_json_strings(raw_lj))
+
+    # 2) 타일 타입 재할당 (일반 t0 타일만, 기믹 보존)
+    if request.randomize_tiles:
+        tile_count = max(1, min(6, request.use_tile_count or 6))
+        seed = request.random_seed if request.random_seed is not None else (
+            request.level_number if request.level_number is not None else None
+        )
+        tile_types = select_color_balanced_tiles(tile_count, seed=seed)
+        rng = random.Random(seed)
+
+        try:
+            num_layers = int(level_json.get("layer", 0) or 0)
+        except (TypeError, ValueError):
+            num_layers = 0
+
+        replaced_t0 = 0
+        for i in range(num_layers):
+            ld = level_json.get(f"layer_{i}")
+            if not isinstance(ld, dict):
+                continue
+            tiles = ld.get("tiles")
+            if not isinstance(tiles, dict):
+                continue
+            for pos, tile in list(tiles.items()):
+                if not isinstance(tile, list) or len(tile) < 1:
+                    continue
+                t0 = tile[0] if isinstance(tile[0], str) else ""
+                # t0(placeholder) → t1~t6 색상. chain/link/curtain 등 attribute는 보존.
+                # stack_s/craft_s/bomb 같은 기믹 tile_type은 건드리지 않음.
+                if t0 == "t0":
+                    tile[0] = rng.choice(tile_types)
+                    replaced_t0 += 1
+
+        # CRITICAL: useTileCount는 실제 결과를 반영해야 함.
+        # 템플릿이 이미 사전 할당된 타입(t2, t6 등)이면 위 루프가 침묵 No-op이므로
+        # tile_count(=6)을 그대로 기록하면 "6종 사용 중"이라는 거짓 메타가 됨.
+        # 실제 등장한 일반 타일 타입만 카운트해서 useTileCount에 반영한다.
+        actual_types: set = set()
+        for i in range(num_layers):
+            ld = level_json.get(f"layer_{i}")
+            if not isinstance(ld, dict):
+                continue
+            tiles = ld.get("tiles")
+            if not isinstance(tiles, dict):
+                continue
+            for tile in tiles.values():
+                if not isinstance(tile, list) or len(tile) < 1:
+                    continue
+                tt = tile[0] if isinstance(tile[0], str) else ""
+                # 일반 색상 타일만 카운트(t1~t15). 기믹·골 타일·t0 placeholder 제외.
+                if tt.startswith("t") and tt[1:].isdigit() and tt != "t0":
+                    actual_types.add(tt)
+        if actual_types:
+            level_json["useTileCount"] = len(actual_types)
+        else:
+            level_json["useTileCount"] = tile_count
+        if replaced_t0 == 0 and len(actual_types) != tile_count:
+            print(
+                f"[from-template] template={request.template_id} pre-assigned tiles only "
+                f"(t0 placeholders=0). Requested useTileCount={tile_count} but actual={len(actual_types)} "
+                f"({sorted(actual_types)}). useTileCount adjusted to actual."
+            )
+
+    # randSeed 갱신 (템플릿마다 다른 시드 부여)
+    level_json["randSeed"] = request.random_seed if request.random_seed is not None else int(time.time() * 1000) % 1000000
+
+    # _preserve_pattern 플래그 추가 (프로덕션 후처리에서 구조 보호)
+    level_json["_preserve_pattern"] = True
+
+    # 3) 정적 분석으로 난이도/등급
+    analyzer = LevelAnalyzer()
+    try:
+        static = analyzer.analyze(level_json)
+        actual_difficulty = float(static.score) / 100.0
+        grade = static.grade.value if hasattr(static.grade, 'value') else str(static.grade)
+    except Exception as ex:
+        actual_difficulty = float(entry.get("measured_difficulty") or 0.5)
+        grade = entry.get("autoplay_grade") or "C"
+        print(f"[WARN] Static analysis failed for template {request.template_id}: {ex}")
+
+    # 4) 응답 — GenerateResponse 포맷 + 추가 메타
+    return {
+        "level_json": level_json,
+        "actual_difficulty": actual_difficulty,
+        "grade": grade,
+        "generation_time_ms": 0,
+        "from_template": True,
+        "template_id": request.template_id,
+        "template_name": entry.get("name"),
+        "template_measured_difficulty": entry.get("measured_difficulty"),
+        "template_autoplay_grade": entry.get("autoplay_grade"),
+    }
+
+
+@router.post("/debug/level-template/{template_id}/measure")
+async def debug_level_template_measure(template_id: str, iterations: int = 100):
+    """템플릿 저장 데이터로 봇 시뮬레이션 + 난이도 측정 + 자동 저장.
+    level_json의 문자열 숫자 필드를 내부에서 정규화하여 분석기에 전달."""
+    from ...models.schemas import AutoPlayRequest
+    from ...core.analyzer import LevelAnalyzer
+
+    data = _load_level_templates()
+    templates = data.get("templates") or {}
+    entry = templates.get(template_id)
+    if not entry:
+        return {"error": "not_found", "template_id": template_id}
+
+    raw_level_json = entry.get("level_json") or {}
+    if not isinstance(raw_level_json, dict):
+        return {"error": "invalid_level_json", "template_id": template_id}
+
+    # 정규화 (string → int for layer/col/row/num/goalCount/max_moves)
+    normalized_lj = _normalize_level_json_strings(raw_level_json)
+
+    # autoplay 실행 — 기존 analyze_autoplay 로직 재사용
+    try:
+        autoplay_req = AutoPlayRequest(level_json=normalized_lj, iterations=iterations)
+        analyzer = LevelAnalyzer()
+        autoplay_resp = analyze_autoplay(autoplay_req, analyzer)
+    except Exception as ex:
+        return {"error": "measurement_failed", "template_id": template_id, "reason": str(ex)}
+
+    # 결과를 템플릿 메타에 저장
+    measured = (autoplay_resp.autoplay_score or 0) / 100.0
+    bot_rates = {b.profile: b.clear_rate for b in autoplay_resp.bot_stats}
+    entry["measured_difficulty"] = measured
+    entry["static_score"] = autoplay_resp.static_score
+    entry["static_grade"] = autoplay_resp.static_grade
+    entry["autoplay_score"] = autoplay_resp.autoplay_score
+    entry["autoplay_grade"] = autoplay_resp.autoplay_grade
+    entry["bot_clear_rates"] = bot_rates
+    entry["difficulty_measured_at"] = int(time.time() * 1000)
+    templates[template_id] = entry
+    data["templates"] = templates
+    _save_level_templates(data)
+
+    return {
+        "measured": True,
+        "template_id": template_id,
+        "measured_difficulty": measured,
+        "autoplay_score": autoplay_resp.autoplay_score,
+        "autoplay_grade": autoplay_resp.autoplay_grade,
+        "static_score": autoplay_resp.static_score,
+        "static_grade": autoplay_resp.static_grade,
+        "bot_clear_rates": bot_rates,
+    }
+
+
+class LevelTemplateDifficultyRequest(_BaseModel):
+    measured_difficulty: float        # 0.0~1.0 — autoplay_score/100 또는 수동
+    static_score: Optional[float] = None      # 0~100
+    static_grade: Optional[str] = None
+    autoplay_score: Optional[float] = None    # 0~100
+    autoplay_grade: Optional[str] = None
+    bot_clear_rates: Optional[Dict[str, float]] = None   # {bot_name: clear_rate}
+
+
+@router.post("/debug/level-template/{template_id}/set-difficulty")
+async def debug_level_template_set_difficulty(template_id: str, request: LevelTemplateDifficultyRequest):
+    """봇 시뮬 결과를 템플릿 메타에 저장. 프로덕션 자동 배치 시 사용."""
+    data = _load_level_templates()
+    templates = data.get("templates") or {}
+    entry = templates.get(template_id)
+    if not entry:
+        return {"error": "not_found", "template_id": template_id}
+
+    entry["measured_difficulty"] = float(request.measured_difficulty)
+    if request.static_score is not None:
+        entry["static_score"] = float(request.static_score)
+    if request.static_grade is not None:
+        entry["static_grade"] = request.static_grade
+    if request.autoplay_score is not None:
+        entry["autoplay_score"] = float(request.autoplay_score)
+    if request.autoplay_grade is not None:
+        entry["autoplay_grade"] = request.autoplay_grade
+    if request.bot_clear_rates is not None:
+        entry["bot_clear_rates"] = request.bot_clear_rates
+    entry["difficulty_measured_at"] = int(time.time() * 1000)
+
+    templates[template_id] = entry
+    data["templates"] = templates
+    _save_level_templates(data)
+
+    return {
+        "saved": True,
+        "template_id": template_id,
+        "measured_difficulty": entry["measured_difficulty"],
+    }
+
+
+@router.delete("/debug/level-template/{template_id}")
+async def debug_level_template_delete(template_id: str):
+    data = _load_level_templates()
+    templates = data.get("templates") or {}
+    if template_id in templates:
+        del templates[template_id]
+        data["templates"] = templates
+        _save_level_templates(data)
+        return {"deleted": True, "template_id": template_id}
+    return {"deleted": False, "template_id": template_id, "error": "not_found"}
+
+
+@router.post("/debug/level-template-spawn/{template_id}")
+async def debug_level_template_spawn(template_id: str):
+    """템플릿을 디버거 test-level과 동일한 응답 포맷으로 반환 (원본 level_json 그대로)."""
+    data = _load_level_templates()
+    templates = data.get("templates") or {}
+    entry = templates.get(template_id)
+    if not entry:
+        return {"error": "not_found", "template_id": template_id}
+
+    level_json = entry.get("level_json") or {}
+    try:
+        num_layers = int(level_json.get("layer", 0) or 0)
+    except (TypeError, ValueError):
+        num_layers = 0
+    layer_views = []
+    total_tiles = 0          # stack 전개
+    total_positions = 0      # 그리드 셀 수
+    for i in range(num_layers):
+        ld = level_json.get(f"layer_{i}") or {}
+        tiles = ld.get("tiles") or {}
+        try:
+            gc = int(ld.get("col") or 0)
+            gr = int(ld.get("row") or 0)
+        except (TypeError, ValueError):
+            gc, gr = 0, 0
+        if not tiles or gc <= 0 or gr <= 0:
+            layer_views.append({
+                "layer": i, "count": 0, "position_count": 0,
+                "grid": [], "grid_size": 0, "grid_cols": gc, "grid_rows": gr,
+                "tiles_detail": {},
+            })
+            continue
+        grid = [[0] * gc for _ in range(gr)]
+        tiles_detail: Dict[str, Any] = {}
+        layer_position_count = 0
+        fallback_count = 0
+        for pos, tile in tiles.items():
+            if "_" not in pos:
+                continue
+            try:
+                x, y = int(pos.split("_")[0]), int(pos.split("_")[1])
+            except ValueError:
+                continue
+            if 0 <= x < gc and 0 <= y < gr:
+                grid[y][x] = 1
+                layer_position_count += 1
+                eff = _tile_effective_count(tile)
+                fallback_count += eff
+                t0 = tile[0] if isinstance(tile, list) and len(tile) >= 1 and isinstance(tile[0], str) else "t0"
+                attr = tile[1] if isinstance(tile, list) and len(tile) >= 2 and isinstance(tile[1], str) else ""
+                extra = tile[2] if isinstance(tile, list) and len(tile) >= 3 else None
+                tiles_detail[pos] = {
+                    "tile_type": t0,
+                    "attribute": attr,
+                    "extra": extra,
+                    "effective_count": eff,
+                }
+        # 권위 소스: 게임의 num 필드. 없으면 fallback.
+        game_num = ld.get("num")
+        try:
+            game_num_int = int(game_num) if game_num is not None else 0
+        except (TypeError, ValueError):
+            game_num_int = 0
+        layer_effective_count = game_num_int if game_num_int > 0 else fallback_count
+        layer_views.append({
+            "layer": i,
+            "count": layer_effective_count,
+            "position_count": layer_position_count,
+            "grid_size": max(gc, gr),
+            "grid_cols": gc,
+            "grid_rows": gr,
+            "grid": grid,
+            "tiles_detail": tiles_detail,
+        })
+        total_tiles += layer_effective_count
+        total_positions += layer_position_count
+
+    return {
+        "template_id": template_id,
+        "name": entry.get("name", template_id),
+        "num_layers": num_layers,
+        "total_tiles": total_tiles,
+        "total_positions": total_positions,
+        "layers": layer_views,
+        "level_json": level_json,
+        "gimmick_types": entry.get("gimmick_types", {}),
+    }
+
+
+def _load_pattern_config() -> Dict[str, Any]:
+    try:
+        with open(PATTERN_CONFIG_PATH, "r") as f:
+            return json_module.load(f)
+    except (FileNotFoundError, json_module.JSONDecodeError):
+        return {"disabled_patterns": [], "custom_pattern_names": {}}
+
+
+def _save_pattern_config(data: Dict[str, Any]):
+    os.makedirs(os.path.dirname(PATTERN_CONFIG_PATH), exist_ok=True)
+    with open(PATTERN_CONFIG_PATH, "w") as f:
+        json_module.dump(data, f, indent=2)
+
+
+class PatternSaveRequest(_BaseModel):
+    pattern_index: int
+    grid_size: int = 8
+    positions: List[str]
+    # [v15.49] 원본 레벨 재현용 메타데이터 (선택적)
+    ingame_origin: Optional[List[int]] = None   # [minX, minY] — bbox의 원본 ingame 좌표
+    ingame_col: Optional[int] = None             # 원본 레이어의 ingame col
+    ingame_row: Optional[int] = None             # 원본 레이어의 ingame row
+    bbox_pad: Optional[List[int]] = None         # [padX, padY] — 저장 시 적용된 bbox 중앙 패딩
+
+
+@router.post("/debug/pattern-save")
+async def debug_pattern_save(request: PatternSaveRequest):
+    """커스텀 패턴 저장. 크기별로 별도 저장됨."""
+    data = _load_custom_patterns()
+    size_key = f"{request.pattern_index}_{request.grid_size}x{request.grid_size}"
+    entry: Dict[str, Any] = {
+        "grid_size": request.grid_size,
+        "positions": request.positions,
+        "count": len(request.positions),
+    }
+    if request.ingame_origin is not None:
+        entry["ingame_origin"] = request.ingame_origin
+    if request.ingame_col is not None:
+        entry["ingame_col"] = request.ingame_col
+    if request.ingame_row is not None:
+        entry["ingame_row"] = request.ingame_row
+    if request.bbox_pad is not None:
+        entry["bbox_pad"] = request.bbox_pad
+    data[size_key] = entry
+    _save_custom_patterns(data)
+    return {"saved": True, "pattern_index": request.pattern_index, "grid_size": request.grid_size, "positions_count": len(request.positions)}
+
+
+@router.delete("/debug/pattern-save/{pattern_index}")
+async def debug_pattern_delete(pattern_index: int, grid_size: Optional[int] = None):
+    """커스텀 패턴 삭제. grid_size 지정 시 해당 크기만, 없으면 해당 인덱스의 모든 크기 삭제."""
+    data = _load_custom_patterns()
+    removed: List[str] = []
+    if grid_size is not None:
+        size_key = f"{pattern_index}_{grid_size}x{grid_size}"
+        if size_key in data:
+            del data[size_key]
+            removed.append(size_key)
+        legacy_key = str(pattern_index)
+        if legacy_key in data:
+            del data[legacy_key]
+            removed.append(legacy_key)
+    else:
+        prefix = f"{pattern_index}_"
+        for key in list(data.keys()):
+            if key == str(pattern_index) or key.startswith(prefix):
+                del data[key]
+                removed.append(key)
+    if removed:
+        _save_custom_patterns(data)
+    return {"deleted": True, "pattern_index": pattern_index, "removed_keys": removed}
+
+
+@router.get("/debug/custom-patterns")
+async def debug_list_custom_patterns():
+    """저장된 커스텀 패턴 목록."""
+    data = _load_custom_patterns()
+    return {"custom_patterns": {k: v for k, v in data.items()}}
+
+
+# ===== 패턴 활성/비활성 설정 =====
+
+@router.post("/debug/pattern-rename")
+async def rename_pattern(pattern_index: int, name: str):
+    """패턴 이름 변경."""
+    config = _load_pattern_config()
+    names = config.get("custom_pattern_names", {})
+    names[str(pattern_index)] = name
+    config["custom_pattern_names"] = names
+    _save_pattern_config(config)
+    return {"pattern_index": pattern_index, "name": name}
+
+
+@router.get("/debug/pattern-config")
+async def get_pattern_config(grid_size: int = 8):
+    """패턴 활성/비활성 설정 + 커스텀 이름 조회 (그리드 크기별)."""
+    config = _load_pattern_config()
+    custom = _load_custom_patterns()
+
+    disabled_map = config.get("disabled_patterns", {})
+    # 마이그레이션: 기존 배열 → 크기별 객체
+    if isinstance(disabled_map, list):
+        disabled_list = list(disabled_map)
+    else:
+        disabled_list = disabled_map.get(str(grid_size), [])
+
+    display_order = config.get("display_order", [])
+
+    return {
+        "disabled_patterns": disabled_list,
+        "disabled_patterns_all": disabled_map,
+        "display_order": display_order,
+        "custom_pattern_names": config.get("custom_pattern_names", {}),
+        "custom_pattern_count": len(custom),
+        "custom_pattern_indices": sorted(set(int(k.split("_")[0]) for k in custom.keys() if k.split("_")[0].isdigit())),
+        # 해당 크기에 커스텀이 있는 패턴 인덱스 목록
+        "custom_for_size": sorted(set(
+            int(k.split("_")[0]) for k in custom.keys()
+            if f"_{grid_size}x{grid_size}" in k
+        )),
+    }
+
+
+class PatternOrderRequest(_BaseModel):
+    order: List[int]
+
+
+@router.post("/debug/pattern-order")
+async def save_pattern_order(request: PatternOrderRequest):
+    """패턴 표시 순서 저장 (모든 크기 공통)."""
+    config = _load_pattern_config()
+    config["display_order"] = request.order
+    # 구버전 크기별 순서 제거
+    config.pop("display_orders", None)
+    _save_pattern_config(config)
+    return {"saved": True, "count": len(request.order)}
+
+
+@router.post("/debug/pattern-toggle")
+async def toggle_pattern(pattern_index: int, enabled: bool, grid_size: int = 8):
+    """패턴 활성/비활성 토글 (그리드 크기별)."""
+    config = _load_pattern_config()
+    disabled_map = config.get("disabled_patterns", {})
+
+    # 마이그레이션: 기존 배열 → 크기별 객체
+    if isinstance(disabled_map, list):
+        old_list = disabled_map
+        disabled_map = {}
+        for s in [6, 7, 8, 9]:
+            disabled_map[str(s)] = list(old_list)
+        config["disabled_patterns"] = disabled_map
+
+    key = str(grid_size)
+    if key not in disabled_map:
+        disabled_map[key] = []
+
+    disabled = set(disabled_map[key])
+    if enabled:
+        disabled.discard(pattern_index)
+    else:
+        disabled.add(pattern_index)
+    disabled_map[key] = sorted(disabled)
+    config["disabled_patterns"] = disabled_map
+    _save_pattern_config(config)
+    return {"pattern_index": pattern_index, "enabled": enabled, "grid_size": grid_size, "disabled_patterns": disabled_map[key]}
+
+
+@router.post("/debug/pattern-create")
+async def create_new_pattern(grid_size: int = 8, positions: List[str] = [], name: str = ""):
+    """새 커스텀 패턴 추가 (인덱스 64~)."""
+    custom = _load_custom_patterns()
+    # 다음 사용 가능한 인덱스 찾기 (64부터)
+    existing_indices = {int(k) for k in custom.keys()}
+    new_index = 64
+    while new_index in existing_indices:
+        new_index += 1
+    custom[str(new_index)] = {
+        "grid_size": grid_size,
+        "positions": positions,
+        "count": len(positions),
+        "name": name,
+        "custom": True,
+    }
+    _save_custom_patterns(custom)
+    return {"created": True, "pattern_index": new_index, "positions_count": len(positions)}
+
+
+class TestLevelLayerConfig(_BaseModel):
+    grid_size: int = 8
+    pattern_index: Optional[int] = None  # None = 전체 pattern_index 사용
+
+class TestLevelRequest(_BaseModel):
+    pattern_index: int
+    layers: List[TestLevelLayerConfig]
+    target_difficulty: float = 0.3
+    render_base_size: Optional[int] = None  # None = auto(max(8, 최대 레이어 크기))
+
+
+@router.post("/debug/test-level")
+async def debug_test_level(request: TestLevelRequest):
+    """패턴 + 레이어별 그리드 크기로 테스트 레벨 1개 생성. 레이어별 배치 시각화 포함."""
+    generator = LevelGenerator()
+    num_layers = len(request.layers)
+
+    # [v15.44] 렌더 프레임 크기: 기본 max(8, 각 레이어 패턴 크기).
+    # 짝수 레이어는 render_base, 홀수는 render_base-1 (인게임 0.5 오프셋 컨벤션).
+    max_layer_size = max(l.grid_size for l in request.layers)
+    render_base = request.render_base_size if request.render_base_size else max(8, max_layer_size)
+
+    level: Dict[str, Any] = {
+        "layer": num_layers,
+        "useTileCount": "6",
+        "randSeed": int(time.time()) % 1000000,
+        "autoCollectCount": 0,
+        "_preserve_pattern": True,
+    }
+
+    all_positions = []
+    custom_data = _load_custom_patterns()
+
+    for i, layer_cfg in enumerate(request.layers):
+        gs = layer_cfg.grid_size
+        is_odd = i % 2 == 1
+
+        grid_size = render_base - 1 if is_odd else render_base
+
+        layer_pat = layer_cfg.pattern_index if layer_cfg.pattern_index is not None else request.pattern_index
+
+        # [v15.49] 커스텀 패턴 저장 시 기록한 ingame_origin 메타데이터가 있으면
+        # 저장 변형의 bbox_pad와 함께 원본 ingame 위치로 복원.
+        size_key = f"{layer_pat}_{gs}x{gs}"
+        saved_entry = custom_data.get(size_key) if layer_pat is not None else None
+
+        use_ingame_placement = (
+            saved_entry is not None
+            and saved_entry.get("ingame_origin") is not None
+            and saved_entry.get("ingame_col") is not None
+            and grid_size == saved_entry.get("ingame_col")  # 프레임이 원본 ingame col과 일치해야 복원 가능
+        )
+
+        positions = generator._generate_aesthetic_positions(
+            gs, gs, target_count=1000, pattern_index=layer_pat
+        )
+
+        if use_ingame_placement:
+            # shift = ingame_origin - bbox_pad → 저장 좌표를 원본 ingame 좌표로 이동
+            origin = saved_entry["ingame_origin"]
+            pad = saved_entry.get("bbox_pad") or [0, 0]
+            shift_x = int(origin[0]) - int(pad[0])
+            shift_y = int(origin[1]) - int(pad[1])
+            offset_x = shift_x
+            offset_y = shift_y
+        else:
+            # fallback: 중앙 정렬
+            diff_x = grid_size - gs
+            offset_x = (diff_x + 1) // 2 if diff_x % 2 == 1 else diff_x // 2
+            offset_x = max(0, offset_x)
+            offset_y = offset_x
+
+        layer_key = f"layer_{i}"
+        tiles = {}
+        for pos in positions:
+            x, y = int(pos.split("_")[0]), int(pos.split("_")[1])
+            new_x = x + offset_x
+            new_y = y + offset_y
+            # 프레임 밖이면 스킵 (원본 ingame 복원 실패 시 안전장치)
+            if new_x < 0 or new_y < 0 or new_x >= grid_size or new_y >= grid_size:
+                continue
+            new_pos = f"{new_x}_{new_y}"
+            tiles[new_pos] = ["t0", ""]
+            all_positions.append((i, new_pos))
+        level[layer_key] = {
+            "col": str(grid_size),
+            "row": str(grid_size),
+            "tiles": tiles,
+            "num": str(len(tiles)),
+        }
+
+    # 타일 타입 재배정 (t0 → t1~t6 균등)
+    import random
+    total = len(all_positions)
+    types_count = 6
+    assignments = []
+    per_type = (total // types_count // 3) * 3
+    for t in range(1, types_count + 1):
+        assignments.extend([f"t{t}"] * per_type)
+    while len(assignments) < total:
+        assignments.append(f"t{(len(assignments) % types_count) + 1}")
+    random.shuffle(assignments)
+
+    idx = 0
+    for layer_idx, pos in all_positions:
+        layer_key = f"layer_{layer_idx}"
+        if idx < len(assignments):
+            level[layer_key]["tiles"][pos] = [assignments[idx], ""]
+        idx += 1
+
+    # 레이어별 시각화
+    layer_views = []
+    for i in range(level.get("layer", 1)):
+        tiles = level.get(f"layer_{i}", {}).get("tiles", {})
+        if not tiles:
+            layer_views.append({"layer": i, "count": 0, "grid": [], "grid_size": 0})
+            continue
+        gc = int(level.get(f"layer_{i}", {}).get("col", render_base))
+        gr = int(level.get(f"layer_{i}", {}).get("row", render_base))
+        grid = [[0] * gc for _ in range(gr)]
+        for pos in tiles.keys():
+            if "_" not in pos:
+                continue
+            x, y = int(pos.split("_")[0]), int(pos.split("_")[1])
+            if 0 <= x < gc and 0 <= y < gr:
+                grid[y][x] = 1
+        layer_views.append({
+            "layer": i,
+            "count": len(tiles),
+            "grid_size": max(gc, gr),
+            "grid_cols": gc,
+            "grid_rows": gr,
+            "grid": grid,
+        })
+
+    return {
+        "pattern_index": request.pattern_index,
+        "num_layers": level.get("layer", 1),
+        "total_tiles": sum(lv["count"] for lv in layer_views),
+        "layers": layer_views,
+        "level_json": level,
+        "difficulty": request.target_difficulty,
+        "grade": "N/A",
+    }
+
+
+@router.get("/debug/color-balance-test")
+async def debug_color_balance_test(tile_count: int = 6, samples: int = 10):
+    """[v15.40] 색상 균등 분배 테스트.
+
+    tile_count개 타일을 색상 균등하게 선택하는 결과를 samples회 반복하여 보여줌.
+    """
+    from ...core.generator import select_color_balanced_tiles, COLOR_BUCKETS
+
+    results = []
+    color_stats_total: Dict[int, int] = {c: 0 for c in COLOR_BUCKETS}
+
+    for i in range(samples):
+        tiles = select_color_balanced_tiles(tile_count, seed=i * 100 + tile_count)
+        # 색상별 카운트
+        color_counts: Dict[int, int] = {c: 0 for c in COLOR_BUCKETS}
+        for t in tiles:
+            for c, bucket in COLOR_BUCKETS.items():
+                if t in bucket:
+                    color_counts[c] += 1
+                    color_stats_total[c] += 1
+                    break
+        results.append({
+            "seed": i,
+            "tiles": tiles,
+            "color_counts": color_counts,
+        })
+
+    return {
+        "tile_count": tile_count,
+        "samples": samples,
+        "color_buckets": {str(c): tiles for c, tiles in COLOR_BUCKETS.items()},
+        "results": results,
+        "color_totals": color_stats_total,
+        "balance_score": round(
+            min(color_stats_total.values()) / max(max(color_stats_total.values()), 1) * 100, 1
+        ) if any(v > 0 for v in color_stats_total.values()) else 0,
+    }

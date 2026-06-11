@@ -3,6 +3,28 @@ from pydantic import BaseModel, Field
 from typing import Dict, List, Any, Optional, Tuple
 
 
+class FixCenteringRequest(BaseModel):
+    """[v15.40] Request schema for visual centering fix (without regeneration)."""
+    levels: List[Dict[str, Any]] = Field(..., description="List of level JSON data to fix centering")
+
+
+class FixCenteringResultItem(BaseModel):
+    """[v15.40] Result for a single level centering fix."""
+    level_number: int = Field(..., description="Level number")
+    level_json: Dict[str, Any] = Field(..., description="Fixed level JSON")
+    was_modified: bool = Field(..., description="Whether centering was actually modified")
+    center_diff_before: float = Field(..., description="Max visual center diff before fix")
+    center_diff_after: float = Field(..., description="Max visual center diff after fix")
+
+
+class FixCenteringResponse(BaseModel):
+    """[v15.40] Response schema for batch centering fix."""
+    results: List[FixCenteringResultItem] = Field(..., description="Fix results per level")
+    total: int = Field(..., description="Total levels processed")
+    modified: int = Field(..., description="Number of levels actually modified")
+    processing_time_ms: int = Field(..., description="Processing time in milliseconds")
+
+
 class AnalyzeRequest(BaseModel):
     """Request schema for level analysis."""
     level_json: Dict[str, Any] = Field(..., description="Level JSON data to analyze")
@@ -142,6 +164,10 @@ class GenerateResponse(BaseModel):
     actual_difficulty: float = Field(..., description="Actual difficulty achieved (0-1)")
     grade: str = Field(..., description="Difficulty grade")
     generation_time_ms: int = Field(default=0, description="Generation time in milliseconds")
+    # True when generator could not fully resolve deadlock (low estimated clear rate).
+    # FE regeneration loops should deprioritize candidates with this flag set.
+    playability_warning: bool = Field(default=False, description="True when generator could not fully resolve deadlock")
+    estimated_clear_rate: float = Field(default=1.0, ge=0.0, le=1.0, description="Best clear rate observed during deadlock resolution (1.0 if not measured)")
 
 
 class SimulateRequest(BaseModel):
@@ -607,6 +633,10 @@ class BatchVerifyResultItem(BaseModel):
     match_score: float = Field(default=0, description="Match score (0-100%)")
     static_grade: str = Field(default="?", description="Static analysis grade")
     issues: List[str] = Field(default=[], description="List of issues found")
+    # [v15.35] 재생성 관련 필드
+    regenerated: bool = Field(default=False, description="Whether level was regenerated")
+    regeneration_attempts: int = Field(default=0, description="Number of regeneration attempts")
+    new_level_json: Optional[Dict[str, Any]] = Field(default=None, description="Regenerated level JSON (if regenerated)")
 
 
 class BatchVerifyResponse(BaseModel):
@@ -617,3 +647,43 @@ class BatchVerifyResponse(BaseModel):
     failed_count: int = Field(..., description="Number of levels that failed")
     pass_rate: float = Field(..., description="Pass rate (0-1)")
     execution_time_ms: int = Field(..., description="Total execution time in milliseconds")
+    # [v15.35] 재생성 통계
+    regenerated_count: int = Field(default=0, description="Number of levels that were regenerated")
+
+
+# ============================================================
+# [v15.35] Batch Verify with Regeneration Schemas
+# ============================================================
+
+class BatchVerifyRegenerateLevelItem(BaseModel):
+    """Single level item for batch verification with regeneration support."""
+    level_json: Dict[str, Any] = Field(..., description="Level JSON to verify")
+    level_id: Optional[str] = Field(default=None, description="Optional level identifier")
+    target_difficulty: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Target difficulty for this level")
+    level_number: Optional[int] = Field(default=None, ge=1, description="Level number for gimmick unlock checking")
+    # 재생성에 필요한 원본 파라미터
+    grid_size: Optional[List[int]] = Field(default=None, description="Original grid size [width, height]")
+    max_layers: Optional[int] = Field(default=None, description="Original max layers")
+    tile_types: Optional[List[str]] = Field(default=None, description="Original tile types")
+    obstacle_types: Optional[List[str]] = Field(default=None, description="Original obstacle types")
+    symmetry_mode: Optional[str] = Field(default=None, description="Original symmetry mode")
+    pattern_type: Optional[str] = Field(default=None, description="Original pattern type")
+    # [v15.40] 재생성 시 패턴 모양 보존
+    pattern_index: Optional[int] = Field(default=None, ge=0, le=99, description="Original pattern index for shape preservation")
+
+
+class BatchVerifyRegenerateRequest(BaseModel):
+    """Request schema for batch verification with automatic regeneration."""
+    levels: List[BatchVerifyRegenerateLevelItem] = Field(..., description="List of levels to verify")
+    iterations: int = Field(default=20, ge=3, le=100, description="Simulation iterations per bot")
+    tolerance: float = Field(default=15.0, ge=1.0, le=50.0, description="Acceptable gap percentage from target")
+    use_core_bots_only: bool = Field(default=True, description="Use only 3 core bots for faster verification")
+    fast_mode: bool = Field(default=True, description="Use fast verification profiles")
+    early_termination: bool = Field(default=True, description="Stop iterations early when conclusive")
+    # [v15.35] 재생성 옵션
+    enable_regeneration: bool = Field(default=True, description="Enable automatic regeneration for failed levels")
+    max_regeneration_retries: int = Field(default=3, ge=1, le=10, description="Maximum regeneration attempts per failed level")
+    regeneration_tolerance: float = Field(default=15.0, ge=1.0, le=50.0, description="Tolerance for regeneration validation")
+    regeneration_iterations: int = Field(default=30, ge=10, le=100, description="Simulation iterations for regeneration validation")
+    # 기믹 언락 설정
+    gimmick_unlock_levels: Optional[Dict[str, int]] = Field(default=None, description="Gimmick unlock levels for regeneration")

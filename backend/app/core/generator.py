@@ -312,10 +312,11 @@ def get_tile_types_for_level(level_number: int) -> List[str]:
         config = get_gboost_style_layer_config(level_number)
         tile_count = config.get("tile_types", 10)
 
-        # [v2] 단순화: t1 ~ t{tile_count} 사용 (그룹 순환 제거)
-        # 최소 4개, 최대 12개 보장
-        tile_count = max(4, min(tile_count, 12))
-        return [f"t{i}" for i in range(1, tile_count + 1)]
+        # [v15.40] 색상 균등 분배: 5색상에서 골고루 선택
+        tile_count = max(4, min(tile_count, 15))
+        # [v15.45] max_index=tile_count: 클라이언트 useTileCount와 정합성 보장.
+        # 풀을 t1..t{tile_count} 범위로 제한해 다운스트림 필터에서 잘리는 사례 방지.
+        return select_color_balanced_tiles(tile_count, seed=level_number, max_index=tile_count)
     else:
         # 나머지 7개 레벨은 t0 사용 (클라이언트에서 랜덤 타일로 변환)
         return ["t0"]
@@ -353,13 +354,83 @@ from ..models.leveling_config import calculate_hidden_tile_ratio
 from .analyzer import get_analyzer
 
 
+# [v15.40] 타일 색상 버킷: 5색상 × 3타일 = 15종
+COLOR_BUCKETS = {
+    1: ["t1", "t2", "t3"],     # 색상1
+    2: ["t4", "t5", "t6"],     # 색상2
+    3: ["t7", "t8", "t9"],     # 색상3
+    4: ["t10", "t11", "t12"],  # 색상4
+    5: ["t13", "t14", "t15"],  # 색상5
+}
+
+def select_color_balanced_tiles(
+    count: int, seed: Optional[int] = None, max_index: Optional[int] = None
+) -> List[str]:
+    """[v15.40] 색상 균등 분배 후 각 색상에서 랜덤 1개 선택.
+
+    count=6이면 5색상에서 1개씩 + 1색상에서 추가 1개 = 6종류 (max_index=15 기준)
+    각 색상에서 어떤 타일을 선택할지는 랜덤.
+
+    [v15.45] max_index 파라미터 추가:
+        useTileCount 같은 클라이언트 측 t-인덱스 상한과 정합성을 맞추기 위해
+        타일 풀을 t1..t{max_index} 범위로 제한할 수 있음. 다른 코드 경로
+        (_assign_tiles_pattern_mode, _validate_dock_tile_compatibility)가
+        useTileCount를 인덱스 상한으로 해석해 범위 밖 타일을 잘라내므로,
+        이 함수에서 미리 제약하지 않으면 결과 타일 수가 useTileCount보다 작아진다.
+        max_index=None 또는 >=15면 기존 동작(전체 풀)을 유지.
+    """
+    rng = random.Random(seed)
+
+    # Restrict pool to t1..t{max_index} when constraint provided
+    if max_index is not None and max_index < 15:
+        allowed = {f"t{i}" for i in range(1, max_index + 1)}
+        in_range_buckets = {
+            c: [t for t in tiles if t in allowed]
+            for c, tiles in COLOR_BUCKETS.items()
+        }
+        in_range_buckets = {c: tiles for c, tiles in in_range_buckets.items() if tiles}
+        if not in_range_buckets:
+            # Fallback shouldn't happen with max_index>=1, but guard anyway
+            return [f"t{i}" for i in range(1, max_index + 1)][:count]
+        colors = list(in_range_buckets.keys())
+    else:
+        in_range_buckets = {c: list(tiles) for c, tiles in COLOR_BUCKETS.items()}
+        colors = list(in_range_buckets.keys())  # [1,2,3,4,5]
+
+    rng.shuffle(colors)
+
+    selected: List[str] = []
+    used_per_color: Dict[int, List[str]] = {c: [] for c in colors}
+    color_idx = 0
+    safety_iter = 0
+    max_safety = count * len(colors) * 2 + 1
+
+    while len(selected) < count and safety_iter < max_safety:
+        color = colors[color_idx % len(colors)]
+        # 해당 색상에서 아직 선택 안 된 타일 중 랜덤
+        available_in_color = [t for t in in_range_buckets[color] if t not in used_per_color[color]]
+        if not available_in_color:
+            # 이 색상은 모두 사용됨 — 다른 색상 시도
+            color_idx += 1
+            safety_iter += 1
+            # 모든 색상이 소진되면 (제약 안에서 더 뽑을 게 없음) 종료
+            if all(not [t for t in in_range_buckets[c] if t not in used_per_color[c]] for c in colors):
+                break
+            continue
+        tile = rng.choice(available_in_color)
+        selected.append(tile)
+        used_per_color[color].append(tile)
+        color_idx += 1
+        safety_iter += 1
+
+    return selected
+
+
 class LevelGenerator:
     """Generates levels with target difficulty."""
 
     # Default tile types for generation
-    # NOTE: t0 is excluded - use t1~t10 for consistent tile types
-    # t0 was previously used as "random tile" but causes issues with bot simulation
-    # [v2] 기본 10종류로 확장 (보통 난이도 기준선)
+    # [v15.40] 색상 균등 분배 방식으로 변경
     DEFAULT_TILE_TYPES = ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9", "t10"]
     OBSTACLE_TILE_TYPES = ["t8", "t9"]
     SPECIAL_TILE_TYPES = ["t10", "t11", "t12", "t14", "t15"]
@@ -381,9 +452,98 @@ class LevelGenerator:
     SIMILARITY_THRESHOLD = 0.75
 
     # Pattern diversity tracking - class-level to persist across instances
-    # Tracks recently used pattern categories to avoid repetition between levels
     _recent_pattern_categories: List[int] = []
-    _PATTERN_HISTORY_SIZE = 5  # Remember last N pattern categories to avoid
+    _PATTERN_HISTORY_SIZE = 5
+
+    # [v15.40] 커스텀 패턴 캐시
+    _custom_patterns_cache: Optional[Dict] = None
+    _custom_patterns_mtime: float = 0
+
+    @classmethod
+    def _get_custom_pattern(cls, pattern_index: int, cols: int, rows: int) -> Optional[List[str]]:
+        """커스텀 패턴 파일에서 해당 인덱스의 패턴을 로드. 없으면 None.
+
+        [v15.53] 그리드 크기 안전 보장: fallback 시 요청 그리드보다 큰 패턴은 반환하지 않음.
+        이전 버그: pattern 11이 5x5 요청에 대해 6x6 패턴(좌표 (5,5) 포함)을 반환 →
+            홀수 레이어가 5x5만 렌더하므로 외곽 타일이 디바이스에서 잘림.
+        해결: 요청보다 작거나 같은 사이즈만 후보로 채택. 작은 패턴은 중앙 정렬해서 재배치.
+        """
+        import os, json as json_mod
+        # __file__ = app/core/generator.py → ../../data/ = backend/data/
+        _this_dir = os.path.dirname(os.path.abspath(__file__))
+        pattern_file = os.path.normpath(os.path.join(_this_dir, "..", "..", "data", "custom_patterns.json"))
+
+        try:
+            mtime = os.path.getmtime(pattern_file)
+            if cls._custom_patterns_cache is None or mtime > cls._custom_patterns_mtime:
+                with open(pattern_file, "r") as f:
+                    cls._custom_patterns_cache = json_mod.load(f)
+                cls._custom_patterns_mtime = mtime
+        except (FileNotFoundError, json_mod.JSONDecodeError):
+            return None
+
+        # [v15.40] 크기별 키 우선
+        size_key = f"{pattern_index}_{cols}x{rows}"
+        if size_key in cls._custom_patterns_cache:
+            return cls._custom_patterns_cache[size_key].get("positions", [])
+
+        # [v15.53] fallback — 요청보다 작거나 같은 사이즈만 채택 (디바이스 그리드 정합 보장)
+        # [v15.59] 요청 사이즈의 75% 미만인 패턴은 거부 — recenter 후 너무 sparse 해져
+        # 채움률이 비정상적으로 낮아짐 (예: 9x9에 4x4 → 11% 채움). 너무 작은 후보만 있으면
+        # 알고리즘 fallback에 위임해 적절한 density 확보.
+        prefix = f"{pattern_index}_"
+        candidates = []  # (saved_size, key, entry) — 작은 사이즈만
+        target_size = min(cols, rows)
+        # 최소 사이즈 임계: target의 75% (단 4 이하면 그냥 4)
+        min_acceptable_size = max(4, int(target_size * 0.75))
+        for k, v in cls._custom_patterns_cache.items():
+            if k.startswith(prefix) and "x" in k:
+                saved_size = v.get("grid_size", 0)
+                if isinstance(saved_size, int) and min_acceptable_size <= saved_size <= target_size:
+                    candidates.append((saved_size, k, v))
+
+        # base 키도 후보에 추가 (크기 정보 있을 때만)
+        base_key = str(pattern_index)
+        if base_key in cls._custom_patterns_cache:
+            entry = cls._custom_patterns_cache[base_key]
+            saved_size = entry.get("grid_size", 0)
+            if isinstance(saved_size, int) and min_acceptable_size <= saved_size <= target_size:
+                candidates.append((saved_size, base_key, entry))
+
+        if not candidates:
+            # 요청 사이즈에 충분히 큰 fitting 패턴이 없음 → 알고리즘 fallback에 위임
+            logger.debug(
+                f"[CUSTOM_PATTERN] pattern={pattern_index} no entry fits {cols}x{rows} "
+                f"(requires {min_acceptable_size} <= saved_size <= {target_size}); falling back to algorithmic"
+            )
+            return None
+
+        # 가장 큰 (요청에 가장 근접한) fitting size 선택
+        candidates.sort(key=lambda c: -c[0])
+        chosen_size, chosen_key, chosen_entry = candidates[0]
+        positions = chosen_entry.get("positions", [])
+
+        # 중앙 정렬 재배치 — 작은 패턴을 큰 그리드 중앙으로
+        if chosen_size < min(cols, rows) and positions:
+            offset_x = max(0, (cols - chosen_size) // 2)
+            offset_y = max(0, (rows - chosen_size) // 2)
+            recentered = []
+            for p in positions:
+                try:
+                    px, py = p.split("_")
+                    nx = int(px) + offset_x
+                    ny = int(py) + offset_y
+                    if 0 <= nx < cols and 0 <= ny < rows:
+                        recentered.append(f"{nx}_{ny}")
+                except (ValueError, AttributeError):
+                    continue
+            positions = recentered
+            logger.debug(
+                f"[CUSTOM_PATTERN] pattern={pattern_index} {chosen_size}x{chosen_size} "
+                f"recentered into {cols}x{rows} (+{offset_x},+{offset_y})"
+            )
+
+        return positions
 
     # ============================================================
     # Tile Creation Helper Methods
@@ -828,11 +988,18 @@ class LevelGenerator:
                 f"Bad types: {final_validation['bad_types']}"
             )
 
+        # CRITICAL: Pre-compute max_moves BEFORE deadlock check.
+        # Without this, _quick_deadlock_check defaults to 50 moves, which is far below
+        # what most levels require (typically total_tiles many). The bot then runs out of
+        # moves on every iteration and reports clear_rate=0%, falsely flagging every level
+        # as deadlocked. Set provisional max_moves now; it gets re-set after gimmick fixes below.
+        level["max_moves"] = self._calculate_max_moves(level)
+
         # CRITICAL: Deadlock prevention - ensure tiles are well-distributed across layers
         # This prevents scenarios where matching tiles are all blocked in lower layers
         # Skip when skip_deadlock_check=True for ultra-fast generation (use batch verify later)
         if not params.skip_deadlock_check:
-            level, deadlock_ok = self._ensure_no_deadlock(level, max_attempts=10)
+            level, deadlock_ok, deadlock_clear_rate = self._ensure_no_deadlock(level, max_attempts=10)
             if not deadlock_ok:
                 logger.warning(
                     f"[generate] Level may have deadlock issues - could not fully resolve"
@@ -842,10 +1009,14 @@ class LevelGenerator:
             # 1. Ensure tile type counts are divisible by 3
             level = self._ensure_tile_divisibility(level)
 
-            # 2. Quick deadlock check with minimal simulation (1 attempt, 1 iteration)
-            # This catches obvious structural issues without the full 10-attempt loop
-            level, _ = self._ensure_no_deadlock(level, max_attempts=1)
+            # 2. Quick deadlock check with minimal simulation
+            # [v15.54] 2 attempts (was 3) — speed 회복. 한 번 실패해도 1회 reshuffle 기회.
+            # 핵심 비용은 _quick_deadlock_check 시뮬 횟수이므로 attempts × iter = 2*5 = 10 sims.
+            level, deadlock_ok, deadlock_clear_rate = self._ensure_no_deadlock(level, max_attempts=2)
             logger.info("[generate] Fast mode: lightweight validation with quick deadlock check")
+        # Stash for response — consumed by generate() return below
+        self._last_playability_warning = not deadlock_ok
+        self._last_estimated_clear_rate = deadlock_clear_rate
 
         # DOCK CAPACITY VALIDATION: Ensure useTileCount is compatible with unlockTile
         # 규칙: 타일 종류 수가 너무 많으면 독이 금방 차서 데드락 발생
@@ -924,9 +1095,109 @@ class LevelGenerator:
                     del tiles[pos]
                     logger.debug(f"[BOUNDARY] Removed out-of-bounds tile at {pos} from {layer_key}")
 
+        # [v15.53] 진짜 원인은 _get_custom_pattern fallback이 더 큰 그리드 패턴을 작은
+        # 그리드 요청에 그대로 반환했던 것. 디바이스는 layer.col/row가 아니라 level.row를
+        # 보고 짝수=N/홀수=N-1로 그리드 결정하므로 layer.col/row 자동확장은 효과 없음.
+        # 근본 fix는 _get_custom_pattern에서 적용했고, 여기서는 최종 sanity check만.
+        # (만약 어떤 경로로 OOB 타일이 끼면 client에서 잘림 — 검출은 MetaIntegrityPanel/
+        #  자물쇠 버튼에서 진행.)
+
+        # [v15.40] 최종 피라미드 구조 강제 + 시각적 중앙정렬 보정
+        level = self._enforce_pyramid_structure(level)
+        level = self._fix_visual_centering(level)
+
         # CRITICAL: Final sync of layer num fields before returning
         # This ensures t0 distribution calculations are based on correct tile counts
         level = self._sync_layer_num_fields(level)
+
+        # [v15.54] FINAL playability re-check 최적화.
+        # 초기 _ensure_no_deadlock이 통과했으면(deadlock_ok=True), 후속 mutating 단계
+        # (dock/key validation, boundary trimming, pyramid enforcement, visual centering)는
+        # 거의 클리어 가능성을 깨지 않음 → final re-check 스킵 (속도 우선).
+        # 초기 단계가 실패(=warning)했으면 그 결과를 그대로 신뢰.
+        # 만약 후속 단계가 깨뜨리는 회귀가 발견되면 별도 단위 테스트로 잡고
+        # 여기서는 정상 경로 속도 회복.
+        # 이전(v15.43): 매 generate마다 _quick_deadlock_check 5 iter 추가 호출 → 누적 비용 큼.
+
+        # [v15.47] STRUCTURAL guarantee: every regular tile type (t1..t15) MUST have a
+        # count that is a multiple of 3 in the final level. Otherwise the level is
+        # mathematically unclearable (leftover tiles can never form a triple).
+        # _force_fix_tile_counts and _redistribute_tile_types_for_divisibility run earlier,
+        # but pyramid enforcement / visual centering / boundary trim afterwards can violate
+        # the invariant. We do one final repair pass here so a non-divisible level can
+        # never reach the consumer.
+        try:
+            from collections import Counter as _Counter
+            num_layers_final = level.get("layer", 0) or 0
+            type_counts: dict = _Counter()
+            type_positions: dict = {}
+            for li in range(num_layers_final):
+                lk = f"layer_{li}"
+                ld = level.get(lk, {})
+                tiles = ld.get("tiles", {}) if isinstance(ld, dict) else {}
+                for pos, tile in tiles.items():
+                    if not (isinstance(tile, list) and tile and isinstance(tile[0], str)):
+                        continue
+                    tt = tile[0]
+                    if tt.startswith("t") and tt[1:].isdigit() and tt != "t0":
+                        type_counts[tt] += 1
+                        type_positions.setdefault(tt, []).append((li, pos))
+            offenders = {t: c for t, c in type_counts.items() if c % 3 != 0}
+            if offenders:
+                # Repair by re-assigning surplus tiles of an offender to another (offender or
+                # normal) type so both end up divisible. This never deletes positions —
+                # only changes the tile-name to keep pattern shape intact.
+                logger.warning(
+                    f"[FINAL_REPAIR] divisibility violations after post-fix steps: {offenders} — repairing"
+                )
+                # Pair rem-1 + rem-2 first (1 swap fixes both)
+                rem1 = [t for t in offenders if offenders[t] % 3 == 1]
+                rem2 = [t for t in offenders if offenders[t] % 3 == 2]
+                while rem1 and rem2:
+                    a = rem1.pop(0); b = rem2.pop(0)
+                    if not type_positions.get(a):
+                        continue
+                    li, pos = type_positions[a].pop()
+                    layer_key = f"layer_{li}"
+                    cur = level[layer_key]["tiles"].get(pos)
+                    if isinstance(cur, list) and cur:
+                        gimmick = cur[1] if len(cur) > 1 else ""
+                        level[layer_key]["tiles"][pos] = [b, gimmick]
+                        type_counts[a] -= 1
+                        type_counts[b] = type_counts.get(b, 0) + 1
+                # Remaining single-class offenders: route surplus to a type whose count is divisible
+                done_types = [t for t, c in type_counts.items() if c % 3 == 0 and c > 0]
+                # Recompute residual offenders
+                still_bad = {t: c for t, c in type_counts.items() if c % 3 != 0}
+                guard = 0
+                while still_bad and done_types and guard < 50:
+                    guard += 1
+                    a, ca = next(iter(still_bad.items()))
+                    surplus = ca % 3
+                    target = done_types[0]
+                    moved = 0
+                    while moved < surplus and type_positions.get(a):
+                        li, pos = type_positions[a].pop()
+                        layer_key = f"layer_{li}"
+                        cur = level[layer_key]["tiles"].get(pos)
+                        if isinstance(cur, list) and cur:
+                            gimmick = cur[1] if len(cur) > 1 else ""
+                            level[layer_key]["tiles"][pos] = [target, gimmick]
+                            type_counts[a] -= 1
+                            type_counts[target] = type_counts.get(target, 0) + 1
+                            moved += 1
+                    still_bad = {t: c for t, c in type_counts.items() if c % 3 != 0}
+                    done_types = [t for t, c in type_counts.items() if c % 3 == 0 and c > 0]
+                # Final assertion logging — if we still failed, mark the level so consumers can see.
+                final_offenders = {t: c for t, c in type_counts.items() if c % 3 != 0}
+                if final_offenders:
+                    logger.error(
+                        f"[FINAL_REPAIR] Could not fully repair divisibility: {final_offenders} — "
+                        f"playability_warning forced True"
+                    )
+                    self._last_playability_warning = True
+        except Exception as e:
+            logger.warning(f"[FINAL_REPAIR] failed: {e}")
 
         generation_time_ms = int((time.time() - start_time) * 1000)
 
@@ -935,6 +1206,8 @@ class LevelGenerator:
             actual_difficulty=report.score / 100.0,
             grade=report.grade,
             generation_time_ms=generation_time_ms,
+            playability_warning=getattr(self, "_last_playability_warning", False),
+            estimated_clear_rate=getattr(self, "_last_estimated_clear_rate", 1.0),
         )
 
     def _place_key_tiles(self, level: Dict[str, Any], count: int) -> None:
@@ -999,6 +1272,10 @@ class LevelGenerator:
         1. Count tiles by type (including stack/craft internal tiles)
         2. For types with remainder != 0, adjust by changing some tiles to other types
         """
+        # [v15.36] 고정 레이아웃 레벨: 타일 변경 건너뛰기 (이미 3의 배수로 설계됨)
+        if level.get("_skip_tile_redistribution", False):
+            return level
+
         from collections import defaultdict
         import random
 
@@ -1591,7 +1868,7 @@ class LevelGenerator:
         }
 
         for i in range(params.max_layers):
-            # Alternating grid sizes (odd layers are smaller)
+            # 레이어 그리드: 짝수=cols+1, 홀수=cols (번갈아, 고정)
             layer_cols = str(cols + 1 if i % 2 == 0 else cols)
             layer_rows = str(rows + 1 if i % 2 == 0 else rows)
 
@@ -1938,38 +2215,43 @@ class LevelGenerator:
     ) -> Dict[str, Any]:
         """Create fixed layout for level 1.
 
-        Layout (4x4 grid):
-        - layer_0 only: 4×4 full grid = 12 tiles (4×3 rectangle for divisibility by 3)
-        - Total: 12 tiles (divisible by 3)
+        [v15.40] 3×3 그리드, 9타일
 
-        Grid layout (4x4):
-        [####]
-        [####]
-        [####]
-        [    ]  <- empty row for 3-divisibility
+        Layout (3x3 grid):
+        - layer_0 only: 3×3 = 9 tiles
+        - Total: 9 tiles (divisible by 3)
+        - Tile types: t1, t2, t3 균등 분배 (각 3개씩)
+
+        Grid layout:
+        [###]
+        [###]
+        [###]
         """
-        tile_types = params.tile_types
-        if not tile_types and params.level_number:
-            tile_types = get_tile_types_for_level(params.level_number)
-        elif not tile_types:
-            tile_types = self.DEFAULT_TILE_TYPES
+        tile_assignments = []
+        tile_assignments.extend(["t1"] * 3)
+        tile_assignments.extend(["t2"] * 3)
+        tile_assignments.extend(["t3"] * 3)
 
-        # Set level to 1 layer
+        import random
+        rng = random.Random(params.level_number or 1)
+        rng.shuffle(tile_assignments)
+
         level["layer"] = 1
+        level["_skip_tile_redistribution"] = True
 
-        # Layer 0: 4×3 rectangle = 12 tiles (4x4 grid)
-        # CRITICAL: Layer dimensions must be SQUARE (col == row)
         level["layer_0"] = {
-            "col": "4",  # 4x4 grid
-            "row": "4",  # MUST equal col for square grid
+            "col": "3",
+            "row": "3",
             "tiles": {},
             "num": "0",
         }
-        # Fill 4×3 rectangle (12 tiles - divisible by 3)
-        for x in range(4):
-            for y in range(3):
-                pos_key = f"{x}_{y}"
-                level["layer_0"]["tiles"][pos_key] = ["t0", ""]
+
+        tile_idx = 0
+        for row in range(3):
+            for col in range(3):
+                pos_key = f"{row}_{col}"
+                level["layer_0"]["tiles"][pos_key] = [tile_assignments[tile_idx], ""]
+                tile_idx += 1
 
         return level
 
@@ -1978,47 +2260,59 @@ class LevelGenerator:
     ) -> Dict[str, Any]:
         """Create fixed layout for level 2.
 
+        [v15.40] 5×3 직사각형 + 4×3 상위 레이어
+
         Layout:
-        - layer_0 (bottom): 4×3 rectangle (12 tiles)
-        - layer_1 (top): 3×3 rectangle centered (9 tiles)
-        - Total: 21 tiles (divisible by 3)
+        - layer_0 (짝수): 5×3 = 15 tiles, cols 0-4, rows 0-2
+        - layer_1 (홀수): 4×3 = 12 tiles, cols 0-3, rows 0-2
+        - Total: 27 tiles (divisible by 3)
+        - Tile types: t1, t2, t3 각 9개씩
 
-        The 3×3 layer is positioned on top-left area of the 4×3 base.
+        layer_0 (5×3):     layer_1 (4×3, +0.5 오프셋):
+        [#####]            [####]
+        [#####]            [####]
+        [#####]            [####]
         """
-        tile_types = params.tile_types
-        if not tile_types and params.level_number:
-            tile_types = get_tile_types_for_level(params.level_number)
-        elif not tile_types:
-            tile_types = self.DEFAULT_TILE_TYPES
+        # [v15.40] 색상 균등 3종: t1(색1), t4(색2), t7(색3) 각 9개
+        tile_assignments = []
+        tile_assignments.extend(["t1"] * 9)
+        tile_assignments.extend(["t4"] * 9)
+        tile_assignments.extend(["t7"] * 9)
 
-        # Set level to 2 layers
+        import random
+        rng = random.Random(params.level_number or 2)
+        rng.shuffle(tile_assignments)
+
         level["layer"] = 2
+        level["_skip_tile_redistribution"] = True
 
-        # Layer 0: 4×3 rectangle (4 columns, 3 rows) = 12 tiles
-        # CRITICAL: Layer dimensions must be SQUARE (col == row)
+        tile_idx = 0
+
+        # Layer 0 (짝수): 5×5 그리드에 5×3 패턴 중앙 배치 = 15 tiles
         level["layer_0"] = {
-            "col": "5",  # Base layer col (must be > layer_1 col for pyramid blocking)
-            "row": "5",  # MUST equal col for square grid
+            "col": "5",
+            "row": "5",
             "tiles": {},
             "num": "0",
         }
-        for x in range(4):
-            for y in range(3):
-                pos_key = f"{x}_{y}"
-                level["layer_0"]["tiles"][pos_key] = ["t0", ""]
+        for row in range(3):  # 3행 (row 1-3 중앙)
+            for col in range(5):  # 5열
+                pos_key = f"{col}_{row + 1}"
+                level["layer_0"]["tiles"][pos_key] = [tile_assignments[tile_idx], ""]
+                tile_idx += 1
 
-        # Layer 1: 3×3 rectangle = 9 tiles
-        # CRITICAL: Layer dimensions must be SQUARE (col == row)
+        # Layer 1 (홀수): 4×4 그리드에 4×3 패턴 중앙 배치 = 12 tiles
         level["layer_1"] = {
-            "col": "4",  # Upper layer col < lower layer col
-            "row": "4",  # MUST equal col for square grid
+            "col": "4",
+            "row": "4",
             "tiles": {},
             "num": "0",
         }
-        for x in range(3):
-            for y in range(3):
-                pos_key = f"{x}_{y}"
-                level["layer_1"]["tiles"][pos_key] = ["t0", ""]
+        for row in range(3):  # 3행 (row 0-2)
+            for col in range(4):  # 4열
+                pos_key = f"{col}_{row}"
+                level["layer_1"]["tiles"][pos_key] = [tile_assignments[tile_idx], ""]
+                tile_idx += 1
 
         return level
 
@@ -2027,55 +2321,71 @@ class LevelGenerator:
     ) -> Dict[str, Any]:
         """Create fixed layout for level 3.
 
+        [v15.39] 시각적 중앙정렬 + 고정 타일 타입 균등 분배
+
+        렌더링 규칙:
+        - 짝수 레이어 (0, 2, 4...): 오프셋 없음
+        - 홀수 레이어 (1, 3, 5...): +0.5 타일 오프셋
+
+        시각적 중심 계산:
+        - Layer 0 (짝수): cols 0-4, 좌표중심=2.0, 시각중심=2.0
+        - Layer 1 (홀수): cols 1-2, 좌표중심=1.5, 시각중심=1.5+0.5=2.0 ✓
+
         Layout:
-        - layer_0 (bottom, 5x5): Full 5×5 grid = 25 tiles
-        - layer_1 (top, 4x4): 2 tiles at diagonal center positions
+        - layer_0: 5×5 = 25 tiles
+        - layer_1: 2 tiles at diagonal (1,1) and (2,2)
         - Total: 27 tiles (divisible by 3)
+        - Tile types: t1, t2, t3 균등 분배 (각 9개씩)
 
-        layer_0 (5x5):        layer_1 (4x4):
-        [#####]               [    ]
-        [#####]               [ #  ]  <- (1,1)
-        [#####]               [  # ]  <- (2,2)
-        [#####]               [    ]
+        layer_0 (5x5):        layer_1:
+        [#####]               [ #  ]  <- row 1, col 1
+        [#####]               [  # ]  <- row 2, col 2
         [#####]
-
-        NOTE: 2 diagonal center tiles at (1,1) and (2,2) ensure 3-divisibility
+        [#####]
+        [#####]
         """
-        tile_types = params.tile_types
-        if not tile_types and params.level_number:
-            tile_types = get_tile_types_for_level(params.level_number)
-        elif not tile_types:
-            tile_types = self.DEFAULT_TILE_TYPES
+        # [v15.40] 색상 균등 4종: t1(색1), t4(색2), t7(색3), t10(색4)
+        total_tiles = 27  # 25 + 2
+        tile_assignments = []
+        tile_assignments.extend(["t1"] * 9)
+        tile_assignments.extend(["t4"] * 6)
+        tile_assignments.extend(["t7"] * 6)
+        tile_assignments.extend(["t10"] * 6)
 
-        # Set level to 2 layers
+        import random
+        rng = random.Random(params.level_number or 3)
+        rng.shuffle(tile_assignments)
+
         level["layer"] = 2
+        level["_skip_tile_redistribution"] = True
 
-        # Layer 0: Full 5×5 grid = 25 tiles
-        # CRITICAL: Layer dimensions must be SQUARE (col == row)
+        tile_idx = 0
+
+        # Layer 0: 5×5 = 25 tiles, 좌표중심=2.0, 시각중심=2.0
         level["layer_0"] = {
-            "col": "5",  # 5x5 grid
-            "row": "5",  # MUST equal col for square grid
+            "col": "5",
+            "row": "5",
             "tiles": {},
             "num": "0",
         }
-        # Fill entire 5×5 grid (25 tiles)
-        for x in range(5):
-            for y in range(5):
-                pos_key = f"{x}_{y}"
-                level["layer_0"]["tiles"][pos_key] = ["t0", ""]
+        for row in range(5):
+            for col in range(5):
+                pos_key = f"{row}_{col}"
+                level["layer_0"]["tiles"][pos_key] = [tile_assignments[tile_idx], ""]
+                tile_idx += 1
 
-        # Layer 1: 2 tiles at diagonal center positions (4x4 grid)
-        # CRITICAL: Layer dimensions must be SQUARE (col == row)
+        # Layer 1: 2 diagonal tiles, 좌표중심=1.5, 시각중심=2.0
         level["layer_1"] = {
-            "col": "4",  # 4x4 grid
-            "row": "4",  # MUST equal col for square grid
+            "col": "5",
+            "row": "5",
             "tiles": {},
             "num": "0",
         }
-        # Diagonal center tiles at (1,1) and (2,2)
-        # 25 + 2 = 27 tiles (divisible by 3)
-        level["layer_1"]["tiles"]["1_1"] = ["t0", ""]
-        level["layer_1"]["tiles"]["2_2"] = ["t0", ""]
+        # Diagonal positions: (1,1) and (2,2) → col center = 1.5 + 0.5 offset = 2.0
+        level["layer_1"]["tiles"]["1_1"] = [tile_assignments[tile_idx], ""]
+        tile_idx += 1
+        level["layer_1"]["tiles"]["2_2"] = [tile_assignments[tile_idx], ""]
+        tile_idx += 1
 
         return level
 
@@ -2483,34 +2793,46 @@ class LevelGenerator:
                 level["_pattern_grid_cols"] = max_cols
                 level["_pattern_grid_rows"] = max_rows
 
-                # PATTERN MODE with PYRAMID EFFECT: Generate pattern for each layer
-                # Higher layers get progressively smaller for 3D depth effect
-                # Shrink rate: 0.9 = each layer is 90% of base size
-                pyramid_shrink_rate = 0.9
-                max_layer_idx = max(active_layers) if active_layers else 0
+                # [v15.40] PATTERN MODE — 스텝 기반 패턴 배치 크기
+                steps = params.layer_steps or [-1] * max(0, len(active_layers) - 1)
+                pattern_base = cols + 1  # L0 패턴 크기
+                pattern_sizes = [pattern_base]
+                for i in range(1, len(active_layers)):
+                    step = steps[i - 1] if i - 1 < len(steps) else -1
+                    pattern_sizes.append(max(4, pattern_sizes[-1] + step))
 
-                for layer_idx in active_layers:
+                # [v15.40] 레이어별 패턴 오버라이드 맵
+                overrides = {}
+                if params.layer_pattern_overrides:
+                    for ov in params.layer_pattern_overrides:
+                        overrides[ov.get("layer", -1)] = ov
+
+                for li, layer_idx in enumerate(active_layers):
                     is_odd_layer = layer_idx % 2 == 1
 
-                    # Calculate base layer grid size (following alternating rule)
+                    # 레이어 그리드 (짝홀 교대, 고정)
                     base_cols = cols if is_odd_layer else cols + 1
                     base_rows = rows if is_odd_layer else rows + 1
 
-                    # Apply pyramid shrink effect for higher layers
-                    if layer_idx > 0:
-                        shrink_factor = pyramid_shrink_rate ** layer_idx
-                        layer_cols = max(4, int(base_cols * shrink_factor))
-                        layer_rows = max(4, int(base_rows * shrink_factor))
+                    # 레이어별 패턴 오버라이드 확인
+                    ov = overrides.get(layer_idx)
+                    if ov:
+                        layer_pattern_idx = ov.get("pattern_index", params.pattern_index)
+                        layer_size = ov.get("size", pattern_sizes[li] if li < len(pattern_sizes) else base_cols)
                     else:
-                        layer_cols = base_cols
-                        layer_rows = base_rows
+                        layer_pattern_idx = params.pattern_index
+                        layer_size = pattern_sizes[li] if li < len(pattern_sizes) else base_cols
+
+                    # 패턴 배치 크기 (그리드 이내, 최소 4)
+                    layer_cols = max(4, min(layer_size, base_cols))
+                    layer_rows = max(4, min(layer_size, base_rows))
 
                     # Generate pattern for this layer's grid size
                     layer_positions = self._generate_aesthetic_positions(
                         layer_cols, layer_rows,
                         target_count=1000,
-                        pattern_index=params.pattern_index,
-                        target_difficulty=params.target_difficulty  # v15.7: Pattern density adjustment
+                        pattern_index=layer_pattern_idx,
+                        target_difficulty=params.target_difficulty
                     )
 
                     # Calculate center offset for depth emphasis (turtle shell effect)
@@ -2541,62 +2863,64 @@ class LevelGenerator:
                            f"total positions={len(all_layer_positions)}")
 
         else:
-            # Standard per-layer pattern generation (original logic)
-            # OPTION B: Enable pyramid/turtle effect - upper layers get progressively smaller
-            max_layer_idx = max(active_layers) if active_layers else 0
-            # Shrink rate: 0.9 = each layer is 90% of the previous
-            # Layer 0: 100%, Layer 1: 90%, Layer 2: 81%, Layer 3: 73%, Layer 4: 66%
-            layer_shrink_rate = 0.9  # Pyramid effect enabled
+            # [v15.40] Standard per-layer pattern generation — 스텝 기반 패턴 배치 크기
+            # 레이어 그리드: 짝홀 교대 (고정)
+            # 패턴 배치: 스텝 기반으로 축소 (layer_steps)
+            steps = params.layer_steps or [-1] * max(0, len(active_layers) - 1)
+            base_size = cols + 1  # L0 패턴 크기
+            pattern_sizes = [base_size]
+            for i in range(1, len(active_layers)):
+                step = steps[i - 1] if i - 1 < len(steps) else -1
+                next_size = max(4, pattern_sizes[-1] + step)
+                pattern_sizes.append(next_size)
 
-            for layer_idx in active_layers:
+            # [v15.40] 레이어별 패턴 오버라이드 맵
+            overrides_std = {}
+            if params.layer_pattern_overrides:
+                for ov in params.layer_pattern_overrides:
+                    overrides_std[ov.get("layer", -1)] = ov
+
+            for li, layer_idx in enumerate(active_layers):
                 layer_key = f"layer_{layer_idx}"
                 is_odd_layer = layer_idx % 2 == 1
 
-                # Calculate base layer dimensions (original logic)
+                # 레이어 그리드 크기 (짝홀 교대, 고정)
                 base_cols = cols if is_odd_layer else cols + 1
                 base_rows = rows if is_odd_layer else rows + 1
 
-                # Phase 1: Apply dynamic layer shrinking for pyramid/turtle effect
-                # Higher layers get progressively smaller to create visual depth
-                if max_layer_idx > 0 and layer_idx > 0:
-                    # Calculate shrink factor based on layer position
-                    # layer_idx 0 = full size, higher = smaller
-                    shrink_factor = layer_shrink_rate ** layer_idx
-
-                    # Apply shrink factor but ensure minimum viable size (at least 4x4)
-                    layer_cols = max(4, int(base_cols * shrink_factor))
-                    layer_rows = max(4, int(base_rows * shrink_factor))
-
-                    # Ensure dimensions stay within original grid bounds
-                    layer_cols = min(layer_cols, base_cols)
-                    layer_rows = min(layer_rows, base_rows)
+                # 레이어별 오버라이드 확인
+                ov = overrides_std.get(layer_idx)
+                if ov:
+                    layer_size = ov.get("size", pattern_sizes[li] if li < len(pattern_sizes) else base_cols)
                 else:
-                    layer_cols = base_cols
-                    layer_rows = base_rows
+                    layer_size = pattern_sizes[li] if li < len(pattern_sizes) else base_cols
 
-                # Phase 2: Calculate center offset for depth emphasis
-                # Higher layers are visually centered within the lower layer's footprint
-                # This creates the turtle/pyramid depth effect
-                layer_offset_x = (base_cols - layer_cols) // 2
-                layer_offset_y = (base_rows - layer_rows) // 2
+                layer_cols = max(4, min(layer_size, base_cols))
+                layer_rows = max(4, min(layer_size, base_rows))
+
+                # 중앙 정렬 오프셋
+                layer_offset_x = max(0, (base_cols - layer_cols) // 2)
+                layer_offset_y = max(0, (base_rows - layer_rows) // 2)
 
                 # Get target tile count for this layer
                 target_count = layer_tile_counts.get(layer_idx, 0)
                 if target_count <= 0:
                     continue
 
-                # Determine pattern type and index for this layer
-                # Priority: 1) Explicit/Auto layer config, 2) Level-wide default
-                layer_pattern_config = get_effective_layer_pattern(layer_idx)
-
-                if layer_pattern_config:
-                    # Use per-layer configuration (explicit or auto-generated)
-                    layer_pattern_type = layer_pattern_config[0]
-                    layer_pattern_index = layer_pattern_config[1] if layer_pattern_config[1] is not None else layer_pattern_indices.get(layer_idx, params.pattern_index)
+                # [v15.40] 레이어별 패턴 오버라이드 우선
+                ov = overrides_std.get(layer_idx)
+                if ov and "pattern_index" in ov:
+                    layer_pattern_type = "aesthetic"
+                    layer_pattern_index = ov["pattern_index"]
                 else:
-                    # Use level-wide pattern_type with varied pattern_index per layer
-                    layer_pattern_type = params.pattern_type
-                    layer_pattern_index = layer_pattern_indices.get(layer_idx, params.pattern_index)
+                    # 기존: layer config → level-wide default
+                    layer_pattern_config = get_effective_layer_pattern(layer_idx)
+                    if layer_pattern_config:
+                        layer_pattern_type = layer_pattern_config[0]
+                        layer_pattern_index = layer_pattern_config[1] if layer_pattern_config[1] is not None else layer_pattern_indices.get(layer_idx, params.pattern_index)
+                    else:
+                        layer_pattern_type = params.pattern_type
+                        layer_pattern_index = layer_pattern_indices.get(layer_idx, params.pattern_index)
 
                 # Generate positions for this layer with symmetry and pattern options
                 # Note: positions are generated within the shrunk layer dimensions
@@ -2621,37 +2945,114 @@ class LevelGenerator:
                             offset_positions.append(f"{new_x}_{new_y}")
                     positions = offset_positions
 
+                # [v15.40] Phase 3: 상위 레이어 지지 검증
+                # 상위 레이어 타일은 하위 레이어 타일 위에만 배치
+                # 홀수/짝수 레이어 간 오프셋 규칙 적용
+                if layer_idx > 0:
+                    # 바로 아래 레이어의 타일 위치 수집
+                    below_positions = set()
+                    for lp in all_layer_positions:
+                        if lp[0] == layer_idx - 1:
+                            below_positions.add(lp[1])
+
+                    if below_positions:
+                        # 하위 타일의 인접 지지 위치 계산
+                        # 패리티가 다르면 (홀↔짝) 오프셋 +0.5 고려 → 4방향 인접
+                        same_parity = (layer_idx % 2) == ((layer_idx - 1) % 2)
+                        supported = set()
+                        for bp in below_positions:
+                            bx, by = int(bp.split("_")[0]), int(bp.split("_")[1])
+                            if same_parity:
+                                # 같은 패리티: 동일 위치만 지지
+                                supported.add(f"{bx}_{by}")
+                            else:
+                                # 다른 패리티: 4개 인접 위치 지지
+                                for dx, dy in [(-1, -1), (0, -1), (-1, 0), (0, 0)]:
+                                    supported.add(f"{bx+dx}_{by+dy}")
+
+                        # 지지되는 위치만 유지
+                        supported_positions = [p for p in positions if p in supported]
+                        if len(supported_positions) >= 3:  # 최소 3개 이상
+                            positions = supported_positions
+
                 for pos in positions:
                     all_layer_positions.append((layer_idx, pos))
+
+        # [v15.40] Phase 1: 피라미드 구조 강제 - 상위 레이어는 하위보다 적은 타일
+        # 패턴 모드에서는 건너뜀 (패턴 형태 보존 우선)
+        layer_pos_map: Dict[int, List[Tuple[int, str]]] = {}
+        for lp in all_layer_positions:
+            layer_pos_map.setdefault(lp[0], []).append(lp)
+
+        sorted_layer_indices = sorted(layer_pos_map.keys())
+        if len(sorted_layer_indices) >= 2 and not level.get("_preserve_pattern"):
+            # 하위→상위 순으로 검사하며 상위가 하위보다 크면 축소
+            for idx in range(1, len(sorted_layer_indices)):
+                cur_layer = sorted_layer_indices[idx]
+                prev_layer = sorted_layer_indices[idx - 1]
+                cur_count = len(layer_pos_map[cur_layer])
+                prev_count = len(layer_pos_map[prev_layer])
+                max_allowed = int(prev_count * 0.85)  # 상위는 하위의 85% 이하
+
+                if cur_count > max_allowed and max_allowed >= 3:
+                    # 중앙에서 가까운 위치 우선 유지 (가장자리 제거)
+                    positions_list = layer_pos_map[cur_layer]
+                    xs = [int(p[1].split("_")[0]) for p in positions_list]
+                    ys = [int(p[1].split("_")[1]) for p in positions_list]
+                    cx = (min(xs) + max(xs)) / 2
+                    cy = (min(ys) + max(ys)) / 2
+
+                    # 중앙 거리 기준 정렬 → 가까운 것 우선 보존
+                    positions_list.sort(key=lambda p: abs(int(p[1].split("_")[0]) - cx) + abs(int(p[1].split("_")[1]) - cy))
+                    # 3의 배수로 클램프
+                    clamped = (max_allowed // 3) * 3
+                    if clamped < 3:
+                        clamped = 3
+                    layer_pos_map[cur_layer] = positions_list[:clamped]
+                    logger.debug(f"[PYRAMID_CLAMP] Layer {cur_layer}: {cur_count} -> {clamped} (prev={prev_count})")
+
+            # all_layer_positions 재구성
+            all_layer_positions = []
+            for li in sorted_layer_indices:
+                all_layer_positions.extend(layer_pos_map[li])
 
         # CRITICAL: Ensure total positions is divisible by 3
         # When layers are full, clamping may break divisibility
         total_positions = len(all_layer_positions)
         remainder = total_positions % 3
 
-        # For symmetric patterns, we can't just remove random positions
-        # as it would break the symmetry. Only remove if no symmetry.
+        # [v15.40] 패턴 모드에서는 position 삭제 금지 — 형태 보존이 최우선
+        # 3의 배수는 타일 타입 재분배로 해결 (position이 아닌 type 조정)
         symmetry = params.symmetry_mode or "none"
-        if remainder > 0 and symmetry == "none":
-            # Remove excess positions to make divisible by 3
-            # Remove from the end (random positions anyway)
+        is_pattern_mode = level.get("_preserve_pattern", False)
+
+        if remainder > 0 and not is_pattern_mode and symmetry == "none":
+            # 비패턴 모드 + 대칭 없음: position 제거 허용
             all_layer_positions = all_layer_positions[:total_positions - remainder]
-        elif remainder > 0 and symmetry != "none":
-            # For symmetric patterns, add dummy positions to reach divisible by 3
-            # We'll use already existing positions (they'll just be duplicated in assignment)
-            # This is a simple workaround - the tile assignment handles extra positions
-            pass  # Let the tile assignment code handle the non-divisibility
+        elif remainder > 0:
+            # 패턴 모드 또는 대칭 모드: position 보존, 타일 타입 재분배로 처리
+            pass  # _ensure_tile_count_divisible_by_3에서 타입 재분배로 해결
 
         # CRITICAL FIX: Filter tile_types to match useTileCount
         # This prevents creating tiles outside the valid range (e.g., t10~t15 when useTileCount=9)
         use_tile_count = int(level.get("useTileCount", 6))
         valid_range = {f"t{i}" for i in range(1, use_tile_count + 1)}
         filtered_tile_types = [t for t in tile_types if t in valid_range or t == "t0"]
-        if filtered_tile_types:
+        # [v15.45] 필터 결과가 useTileCount보다 적으면 보충 — 그렇지 않으면 결과
+        # 레벨이 실제로는 N(<useTileCount) 타입만 사용하면서 메타에는 useTileCount=N+α가
+        # 기록되는 거짓이 발생함 (예: 입력 [t1,t3,t5,t8,t10,t14] + useTileCount=6 → 필터
+        # 후 [t1,t3,t5]만 남아 3종으로 생성되지만 useTileCount=6 그대로).
+        if len(filtered_tile_types) >= use_tile_count or "t0" in filtered_tile_types:
             tile_types = filtered_tile_types
         else:
-            # Fallback: use all types in range
-            tile_types = [f"t{i}" for i in range(1, use_tile_count + 1)]
+            existing = list(filtered_tile_types)
+            topup = select_color_balanced_tiles(use_tile_count, max_index=use_tile_count)
+            for t in topup:
+                if t not in existing:
+                    existing.append(t)
+                if len(existing) >= use_tile_count:
+                    break
+            tile_types = existing if existing else select_color_balanced_tiles(use_tile_count, max_index=use_tile_count)
         logger.debug(f"[TILE_ASSIGN] Filtered tile_types to useTileCount={use_tile_count}: {len(tile_types)} types")
 
         # CRITICAL: Distribute tile types ensuring each type has count divisible by 3
@@ -2862,16 +3263,23 @@ class LevelGenerator:
         # we need to expand to actual tile types for pattern mode distribution.
         # Otherwise, all tiles will be 't0' causing same-type blocking in validation.
         if len(tile_types) == 1 and tile_types[0] == "t0":
-            # Expand t0 to t1, t2, ..., t{useTileCount}
-            tile_types = [f"t{i}" for i in range(1, use_tile_count + 1)]
+            # [v15.40] 색상 균등 분배로 확장
+            tile_types = select_color_balanced_tiles(use_tile_count, max_index=use_tile_count)
         else:
             # CRITICAL FIX: Ensure tile_types does not exceed useTileCount
-            # Filter to only types within valid range (t1 ~ t{useTileCount})
             valid_range = {f"t{i}" for i in range(1, use_tile_count + 1)}
-            tile_types = [t for t in tile_types if t in valid_range]
-            # If no valid types remain, use all types in range
-            if not tile_types:
-                tile_types = [f"t{i}" for i in range(1, use_tile_count + 1)]
+            in_range = [t for t in tile_types if t in valid_range]
+            # [v15.45] 필터 후 부족하면 useTileCount까지 보충 (메타-실제 정합성 유지)
+            if len(in_range) >= use_tile_count:
+                tile_types = in_range
+            else:
+                topup = select_color_balanced_tiles(use_tile_count, max_index=use_tile_count)
+                for t in topup:
+                    if t not in in_range:
+                        in_range.append(t)
+                    if len(in_range) >= use_tile_count:
+                        break
+                tile_types = in_range if in_range else select_color_balanced_tiles(use_tile_count, max_index=use_tile_count)
             logger.debug(f"[PATTERN_MODE] Filtered tile_types to useTileCount={use_tile_count}: {tile_types}")
 
         # Group positions by coordinate
@@ -2883,53 +3291,13 @@ class LevelGenerator:
         for pos in positions_by_coord:
             positions_by_coord[pos].sort()
 
-        # CRITICAL FIX: Ensure total tiles is divisible by 3
-        # If not, we need to remove excess positions while preserving pattern shape
+        # [v15.40] 패턴 형태 보존: 3의 배수 보정 시 타일 위치 삭제 금지
+        # 타일 타입 분배 단계에서 나머지를 흡수 (위치는 100% 보존)
         total_tiles = len(all_layer_positions)
         excess = total_tiles % 3
-
         if excess > 0:
-            # Need to remove 'excess' number of positions to make total divisible by 3
-            # Strategy: Remove positions from the least stacked coords (single-layer positions first)
-            # This minimizes impact on pattern shape
-
-            all_positions_sorted = sorted(
-                positions_by_coord.keys(),
-                key=lambda p: (len(positions_by_coord[p]), p)  # Sort by layer count (ascending), then by position
-            )
-
-            removed_count = 0
-            positions_to_skip = set()
-
-            for pos in all_positions_sorted:
-                if removed_count >= excess:
-                    break
-                layers = positions_by_coord[pos]
-                # Remove from top layer only to minimize pattern impact
-                if len(layers) > 0:
-                    top_layer = layers[-1]
-                    layer_key = f"layer_{top_layer}"
-                    if pos in level[layer_key]["tiles"]:
-                        del level[layer_key]["tiles"][pos]
-                        level[layer_key]["num"] = str(int(level[layer_key]["num"]) - 1)
-                    # Update positions_by_coord
-                    positions_by_coord[pos] = layers[:-1]
-                    if len(positions_by_coord[pos]) == 0:
-                        positions_to_skip.add(pos)
-                    removed_count += 1
-
-            # Remove empty positions
-            for pos in positions_to_skip:
-                del positions_by_coord[pos]
-
-            # Rebuild all_layer_positions after removal
-            all_layer_positions = []
-            for pos, layers in positions_by_coord.items():
-                for layer_idx in layers:
-                    all_layer_positions.append((layer_idx, pos))
-
-            total_tiles = len(all_layer_positions)
-            logger.debug(f"[PATTERN_MODE] Adjusted total tiles to {total_tiles} (removed {removed_count} for 3-divisibility)")
+            logger.debug(f"[PATTERN_MODE] Total {total_tiles} not div3 (excess={excess}). "
+                        f"Positions preserved - will adjust via type distribution.")
 
         num_types = len(tile_types)
 
@@ -2953,35 +3321,11 @@ class LevelGenerator:
             remaining -= 3
             type_idx += 1
 
-        # If there's still a remainder (0, 1, or 2), we need to remove more positions
-        # This should rarely happen if we did the initial adjustment correctly
+        # [v15.40] 나머지 타일은 삭제하지 않고 타입 분배에서 흡수
+        # 패턴은 3의 배수로 디자인할 예정이므로 이 경로는 거의 사용 안 됨
         if remaining > 0:
-            logger.warning(f"[PATTERN_MODE] Unexpected remainder {remaining} after distribution, adjusting...")
-            # Remove additional positions to make it work
-            all_positions_list = list(positions_by_coord.keys())
-            for _ in range(remaining):
-                if all_positions_list:
-                    pos = all_positions_list.pop()
-                    layers = positions_by_coord.get(pos, [])
-                    if layers:
-                        top_layer = layers[-1]
-                        layer_key = f"layer_{top_layer}"
-                        if pos in level[layer_key]["tiles"]:
-                            del level[layer_key]["tiles"][pos]
-                            level[layer_key]["num"] = str(int(level[layer_key]["num"]) - 1)
-                        positions_by_coord[pos] = layers[:-1]
-                        if len(positions_by_coord[pos]) == 0:
-                            del positions_by_coord[pos]
-
-            # Recalculate
-            total_tiles -= remaining
-            remaining = total_tiles - (base_per_type * num_types)
-            type_idx = 0
-            type_targets = {t: base_per_type for t in tile_types}
-            while remaining >= 3:
-                type_targets[tile_types[type_idx % num_types]] += 3
-                remaining -= 3
-                type_idx += 1
+            logger.warning(f"[PATTERN_MODE] Remainder {remaining} tiles - assigning to first type (no deletion)")
+            type_targets[tile_types[0]] += remaining
 
         # Shuffle positions for randomness
         all_positions = list(positions_by_coord.keys())
@@ -3240,20 +3584,9 @@ class LevelGenerator:
             # The tile assignment code will handle any count differences
             return selected
 
-        # CRITICAL FIX: When pattern_index is explicitly specified (e.g., special shape levels),
-        # do NOT pad with random positions - preserve the pattern's natural shape
-        # Only trim if pattern is excessively large
+        # [v15.40] pattern_index 지정 시 패턴 형태를 최대한 보존
+        # 트리밍하지 않고 패턴 전체를 반환 → 타일 수는 패턴이 결정
         if pattern_index is not None:
-            if len(selected) > actual_count * 1.5:
-                # Pattern is too large, trim minimally
-                center_x, center_y = cols / 2.0, rows / 2.0
-                def distance_from_center(pos: str) -> float:
-                    parts = pos.split("_")
-                    x, y = int(parts[0]), int(parts[1])
-                    return ((x - center_x) ** 2 + (y - center_y) ** 2) ** 0.5
-                selected.sort(key=distance_from_center)
-                selected = selected[:int(actual_count * 1.5)]
-            # Do NOT add filler positions - preserve pattern shape
             return selected
 
         # Only for symmetry_mode="none" and no specific pattern:
@@ -3285,8 +3618,13 @@ class LevelGenerator:
         target_difficulty: Optional[float] = None
     ) -> List[str]:
         """Generate positions with symmetry and pattern options."""
-        # Default to geometric pattern for more regular shapes
-        pattern = pattern_type or "geometric"
+        # [v15.40] pattern_index가 지정되면 반드시 aesthetic 모드 사용
+        # pattern_index는 사전 정의된 모양 템플릿 → aesthetic 경로에서만 처리됨
+        # geometric/clustered/random은 pattern_index를 무시하므로 강제 전환
+        if pattern_index is not None:
+            pattern = "aesthetic"
+        else:
+            pattern = pattern_type or "geometric"
 
         # Resolve symmetry mode:
         # - PATTERN MODE: When pattern_index is specified, ALWAYS use "none" (pattern is pre-designed)
@@ -3362,6 +3700,15 @@ class LevelGenerator:
             target_difficulty: Target difficulty (0.0-1.0) for dynamic fill ratio calculation.
         """
         import math
+
+        # [v15.40] 커스텀 패턴 우선 적용
+        if pattern_index is not None:
+            custom = self._get_custom_pattern(pattern_index, cols, rows)
+            if custom is not None:
+                return custom
+            else:
+                logger.debug(f"[PATTERN_FALLBACK] No custom pattern for #{pattern_index} at {cols}x{rows}, using code pattern")
+
         center_x, center_y = cols / 2.0, rows / 2.0
 
         # === PATTERN DENSITY WEIGHTS (v15.7) ===
@@ -3433,20 +3780,12 @@ class LevelGenerator:
 
         # Pattern 0: Filled Rectangle
         def filled_rectangle():
-            aspect_ratio = cols / rows
-            rect_height = int((target_count / aspect_ratio) ** 0.5)
-            rect_width = int(rect_height * aspect_ratio)
-            if rect_width * rect_height < target_count:
-                rect_width += 1
-            if rect_width * rect_height < target_count:
-                rect_height += 1
-            start_x = int((cols - rect_width) / 2)
-            start_y = int((rows - rect_height) / 2)
+            # [v15.40] 1칸 마진의 중앙 직사각형 (8x8 → 6x6 내부)
+            margin = 1
             positions = []
-            for x in range(start_x, min(cols, start_x + rect_width)):
-                for y in range(start_y, min(rows, start_y + rect_height)):
-                    if x >= 0 and y >= 0:
-                        positions.append(f"{x}_{y}")
+            for x in range(margin, cols - margin):
+                for y in range(margin, rows - margin):
+                    positions.append(f"{x}_{y}")
             return positions
 
         # Pattern 1: Diamond/Rhombus shape
@@ -5949,18 +6288,13 @@ class LevelGenerator:
             upper_parity = upper_layer_idx % 2
             upper_layer_col = int(upper_layer_data.get("col", 7))
 
-            # Determine blocking positions based on parity and layer size
+            # [v15.49 revert] 원래 col-기반 로직 — 디바이스와 일치
             if tile_parity == upper_parity:
-                # Same parity (odd-odd or even-even): only check same position
                 blocking_offsets = BLOCKING_OFFSETS_SAME_PARITY
+            elif upper_layer_col > cur_layer_col:
+                blocking_offsets = BLOCKING_OFFSETS_UPPER_BIGGER
             else:
-                # Different parity: compare layer col sizes
-                if upper_layer_col > cur_layer_col:
-                    # Upper layer is bigger (has more columns)
-                    blocking_offsets = BLOCKING_OFFSETS_UPPER_BIGGER
-                else:
-                    # Upper layer is smaller or same size
-                    blocking_offsets = BLOCKING_OFFSETS_UPPER_SMALLER
+                blocking_offsets = BLOCKING_OFFSETS_UPPER_SMALLER
 
             for dx, dy in blocking_offsets:
                 bx = col + dx
@@ -6106,11 +6440,13 @@ class LevelGenerator:
                     layer_eligible.append(pos)
 
                 # Find horizontal and vertical pairs
+                # CRITICAL: Also track adjacent positions to prevent link tiles from being neighbors
                 link_pairs = []
-                used_positions = set()
+                used_positions = set()  # Positions used by link pairs
+                blocked_positions = set()  # Positions that cannot have links (adjacent to existing links)
 
                 for pos in layer_eligible:
-                    if pos in used_positions:
+                    if pos in used_positions or pos in blocked_positions:
                         continue
                     try:
                         col, row = map(int, pos.split('_'))
@@ -6119,40 +6455,49 @@ class LevelGenerator:
 
                     # Check for horizontal pair (east-west)
                     east_pos = f"{col+1}_{row}"
-                    if east_pos in layer_eligible and east_pos not in used_positions:
+                    if east_pos in layer_eligible and east_pos not in used_positions and east_pos not in blocked_positions:
                         link_pairs.append((pos, east_pos, "link_e", "link_w", current_tiles))
                         used_positions.add(pos)
                         used_positions.add(east_pos)
+                        # Block adjacent positions to prevent adjacent links
+                        for adj in [f"{col}_{row-1}", f"{col}_{row+1}", f"{col-1}_{row}",
+                                   f"{col+1}_{row-1}", f"{col+1}_{row+1}", f"{col+2}_{row}"]:
+                            blocked_positions.add(adj)
                         continue
 
                     # Check for vertical pair (north-south)
                     south_pos = f"{col}_{row+1}"
-                    if south_pos in layer_eligible and south_pos not in used_positions:
+                    if south_pos in layer_eligible and south_pos not in used_positions and south_pos not in blocked_positions:
                         link_pairs.append((pos, south_pos, "link_n", "link_s", current_tiles))
                         used_positions.add(pos)
                         used_positions.add(south_pos)
+                        # Block adjacent positions to prevent adjacent links
+                        for adj in [f"{col-1}_{row}", f"{col+1}_{row}", f"{col}_{row-1}",
+                                   f"{col-1}_{row+1}", f"{col+1}_{row+1}", f"{col}_{row+2}"]:
+                            blocked_positions.add(adj)
 
                 # Place link pairs on this layer
+                # CRITICAL: Only ONE tile in the pair should have the link attribute
+                # The target tile must NOT have any attribute
                 random.shuffle(link_pairs)
                 for pos1, pos2, attr1, attr2, layer_tiles in link_pairs:
                     if placed_count >= target_count:
                         break
 
                     tile1 = layer_tiles[pos1]
-                    tile2 = layer_tiles[pos2]
+                    # tile2 is the target - it should NOT have link attribute
 
+                    # Only set link attribute on source tile (tile1)
                     if len(tile1) == 1:
                         tile1.append(attr1)
                     else:
                         tile1[1] = attr1
 
-                    if len(tile2) == 1:
-                        tile2.append(attr2)
-                    else:
-                        tile2[1] = attr2
+                    # DO NOT set link attribute on target tile (tile2)
+                    # Target tile must remain without attribute
 
-                    placed_count += 2
-                    logger.debug(f"Tutorial gimmick 'link' pair placed at layer {current_layer_idx}: {pos1}({attr1}), {pos2}({attr2})")
+                    placed_count += 1  # Count as 1 link (not 2)
+                    logger.debug(f"Tutorial gimmick 'link' placed at layer {current_layer_idx}: {pos1}({attr1}) -> {pos2}")
 
             logger.info(f"Tutorial gimmick 'link' placed: {placed_count} tiles total")
             return level
@@ -6351,6 +6696,7 @@ class LevelGenerator:
                         logger.debug(f"Tutorial gimmick 'chain' ensured at layer {layer_idx}, pos {pos}")
 
         # For link: need pairs
+        # CRITICAL: Also track adjacent positions to prevent link tiles from being neighbors
         elif gimmick_type == "link":
             for layer_idx in layers_with_tiles:
                 if added >= needed:
@@ -6360,10 +6706,11 @@ class LevelGenerator:
                 tiles = level.get(layer_key, {}).get("tiles", {})
 
                 # Find eligible pairs
-                used = set()
+                used = set()  # Positions used by link pairs
+                blocked = set()  # Positions that cannot have links (adjacent to existing links)
                 pairs = []
                 for pos, tile_data in tiles.items():
-                    if pos in used:
+                    if pos in used or pos in blocked:
                         continue
                     if not isinstance(tile_data, list) or len(tile_data) < 1:
                         continue
@@ -6379,7 +6726,7 @@ class LevelGenerator:
 
                     # Check east neighbor
                     east_pos = f"{col+1}_{row}"
-                    if east_pos in tiles and east_pos not in used:
+                    if east_pos in tiles and east_pos not in used and east_pos not in blocked:
                         east_data = tiles[east_pos]
                         if isinstance(east_data, list) and len(east_data) >= 1:
                             if not (east_data[0] in self.GOAL_TYPES or east_data[0].startswith("craft_") or east_data[0].startswith("stack_")):
@@ -6387,11 +6734,15 @@ class LevelGenerator:
                                     pairs.append((pos, east_pos, "link_e", "link_w"))
                                     used.add(pos)
                                     used.add(east_pos)
+                                    # Block adjacent positions
+                                    for adj in [f"{col}_{row-1}", f"{col}_{row+1}", f"{col-1}_{row}",
+                                               f"{col+1}_{row-1}", f"{col+1}_{row+1}", f"{col+2}_{row}"]:
+                                        blocked.add(adj)
                                     continue
 
                     # Check south neighbor
                     south_pos = f"{col}_{row+1}"
-                    if south_pos in tiles and south_pos not in used:
+                    if south_pos in tiles and south_pos not in used and south_pos not in blocked:
                         south_data = tiles[south_pos]
                         if isinstance(south_data, list) and len(south_data) >= 1:
                             if not (south_data[0] in self.GOAL_TYPES or south_data[0].startswith("craft_") or south_data[0].startswith("stack_")):
@@ -6399,22 +6750,27 @@ class LevelGenerator:
                                     pairs.append((pos, south_pos, "link_n", "link_s"))
                                     used.add(pos)
                                     used.add(south_pos)
+                                    # Block adjacent positions
+                                    for adj in [f"{col-1}_{row}", f"{col+1}_{row}", f"{col}_{row-1}",
+                                               f"{col-1}_{row+1}", f"{col+1}_{row+1}", f"{col}_{row+2}"]:
+                                        blocked.add(adj)
 
+                # CRITICAL: Only ONE tile in the pair should have the link attribute
                 for pos1, pos2, attr1, attr2 in pairs:
                     if added >= needed:
                         break
                     tile1 = tiles[pos1]
-                    tile2 = tiles[pos2]
+                    # tile2 is the target - it should NOT have link attribute
+
+                    # Only set link attribute on source tile (tile1)
                     if len(tile1) == 1:
                         tile1.append(attr1)
                     else:
                         tile1[1] = attr1
-                    if len(tile2) == 1:
-                        tile2.append(attr2)
-                    else:
-                        tile2[1] = attr2
-                    added += 2
-                    logger.debug(f"Tutorial gimmick 'link' ensured at layer {layer_idx}: {pos1}, {pos2}")
+                    # DO NOT set link attribute on target tile (tile2)
+
+                    added += 1  # Count as 1 link (not 2)
+                    logger.debug(f"Tutorial gimmick 'link' ensured at layer {layer_idx}: {pos1}({attr1}) -> {pos2}")
 
         # For grass: need 2+ clearable neighbors
         elif gimmick_type == "grass":
@@ -7252,12 +7608,15 @@ class LevelGenerator:
         linked_targets: set = set()
 
         # Also collect existing link targets from tiles that already have link attributes
+        # CRITICAL: Both source (link holder) and target must be marked as used
         for pos, tile_data in tiles.items():
             if isinstance(tile_data, list) and len(tile_data) >= 2 and tile_data[1]:
                 attr = tile_data[1]
                 if attr.startswith("link_"):
                     try:
                         col, row = map(int, pos.split('_'))
+                        # CRITICAL: Mark source position as used (link holder cannot be a target)
+                        linked_targets.add(pos)
                         # Calculate target position based on link direction
                         if attr == "link_n":
                             linked_targets.add(f"{col}_{row - 1}")
@@ -7289,6 +7648,26 @@ class LevelGenerator:
                 # Position format is "col_row" (x_y)
                 col, row = map(int, pos.split('_'))
             except:
+                continue
+
+            # CRITICAL: Check if any adjacent tile already has a link attribute
+            # This prevents link tiles from being adjacent to each other
+            adjacent_positions = [
+                f"{col}_{row - 1}",  # North
+                f"{col}_{row + 1}",  # South
+                f"{col - 1}_{row}",  # West
+                f"{col + 1}_{row}",  # East
+            ]
+            has_adjacent_link = False
+            for adj_pos in adjacent_positions:
+                if adj_pos in tiles:
+                    adj_tile = tiles[adj_pos]
+                    if isinstance(adj_tile, list) and len(adj_tile) >= 2:
+                        adj_attr = adj_tile[1]
+                        if adj_attr and adj_attr.startswith("link_"):
+                            has_adjacent_link = True
+                            break
+            if has_adjacent_link:
                 continue
 
             # Direction mapping: link type -> target position
@@ -7331,11 +7710,16 @@ class LevelGenerator:
                     logger.debug(f"[LINK] Skipping {pos} -> {target_pos}: target has attribute '{target_tile[1]}'")
                     continue
 
-                # CRITICAL: Explicitly reject chain, ice, grass on target (blocking gimmicks)
+                # CRITICAL: Explicitly reject chain, ice, grass, and other links on target
                 # This is a defensive double-check in case the generic check above fails
                 BLOCKING_GIMMICKS = {"chain", "ice", "ice_1", "ice_2", "ice_3", "grass"}
-                if target_tile[1] in BLOCKING_GIMMICKS:
+                target_attr = target_tile[1]
+                if target_attr in BLOCKING_GIMMICKS:
                     logger.warning(f"[LINK] BLOCKED: {pos} -> {target_pos} would create link->chain/ice/grass")
+                    continue
+                # CRITICAL: Target must NOT be a link source (prevents bidirectional links)
+                if target_attr and target_attr.startswith("link_"):
+                    logger.warning(f"[LINK] BLOCKED: {pos} -> {target_pos} target is already a link source '{target_attr}'")
                     continue
 
                 # Valid link found - assign the link type
@@ -7955,6 +8339,26 @@ class LevelGenerator:
             except:
                 continue
 
+            # CRITICAL: Check if any adjacent tile already has a link attribute
+            # This prevents link tiles from being adjacent to each other
+            adjacent_positions = [
+                f"{col1}_{row1 - 1}",  # North
+                f"{col1}_{row1 + 1}",  # South
+                f"{col1 - 1}_{row1}",  # West
+                f"{col1 + 1}_{row1}",  # East
+            ]
+            has_adjacent_link = False
+            for adj_pos in adjacent_positions:
+                if adj_pos in tiles:
+                    adj_tile = tiles[adj_pos]
+                    if isinstance(adj_tile, list) and len(adj_tile) >= 2:
+                        adj_attr = adj_tile[1]
+                        if adj_attr and adj_attr.startswith("link_"):
+                            has_adjacent_link = True
+                            break
+            if has_adjacent_link:
+                continue
+
             # Try to find a valid partner in one of 4 directions
             directions = [
                 ("link_n", col1, row1 - 1),  # North (up = row-1)
@@ -7990,11 +8394,16 @@ class LevelGenerator:
                     logger.debug(f"[LINK] Skipping {pos1} -> {pos2}: target has attribute '{tile_data2[1]}'")
                     continue
 
-                # CRITICAL: Explicitly reject chain, ice, grass on target (blocking gimmicks)
+                # CRITICAL: Explicitly reject chain, ice, grass, and other links on target
                 # Defensive double-check
                 BLOCKING_GIMMICKS = {"chain", "ice", "ice_1", "ice_2", "ice_3", "grass"}
-                if tile_data2[1] in BLOCKING_GIMMICKS:
+                target_attr = tile_data2[1]
+                if target_attr in BLOCKING_GIMMICKS:
                     logger.warning(f"[LINK] BLOCKED: {pos1} -> {pos2} would create link->blocking gimmick")
+                    continue
+                # CRITICAL: Target must NOT be a link source (prevents bidirectional links)
+                if target_attr and target_attr.startswith("link_"):
+                    logger.warning(f"[LINK] BLOCKED: {pos1} -> {pos2} target is already a link source '{target_attr}'")
                     continue
 
                 # Valid link found - assign the link type to ONLY the source tile
@@ -8451,6 +8860,10 @@ class LevelGenerator:
             # PATTERN MODE: In pattern mode, ALWAYS replace existing tiles (never add new positions)
             use_replacement_mode = symmetry_mode in ("horizontal", "vertical", "both") or preserve_pattern
 
+            # [v15.56] Tutorial 레벨/필수 기믹: 1차 패턴 안에서 시도 → 실패 시 2차 패턴 잠금 해제.
+            # 패턴 모양 보존보다 골(=기믹) 배치가 우선이므로 craft/stack 등 필수 골이 항상 배치됨.
+            relax_pattern_lock = False
+
             # Try positions in randomized order
             for try_row in row_order_list:
                 for try_col in col_search_order:
@@ -8463,8 +8876,13 @@ class LevelGenerator:
                         if try_pos not in tiles:
                             continue
 
-                        # PATTERN MODE: Also check if position is within locked pattern positions
-                        if preserve_pattern and pattern_locked_positions:
+                        # PATTERN MODE: Prefer positions within locked pattern positions in pass 1.
+                        # On fallback pass (relax_pattern_lock), allow any existing tile position.
+                        # This ensures tutorial levels (Lv.11/21 craft/stack unlock) always get
+                        # the goal tile placed even when pattern shape doesn't accommodate
+                        # output direction. Tile is placed slightly outside designed pattern
+                        # but the gimmick is guaranteed to be present.
+                        if preserve_pattern and pattern_locked_positions and not relax_pattern_lock:
                             if try_pos not in pattern_locked_positions:
                                 continue
 
@@ -8544,6 +8962,122 @@ class LevelGenerator:
                     break
                 if pos:
                     break
+
+            # [v15.56/v15.57] 골 배치 실패 0% 보장 — 다단계 fallback.
+            #   1st pass (위쪽 inner loop): 패턴 안에서만 시도 (모양 보존)
+            #   2nd pass (아래): 패턴 잠금 해제 + ADD 모드 (패턴 외부 빈 자리)
+            #   3rd pass (사용자 제안): 기존 일반 타일을 craft/stack으로 직접 치환
+            #     - 일반 타일(t1~t15) 위치 중 출구 방향이 grid 안인 곳 선택
+            #     - 출구 위치에 다른 타일이 있으면 제거하고 골 출구 공간 확보
+            #     - 일반 타일 1개 제거 → craft/stack 박스로 치환 (내부 4개)
+            #     - FINAL_REPAIR가 타입 카운트 정합성 보정
+            if pos is None and preserve_pattern and pattern_locked_positions:
+                relax_pattern_lock = True
+                logger.warning(f"[_add_goals_pass2] 1st failed for {goal_type}, retrying with pattern_lock relaxed (locked_pos_count={len(pattern_locked_positions)}, tile_count={len(tiles)})")
+                for try_row in row_order_list:
+                    for try_col in col_search_order:
+                        try_pos = f"{try_col}_{try_row}"
+                        # ADD 모드: 빈 위치(아직 타일 없음) 우선, 단 placed_positions/output_positions 충돌 금지
+                        if try_pos in placed_positions or try_pos in output_positions:
+                            continue
+                        if not is_valid_goal_position(try_col, try_row, goal_type):
+                            continue
+                        col_off, row_off = get_output_direction(goal_type)
+                        output_pos = f"{try_col + col_off}_{try_row + row_off}"
+                        if output_pos in placed_positions or output_pos in output_positions:
+                            continue
+                        # output_pos는 비어 있어야 함 (다른 레이어 포함)
+                        # is_valid_goal_position이 이미 체크했지만 명시적으로 한 번 더
+                        if output_pos in tiles:
+                            continue
+                        adjacent = get_adjacent_positions(try_col, try_row)
+                        if adjacent & placed_positions:
+                            continue
+                        output_adjacent = get_adjacent_positions(try_col + col_off, try_row + row_off)
+                        if output_adjacent & output_positions:
+                            continue
+                        facing_conflict = False
+                        for existing_pos, existing_type in goal_positions_info:
+                            if would_face_each_other(try_pos, goal_type, existing_pos, existing_type):
+                                facing_conflict = True
+                                break
+                        if facing_conflict:
+                            continue
+                        if would_craft_stack_conflict(try_pos, goal_type, goal_positions_info, output_positions):
+                            continue
+                        pos = try_pos
+                        logger.warning(f"[_add_goals_pass2] Found new position {pos} for {goal_type} (outside pattern)")
+                        break
+                    if pos:
+                        break
+
+            # [v15.57] 3rd pass — 강제 치환 (사용자 요청: 절대 누락 금지).
+            # 일반 타일(t1~t15) 위치를 골 박스로 직접 치환. 출구 자리도 비워서 확보.
+            # 패턴 모양은 약간 변형되지만 craft/stack 기믹은 100% 포함됨을 보장.
+            if pos is None:
+                logger.warning(f"[_add_goals_pass3] 2nd failed for {goal_type}, FORCING tile replacement")
+                # 모든 4 방향 시도 (s, n, e, w 순)
+                base_g = goal_type[:-2] if goal_type.endswith(('_s', '_n', '_e', '_w')) else goal_type
+                direction_priority = [goal_type[-1] if goal_type.endswith(('_s', '_n', '_e', '_w')) else 's']
+                for d in ['s', 'n', 'e', 'w']:
+                    if d not in direction_priority:
+                        direction_priority.append(d)
+
+                # 일반 타일 위치 후보 — 모든 레이어에서 t1~t15 타일 위치만
+                regular_positions = []
+                for li in range(num_layers):
+                    lk = f"layer_{li}"
+                    ltiles = level.get(lk, {}).get("tiles", {})
+                    for p, td in ltiles.items():
+                        if isinstance(td, list) and td and isinstance(td[0], str):
+                            tt = td[0]
+                            if tt.startswith('t') and tt[1:].isdigit() and tt != 't0':
+                                regular_positions.append((li, p))
+
+                # top 레이어부터 우선 (top_layer_idx 기준)
+                regular_positions.sort(key=lambda x: -x[0])
+
+                replaced = False
+                for try_dir in direction_priority:
+                    if replaced:
+                        break
+                    forced_goal_type = f"{base_g}_{try_dir}"
+                    fcol_off, frow_off = get_output_direction(forced_goal_type)
+                    for li, try_pos in regular_positions:
+                        if li != top_layer_idx:
+                            continue  # top 레이어 우선만 고려
+                        try:
+                            tx, ty = map(int, try_pos.split("_"))
+                        except ValueError:
+                            continue
+                        # 출구 위치가 grid 안에 있어야 함
+                        ox, oy = tx + fcol_off, ty + frow_off
+                        if ox < 0 or ox >= cols or oy < 0 or oy >= rows:
+                            continue
+                        # 자기 자신 이미 다른 골 사용중이면 skip
+                        if try_pos in placed_positions or try_pos in output_positions:
+                            continue
+                        # 인접 골 충돌 검사 (완화 — 마지막 fallback이라 일부 룰 무시)
+                        # craft-stack 충돌만 최소한 보존
+                        if would_craft_stack_conflict(try_pos, forced_goal_type, goal_positions_info, output_positions):
+                            continue
+                        # 출구 위치 강제 비우기 — 모든 레이어에서 (oy_pos) 제거
+                        output_pos_str = f"{ox}_{oy}"
+                        if output_pos_str in placed_positions or output_pos_str in output_positions:
+                            continue
+                        for li_clear in range(num_layers):
+                            lk = f"layer_{li_clear}"
+                            ct = level.get(lk, {}).get("tiles", {})
+                            if output_pos_str in ct:
+                                del ct[output_pos_str]
+                                level[lk]["num"] = str(len(ct))
+                                logger.warning(f"[_add_goals_pass3] Cleared {lk} @{output_pos_str} for goal output")
+
+                        pos = try_pos
+                        goal_type = forced_goal_type  # 방향 갱신
+                        logger.warning(f"[_add_goals_pass3] FORCED placement at {pos} dir={try_dir} (replacing {tiles.get(pos, '?')[0] if pos in tiles else 'unknown'})")
+                        replaced = True
+                        break
 
             if pos:
                 p_col, p_row = map(int, pos.split("_"))
@@ -9906,53 +10440,145 @@ class LevelGenerator:
 
                     # Now both should be divisible by 3
 
+        # Step 3.5: CRITICAL FIX - Handle multiple rem1 types by pairing them
+        # If we have rem1=[A,B,C] (3 types each with remainder 1):
+        # - Move 2 tiles from A to B: A becomes rem2, B becomes rem0
+        # - Move 1 tile from C to A: C becomes rem0, A becomes rem0
+        max_rem1_iterations = 10
+        for _ in range(max_rem1_iterations):
+            # Recalculate remainders
+            rem1_types = [t for t, c in type_counts.items() if c % 3 == 1 and type_positions.get(t)]
+            rem2_types = [t for t, c in type_counts.items() if c % 3 == 2 and type_positions.get(t)]
+
+            if not rem1_types and not rem2_types:
+                break
+
+            # First, try to pair rem1 with rem2
+            if rem1_types and rem2_types:
+                from_type = rem1_types[0]
+                to_type = rem2_types[0]
+                if type_positions.get(from_type):
+                    layer_idx, pos = type_positions[from_type].pop()
+                    layer_key = f"layer_{layer_idx}"
+                    if pos in level[layer_key]["tiles"]:
+                        old_data = level[layer_key]["tiles"][pos]
+                        level[layer_key]["tiles"][pos] = [to_type, old_data[1] if len(old_data) > 1 else ""]
+                        type_counts[from_type] -= 1
+                        type_counts[to_type] = type_counts.get(to_type, 0) + 1
+                        if to_type not in type_positions:
+                            type_positions[to_type] = []
+                        type_positions[to_type].append((layer_idx, pos))
+                continue
+
+            # If we have 2+ rem1 types, move 2 tiles from one to another
+            # A(rem1) gives 2 to B(rem1): A becomes rem2, B becomes rem0
+            if len(rem1_types) >= 2:
+                type_a = rem1_types[0]
+                type_b = rem1_types[1]
+                if len(type_positions.get(type_a, [])) >= 2:
+                    moved = 0
+                    while moved < 2 and type_positions.get(type_a):
+                        layer_idx, pos = type_positions[type_a].pop()
+                        layer_key = f"layer_{layer_idx}"
+                        if pos in level[layer_key]["tiles"]:
+                            old_data = level[layer_key]["tiles"][pos]
+                            level[layer_key]["tiles"][pos] = [type_b, old_data[1] if len(old_data) > 1 else ""]
+                            type_counts[type_a] -= 1
+                            type_counts[type_b] = type_counts.get(type_b, 0) + 1
+                            if type_b not in type_positions:
+                                type_positions[type_b] = []
+                            type_positions[type_b].append((layer_idx, pos))
+                            moved += 1
+                    # type_a: rem1->rem2, type_b: rem1->rem0
+                    continue
+
+            # If we have 2+ rem2 types, move 1 tile from one to another
+            # A(rem2) gives 1 to B(rem2): A becomes rem1, B becomes rem0
+            if len(rem2_types) >= 2:
+                type_a = rem2_types[0]
+                type_b = rem2_types[1]
+                if type_positions.get(type_a):
+                    layer_idx, pos = type_positions[type_a].pop()
+                    layer_key = f"layer_{layer_idx}"
+                    if pos in level[layer_key]["tiles"]:
+                        old_data = level[layer_key]["tiles"][pos]
+                        level[layer_key]["tiles"][pos] = [type_b, old_data[1] if len(old_data) > 1 else ""]
+                        type_counts[type_a] -= 1
+                        type_counts[type_b] = type_counts.get(type_b, 0) + 1
+                        if type_b not in type_positions:
+                            type_positions[type_b] = []
+                        type_positions[type_b].append((layer_idx, pos))
+                    # type_a: rem2->rem1, type_b: rem2->rem0
+                    continue
+
+            # Single rem1 or rem2 - redistribute to highest count type
+            break
+
+        # Recalculate after step 3.5
+        rem1_types = [t for t, c in type_counts.items() if c % 3 == 1 and type_positions.get(t)]
+        rem2_types = [t for t, c in type_counts.items() if c % 3 == 2 and type_positions.get(t)]
+
         # Step 4: Handle remaining rem1 types (need to convert 1 tile to get 0 remainder)
         # CRITICAL FIX: Only use existing types with count >= 3 to prevent creating 2-count types
         for from_type in list(rem1_types):  # Use list() to avoid modification during iteration
+            if not type_positions.get(from_type):
+                continue  # No positions to modify
             # Best target: type with remainder=2 (both become divisible)
             target_type = None
             for t, c in type_counts.items():
-                if c % 3 == 2 and t != from_type and t in type_positions:
+                if c % 3 == 2 and t != from_type:  # Removed: t in type_positions
                     target_type = t
                     break
 
             # Second best: type with count >= 6 and divisible by 3 (can afford to become rem1)
             if not target_type:
-                for t, c in type_counts.items():
-                    if c >= 6 and c % 3 == 0 and t != from_type and t in type_positions:
+                for t, c in sorted(type_counts.items(), key=lambda x: -x[1]):
+                    if c >= 6 and c % 3 == 0 and t != from_type:  # Removed: t in type_positions
                         target_type = t
                         break
 
             # Third: type with count >= 3 (minimum safe)
             if not target_type:
                 for t, c in sorted(type_counts.items(), key=lambda x: -x[1]):  # Highest count first
-                    if c >= 3 and t != from_type and t in type_positions:
+                    if c >= 3 and t != from_type:  # Removed: t in type_positions
                         target_type = t
                         break
 
-            # NEVER use random.choice - only use existing types
+            # Fallback: ANY type that isn't from_type
             if not target_type:
-                logger.warning(f"[REDISTRIBUTE] No safe target for rem1 type {from_type}, skipping")
+                for t, c in sorted(type_counts.items(), key=lambda x: -x[1]):
+                    if t != from_type:
+                        target_type = t
+                        break
+
+            if not target_type:
+                logger.warning(f"[REDISTRIBUTE] No target for rem1 type {from_type}, skipping")
                 continue
 
-            if type_positions.get(from_type):
-                layer_idx, pos = type_positions[from_type].pop()
-                layer_key = f"layer_{layer_idx}"
-                if pos in level[layer_key]["tiles"]:
-                    old_data = level[layer_key]["tiles"][pos]
-                    level[layer_key]["tiles"][pos] = [target_type, old_data[1] if len(old_data) > 1 else ""]
-                    type_counts[from_type] -= 1
-                    type_counts[target_type] = type_counts.get(target_type, 0) + 1
+            layer_idx, pos = type_positions[from_type].pop()
+            layer_key = f"layer_{layer_idx}"
+            if pos in level[layer_key]["tiles"]:
+                old_data = level[layer_key]["tiles"][pos]
+                level[layer_key]["tiles"][pos] = [target_type, old_data[1] if len(old_data) > 1 else ""]
+                type_counts[from_type] -= 1
+                type_counts[target_type] = type_counts.get(target_type, 0) + 1
+                if target_type not in type_positions:
+                    type_positions[target_type] = []
+                type_positions[target_type].append((layer_idx, pos))
+                if from_type in rem1_types:
                     rem1_types.remove(from_type)  # Successfully handled
 
         # Step 5: Handle remaining rem2 types
         for from_type in list(rem2_types):
+            if from_type not in rem2_types:  # Already handled
+                continue
             # Best target: type with remainder=1 (both become divisible after transfer)
             target_type = None
-            for t, c in type_counts.items():
-                if c % 3 == 1 and t != from_type and t in type_positions:
-                    target_type = t
-                    break
+            # Recalculate rem1 dynamically
+            current_rem1 = [t for t, c in type_counts.items() if c % 3 == 1 and t != from_type]
+            for t in current_rem1:
+                target_type = t
+                break
 
             if target_type and type_positions.get(from_type) and len(type_positions[from_type]) >= 1:
                 # Change 1 tile to pair with rem1
@@ -9963,18 +10589,23 @@ class LevelGenerator:
                     level[layer_key]["tiles"][pos] = [target_type, old_data[1] if len(old_data) > 1 else ""]
                     type_counts[from_type] -= 1
                     type_counts[target_type] = type_counts.get(target_type, 0) + 1
-                    rem2_types.remove(from_type)
+                    if target_type not in type_positions:
+                        type_positions[target_type] = []
+                    type_positions[target_type].append((layer_idx, pos))
+                    if from_type in rem2_types:
+                        rem2_types.remove(from_type)
             elif type_positions.get(from_type) and len(type_positions[from_type]) >= 2:
                 # Change 2 tiles to an existing type with high count (to minimize impact)
+                # CRITICAL FIX: Don't require type to be in type_positions - just needs high count
                 best_target = None
                 for t, c in sorted(type_counts.items(), key=lambda x: -x[1]):
-                    if c >= 3 and c % 3 == 0 and t != from_type and t in type_positions:
+                    if c >= 3 and c % 3 == 0 and t != from_type:
                         best_target = t
                         break
                 if not best_target:
-                    # Use highest count type as fallback
+                    # Use highest count type as fallback (even if it creates new remainder)
                     for t, c in sorted(type_counts.items(), key=lambda x: -x[1]):
-                        if t != from_type and t in type_positions:
+                        if t != from_type and c >= 3:
                             best_target = t
                             break
 
@@ -9984,7 +10615,7 @@ class LevelGenerator:
 
                 tiles_changed = 0
                 for _ in range(2):
-                    if not type_positions[from_type]:
+                    if not type_positions.get(from_type):
                         break
                     layer_idx, pos = type_positions[from_type].pop()
                     layer_key = f"layer_{layer_idx}"
@@ -9994,36 +10625,85 @@ class LevelGenerator:
                         level[layer_key]["tiles"][pos] = [best_target, old_data[1] if len(old_data) > 1 else ""]
                         type_counts[from_type] -= 1
                         type_counts[best_target] = type_counts.get(best_target, 0) + 1
+                        if best_target not in type_positions:
+                            type_positions[best_target] = []
+                        type_positions[best_target].append((layer_idx, pos))
                         tiles_changed += 1
 
-                if tiles_changed == 2:
+                if tiles_changed == 2 and from_type in rem2_types:
                     rem2_types.remove(from_type)
 
-        # Final validation: Check if all types are now divisible by 3
-        final_counts: Dict[str, int] = {}
-        for i in range(num_layers):
-            layer_key = f"layer_{i}"
-            tiles = level.get(layer_key, {}).get("tiles", {})
-            for pos, tile_data in tiles.items():
-                if isinstance(tile_data, list) and len(tile_data) > 0:
-                    tile_type = tile_data[0]
-                    if not tile_type.startswith("craft_") and not tile_type.startswith("stack_") and tile_type not in self.GOAL_TYPES:
-                        final_counts[tile_type] = final_counts.get(tile_type, 0) + 1
+        # Final validation and emergency fix loop
+        for final_attempt in range(5):  # Max 5 emergency fix attempts
+            final_counts: Dict[str, int] = {}
+            final_positions: Dict[str, List[Tuple[int, str]]] = {}
+            for i in range(num_layers):
+                layer_key = f"layer_{i}"
+                tiles = level.get(layer_key, {}).get("tiles", {})
+                for pos, tile_data in tiles.items():
+                    if isinstance(tile_data, list) and len(tile_data) > 0:
+                        tile_type = tile_data[0]
+                        if not tile_type.startswith("craft_") and not tile_type.startswith("stack_") and tile_type not in self.GOAL_TYPES:
+                            final_counts[tile_type] = final_counts.get(tile_type, 0) + 1
+                            if tile_type not in final_positions:
+                                final_positions[tile_type] = []
+                            final_positions[tile_type].append((i, pos))
 
-        bad_types = []
-        for tile_type, count in final_counts.items():
-            # For t0, add goal internal count
-            if tile_type == "t0":
-                effective = count + goal_internal_t0_count
-                if effective % 3 != 0:
-                    bad_types.append((tile_type, count, f"grid={count}+goal={goal_internal_t0_count}={effective}"))
-            elif count % 3 != 0:
-                bad_types.append((tile_type, count, f"count={count}"))
+            bad_types = []
+            for tile_type, count in final_counts.items():
+                # For t0, add goal internal count
+                if tile_type == "t0":
+                    effective = count + goal_internal_t0_count
+                    if effective % 3 != 0:
+                        bad_types.append((tile_type, count, effective % 3))
+                elif count % 3 != 0:
+                    bad_types.append((tile_type, count, count % 3))
 
-        if bad_types:
-            logger.warning(f"[REDISTRIBUTE] Final validation failed - bad types: {bad_types}")
+            if not bad_types:
+                logger.debug(f"[REDISTRIBUTE] Final validation passed - all {len(final_counts)} types divisible by 3")
+                break
+
+            # EMERGENCY FIX: Force redistribute remaining bad types
+            logger.debug(f"[REDISTRIBUTE] Emergency fix attempt {final_attempt + 1}: {len(bad_types)} bad types")
+
+            for bad_type, bad_count, remainder in bad_types:
+                if not final_positions.get(bad_type):
+                    continue
+
+                # Find best target: type with count divisible by 3 and highest count
+                best_target = None
+                for t, c in sorted(final_counts.items(), key=lambda x: -x[1]):
+                    if c % 3 == 0 and c >= 3 and t != bad_type:
+                        best_target = t
+                        break
+                # Fallback: any type with count >= 3
+                if not best_target:
+                    for t, c in sorted(final_counts.items(), key=lambda x: -x[1]):
+                        if c >= 3 and t != bad_type:
+                            best_target = t
+                            break
+
+                if not best_target:
+                    continue
+
+                # Move tiles based on remainder
+                tiles_to_move = remainder if remainder <= 2 else 3 - remainder
+                moved = 0
+                while moved < tiles_to_move and final_positions.get(bad_type):
+                    layer_idx, pos = final_positions[bad_type].pop()
+                    layer_key = f"layer_{layer_idx}"
+                    if pos in level.get(layer_key, {}).get("tiles", {}):
+                        old_data = level[layer_key]["tiles"][pos]
+                        level[layer_key]["tiles"][pos] = [best_target, old_data[1] if len(old_data) > 1 else ""]
+                        final_counts[bad_type] -= 1
+                        final_counts[best_target] = final_counts.get(best_target, 0) + 1
+                        moved += 1
+                        logger.debug(f"[REDISTRIBUTE_EMERGENCY] Moved tile from {bad_type} to {best_target}")
         else:
-            logger.debug(f"[REDISTRIBUTE] Final validation passed - all {len(final_counts)} types divisible by 3")
+            # Still have bad types after all attempts
+            remaining_bad = [(t, c) for t, c in final_counts.items() if c % 3 != 0]
+            if remaining_bad:
+                logger.warning(f"[REDISTRIBUTE] Final validation failed - bad types: {remaining_bad}")
 
         return level
 
@@ -10189,9 +10869,12 @@ class LevelGenerator:
                 # If no goal tiles but total is somehow already 3-divisible after redistribution
                 # This is handled by _redistribute_tile_types_for_divisibility earlier
 
-                # === PRIORITY 3: Add tiles adjacent to pattern (last resort) ===
+                # === PRIORITY 3: [v15.40] 타입 재분배로 해결 (위치 추가 금지) ===
                 if not pattern_fix_success:
-                    logger.warning("[PATTERN_MODE] No goal tiles available, falling back to adjacent tile addition")
+                    logger.warning("[PATTERN_MODE] No goal tiles available, using type redistribution (no position addition)")
+                    # 패턴 형태 보존: 타일 위치를 추가/삭제하지 않고
+                    # 나머지 타일을 가장 적은 타입으로 재할당
+                    pattern_fix_success = True  # 위치 추가 fallback 차단
 
                     # Find positions adjacent to existing pattern tiles (to maintain cohesion)
                     def get_adjacent_empty_positions(layer_idx: int) -> List[str]:
@@ -10741,6 +11424,162 @@ class LevelGenerator:
                             layer_key = f"layer_{layer_idx}"
                             if pos in level.get(layer_key, {}).get("tiles", {}):
                                 level[layer_key]["tiles"][pos][0] = type_b
+
+        return level
+
+    def _enforce_pyramid_structure(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """[v15.40] 최종 피라미드 구조 강제.
+
+        상위 레이어 타일 수가 하위보다 많으면 가장자리 타일을 제거하여
+        하위의 85% 이하로 줄임. 타일 타입/데이터는 보존.
+        """
+        num_layers = level.get("layer", 1)
+        if num_layers < 2:
+            return level
+        if level.get("_skip_tile_redistribution"):
+            return level
+        # [v15.40] 패턴 모드에서는 패턴 형태 보존이 우선 → 피라미드 강제 건너뜀
+        if level.get("_preserve_pattern"):
+            return level
+
+        layer_counts = []
+        for i in range(num_layers):
+            tiles = level.get(f"layer_{i}", {}).get("tiles", {})
+            layer_counts.append(len(tiles))
+
+        for i in range(1, num_layers):
+            if layer_counts[i] == 0 or layer_counts[i - 1] == 0:
+                continue
+            max_allowed = int(layer_counts[i - 1] * 0.85)
+            if max_allowed < 3:
+                max_allowed = 3
+
+            if layer_counts[i] > max_allowed:
+                layer_key = f"layer_{i}"
+                tiles = level[layer_key]["tiles"]
+                excess = layer_counts[i] - max_allowed
+
+                # 가장자리에서 먼 타일부터 제거 (중앙 보존)
+                pos_list = list(tiles.keys())
+                valid_pos = [p for p in pos_list if "_" in p]
+                if not valid_pos:
+                    continue
+                xs = [int(p.split("_")[0]) for p in valid_pos]
+                ys = [int(p.split("_")[1]) for p in valid_pos]
+                cx = (min(xs) + max(xs)) / 2
+                cy = (min(ys) + max(ys)) / 2
+
+                # 중앙에서 먼 순서로 정렬 → 먼 것부터 제거
+                valid_pos.sort(key=lambda p: -(abs(int(p.split("_")[0]) - cx) + abs(int(p.split("_")[1]) - cy)))
+
+                removed = 0
+                for pos in valid_pos:
+                    if removed >= excess:
+                        break
+                    del tiles[pos]
+                    removed += 1
+
+                level[layer_key]["num"] = str(len(tiles))
+                layer_counts[i] = len(tiles)
+                logger.debug(f"[PYRAMID_ENFORCE] Layer {i}: removed {removed} tiles, now {layer_counts[i]}")
+
+        return level
+
+    def _fix_visual_centering(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """[v15.40] 최종 시각적 중앙정렬 보정 (위치 시프트 방식).
+
+        타일 종류와 개수를 변경하지 않고, 레이어 내 모든 타일의 위치를
+        일괄 이동하여 시각적 중심을 Layer 0에 맞춤.
+
+        Position format: "row_col" (예: "1_2" = row 1, col 2)
+        렌더링 시 홀수 레이어는 row와 col 모두 +0.5 오프셋 적용.
+        """
+        num_layers = level.get("layer", 1)
+        if num_layers < 2:
+            return level
+
+        # 고정 레이아웃/패턴 모드 레벨은 형태 보존이 우선
+        if level.get("_skip_tile_redistribution") or level.get("_preserve_pattern"):
+            return level
+
+        # Layer 0의 시각적 중심 계산 (기준)
+        l0_tiles = level.get("layer_0", {}).get("tiles", {})
+        if not l0_tiles:
+            return level
+
+        l0_rows = [int(p.split("_")[0]) for p in l0_tiles.keys() if "_" in p]
+        l0_cols = [int(p.split("_")[1]) for p in l0_tiles.keys() if "_" in p]
+        if not l0_cols:
+            return level
+
+        ref_row_center = (min(l0_rows) + max(l0_rows)) / 2
+        ref_col_center = (min(l0_cols) + max(l0_cols)) / 2
+
+        for i in range(1, num_layers):
+            layer_key = f"layer_{i}"
+            tiles = level.get(layer_key, {}).get("tiles", {})
+            if len(tiles) < 2:
+                continue
+
+            is_odd = i % 2 == 1
+            offset = 0.5 if is_odd else 0
+
+            # 현재 레이어의 시각적 중심 계산
+            cur_rows = [int(p.split("_")[0]) for p in tiles.keys() if "_" in p]
+            cur_cols = [int(p.split("_")[1]) for p in tiles.keys() if "_" in p]
+            if not cur_cols:
+                continue
+
+            vis_row = (min(cur_rows) + max(cur_rows)) / 2 + offset
+            vis_col = (min(cur_cols) + max(cur_cols)) / 2 + offset
+
+            # 시프트량 계산 (정수만 가능 - 타일은 정수 좌표)
+            # math.floor(x + 0.5) 사용 → 0.5 차이를 -1로 정확히 보정
+            import math
+            diff_row = ref_row_center - vis_row
+            diff_col = ref_col_center - vis_col
+            shift_row = math.floor(diff_row + 0.5) if abs(diff_row) >= 0.4 else 0
+            shift_col = math.floor(diff_col + 0.5) if abs(diff_col) >= 0.4 else 0
+
+            if shift_row == 0 and shift_col == 0:
+                continue
+
+            # 그리드 범위 확인
+            grid_rows = int(level[layer_key].get("row", 9))
+            grid_cols = int(level[layer_key].get("col", 9))
+
+            # 시프트 후 모든 타일이 그리드 안에 있는지 확인
+            new_min_row = min(cur_rows) + shift_row
+            new_max_row = max(cur_rows) + shift_row
+            new_min_col = min(cur_cols) + shift_col
+            new_max_col = max(cur_cols) + shift_col
+
+            # 그리드 밖으로 나가면 시프트를 클램프
+            if new_min_row < 0:
+                shift_row -= new_min_row
+            elif new_max_row >= grid_rows:
+                shift_row -= (new_max_row - grid_rows + 1)
+
+            if new_min_col < 0:
+                shift_col -= new_min_col
+            elif new_max_col >= grid_cols:
+                shift_col -= (new_max_col - grid_cols + 1)
+
+            if shift_row == 0 and shift_col == 0:
+                continue
+
+            # 모든 타일 위치를 일괄 이동 (타일 데이터는 보존)
+            new_tiles = {}
+            for pos, tile_data in tiles.items():
+                if "_" not in pos:
+                    new_tiles[pos] = tile_data
+                    continue
+                r, c = int(pos.split("_")[0]), int(pos.split("_")[1])
+                new_pos = f"{r + shift_row}_{c + shift_col}"
+                new_tiles[new_pos] = tile_data
+
+            level[layer_key]["tiles"] = new_tiles
+            logger.debug(f"[VISUAL_CENTER_SHIFT] Layer {i}: shift=({shift_row},{shift_col})")
 
         return level
 
@@ -11338,20 +12177,27 @@ class LevelGenerator:
                         # Move 2 tiles from rem2 type to a rem0 type with high count
                         type_a = rem2[0]
                         # Find best target: type with highest count that's divisible by 3
+                        # CRITICAL FIX: Don't require target to be in type_positions
                         best_target = None
                         for t, c in sorted(type_counts.items(), key=lambda x: -x[1]):
-                            if c % 3 == 0 and c >= 6 and t != type_a and t in type_positions:
+                            if c % 3 == 0 and c >= 6 and t != type_a:
                                 best_target = t
                                 break
                         if not best_target:
                             for t, c in sorted(type_counts.items(), key=lambda x: -x[1]):
-                                if c % 3 == 0 and c >= 3 and t != type_a and t in type_positions:
+                                if c % 3 == 0 and c >= 3 and t != type_a:
+                                    best_target = t
+                                    break
+                        # Fallback: any type with count >= 3
+                        if not best_target:
+                            for t, c in sorted(type_counts.items(), key=lambda x: -x[1]):
+                                if c >= 3 and t != type_a:
                                     best_target = t
                                     break
 
                         if best_target and len(type_positions.get(type_a, [])) >= 2:
                             moved = 0
-                            while moved < 2 and type_positions[type_a]:
+                            while moved < 2 and type_positions.get(type_a):
                                 layer_idx, pos = type_positions[type_a].pop()
                                 layer_key = f"layer_{layer_idx}"
                                 if pos in level.get(layer_key, {}).get("tiles", {}):
@@ -11370,10 +12216,17 @@ class LevelGenerator:
                         # Move 1 tile from rem1 type to a rem0 type
                         type_a = rem1[0]
                         best_target = None
+                        # CRITICAL FIX: Don't require target to be in type_positions
                         for t, c in sorted(type_counts.items(), key=lambda x: -x[1]):
-                            if c % 3 == 0 and c >= 3 and t != type_a and t in type_positions:
+                            if c % 3 == 0 and c >= 3 and t != type_a:
                                 best_target = t
                                 break
+                        # Fallback: any type with count >= 3
+                        if not best_target:
+                            for t, c in sorted(type_counts.items(), key=lambda x: -x[1]):
+                                if c >= 3 and t != type_a:
+                                    best_target = t
+                                    break
 
                         if best_target and type_positions.get(type_a):
                             layer_idx, pos = type_positions[type_a].pop()
@@ -11812,11 +12665,12 @@ class LevelGenerator:
 
         # Step 2: 블로킹 관계 분석
         def get_blocking_offsets(lower_layer: int, upper_layer: int) -> List[Tuple[int, int]]:
-            """레이어 크기에 따른 블로킹 오프셋 반환"""
+            """[v15.49 revert] 원래 col-기반 로직 — 디바이스와 일치."""
+            lower_parity = lower_layer % 2
+            upper_parity = upper_layer % 2
             lower_col = int(level.get(f"layer_{lower_layer}", {}).get("col", 7))
             upper_col = int(level.get(f"layer_{upper_layer}", {}).get("col", 7))
-
-            if lower_col == upper_col:
+            if lower_parity == upper_parity:
                 return BLOCKING_OFFSETS_SAME_PARITY
             elif upper_col > lower_col:
                 return BLOCKING_OFFSETS_UPPER_BIGGER
@@ -11952,6 +12806,11 @@ class LevelGenerator:
         """
         import copy
         import random
+
+        # [v15.36] 고정 레이아웃 레벨: 타일 교체 건너뛰기
+        if level.get("_skip_tile_redistribution", False):
+            logger.info("[_fix_same_type_blocking] Skipping for fixed layout level")
+            return level
 
         level = copy.deepcopy(level)
         num_layers = level.get("layer", 8)
@@ -12116,15 +12975,18 @@ class LevelGenerator:
         profile = get_profile("optimal")
 
         # Run small number of simulations for quick check
+        # [v15.54] 5 iterations w/ 0.3 threshold — speed/accuracy 균형. v15.43에서 10으로
+        # 늘렸으나 매 generate마다 ~30~50 sims가 누적되어 생성 시간이 3-7초로 급증함.
+        # 5 iter + threshold 0.3은 noise 충분히 억제하면서 cost 50% 절감.
         result = simulator.simulate_with_profile(
             level_json=level,
             profile=profile,
-            iterations=3,  # Quick check with 3 iterations
+            iterations=5,
             max_moves=max_moves,
             seed=None
         )
 
-        has_deadlock = result.clear_rate < 0.34  # Less than 1/3 clears
+        has_deadlock = result.clear_rate < 0.3
 
         failure_reason = ""
         if has_deadlock:
@@ -12163,6 +13025,11 @@ class LevelGenerator:
         """
         import copy
         import random
+
+        # [v15.36] 고정 레이아웃 레벨: 타일 재분배 건너뛰기
+        if level.get("_skip_tile_redistribution", False):
+            logger.info("[_reshuffle_tiles_across_layers] Skipping for fixed layout level")
+            return level
 
         level = copy.deepcopy(level)
         num_layers = level.get("layer", 8)
@@ -12280,6 +13147,11 @@ class LevelGenerator:
         if not problem_types:
             return level
 
+        # [v15.36] 고정 레이아웃 레벨: 타일 재분배 건너뛰기
+        if level.get("_skip_tile_redistribution", False):
+            logger.info("[_fix_layer_distribution] Skipping redistribution for fixed layout level")
+            return level
+
         num_layers = level.get("layer", 8)
 
         # Check if level uses t0 or pre-assigned tiles
@@ -12360,7 +13232,7 @@ class LevelGenerator:
 
     def _ensure_no_deadlock(
         self, level: Dict[str, Any], max_attempts: int = 10
-    ) -> Tuple[Dict[str, Any], bool]:
+    ) -> Tuple[Dict[str, Any], bool, float]:
         """
         Hybrid deadlock prevention: combines fast validation with simulation.
 
@@ -12437,7 +13309,7 @@ class LevelGenerator:
                     f"[_ensure_no_deadlock] Level passed deadlock check "
                     f"(clear_rate: {deadlock_result['clear_rate']:.1%})"
                 )
-                return level, True
+                return level, True, float(deadlock_result.get("clear_rate", 1.0))
 
             # Track best result
             if deadlock_result["clear_rate"] > best_clear_rate:
@@ -12465,7 +13337,7 @@ class LevelGenerator:
             f"[_ensure_no_deadlock] Could not fully resolve deadlock after {max_attempts} attempts. "
             f"Best clear_rate: {best_clear_rate:.1%}"
         )
-        return best_level, best_clear_rate >= 0.1  # Accept if at least 10% clear rate
+        return best_level, best_clear_rate >= 0.1, best_clear_rate  # Accept if at least 10% clear rate
 
     def _validate_and_fix_obstacles(self, level: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -12584,8 +13456,33 @@ class LevelGenerator:
                                 # NEW: Check if target has blocking gimmick
                                 if target_attr in BLOCKING_GIMMICKS:
                                     invalid_reason = f"target has blocking gimmick '{target_attr}'"
+                                # CRITICAL: Target must NOT have link attribute
+                                # Link tiles cannot be targets of other links
+                                elif target_attr and target_attr.startswith("link_"):
+                                    invalid_reason = f"target is already a link source '{target_attr}'"
                                 else:
-                                    valid_link = True
+                                    # CRITICAL: Check if any adjacent tile (other than target) has link
+                                    # Link tiles should not be adjacent to other link tiles
+                                    adjacent_positions = [
+                                        f"{col}_{row - 1}",  # North
+                                        f"{col}_{row + 1}",  # South
+                                        f"{col - 1}_{row}",  # West
+                                        f"{col + 1}_{row}",  # East
+                                    ]
+                                    has_adjacent_link = False
+                                    for adj_pos in adjacent_positions:
+                                        if adj_pos == target_pos:  # Skip the target itself
+                                            continue
+                                        if adj_pos in tiles:
+                                            adj_tile = tiles[adj_pos]
+                                            if isinstance(adj_tile, list) and len(adj_tile) >= 2:
+                                                adj_attr = adj_tile[1]
+                                                if adj_attr and adj_attr.startswith("link_"):
+                                                    has_adjacent_link = True
+                                                    invalid_reason = f"adjacent tile {adj_pos} has link '{adj_attr}'"
+                                                    break
+                                    if not has_adjacent_link:
+                                        valid_link = True
                             else:
                                 invalid_reason = "target is a goal tile"
                         else:

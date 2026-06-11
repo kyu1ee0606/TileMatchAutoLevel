@@ -169,21 +169,21 @@ def get_special_shape_pattern_index() -> int:
 # NOTE: symmetry_mode="none" ensures exact tile counts (symmetry can cause count variations)
 TUTORIAL_LEVEL_CONFIGS = {
     1: {
-        "description": "첫 번째 레벨: 3종류 타일 × 3개 = 9타일 기본 매칭",
-        "tile_types": ["t1", "t2", "t3"],
-        "total_tiles": 9,  # Exactly 3 sets of 3
-        "grid_size": (5, 5),
+        "description": "첫 번째 레벨: 3×3=9타일, 1레이어",
+        "tile_types": ["t1", "t4", "t7"],  # [v15.40] 색상 균등 3종
+        "total_tiles": 9,
+        "grid_size": (3, 3),
         "max_layers": 1,
-        "goals": [],  # No craft/stack goals
+        "goals": [],
         "obstacle_types": [],
-        "symmetry_mode": "none",  # Exact tile count required
+        "symmetry_mode": "none",
         "target_difficulty": 0.05,
     },
     2: {
-        "description": "두 번째 레벨: 고정 레이아웃 4×3(12) + 3×3(9) = 21타일, 2레이어",
-        "tile_types": ["t1", "t2", "t3"],
-        "total_tiles": 21,  # Fixed layout: 4×3 + 3×3
-        "grid_size": (7, 7),  # Standard grid for fixed layout
+        "description": "두 번째 레벨: 5×3(15) + 4×3(12) = 27타일, 2레이어",
+        "tile_types": ["t1", "t4", "t7"],  # [v15.40] 색상 균등 3종
+        "total_tiles": 27,
+        "grid_size": (5, 5),
         "max_layers": 2,
         "goals": [],
         "obstacle_types": [],
@@ -191,10 +191,10 @@ TUTORIAL_LEVEL_CONFIGS = {
         "target_difficulty": 0.08,
     },
     3: {
-        "description": "세 번째 레벨: 고정 레이아웃 6×3(18) + 섬모양 2×3×2(12) = 30타일, 2레이어",
-        "tile_types": ["t1", "t2", "t3", "t4"],
-        "total_tiles": 30,  # Fixed layout: 6×3 + two 2×3 islands
-        "grid_size": (7, 7),  # Standard grid for fixed layout
+        "description": "세 번째 레벨: 5×5(25) + 대각선2 = 27타일, 2레이어",
+        "tile_types": ["t1", "t4", "t7", "t10"],  # [v15.40] 색상 균등 4종
+        "total_tiles": 27,
+        "grid_size": (5, 5),
         "max_layers": 2,
         "goals": [],
         "obstacle_types": [],
@@ -457,6 +457,30 @@ def select_gimmicks_with_unlock_probability(
             logger.info(f"[GIMMICK_SELECT] Level {level_number}: Found tutorial gimmick '{tutorial_gimmick}' (unlock_level={unlock_level})")
             break
 
+    # [v15.58] Find the PRACTICE gimmick — the gimmick currently in its practice phase.
+    # 해당 기믹이 unlock 직후 practice 기간(unlock_level+1 ~ unlock_level+practice_levels)이면
+    # 그 레벨은 그 기믹을 학습하기 위한 레벨이므로 강제 포함해야 함.
+    # 기존: probability-based (50%) → ice 등 attribute 기믹이 0/10 누락 사례 발생.
+    practice_gimmick = None
+    if tutorial_gimmick is None:
+        # Tutorial이 아니면서 practice 진행 중인 가장 최근 unlock 기믹 찾기
+        try:
+            from ...models.leveling_config import PROFESSIONAL_GIMMICK_UNLOCK
+            best_match = None
+            best_unlock = -1
+            for gimmick_name, config in PROFESSIONAL_GIMMICK_UNLOCK.items():
+                practice_end = config.unlock_level + config.practice_levels  # exclusive
+                if config.unlock_level < level_number < practice_end:
+                    # 이 기믹은 현재 practice 중. 가장 늦게 unlock된 것 우선.
+                    if config.unlock_level > best_unlock:
+                        best_unlock = config.unlock_level
+                        best_match = gimmick_name
+            if best_match:
+                practice_gimmick = best_match
+                logger.info(f"[GIMMICK_SELECT] Level {level_number}: Found practice gimmick '{practice_gimmick}' (unlock={best_unlock})")
+        except Exception as e:
+            logger.warning(f"[GIMMICK_SELECT] practice gimmick lookup failed: {e}")
+
     # Get all unlocked gimmicks at this level (using passed unlock_levels for flexibility)
     # But merge with canonical for tutorial gimmick
     effective_unlock_levels = {**canonical_unlock_levels, **(unlock_levels or {})}
@@ -466,22 +490,30 @@ def select_gimmicks_with_unlock_probability(
     ]
 
     # If available_gimmicks provided, filter to only those
-    # BUT always keep tutorial_gimmick if it exists
+    # BUT always keep tutorial_gimmick / practice_gimmick if they exist
     if available_gimmicks:
-        unlocked_gimmicks = [g for g in unlocked_gimmicks if g in available_gimmicks or g == tutorial_gimmick]
+        unlocked_gimmicks = [
+            g for g in unlocked_gimmicks
+            if g in available_gimmicks or g == tutorial_gimmick or g == practice_gimmick
+        ]
 
     if not unlocked_gimmicks:
         return []
 
     selected = []
 
-    # Step 1: Tutorial gimmick is ALWAYS included (forced - no conditions)
+    # Step 1a: Tutorial gimmick is ALWAYS included (forced - no conditions)
     if tutorial_gimmick:
         selected.append(tutorial_gimmick)
         logger.info(f"[GIMMICK_SELECT] Level {level_number}: Tutorial gimmick '{tutorial_gimmick}' FORCED (mandatory)")
 
+    # Step 1b: Practice gimmick is ALSO ALWAYS included (forced - currently learning this gimmick)
+    if practice_gimmick and practice_gimmick != tutorial_gimmick and practice_gimmick not in selected:
+        selected.append(practice_gimmick)
+        logger.warning(f"[GIMMICK_SELECT_PRACTICE] Level {level_number}: Practice gimmick '{practice_gimmick}' FORCED (currently in practice phase)")
+
     # Step 2: For other unlocked gimmicks, include with probability
-    other_gimmicks = [g for g in unlocked_gimmicks if g != tutorial_gimmick]
+    other_gimmicks = [g for g in unlocked_gimmicks if g not in selected]
     random.shuffle(other_gimmicks)  # Randomize order for fair selection
 
     for gimmick in other_gimmicks:
@@ -926,32 +958,23 @@ def generate_level(
             import time
             start_time = time.time()
 
-            # Fixed 3x3 layout centered in 5x5 grid (positions 1-3 in both axes)
+            # [v15.40] Fixed 3x3 layout — 색상 균등 (t1, t4, t7)
             level_json = {
                 "layer": 1,
                 "useTileCount": 3,
                 "randSeed": random.randint(1, 999999),
                 "layer_0": {
-                    "col": "5",
-                    "row": "5",
+                    "col": "3",
+                    "row": "3",
                     "tiles": {
-                        # Row 1: t1 t1 t1
-                        "1_1": ["t1", ""],
-                        "2_1": ["t1", ""],
-                        "3_1": ["t1", ""],
-                        # Row 2: t2 t2 t2
-                        "1_2": ["t2", ""],
-                        "2_2": ["t2", ""],
-                        "3_2": ["t2", ""],
-                        # Row 3: t3 t3 t3
-                        "1_3": ["t3", ""],
-                        "2_3": ["t3", ""],
-                        "3_3": ["t3", ""],
+                        "0_0": ["t1", ""], "1_0": ["t1", ""], "2_0": ["t1", ""],
+                        "0_1": ["t4", ""], "1_1": ["t4", ""], "2_1": ["t4", ""],
+                        "0_2": ["t7", ""], "1_2": ["t7", ""], "2_2": ["t7", ""],
                     },
                     "num": "9"
                 },
                 "goalCount": {},
-                "max_moves": 19,  # 9 tiles + 10 generous
+                "max_moves": 19,
                 "target_difficulty": 0.05,
                 "is_tutorial": True,
                 "tutorial_level": 1
@@ -995,6 +1018,8 @@ def generate_level(
             actual_difficulty=result.actual_difficulty,
             grade=result.grade.value,
             generation_time_ms=result.generation_time_ms,
+            playability_warning=getattr(result, "playability_warning", False),
+            estimated_clear_rate=getattr(result, "estimated_clear_rate", 1.0),
         )
 
     # Convert goals from Pydantic models to dicts
@@ -1220,6 +1245,8 @@ def generate_level(
                 actual_difficulty=result.actual_difficulty,
                 grade=result.grade.value,
                 generation_time_ms=result.generation_time_ms,
+                playability_warning=getattr(result, "playability_warning", False),
+                estimated_clear_rate=getattr(result, "estimated_clear_rate", 1.0),
             )
         except Exception as e:
             import traceback

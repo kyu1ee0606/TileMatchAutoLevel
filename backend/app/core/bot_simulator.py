@@ -2158,7 +2158,6 @@ class BotSimulator:
                     continue
 
                 tile_parity = tile.layer_idx % 2
-                cur_layer_col = state.layer_cols.get(tile.layer_idx, 7)
 
                 for upper_layer_idx in range(tile.layer_idx + 1, max_layer + 1):
                     upper_layer = state.tiles.get(upper_layer_idx, {})
@@ -2166,9 +2165,10 @@ class BotSimulator:
                         continue
 
                     upper_parity = upper_layer_idx % 2
-                    upper_layer_col = state.layer_cols.get(upper_layer_idx, 7)
 
-                    # Determine blocking offsets
+                    # [v15.49 revert] 원래 col-기반 로직 복원 — 디바이스와 일치.
+                    upper_layer_col = state.layer_cols.get(upper_layer_idx, 7)
+                    cur_layer_col = state.layer_cols.get(tile.layer_idx, 7)
                     if tile_parity == upper_parity:
                         blocking_offsets = BotSimulator.BLOCKING_OFFSETS_SAME_PARITY
                     elif upper_layer_col > cur_layer_col:
@@ -2368,7 +2368,6 @@ class BotSimulator:
             return False
 
         tile_parity = tile.layer_idx % 2
-        cur_layer_col = state.layer_cols.get(tile.layer_idx, 7)
 
         result = False
         for upper_layer_idx in range(tile.layer_idx + 1, max_layer + 1):
@@ -2378,14 +2377,15 @@ class BotSimulator:
 
             upper_parity = upper_layer_idx % 2
             upper_layer_col = state.layer_cols.get(upper_layer_idx, 7)
+            cur_layer_col = state.layer_cols.get(tile.layer_idx, 7)
 
+            # [v15.49 revert] 원래 col-기반 로직 — 디바이스와 일치
             if tile_parity == upper_parity:
                 blocking_offsets = BotSimulator.BLOCKING_OFFSETS_SAME_PARITY
+            elif upper_layer_col > cur_layer_col:
+                blocking_offsets = BotSimulator.BLOCKING_OFFSETS_UPPER_BIGGER
             else:
-                if upper_layer_col > cur_layer_col:
-                    blocking_offsets = BotSimulator.BLOCKING_OFFSETS_UPPER_BIGGER
-                else:
-                    blocking_offsets = BotSimulator.BLOCKING_OFFSETS_UPPER_SMALLER
+                blocking_offsets = BotSimulator.BLOCKING_OFFSETS_UPPER_SMALLER
 
             for dx, dy in blocking_offsets:
                 bx = tile.x_idx + dx

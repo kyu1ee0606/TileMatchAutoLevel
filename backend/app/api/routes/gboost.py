@@ -2,8 +2,11 @@
 import base64
 import io
 import json
+import logging
 import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from pydantic import BaseModel
 from typing import Optional
@@ -174,18 +177,11 @@ async def save_level_to_gboost(
 async def load_level_from_gboost(
     board_id: str,
     level_id: str,
+    project_id: str = Query(default="", description="Override project ID"),
     client: GBoostClient = Depends(get_gboost),
 ) -> GBoostLoadResponse:
     """
     Load a level from GBoost server.
-
-    Args:
-        board_id: Board identifier.
-        level_id: Level identifier.
-        client: GBoostClient dependency.
-
-    Returns:
-        GBoostLoadResponse with level data and metadata.
     """
     if not client.is_configured:
         raise HTTPException(
@@ -193,7 +189,7 @@ async def load_level_from_gboost(
             detail="GBoost client not configured",
         )
 
-    result = await client.load_level(board_id, level_id)
+    result = await client.load_level(board_id, level_id, project_id_override=project_id)
 
     if result is None:
         raise HTTPException(
@@ -211,7 +207,8 @@ async def load_level_from_gboost(
 async def list_levels_from_gboost(
     board_id: str,
     prefix: str = Query(default="level_", description="Level ID prefix filter"),
-    limit: int = Query(default=100, ge=1, le=1000, description="Maximum results"),
+    limit: int = Query(default=100, ge=1, le=10000, description="Maximum results"),
+    project_id: str = Query(default="", description="Override project ID (다른 프로젝트에서 가져오기)"),
     client: GBoostClient = Depends(get_gboost),
 ) -> GBoostListResponse:
     """
@@ -232,7 +229,7 @@ async def list_levels_from_gboost(
             detail="GBoost client not configured",
         )
 
-    levels = await client.list_levels(board_id, prefix, limit)
+    levels = await client.list_levels(board_id, prefix, limit, project_id_override=project_id)
 
     return GBoostListResponse(
         levels=[
@@ -355,6 +352,28 @@ def _count_active_layers(level_json: dict) -> int:
     return active
 
 
+def _tile_pos_sort_key(pos: str) -> tuple:
+    """Sort key for tile position strings ("col_row") in row-major order (top→bottom, left→right)."""
+    try:
+        x, y = pos.split("_")
+        return (0, int(y), int(x))
+    except (ValueError, AttributeError):
+        # Malformed keys go last, preserving relative order among themselves
+        return (1, 0, 0)
+
+
+def _normalize_tiles_order(tiles: dict) -> dict:
+    """
+    Re-emit tiles in row-major key order.
+
+    The in-game client derives block order from the JSON key sequence, so the
+    generator's placement-order keys must be normalized before upload.
+    """
+    if not isinstance(tiles, dict):
+        return {}
+    return {pos: tiles[pos] for pos in sorted(tiles, key=_tile_pos_sort_key)}
+
+
 def _convert_to_townpop_format(level_json: dict) -> dict:
     """
     Convert level data to TownPop/GBoost-compatible format with all metadata.
@@ -381,7 +400,7 @@ def _convert_to_townpop_format(level_json: dict) -> dict:
             # Copy layer data with proper types
             layer_data["col"] = str(src_layer.get("col", col))
             layer_data["row"] = str(src_layer.get("row", row))
-            layer_data["tiles"] = src_layer.get("tiles", {})
+            layer_data["tiles"] = _normalize_tiles_order(src_layer.get("tiles", {}))
             layer_data["num"] = str(len(layer_data["tiles"]))
             map_data[layer_key] = layer_data
 
@@ -401,6 +420,34 @@ def _convert_to_townpop_format(level_json: dict) -> dict:
     if not goal_count:
         goal_count = auto_goal_counts
 
+    # Recompute useTileCount from the level's actual regular tile types.
+    # Some saved levels carry stale/inflated useTileCount (e.g., 6 when only 2 colors present)
+    # because /generate/from-template wrote the requested count without verifying that any
+    # t0 placeholders actually got replaced. Shipping a stale value to the client can break
+    # color distribution at runtime, so we always emit the value derived from the level itself.
+    actual_tile_types: set = set()
+    for i in range(num_layers):
+        layer_key = f"layer_{i}"
+        ld = level_json.get(layer_key)
+        if not isinstance(ld, dict):
+            continue
+        tiles = ld.get("tiles")
+        if not isinstance(tiles, dict):
+            continue
+        for tile in tiles.values():
+            if not isinstance(tile, list) or len(tile) < 1:
+                continue
+            tt = tile[0] if isinstance(tile[0], str) else ""
+            if tt.startswith("t") and tt[1:].isdigit() and tt != "t0":
+                actual_tile_types.add(tt)
+    stored_use_tile_count = int(level_json.get("useTileCount", 6) or 6)
+    derived_use_tile_count = len(actual_tile_types) if actual_tile_types else stored_use_tile_count
+    if derived_use_tile_count != stored_use_tile_count:
+        logger.info(
+            "[townpop] useTileCount stored=%s but actual=%s (%s) — emitting actual",
+            stored_use_tile_count, derived_use_tile_count, sorted(actual_tile_types),
+        )
+
     # Build GBoost-compatible structure (matching admin panel fields EXACTLY)
     # All fields from GBoost admin panel must be included
     # IMPORTANT: GBoost stores fields as columns, so nested objects like 'map' must be stringified
@@ -413,6 +460,7 @@ def _convert_to_townpop_format(level_json: dict) -> dict:
         "col": str(col),
         "row": str(row),
         "rewardCoin": str(level_json.get("rewardCoin", 10)),
+        "autoCollectCount": str(level_json.get("autoCollectCount", 0)),
         "useInRandomizer": "1" if level_json.get("useInRandomizer", False) else "0",
         "randSeed": str(level_json.get("randSeed", level_json.get("seed", 0))),
         "shuffleLayer": str(level_json.get("shuffleLayer", 0)),
@@ -425,7 +473,7 @@ def _convert_to_townpop_format(level_json: dict) -> dict:
         "num": str(total_tiles),
         "sets": str(total_tiles // 3),
         "layer": str(active_layers),
-        "useTileCount": str(level_json.get("useTileCount", 6)),
+        "useTileCount": str(derived_use_tile_count),
         "typeImbalance": str(level_json.get("typeImbalance", level_json.get("tileImbalance", ""))),
         "rewardList": json.dumps(level_json.get("rewardList", [])),
         "etime": str(int(time.time())),

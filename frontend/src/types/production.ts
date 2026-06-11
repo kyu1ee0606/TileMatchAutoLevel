@@ -153,9 +153,17 @@ export interface ProductionLevelMeta {
   verified?: boolean;                            // 검증 완료 여부
   verification_passed?: boolean;                 // 검증 통과 여부
 
+  // [v15.35] 재생성 정보
+  regenerated?: boolean;                         // 재생성 여부
+  regeneration_attempts?: number;                // 재생성 시도 횟수
+
   // 패턴 생성 정보
   pattern_index?: number;                        // 사용된 패턴 인덱스 (undefined = 랜덤/패턴 없음)
   pattern_type?: 'aesthetic' | 'geometric' | 'clustered';  // 패턴 타입
+
+  // [v15.55] 레벨 템플릿 기반 생성 출처
+  template_id?: string;                          // 사용된 템플릿 ID (템플릿 기반이면 존재)
+  template_source_difficulty?: number;           // 템플릿의 측정 난이도
 
   // 재생성 추적 (이진 탐색 수렴용)
   regen_attempts?: number;          // 재생성 시도 횟수

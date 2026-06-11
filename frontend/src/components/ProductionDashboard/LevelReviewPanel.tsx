@@ -3,14 +3,18 @@
  * 레벨 검토 및 승인/거부 패널
  */
 
+import { useState } from 'react';
 import { ProductionLevel } from '../../types/production';
+import { LevelJSON } from '../../types';
 import { Button } from '../ui';
+import { fixCentering } from '../../api/analyze';
 
 interface LevelReviewPanelProps {
   level: ProductionLevel;
   onApprove: () => void;
   onReject: (reason: string) => void;
   onNeedsRework: (reason: string) => void;
+  onLevelUpdate?: (updatedLevelJson: LevelJSON) => void;
 }
 
 export function LevelReviewPanel({
@@ -18,8 +22,11 @@ export function LevelReviewPanel({
   onApprove,
   onReject,
   onNeedsRework,
+  onLevelUpdate,
 }: LevelReviewPanelProps) {
   const { meta } = level;
+  const [isCentering, setIsCentering] = useState(false);
+  const [centeringResult, setCenteringResult] = useState<{ modified: boolean; diffBefore: number; diffAfter: number } | null>(null);
 
   const handleReject = () => {
     const reason = prompt('거부 사유를 입력하세요:');
@@ -32,6 +39,34 @@ export function LevelReviewPanel({
     const reason = prompt('수정이 필요한 이유를 입력하세요:');
     if (reason) {
       onNeedsRework(reason);
+    }
+  };
+
+  // [v15.40] 중앙정렬 수정
+  const handleFixCentering = async () => {
+    setIsCentering(true);
+    setCenteringResult(null);
+    try {
+      const levelJson = {
+        ...(level.level_json as unknown as Record<string, unknown>),
+        level_number: meta.level_number,
+      };
+      const response = await fixCentering([levelJson]);
+      if (response.results.length > 0) {
+        const result = response.results[0];
+        setCenteringResult({
+          modified: result.was_modified,
+          diffBefore: result.center_diff_before,
+          diffAfter: result.center_diff_after,
+        });
+        if (result.was_modified && onLevelUpdate) {
+          onLevelUpdate(result.level_json as unknown as LevelJSON);
+        }
+      }
+    } catch (error) {
+      console.error('[FixCentering] Error:', error);
+    } finally {
+      setIsCentering(false);
     }
   };
 
@@ -158,6 +193,25 @@ export function LevelReviewPanel({
           거부 사유: {meta.rejection_reason}
         </div>
       )}
+
+      {/* [v15.40] 중앙정렬 수정 */}
+      <div className="flex items-center gap-2">
+        <Button
+          onClick={handleFixCentering}
+          disabled={isCentering}
+          variant="secondary"
+          className="text-xs"
+        >
+          {isCentering ? '정렬 중...' : '중앙정렬 수정'}
+        </Button>
+        {centeringResult && (
+          <span className={`text-xs ${centeringResult.modified ? 'text-blue-400' : 'text-gray-500'}`}>
+            {centeringResult.modified
+              ? `수정됨 (${centeringResult.diffBefore.toFixed(1)} → ${centeringResult.diffAfter.toFixed(1)})`
+              : '이미 정렬됨'}
+          </span>
+        )}
+      </div>
 
       {/* Actions */}
       {meta.status !== 'approved' && meta.status !== 'exported' && (

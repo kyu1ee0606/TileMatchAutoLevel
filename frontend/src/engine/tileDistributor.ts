@@ -109,105 +109,142 @@ export class TileDistributor {
   private static readonly IMBALANCE_FACTOR = 3.0;  // 불균형 강도 (matches C#)
   private static readonly KEY_TILE_INDEX = 16;     // 키타일 인덱스
 
+  private static readonly TILES_PER_COLOR = 3;
+
   /**
-   * Distribute tile type indices matching C# DistributeTiles().
+   * [v15.40] 색상 버킷 2단계 분배 - 인게임 DistributeTiles() 동기화
+   *
+   * 1단계: 색상 단위 분배 (용량 비례 + 불균형)
+   * 2단계: 색상 내 타일 분배 (Fisher-Yates로 rnd 사용)
    *
    * @param setLength - Number of tile sets (total t0 tiles / 3)
-   * @param tileTypeCount - Number of tile types to use (useTileCount)
+   * @param tileTypeCount - Number of tile types to use (useTileCount, 1~15)
    * @param specifiedCount - Number of key tile (t16) sets
-   * @param imbalanceSliderValue - Imbalance factor (0.0 = balanced, 1.0 = imbalanced)
-   * @returns List of tile type indices (e.g., [1, 1, 1, 2, 2, 2, 3, ...])
+   * @param imbalance - Imbalance factor (0.0~1.0)
+   * @param rnd - zWellRandom instance for deterministic Fisher-Yates
+   * @returns List of tile type indices (e.g., [1, 1, 1, 4, 4, 4, 7, ...])
    */
   static distributeTiles(
     setLength: number,
     tileTypeCount: number,
     specifiedCount: number = 0,
-    imbalanceSliderValue: number = 0.0
+    imbalance: number = 0.0,
+    rnd?: zWellRandom
   ): number[] {
     if (setLength <= 0 || tileTypeCount <= 0) {
       return [];
     }
 
     const specifiedIndex = TileDistributor.KEY_TILE_INDEX;
-
-    // 1. Calculate non-specified total
     const nonSpecifiedTotal = setLength - specifiedCount;
+    if (nonSpecifiedTotal <= 0) {
+      return new Array(specifiedCount).fill(specifiedIndex);
+    }
 
-    // 1-1. Allocate minimum 1 set per tile type
-    const nonSpecifiedCounts = new Array(tileTypeCount).fill(1);
+    const activeColors = Math.ceil(tileTypeCount / TileDistributor.TILES_PER_COLOR);
 
-    // 2. Distribute remaining sets based on imbalance setting
-    if (imbalanceSliderValue > 0) {
-      // Imbalanced distribution
-      let remainingSets = nonSpecifiedTotal - tileTypeCount;
-      if (remainingSets > 0) {
-        const baseCount = remainingSets / tileTypeCount;
+    // 색상별 용량 계산: ColorCapacity(c) = min(3, max(0, useTileCount - c*3))
+    const colorCap: number[] = [];
+    for (let c = 0; c < activeColors; c++) {
+      colorCap.push(Math.min(3, Math.max(0, tileTypeCount - c * 3)));
+    }
 
-        for (let i = 0; i < tileTypeCount; i++) {
-          // Normalization factor: (2*i - (tileTypeCount-1)) / (tileTypeCount-1)
-          let normalizationFactor = 0;
-          if (tileTypeCount > 1) {
-            normalizationFactor = (2 * i - (tileTypeCount - 1)) / (tileTypeCount - 1);
+    // === 1단계: 색상 단위 분배 ===
+
+    // 1-A: 용량 비례 base 분배
+    const totalCap = colorCap.reduce((a, b) => a + b, 0);
+    const colorSet: number[] = colorCap.map(cap =>
+      Math.floor(nonSpecifiedTotal * cap / totalCap)
+    );
+
+    // 1-B: 나머지를 색상 인덱스 순으로 +1 (rnd 미사용)
+    let remainder = nonSpecifiedTotal - colorSet.reduce((a, b) => a + b, 0);
+    for (let c = 0; remainder > 0; c++) {
+      colorSet[c % activeColors] += 1;
+      remainder--;
+    }
+
+    // 1-C: 불균형 적용
+    if (imbalance > 0 && activeColors > 1) {
+      const baseShare = nonSpecifiedTotal / activeColors;
+      for (let c = 0; c < activeColors; c++) {
+        const normFactor = (2 * c - (activeColors - 1)) / (activeColors - 1);
+        const delta = Math.round(baseShare * imbalance * TileDistributor.IMBALANCE_FACTOR * normFactor);
+        colorSet[c] = Math.max(0, colorSet[c] + delta);
+      }
+      // 총합 재보정 (rnd 미사용)
+      let diff = nonSpecifiedTotal - colorSet.reduce((a, b) => a + b, 0);
+      while (diff !== 0) {
+        if (diff > 0) {
+          // 가장 적은 색상에 추가
+          let minIdx = 0;
+          for (let c = 1; c < activeColors; c++) {
+            if (colorSet[c] < colorSet[minIdx]) minIdx = c;
           }
-
-          const calculatedSetCount = baseCount * (
-            imbalanceSliderValue * TileDistributor.IMBALANCE_FACTOR * normalizationFactor
-          );
-          nonSpecifiedCounts[i] += Math.max(0, Math.round(calculatedSetCount));
-        }
-      }
-    } else {
-      // Balanced distribution (round-robin)
-      let remainingSets = nonSpecifiedTotal - tileTypeCount;
-      if (remainingSets > 0) {
-        for (let i = 0; i < remainingSets; i++) {
-          const targetIndex = i % tileTypeCount;
-          nonSpecifiedCounts[targetIndex] += 1;
-        }
-      }
-    }
-
-    // 3. Adjust if total doesn't match
-    let currentTotal = nonSpecifiedCounts.reduce((a, b) => a + b, 0);
-    let difference = nonSpecifiedTotal - currentTotal;
-
-    if (difference !== 0) {
-      // Create indexed counts for sorting (matches C# adjustTiles - NOT updated in loop)
-      const indexedCounts: Array<[number, number]> = nonSpecifiedCounts.map(
-        (count, idx) => [count, idx]
-      );
-
-      for (let j = 0; j < Math.abs(difference); j++) {
-        if (difference > 0) {
-          // Add to tile with lowest count
-          // C# uses OrderBy which doesn't modify original, so we copy and sort
-          const sorted = [...indexedCounts].sort((a, b) => a[0] - b[0]);
-          const minIdx = sorted[0][1];
-          nonSpecifiedCounts[minIdx] += 1;
-          // NOTE: C# doesn't update adjustTiles here, so we don't update indexedCounts
+          colorSet[minIdx] += 1;
+          diff--;
         } else {
-          // Remove from tile with highest count
-          // C# uses OrderByDescending which doesn't modify original, so we copy and sort
-          const sorted = [...indexedCounts].sort((a, b) => b[0] - a[0]);
-          const maxIdx = sorted[0][1];
-          nonSpecifiedCounts[maxIdx] -= 1;
-          // NOTE: C# doesn't update adjustTiles here, so we don't update indexedCounts
+          // 가장 많은 색상에서 제거
+          let maxIdx = 0;
+          for (let c = 1; c < activeColors; c++) {
+            if (colorSet[c] > colorSet[maxIdx]) maxIdx = c;
+          }
+          colorSet[maxIdx] -= 1;
+          diff++;
         }
       }
     }
 
-    // 4. Generate final list (tile type indices)
+    // === 2단계: 색상 내 타일 분배 ===
+    const tilePerSlot: number[][] = [];
+    for (let c = 0; c < activeColors; c++) {
+      const cap = colorCap[c];
+      const slots = new Array(3).fill(0);
+
+      if (cap <= 0 || colorSet[c] <= 0) {
+        tilePerSlot.push(slots);
+        continue;
+      }
+
+      const quotient = Math.floor(colorSet[c] / cap);
+      const rem = colorSet[c] % cap;
+
+      for (let offset = 0; offset < cap; offset++) {
+        slots[offset] = quotient;
+      }
+
+      // rem개를 rnd로 랜덤 offset에 +1 (Fisher-Yates)
+      if (rem > 0 && cap > 1 && rnd) {
+        const indices: number[] = [];
+        for (let i = 0; i < cap; i++) indices.push(i);
+        // Fisher-Yates shuffle (역순, rnd.rand(0, i) inclusive)
+        for (let i = cap - 1; i >= 1; i--) {
+          const j = rnd.rand(0, i);
+          [indices[i], indices[j]] = [indices[j], indices[i]];
+        }
+        for (let k = 0; k < rem; k++) {
+          slots[indices[k]] += 1;
+        }
+      } else if (rem > 0) {
+        slots[0] += rem;
+      }
+
+      tilePerSlot.push(slots);
+    }
+
+    // === 3단계: 결과 리스트 생성 ===
     const resultList: number[] = [];
-    for (let i = 0; i < nonSpecifiedCounts.length; i++) {
-      const count = nonSpecifiedCounts[i];
-      // Tile indices are 1-based (t1, t2, ..., t15)
-      const tileIndex = i + 1;
-      for (let j = 0; j < count; j++) {
-        resultList.push(tileIndex);
+    for (let c = 0; c < activeColors; c++) {
+      const cap = colorCap[c];
+      for (let offset = 0; offset < cap; offset++) {
+        const tileId = c * 3 + offset + 1; // 1-based
+        for (let n = 0; n < tilePerSlot[c][offset]; n++) {
+          resultList.push(tileId);
+        }
       }
     }
 
-    // Add specified (key tile) sets
+    // 키타일(t16) 추가
     for (let i = 0; i < specifiedCount; i++) {
       resultList.push(specifiedIndex);
     }
@@ -317,12 +354,14 @@ export class TileDistributor {
     // Imbalance slider value (0.0 - 1.0)
     const imbalanceValue = typeImbalance / 10.0;
 
-    // Generate tile type indices from DistributeTiles
+    // [v15.40] Generate tile type indices with color-balanced distribution
+    // rng를 전달하여 색상 내 Fisher-Yates 셔플이 인게임과 동일한 시드로 동작
     const typeIndices = TileDistributor.distributeTiles(
       setCount,
       useTileCount,
       unlockTile,
-      imbalanceValue
+      imbalanceValue,
+      rng
     );
 
     // Get toAddIndexList for balancing existing tiles (C# GetToAddIndexList)

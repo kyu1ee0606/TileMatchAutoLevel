@@ -186,3 +186,123 @@ export async function batchVerifyLevels(
   );
   return response.data;
 }
+
+
+// ============================================================
+// [v15.35] Batch Verify with Regeneration Types & API
+// ============================================================
+
+export interface BatchVerifyRegenerateLevelItem {
+  level_json: LevelJSON;
+  level_id?: string;
+  target_difficulty?: number;
+  level_number?: number;
+  // 재생성에 필요한 원본 파라미터
+  grid_size?: [number, number];
+  max_layers?: number;
+  tile_types?: string[];
+  obstacle_types?: string[];
+  symmetry_mode?: string;
+  pattern_type?: string;
+  // [v15.40] 재생성 시 패턴 모양 보존
+  pattern_index?: number;
+}
+
+export interface BatchVerifyRegenerateOptions {
+  iterations?: number;
+  tolerance?: number;
+  useCoreBotOnly?: boolean;
+  fastMode?: boolean;
+  earlyTermination?: boolean;
+  // 재생성 옵션
+  enableRegeneration?: boolean;
+  maxRegenerationRetries?: number;
+  regenerationTolerance?: number;
+  regenerationIterations?: number;
+  gimmickUnlockLevels?: Record<string, number>;
+}
+
+export interface BatchVerifyRegenerateResultItem extends BatchVerifyResultItem {
+  regenerated: boolean;
+  regeneration_attempts: number;
+  new_level_json?: LevelJSON;
+}
+
+export interface BatchVerifyRegenerateResponse {
+  results: BatchVerifyRegenerateResultItem[];
+  total_levels: number;
+  passed_count: number;
+  failed_count: number;
+  pass_rate: number;
+  execution_time_ms: number;
+  regenerated_count: number;
+}
+
+/**
+ * [v15.35] Batch verify levels with automatic regeneration for failed levels.
+ * This provides a "root cause" solution by creating new levels that actually
+ * meet the target difficulty when verification fails.
+ */
+export async function batchVerifyWithRegeneration(
+  levels: BatchVerifyRegenerateLevelItem[],
+  options?: BatchVerifyRegenerateOptions
+): Promise<BatchVerifyRegenerateResponse> {
+  const iterations = options?.iterations ?? 20;
+  const maxRetries = options?.maxRegenerationRetries ?? 3;
+  // Timeout: base 60s + verification time + regeneration time per failed level
+  // Assume worst case: all levels fail and need regeneration
+  const timeoutMs = Math.max(
+    120000,
+    60000 + levels.length * iterations * 2000 + levels.length * maxRetries * 30000
+  );
+
+  const response = await apiClient.post<BatchVerifyRegenerateResponse>(
+    '/analyze/batch-verify-regenerate',
+    {
+      levels,
+      iterations,
+      tolerance: options?.tolerance ?? 15.0,
+      use_core_bots_only: options?.useCoreBotOnly ?? true,
+      fast_mode: options?.fastMode ?? true,
+      early_termination: options?.earlyTermination ?? true,
+      enable_regeneration: options?.enableRegeneration ?? true,
+      max_regeneration_retries: maxRetries,
+      regeneration_tolerance: options?.regenerationTolerance ?? 15.0,
+      regeneration_iterations: options?.regenerationIterations ?? 30,
+      gimmick_unlock_levels: options?.gimmickUnlockLevels,
+    },
+    {
+      timeout: timeoutMs,
+    }
+  );
+  return response.data;
+}
+
+// [v15.40] 중앙정렬 수정 API
+
+export interface FixCenteringResultItem {
+  level_number: number;
+  level_json: Record<string, unknown>;
+  was_modified: boolean;
+  center_diff_before: number;
+  center_diff_after: number;
+}
+
+export interface FixCenteringResponse {
+  results: FixCenteringResultItem[];
+  total: number;
+  modified: number;
+  processing_time_ms: number;
+}
+
+/**
+ * [v15.40] 기존 레벨에 시각적 중앙정렬만 적용 (재생성 없음).
+ */
+export async function fixCentering(levels: Record<string, unknown>[]): Promise<FixCenteringResponse> {
+  const response = await apiClient.post<FixCenteringResponse>(
+    '/analyze/fix-centering',
+    { levels },
+    { timeout: 60000 }
+  );
+  return response.data;
+}

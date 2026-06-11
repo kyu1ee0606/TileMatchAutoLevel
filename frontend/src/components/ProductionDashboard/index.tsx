@@ -7,7 +7,8 @@ import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { Button } from '../ui';
 import { useUIStore } from '../../stores/uiStore';
 import { generateLevel, enhanceLevel } from '../../api/generate';
-import { analyzeAutoPlay } from '../../api/analyze';
+import apiClient from '../../api/client';
+import { analyzeAutoPlay, fixCentering } from '../../api/analyze';
 import GamePlayer from '../GamePlayer';
 import GameBoard from '../GamePlayer/GameBoard';
 import { createGameEngine } from '../../engine/gameEngine';
@@ -49,6 +50,7 @@ import {
 import { ProductionExport } from './ProductionExport';
 import { BatchApprovalPanel } from './BatchApprovalPanel';
 import { BatchVerifyPanel } from './BatchVerifyPanel';
+import { MetaIntegrityPanel, checkTileDivisibility, detectOOBTiles } from './MetaIntegrityPanel';
 import { LevelDistributionChart } from './LevelDistributionChart';
 // PatternSelector import removed - using inline grid instead
 import { getPatternByIndex, BOSS_PATTERNS, SPECIAL_PATTERNS, PATTERN_CATEGORIES } from '../../constants/patterns';
@@ -190,6 +192,24 @@ const GIMMICK_TUTORIAL_INFO: Array<{
   { level: 441, gimmick: 'teleport', name: '텔레포터', type: 'obstacle', difficulty: '⭐⭐⭐', description: '타일이 이동하는 포탈' },
 ];
 
+/**
+ * 순차 검증 통과 컷오프 (target_difficulty 동적)
+ * BE _verify_single_level 의 tolerance 곡선 (0.5→0.7 구간 1.0→1.3×)과 동일.
+ * - target < 0.5  → 70 (1.0×)
+ * - 0.5~0.7      → 70 → 61 선형
+ * - target ≥ 0.7 → 61 (1.3×)
+ * UI 표시/필터링과 handleSequentialProcess 가 동일 기준을 사용해야
+ * "순차에서 통과한 레벨이 리스트에서 실패로 보이는" 불일치가 사라진다.
+ */
+function computeSequentialPassThreshold(targetDifficulty: number | undefined): number {
+  const td = typeof targetDifficulty === 'number' ? targetDifficulty : 0.5;
+  let toleranceMult = 1.0;
+  if (td >= 0.7) toleranceMult = 1.3;
+  else if (td >= 0.5) toleranceMult = 1.0 + ((td - 0.5) / 0.2) * 0.3;
+  const allowedGap = 15 * toleranceMult;
+  return Math.max(50, Math.round(100 - allowedGap * 2));
+}
+
 export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps) {
   const { addNotification } = useUIStore();
   const [activeTab, setActiveTab] = useState<DashboardTab>('overview');
@@ -202,6 +222,29 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
   // Generation state
   const [isGenerating, setIsGenerating] = useState(false);
   const [useValidatedGeneration, setUseValidatedGeneration] = useState(false); // 검증 기반 생성 (기본 OFF - 빠른 생성)
+
+  // [v15.55] 레벨 템플릿 할당 (프로덕션 생성 시 특정 레벨을 템플릿으로 대체)
+  //  - 수동 할당: templateAssignments[레벨번호] = templateId
+  //  - 자동 배치: autoAssignTemplates=ON 이면 미할당 템플릿을 measured_difficulty 가까운 슬롯에 배치
+  const [templateAssignments, setTemplateAssignments] = useState<Record<number, string>>({});
+  const [autoAssignTemplates, setAutoAssignTemplates] = useState<boolean>(true);
+  // localStorage persist — batch별이 아닌 projectId(현재 단일 프로젝트이므로 공용 키)
+  const TEMPLATE_ASSIGN_KEY = 'prod_template_assignments_v1';
+  const AUTO_ASSIGN_KEY = 'prod_template_auto_assign_v1';
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(TEMPLATE_ASSIGN_KEY);
+      if (raw) setTemplateAssignments(JSON.parse(raw));
+      const autoRaw = localStorage.getItem(AUTO_ASSIGN_KEY);
+      if (autoRaw !== null) setAutoAssignTemplates(autoRaw === '1');
+    } catch { /* ignore */ }
+  }, []);
+  useEffect(() => {
+    try { localStorage.setItem(TEMPLATE_ASSIGN_KEY, JSON.stringify(templateAssignments)); } catch { /* ignore */ }
+  }, [templateAssignments]);
+  useEffect(() => {
+    try { localStorage.setItem(AUTO_ASSIGN_KEY, autoAssignTemplates ? '1' : '0'); } catch { /* ignore */ }
+  }, [autoAssignTemplates]);
   const [useCoreBots, setUseCoreBots] = useState(true); // 3봇 코어 모드 (기본 ON - 40% 빠름)
   const [validationConfig, setValidationConfig] = useState({
     max_retries: 3,           // 최대 재시도 횟수
@@ -337,6 +380,87 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
     abortControllerRef.current = new AbortController();
     const signal = abortControllerRef.current.signal;
 
+    // [v15.55] 템플릿 자동 배치 — 미할당 템플릿을 measured_difficulty 기반 슬롯에 매핑
+    // manual 할당은 우선. auto 토글 OFF면 manual만 사용.
+    let effectiveAssignments: Record<number, string> = { ...templateAssignments };
+    console.log('[generate] 수동 할당 (initial):', templateAssignments, 'autoAssign:', autoAssignTemplates);
+    const autoAssignWarnings: string[] = [];
+    if (autoAssignTemplates) {
+      try {
+        const tplRes = await apiClient.get('/debug/level-templates');
+        const allTemplates = (tplRes.data.templates || []) as Array<{
+          template_id: string;
+          measured_difficulty?: number | null;
+          name?: string;
+        }>;
+        const takenLevels = new Set<number>(Object.keys(effectiveAssignments).map(k => parseInt(k)));
+        const takenTemplateIds = new Set<string>(Object.values(effectiveAssignments));
+
+        // 모든 슬롯의 target_difficulty 계산
+        const slots: Array<{ level: number; targetDiff: number }> = [];
+        for (let level = 1; level <= batch.total_levels; level++) {
+          const setIdx = Math.floor((level - 1) / batch.levels_per_set);
+          const localIdx = ((level - 1) % batch.levels_per_set) + 1;
+          const baseDifficulty = batch.difficulty_start +
+            (batch.difficulty_end - batch.difficulty_start) * setIdx / Math.max(1, batch.total_sets - 1);
+          let targetDifficulty = baseDifficulty;
+          if (batch.use_sawtooth) {
+            const localProgress = (localIdx - 1) / (batch.levels_per_set - 1);
+            const sawtoothBonus = localIdx === 10 ? 0.1 : localProgress * 0.05;
+            targetDifficulty = Math.min(0.95, baseDifficulty + sawtoothBonus);
+          }
+          slots.push({ level, targetDiff: targetDifficulty });
+        }
+
+        // 미할당 + 측정된 템플릿만 자동 배치 대상 (난이도 낮은 것부터)
+        const toAssign = allTemplates
+          .filter(t => t.measured_difficulty != null && !takenTemplateIds.has(t.template_id))
+          .sort((a, b) => (a.measured_difficulty || 0) - (b.measured_difficulty || 0));
+
+        for (const tpl of toAssign) {
+          const diff = tpl.measured_difficulty!;
+          let bestSlot: typeof slots[number] | null = null;
+          let bestGap = Infinity;
+          for (const slot of slots) {
+            if (takenLevels.has(slot.level)) continue;
+            const gap = Math.abs(slot.targetDiff - diff);
+            if (gap < bestGap) { bestGap = gap; bestSlot = slot; }
+          }
+          if (bestSlot) {
+            effectiveAssignments[bestSlot.level] = tpl.template_id;
+            takenLevels.add(bestSlot.level);
+          } else {
+            autoAssignWarnings.push(`${tpl.name || tpl.template_id}: 빈 슬롯 없음`);
+          }
+        }
+
+        // 측정 안 된 템플릿 경고
+        for (const tpl of allTemplates) {
+          if (tpl.measured_difficulty == null && !takenTemplateIds.has(tpl.template_id)) {
+            autoAssignWarnings.push(`${tpl.name || tpl.template_id}: 난이도 미측정 — 자동 배치 스킵`);
+          }
+        }
+        if (autoAssignWarnings.length > 0) {
+          console.warn('[template-auto-assign]', autoAssignWarnings);
+        }
+        const manualCount = Object.keys(templateAssignments).length;
+        const totalCount = Object.keys(effectiveAssignments).length;
+        const addedCount = totalCount - manualCount;
+        if (totalCount > 0) {
+          addNotification('info',
+            `📋 템플릿 할당: 총 ${totalCount}개 (수동 ${manualCount} + 자동 ${addedCount}), 경고 ${autoAssignWarnings.length}개`);
+        } else if (allTemplates.length > 0) {
+          // 템플릿은 있지만 하나도 할당 안 됨 → 원인 알림
+          const measured = allTemplates.filter(t => t.measured_difficulty != null).length;
+          addNotification('warning',
+            `📋 템플릿 ${allTemplates.length}개 존재하나 0개 할당됨 (측정 ${measured}/${allTemplates.length}). 템플릿을 사용하려면 디버거 탭에서 먼저 난이도 측정 필요.`);
+        }
+      } catch (err) {
+        console.error('Template auto-assignment failed:', err);
+        addNotification('warning', `템플릿 자동 배치 실패: ${(err as Error).message} — manual 할당만 사용`);
+      }
+    }
+
     const startTime = Date.now();
     const initialProgress: ProductionGenerationProgress = {
       status: 'generating',
@@ -402,10 +526,28 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
           levelNumber: number;
           targetDifficulty: number;
           patternIndex: number;  // Pre-computed pattern index
+          // [v15.55] 할당된 레벨 템플릿 ID — 있으면 템플릿 기반 생성 사용
+          templateId?: string;
         }
 
+        // [v15.40] 비활성 패턴 목록을 서버에서 가져옴 (그리드 크기별)
+        let disabledPatternsMap: Record<string, number[]> = {};
+        try {
+          const configRes = await apiClient.get('/debug/pattern-config');
+          const raw = configRes.data.disabled_patterns_all || configRes.data.disabled_patterns;
+          if (Array.isArray(raw)) {
+            for (const s of [6,7,8,9]) disabledPatternsMap[String(s)] = raw;
+          } else {
+            disabledPatternsMap = raw;
+          }
+        } catch {
+          const fb = [5, 22, 25, 29, 39, 40, 42, 47, 54, 57, 60];
+          for (const s of [6,7,8,9]) disabledPatternsMap[String(s)] = fb;
+        }
+        // gridSize에 맞는 disabled 선택하는 헬퍼
+        const getDisabledForSize = (gs: number) => new Set(disabledPatternsMap[String(gs)] || []);
+
         // OPTION D: Pre-compute pattern indices to prevent consecutive same patterns
-        // Each level gets a pattern different from the previous level
         const preComputePatternIndices = (count: number, startLevelNumber: number): number[] => {
           const indices: number[] = [];
           let previousIndex = -1;
@@ -421,8 +563,10 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             } else if (isSpecialShape) {
               pool = [...SPECIAL_PATTERNS];
             } else {
-              // General levels: all 64 patterns
-              pool = Array.from({ length: 64 }, (_, i) => i);
+              // General levels: 64 patterns excluding POOR quality (fill<40%)
+              // POOR: #5,22,25,29,39,42,47,54,57,60 - 너무 성겨서 형태 불명확
+              const EXCLUDED_PATTERNS = getDisabledForSize(8);
+              pool = Array.from({ length: 64 }, (_, i) => i).filter(i => !EXCLUDED_PATTERNS.has(i));
             }
 
             // Remove previous pattern from pool to prevent consecutive same pattern
@@ -450,17 +594,99 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             const sawtoothBonus = localIdx === 10 ? 0.1 : localProgress * 0.05;
             targetDifficulty = Math.min(0.95, baseDifficulty + sawtoothBonus);
           }
+          // [v15.55] 이 레벨에 수동/자동 할당된 템플릿이 있는지 확인
+          const tplId = effectiveAssignments[levelNumber];
           levelTasks.push({
             localIdx,
             levelNumber,
             targetDifficulty,
-            patternIndex: patternIndices[localIdx - 1]
+            patternIndex: patternIndices[localIdx - 1],
+            templateId: tplId,
           });
         }
 
         // Helper: Generate a single level (returns ProductionLevel or null on failure)
         const generateOneLevel = async (task: LevelTask): Promise<ProductionLevel | null> => {
-          const { localIdx, levelNumber, targetDifficulty, patternIndex } = task;
+          const { localIdx, levelNumber, targetDifficulty, patternIndex, templateId } = task;
+
+          // [v15.55] 레벨 템플릿 할당됨 → from-template 엔드포인트 분기
+          if (templateId) {
+            try {
+              const tplStartTime = Date.now();
+              const tplResp = await apiClient.post('/generate/from-template', {
+                template_id: templateId,
+                level_number: levelNumber,
+                use_tile_count: 6,
+                randomize_tiles: true,
+                random_seed: levelNumber,
+              });
+              const levelJson = tplResp.data.level_json;
+              const generationTime = Date.now() - tplStartTime;
+
+              // 봇 검증 (기존 파이프라인과 동일하게 autoplay 실행)
+              let matchScore = 0;
+              let botStats: Array<{ profile: string; clear_rate: number; target_clear_rate: number }> = [];
+              try {
+                const autoplayRes = await apiClient.post('/analyze/autoplay', {
+                  level_json: levelJson,
+                  iterations: useCoreBots ? 50 : 100,
+                  target_difficulty: targetDifficulty,
+                  bot_profiles: useCoreBots ? ['average', 'expert', 'optimal'] : undefined,
+                }, { timeout: 310000 });
+                botStats = (autoplayRes.data.bot_stats || []).map((b: { profile: string; clear_rate: number; target_clear_rate: number }) => ({
+                  profile: b.profile,
+                  clear_rate: b.clear_rate,
+                  target_clear_rate: b.target_clear_rate,
+                }));
+                if (botStats.length > 0) {
+                  const gaps = botStats.map(s => {
+                    const g = (s.clear_rate - s.target_clear_rate) * 100;
+                    return g > 0 ? g * 0.5 : Math.abs(g) * 0.7;
+                  });
+                  const avgGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+                  const maxGap = Math.max(...gaps);
+                  matchScore = Math.max(0, 100 - (avgGap * 0.7 + maxGap * 0.3) * 2);
+                }
+              } catch (botErr) {
+                console.warn(`[template-bot-sim] level ${levelNumber}:`, botErr);
+              }
+
+              const botClearRates = {
+                average: botStats.find(s => s.profile === 'average')?.clear_rate ?? 0,
+                expert: botStats.find(s => s.profile === 'expert')?.clear_rate ?? 0,
+                optimal: botStats.find(s => s.profile === 'optimal')?.clear_rate ?? 0,
+              };
+              const meta: ProductionLevelMeta = {
+                level_number: levelNumber,
+                set_index: setIdx,
+                local_index: localIdx,
+                generated_at: new Date().toISOString(),
+                target_difficulty: targetDifficulty,
+                actual_difficulty: tplResp.data.actual_difficulty ?? 0,
+                grade: (tplResp.data.grade || 'C') as DifficultyGrade,
+                status: 'playtest_queue',
+                status_updated_at: new Date().toISOString(),
+                playtest_required: true,
+                playtest_priority: levelNumber,
+                playtest_results: [],
+                match_score: matchScore,
+                bot_clear_rates: botClearRates,
+                validation_attempts: 0,
+                pattern_index: -1,            // 템플릿 기반 — 패턴 인덱스 의미 없음
+                pattern_type: 'aesthetic',
+                template_id: templateId,       // 템플릿 출처 표시
+                template_source_difficulty: tplResp.data.template_measured_difficulty ?? undefined,
+              };
+              void generationTime;  // 수집 안 하지만 측정은 해둠 (future use)
+              return { meta, level_json: levelJson };
+            } catch (tplErr) {
+              const errMsg = (tplErr as Error).message || String(tplErr);
+              console.error(`[template-gen] level ${levelNumber} failed, falling back to pattern:`, errMsg);
+              addNotification('warning',
+                `레벨 ${levelNumber} 템플릿 생성 실패 → 패턴으로 fallback: ${errMsg}`);
+              // 실패 시 기존 패턴 기반 생성으로 fallback (아래 코드 진행)
+            }
+          }
 
           // Local helper: Calculate match score from bot stats (asymmetric penalty)
           // [v14.2] 방안 B+D: maxGap 가중치 감소(0.4→0.3) + 어려움 패널티 완화(1.0→0.7)
@@ -901,12 +1127,35 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
     } finally {
       setIsGenerating(false);
     }
-  }, [selectedBatchId, addNotification, useValidatedGeneration, validationConfig, useCoreBots, updateProgressThrottled, flushProgressImmediate]);
+  }, [selectedBatchId, addNotification, useValidatedGeneration, validationConfig, useCoreBots, updateProgressThrottled, flushProgressImmediate, templateAssignments, autoAssignTemplates]);
+
+  // 진행 상태를 idle로 리셋 (UI에서 프로그레스 바 사라짐)
+  const resetGenerationProgress = useCallback(() => {
+    const idle: ProductionGenerationProgress = {
+      status: 'idle',
+      total_sets: 0,
+      completed_sets: 0,
+      current_set_index: 0,
+      total_levels: 0,
+      completed_levels: 0,
+      current_level: 0,
+      elapsed_ms: 0,
+      estimated_remaining_ms: 0,
+      started_at: '',
+      failed_levels: [],
+      checkpoint_interval_levels: 50,
+    };
+    progressRef.current = idle;
+    setGenerationProgress(idle);
+  }, []);
 
   // Cancel generation
   const handleCancelGeneration = useCallback(() => {
     abortControllerRef.current?.abort();
-  }, []);
+    setIsGenerating(false);
+    resetGenerationProgress();
+    addNotification('info', '생성 중지됨');
+  }, [addNotification, resetGenerationProgress]);
 
   // Delete batch
   const handleDeleteBatch = useCallback(async (batchId: string) => {
@@ -915,16 +1164,23 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
     }
 
     try {
+      // 현재 생성 중이면 먼저 abort
+      if (isGenerating && selectedBatchId === batchId) {
+        abortControllerRef.current?.abort();
+        setIsGenerating(false);
+      }
       await deleteProductionBatch(batchId);
       setBatches(prev => prev.filter(b => b.id !== batchId));
       if (selectedBatchId === batchId) {
         setSelectedBatchId(batches.find(b => b.id !== batchId)?.id || null);
+        // 삭제된 배치의 진행 상태 제거
+        resetGenerationProgress();
       }
       addNotification('success', '배치 삭제됨');
-    } catch (err) {
+    } catch {
       addNotification('error', '배치 삭제 실패');
     }
-  }, [selectedBatchId, batches, addNotification]);
+  }, [selectedBatchId, batches, addNotification, isGenerating, resetGenerationProgress]);
 
   // Rename batch state
   const [isRenaming, setIsRenaming] = useState(false);
@@ -1184,6 +1440,11 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             isGenerating={isGenerating}
             onStart={handleStartGeneration}
             onCancel={handleCancelGeneration}
+            onResetProgress={resetGenerationProgress}
+            templateAssignments={templateAssignments}
+            onTemplateAssignmentsChange={setTemplateAssignments}
+            autoAssignTemplates={autoAssignTemplates}
+            onAutoAssignChange={setAutoAssignTemplates}
             useValidation={useValidatedGeneration}
             onUseValidationChange={setUseValidatedGeneration}
             validationConfig={validationConfig}
@@ -1209,6 +1470,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
         {activeTab === 'test' && selectedBatchId && (
           <TestTab
             batchId={selectedBatchId}
+            isGenerating={isGenerating}
             onStatsUpdate={async () => {
               const newStats = await calculateProductionStats(selectedBatchId);
               setStats(newStats);
@@ -1554,6 +1816,11 @@ function GenerateTab({
   isGenerating,
   onStart,
   onCancel,
+  onResetProgress,
+  templateAssignments,
+  onTemplateAssignmentsChange,
+  autoAssignTemplates,
+  onAutoAssignChange,
   useValidation,
   onUseValidationChange,
   validationConfig,
@@ -1566,6 +1833,11 @@ function GenerateTab({
   isGenerating: boolean;
   onStart: (config: PlaytestQueueConfig) => void;
   onCancel: () => void;
+  onResetProgress?: () => void;
+  templateAssignments: Record<number, string>;
+  onTemplateAssignmentsChange: (next: Record<number, string>) => void;
+  autoAssignTemplates: boolean;
+  onAutoAssignChange: (v: boolean) => void;
   useValidation: boolean;
   onUseValidationChange: (value: boolean) => void;
   validationConfig: { max_retries: number; tolerance: number; simulation_iterations: number };
@@ -1685,6 +1957,15 @@ function GenerateTab({
             )}
           </div>
 
+          {/* 레벨 템플릿 할당 패널 */}
+          <TemplateAssignmentPanel
+            batch={batch}
+            assignments={templateAssignments}
+            onAssignmentsChange={onTemplateAssignmentsChange}
+            autoAssign={autoAssignTemplates}
+            onAutoAssignChange={onAutoAssignChange}
+          />
+
           {/* Summary */}
           <div className="text-sm text-gray-400">
             <div>총 {batch.total_levels}개 레벨 생성</div>
@@ -1738,17 +2019,26 @@ function GenerateTab({
               <h3 className="text-sm font-medium text-white flex items-center gap-2">
                 📊 생성 진행률
               </h3>
-              <span className={`text-xs px-2 py-0.5 rounded ${
-                progress.status === 'generating' ? 'bg-indigo-900/50 text-indigo-300' :
-                progress.status === 'completed' ? 'bg-green-900/50 text-green-300' :
-                progress.status === 'paused' ? 'bg-yellow-900/50 text-yellow-300' :
-                progress.status === 'error' ? 'bg-red-900/50 text-red-300' : 'bg-gray-700 text-gray-300'
-              }`}>
-                {progress.status === 'generating' ? '생성 중...' :
-                 progress.status === 'completed' ? '완료' :
-                 progress.status === 'paused' ? '일시 정지' :
-                 progress.status === 'error' ? '오류' : '대기'}
-              </span>
+              <div className="flex items-center gap-2">
+                <span className={`text-xs px-2 py-0.5 rounded ${
+                  progress.status === 'generating' ? 'bg-indigo-900/50 text-indigo-300' :
+                  progress.status === 'completed' ? 'bg-green-900/50 text-green-300' :
+                  progress.status === 'paused' ? 'bg-yellow-900/50 text-yellow-300' :
+                  progress.status === 'error' ? 'bg-red-900/50 text-red-300' : 'bg-gray-700 text-gray-300'
+                }`}>
+                  {progress.status === 'generating' ? '생성 중...' :
+                   progress.status === 'completed' ? '완료' :
+                   progress.status === 'paused' ? '일시 정지' :
+                   progress.status === 'error' ? '오류' : '대기'}
+                </span>
+                {progress.status !== 'generating' && !isGenerating && onResetProgress && (
+                  <button onClick={onResetProgress}
+                    className="text-[10px] px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600 text-gray-300"
+                    title="진행 상태 지우기">
+                    ✕ 닫기
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* Main Progress Bar */}
@@ -1962,9 +2252,11 @@ const GIMMICK_COLORS: Record<string, string> = {
 // Test Tab Component - 레벨 테스트 (수동/자동)
 function TestTab({
   batchId,
+  isGenerating,
   onStatsUpdate,
 }: {
   batchId: string;
+  isGenerating?: boolean;
   onStatsUpdate: () => void;
 }) {
   const { addNotification } = useUIStore();
@@ -1998,7 +2290,17 @@ function TestTab({
     currentAttempt: number;
     maxAttempts: number;
     status: 'testing' | 'regenerating' | 'idle';
-    results: { level_number: number; attempts: number; final_score: number; success: boolean }[];
+    results: {
+      level_number: number;
+      attempts: number;
+      final_score: number;
+      success: boolean;
+      pass_threshold?: number;
+      target_difficulty?: number;
+      worst_bot?: string;
+      worst_gap_pp?: number;
+      direction?: 'too_easy' | 'too_hard' | 'ok';
+    }[];
   }>({ currentIndex: 0, total: 0, currentLevel: 0, currentAttempt: 0, maxAttempts: 5, status: 'idle', results: [] });
   const [selectedSequentialLevels, setSelectedSequentialLevels] = useState<Set<number>>(new Set());
   const [lastClickedSequentialLevel, setLastClickedSequentialLevel] = useState<number | null>(null);
@@ -2053,6 +2355,18 @@ function TestTab({
   useEffect(() => {
     loadLevels();
   }, [batchId, filter]);
+
+  // [v15.56] 생성 중엔 5초마다 자동 갱신 — 완료된 레벨 실시간 표시
+  useEffect(() => {
+    if (!isGenerating) return;
+    const interval = setInterval(() => {
+      // 테스트 진행 중이면 스킵 (정신없음 방지)
+      if (isAutoTesting || isPlaying) return;
+      loadLevels();
+    }, 5000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isGenerating, isAutoTesting, isPlaying, batchId, filter]);
 
   // Preserve scroll position when levels update (during sequential/batch testing)
   // loadLevels에서 로딩 중일 때는 건너뛰고, 개별 레벨 업데이트 시에만 동작
@@ -2298,7 +2612,7 @@ function TestTab({
     }
 
     const MAX_ATTEMPTS = 5; // Maximum regeneration attempts per level
-    const PASS_THRESHOLD = 70; // 70% match score to pass
+    const BASE_PASS_THRESHOLD = 70; // 70% match score to pass
 
     sequentialAbortRef.current = new AbortController();
     const signal = sequentialAbortRef.current.signal;
@@ -2314,7 +2628,17 @@ function TestTab({
       results: [],
     });
 
-    const results: { level_number: number; attempts: number; final_score: number; success: boolean }[] = [];
+    const results: {
+      level_number: number;
+      attempts: number;
+      final_score: number;
+      success: boolean;
+      pass_threshold?: number;
+      target_difficulty?: number;
+      worst_bot?: string;
+      worst_gap_pp?: number;
+      direction?: 'too_easy' | 'too_hard' | 'ok';
+    }[] = [];
 
     for (let i = 0; i < targetLevelNumbers.length; i++) {
       if (signal.aborted) break;
@@ -2326,9 +2650,17 @@ function TestTab({
       let attempts = 0;
       let matchScore = 0;
       let passed = false;
+      let lastWorstBot: string | undefined;
+      let lastWorstGapPp: number | undefined;
+      let lastDirection: 'too_easy' | 'too_hard' | 'ok' | undefined;
+      let lastTargetDifficulty: number | undefined = currentLevel.meta.target_difficulty;
+      let lastPassThreshold = BASE_PASS_THRESHOLD;
 
       while (attempts < MAX_ATTEMPTS && !passed && !signal.aborted) {
         attempts++;
+        const passThreshold = computeSequentialPassThreshold(currentLevel?.meta.target_difficulty);
+        lastPassThreshold = passThreshold;
+        lastTargetDifficulty = currentLevel?.meta.target_difficulty;
 
         // Update progress: testing
         setSequentialProgress(prev => ({
@@ -2348,6 +2680,26 @@ function TestTab({
 
           matchScore = calculateMatchScoreFromBots(result.bot_stats);
 
+          // [diagnostics] 봇별 갭 중 절댓값이 가장 큰 항목을 기록 — 실패 분류용
+          let worstBot = '';
+          let worstGapPp = 0;
+          for (const s of result.bot_stats) {
+            const gapPp = (s.clear_rate - s.target_clear_rate) * 100;
+            if (Math.abs(gapPp) > Math.abs(worstGapPp)) {
+              worstGapPp = gapPp;
+              worstBot = s.profile;
+            }
+          }
+          lastWorstBot = worstBot || undefined;
+          lastWorstGapPp = worstBot ? worstGapPp : undefined;
+          lastDirection = !worstBot
+            ? undefined
+            : Math.abs(worstGapPp) <= 5
+              ? 'ok'
+              : worstGapPp > 0
+                ? 'too_easy'
+                : 'too_hard';
+
           // Save test result
           // [v15.14] novice/casual 제외 - 검증용 3봇만 사용
           const botClearRates = {
@@ -2356,8 +2708,17 @@ function TestTab({
             optimal: result.bot_stats.find(s => s.profile === 'optimal')?.clear_rate || 0,
           };
 
+          // 동적 컷오프로 통과 여부 판정 — UI 표시 로직과 동일 기준
+          const isPassed = matchScore >= passThreshold;
+
           await saveProductionLevels(batchId, [{
-            meta: { ...currentLevel.meta, bot_clear_rates: botClearRates, match_score: matchScore },
+            meta: {
+              ...currentLevel.meta,
+              bot_clear_rates: botClearRates,
+              match_score: matchScore,
+              verified: true,
+              verification_passed: isPassed,
+            },
             level_json: currentLevel.level_json,
           }]);
 
@@ -2365,7 +2726,16 @@ function TestTab({
           const scrollTop = levelListRef.current?.scrollTop || 0;
           setLevels(prev => prev.map(l =>
             l.meta.level_number === levelNumber
-              ? { ...l, meta: { ...l.meta, match_score: matchScore, bot_clear_rates: botClearRates } }
+              ? {
+                  ...l,
+                  meta: {
+                    ...l.meta,
+                    match_score: matchScore,
+                    bot_clear_rates: botClearRates,
+                    verified: true,
+                    verification_passed: isPassed,
+                  },
+                }
               : l
           ));
           // Restore scroll position after React re-render
@@ -2375,14 +2745,33 @@ function TestTab({
             }
           });
 
-          if (matchScore >= PASS_THRESHOLD) {
+          if (isPassed) {
             passed = true;
           } else if (attempts < MAX_ATTEMPTS && !signal.aborted) {
             // Regenerate if not passed
             setSequentialProgress(prev => ({ ...prev, status: 'regenerating' }));
 
+            // [unclear-template-escape] 템플릿 기반 레벨에서 모든 봇 클리어율이 사실상 0(<5%)이면
+            // 같은 모양으로 색만 바꿔봐야 데드락 탈출 불가 → 일반 generate 경로로 강제 전환.
+            // 데이터 분석 결과(2026-05-21) May7 배치의 23개 반복 실패 중 22개가 이 케이스였음.
+            const hasTemplate = !!(currentLevel?.meta as { template_id?: string } | undefined)?.template_id;
+            const maxBotRate = Math.max(
+              botClearRates.average,
+              botClearRates.expert,
+              botClearRates.optimal,
+            );
+            const unclearableTemplate = hasTemplate && maxBotRate < 0.05;
+            if (unclearableTemplate) {
+              addNotification(
+                'warning',
+                `Lv.${levelNumber} 템플릿 언클리어러블 감지 (max bot ${(maxBotRate * 100).toFixed(0)}%) → 일반 생성 경로로 전환`
+              );
+            }
+
             // Use existing regeneration logic
-            await handleRegenerateLevel(levelNumber);
+            await handleRegenerateLevel(levelNumber, undefined, undefined, {
+              forceNoTemplate: unclearableTemplate,
+            });
 
             // Reload the level after regeneration from storage
             const reloadedLevels = await getProductionLevelsByBatch(batchId);
@@ -2395,7 +2784,17 @@ function TestTab({
         }
       }
 
-      results.push({ level_number: levelNumber, attempts, final_score: matchScore, success: passed });
+      results.push({
+        level_number: levelNumber,
+        attempts,
+        final_score: matchScore,
+        success: passed,
+        pass_threshold: lastPassThreshold,
+        target_difficulty: lastTargetDifficulty,
+        worst_bot: lastWorstBot,
+        worst_gap_pp: lastWorstGapPp,
+        direction: lastDirection,
+      });
       setSequentialProgress(prev => ({ ...prev, results: [...results] }));
     }
 
@@ -2705,7 +3104,8 @@ function TestTab({
   const handleRegenerateLevel = async (
     levelNumber: number,
     userPatternIndex?: number,
-    userSymmetryMode?: 'none' | 'horizontal' | 'vertical' | 'both'
+    userSymmetryMode?: 'none' | 'horizontal' | 'vertical' | 'both',
+    options?: { forceNoTemplate?: boolean }
   ) => {
     const level = levels.find(l => l.meta.level_number === levelNumber);
     if (!level) return;
@@ -2720,8 +3120,71 @@ function TestTab({
         throw new Error('Batch not found');
       }
 
-      const targetDifficulty = level.meta.target_difficulty;
+      const rawTargetDifficulty = level.meta.target_difficulty;
+      // Guard: corrupt levels (older format / missing meta) can have NaN/undefined/out-of-range.
+      // Without this, every generated request body becomes invalid (NaN→null) → 422 across all 15 candidates.
+      if (typeof rawTargetDifficulty !== 'number' || !Number.isFinite(rawTargetDifficulty)) {
+        throw new Error(`레벨 ${levelNumber}의 target_difficulty가 비어있거나 잘못됨 (값=${rawTargetDifficulty}). 메타 복구 필요.`);
+      }
+      const targetDifficulty = Math.min(0.99, Math.max(0.01, rawTargetDifficulty));
+      if (targetDifficulty !== rawTargetDifficulty) {
+        console.warn(`[regen] Lv.${levelNumber}: target_difficulty=${rawTargetDifficulty}을 [0.01, 0.99] 범위로 클램프 (백엔드 ge=0.0/le=1.0 보호).`);
+      }
       const targetScore = targetDifficulty * 100;
+
+      // [v15.55+] 템플릿 기반 레벨(import한 패턴 사용 중)은 별도 경로로 재생성.
+      // 메타에 template_id가 있고 사용자가 패턴/대칭을 강제 지정하지 않았다면,
+      // /generate/from-template으로 같은 템플릿 모양·기믹을 유지하고 타일 색만 새 시드로 랜덤화.
+      // 일반 /generate 경로는 pattern_index를 요구하지만 템플릿 레벨에는 pattern_index=-1 센티넬이
+      // 저장돼 있어 백엔드 ge=0 검증을 위반하므로 422가 발생함.
+      const templateId = (level.meta as { template_id?: string }).template_id;
+      const userOverridingPattern = userPatternIndex !== undefined || userSymmetryMode !== undefined;
+      const forceNoTemplate = options?.forceNoTemplate === true;
+      // [v15.x+] 템플릿 레이아웃이 언클리어러블한 경우(모든 봇 클리어율 0%) 호출자가
+      // forceNoTemplate=true 로 우회 요청. 같은 모양만 유지하는 /generate/from-template 로는
+      // 데드락 모양에서 탈출 불가하므로 일반 generate 경로로 전환하고 meta.template_id 도 제거한다.
+      if (templateId && !userOverridingPattern && !forceNoTemplate) {
+        const seed = Math.floor(Date.now() % 1_000_000);
+        const tplResp = await apiClient.post('/generate/from-template', {
+          template_id: templateId,
+          level_number: levelNumber,
+          use_tile_count: 6,
+          randomize_tiles: true,
+          random_seed: seed,
+        });
+        const tplLevelJson = tplResp.data?.level_json;
+        if (!tplLevelJson) {
+          throw new Error('템플릿 응답에 level_json 없음');
+        }
+        const tplActualDifficulty = Number(tplResp.data?.actual_difficulty ?? 0);
+        const tplGrade = String(tplResp.data?.grade ?? 'C');
+        setRegenProgressMap(prev => new Map(prev).set(levelNumber, { status: 'saving' }));
+        await saveProductionLevels(batchId, [{
+          meta: {
+            ...level.meta,
+            generated_at: new Date().toISOString(),
+            actual_difficulty: tplActualDifficulty,
+            grade: tplGrade as DifficultyGrade,
+            bot_clear_rates: undefined,
+            match_score: undefined,
+            status_updated_at: new Date().toISOString(),
+            regen_attempts: (level.meta.regen_attempts || 0) + 1,
+            regen_lower_bound: undefined,
+            regen_upper_bound: undefined,
+            // 템플릿 기반 표시 보존
+            pattern_index: -1,
+            pattern_type: 'aesthetic',
+            template_id: templateId,
+          },
+          level_json: tplLevelJson,
+        }]);
+        setRegenProgressMap(prev => new Map(prev).set(levelNumber, { status: 'done' }));
+        addNotification('success', `레벨 ${levelNumber} 템플릿 재생성 완료 (template=${templateId})`);
+        loadLevels();
+        onStatsUpdate();
+        return;
+      }
+
       // 기믹 강도를 목표 난이도로 제한 (과도한 기믹으로 난이도 초과 방지)
       const gimmickIntensity = Math.min(targetDifficulty, levelNumber / 500);
       const DIFFICULTY_TOLERANCE = 5.0; // 0.05 in 0-1 scale = 5.0 in 0-100 scale (프로덕션과 동일)
@@ -2754,22 +3217,41 @@ function TestTab({
       }
 
       // Pattern index: 사용자 선택 > 기존 레벨 패턴 > 자동 선택
-      let patternIndex: number | undefined = userPatternIndex;
+      // 백엔드 스키마: pattern_index ∈ [0, 99]. 음수/범위 외 값을 보내면 422.
+      // 일부 저장된 레벨 메타에 sentinel -1 또는 100+가 들어있는 경우가 있어, 명시적으로 검증.
+      const isValidPatternIndex = (v: unknown): v is number =>
+        typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 99;
+
+      let patternIndex: number | undefined = isValidPatternIndex(userPatternIndex) ? userPatternIndex : undefined;
       if (patternIndex === undefined) {
-        // 기존 레벨에 패턴이 있으면 동일한 패턴으로 재생성
-        if (level.meta.pattern_index !== undefined) {
+        // 기존 레벨에 유효한 패턴이 있으면 그걸 우선 사용. -1 등 잘못된 값은 무시하고 자동 재선택.
+        if (isValidPatternIndex(level.meta.pattern_index)) {
           patternIndex = level.meta.pattern_index;
         } else {
+          if (level.meta.pattern_index !== undefined && !isValidPatternIndex(level.meta.pattern_index)) {
+            console.warn(`[regen] Lv.${levelNumber}: 저장된 pattern_index=${level.meta.pattern_index} 가 유효 범위 밖이라 무시하고 자동 재선택.`);
+          }
           // 모든 레벨에 패턴 지정 (빠른 생성)
           if (isBossLevel) {
             patternIndex = BOSS_PATTERNS[Math.floor(Math.random() * BOSS_PATTERNS.length)];
           } else if (isSpecialShape) {
             patternIndex = SPECIAL_PATTERNS[Math.floor(Math.random() * SPECIAL_PATTERNS.length)];
           } else {
-            // 일반 레벨: 전체 패턴 풀에서 랜덤 선택 (0-63)
-            patternIndex = Math.floor(Math.random() * 64);
+            // 일반 레벨: 비활성 패턴 제외 (그리드 크기별)
+            let excl: Set<number>;
+            try {
+              const r = await apiClient.get('/debug/pattern-config?grid_size=7');
+              excl = new Set(r.data.disabled_patterns || []);
+            } catch { excl = new Set([5, 22, 25, 29, 39, 40, 42, 47, 54, 57, 60]); }
+            const pool = Array.from({ length: 64 }, (_, i) => i).filter(i => !excl.has(i));
+            patternIndex = pool[Math.floor(Math.random() * pool.length)];
           }
         }
+      }
+      // 마지막 안전망: 어떤 경로든 최종값이 유효 범위에 있는지 한 번 더 보장
+      if (!isValidPatternIndex(patternIndex)) {
+        console.warn(`[regen] Lv.${levelNumber}: 최종 patternIndex=${patternIndex}가 유효하지 않아 0으로 폴백.`);
+        patternIndex = 0;
       }
 
       // Grid size (프로덕션과 동일)
@@ -2788,6 +3270,13 @@ function TestTab({
 
       let bestResult: GenerationResult | null = null;
       let bestGap = Infinity;
+      // [v15.42] Track best fallback (playability_warning=true) separately so we only use it
+      // when no clean candidate was produced across all attempts. This prevents picking
+      // unclearable levels purely because their static difficulty happens to be closest to target.
+      let bestFallback: GenerationResult | null = null;
+      let bestFallbackGap = Infinity;
+      let warningCandidatesCount = 0;
+      let totalCandidatesCount = 0;
 
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
         const candidates = await Promise.all(
@@ -2828,20 +3317,51 @@ function TestTab({
                 gimmick_unlock_levels: currentBatch.gimmick_unlock_levels || PROFESSIONAL_GIMMICK_UNLOCK_LEVELS,
                 level_number: levelNumber,
               }
-            ).catch(() => null);
+            ).catch((err: any) => {
+              // Surface the first generate failure per regen so we don't silently lose visibility.
+              const status = err?.response?.status;
+              const detail = err?.response?.data;
+              console.warn(
+                `[regen] Lv.${levelNumber} 후보 생성 실패 (attempt ${attempt + 1}) status=${status}`,
+                detail || err?.message
+              );
+              return null;
+            });
           })
         );
 
         for (const c of candidates) {
           if (!c) continue;
+          totalCandidatesCount++;
           const gap = Math.abs(c.actual_difficulty - targetScore);
+          // 데드락 미해소 후보(클리어율 < 10%)는 봇 검증에서 거의 항상 실패하므로 후순위로 격리
+          if (c.playability_warning) {
+            warningCandidatesCount++;
+            if (gap < bestFallbackGap) {
+              bestFallbackGap = gap;
+              bestFallback = c;
+            }
+            continue;
+          }
           if (gap < bestGap) {
             bestGap = gap;
             bestResult = c;
           }
         }
 
-        if (bestGap <= DIFFICULTY_TOLERANCE) break; // 허용 오차 이내 → 즉시 채택
+        if (bestResult && bestGap <= DIFFICULTY_TOLERANCE) break; // 허용 오차 이내 → 즉시 채택
+      }
+
+      // 클린 후보가 하나도 없을 때만 워닝 후보로 폴백
+      if (!bestResult && bestFallback) {
+        console.warn(
+          `[regen] Lv.${levelNumber}: 모든 ${totalCandidatesCount}개 후보가 playability_warning. 폴백 후보 채택 (clear_rate≈${(bestFallback.estimated_clear_rate ?? 0).toFixed(2)}).`
+        );
+        bestResult = bestFallback;
+      } else if (warningCandidatesCount > 0) {
+        console.info(
+          `[regen] Lv.${levelNumber}: ${warningCandidatesCount}/${totalCandidatesCount} 후보를 playability_warning으로 배제했습니다.`
+        );
       }
 
       if (!bestResult) {
@@ -2851,9 +3371,18 @@ function TestTab({
 
       // Save regenerated level - match_score/bot_clear_rates는 비워둠 (일괄 테스트에서 측정)
       setRegenProgressMap(prev => new Map(prev).set(levelNumber, { status: 'saving' }));
+      // forceNoTemplate 으로 진입한 경우 향후 재생성에서 다시 템플릿 경로로 빠지지 않도록
+      // template_id 를 명시적으로 제거하고, 일반 generate 의 verified 패턴 정보를 기록한다.
+      const baseMetaForSave: ProductionLevelMeta = forceNoTemplate
+        ? (() => {
+            const m: Record<string, unknown> = { ...(level.meta as unknown as Record<string, unknown>) };
+            delete m.template_id;
+            return m as unknown as ProductionLevelMeta;
+          })()
+        : level.meta;
       await saveProductionLevels(batchId, [{
         meta: {
-          ...level.meta,
+          ...baseMetaForSave,
           generated_at: new Date().toISOString(),
           actual_difficulty: result.actual_difficulty,
           grade: result.grade as any,
@@ -3019,22 +3548,34 @@ function TestTab({
         symmetryMode = symmetryRoll < 0.05 ? 'none' : symmetryRoll < 0.40 ? 'horizontal' : symmetryRoll < 0.75 ? 'vertical' : 'both';
       }
 
-      // Pattern index: 기존 레벨 패턴 > 자동 선택
+      // Pattern index: 기존 레벨 패턴 > 자동 선택. 저장된 값이 음수/범위 밖이면 자동 재선택으로 폴백.
+      const isValidPatternIndexBatch = (v: unknown): v is number =>
+        typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 99;
       let patternIndex: number | undefined = undefined;
-      if (level.meta.pattern_index !== undefined) {
-        // 기존 레벨에 패턴이 있으면 동일한 패턴으로 재생성
+      if (isValidPatternIndexBatch(level.meta.pattern_index)) {
         patternIndex = level.meta.pattern_index;
       } else {
+        if (level.meta.pattern_index !== undefined) {
+          console.warn(`[batchRegen] Lv.${levelNumber}: 저장된 pattern_index=${level.meta.pattern_index} 무시 후 자동 재선택.`);
+        }
         // 모든 레벨에 패턴 지정 (빠른 생성)
-        // undefined면 백엔드에서 64개 패턴 모두 시도하여 매우 느림
         if (isBossLevel) {
           patternIndex = BOSS_PATTERNS[Math.floor(Math.random() * BOSS_PATTERNS.length)];
         } else if (isSpecialShape) {
           patternIndex = SPECIAL_PATTERNS[Math.floor(Math.random() * SPECIAL_PATTERNS.length)];
         } else {
-          // 일반 레벨: 전체 패턴 풀에서 랜덤 선택 (0-63)
-          patternIndex = Math.floor(Math.random() * 64);
+          // 일반 레벨: 비활성 패턴 제외 (그리드 크기별)
+          let excl2: Set<number>;
+          try {
+            const r2 = await apiClient.get('/debug/pattern-config?grid_size=7');
+            excl2 = new Set(r2.data.disabled_patterns || []);
+          } catch { excl2 = new Set([5, 22, 25, 29, 39, 40, 42, 47, 54, 57, 60]); }
+          const pool = Array.from({ length: 64 }, (_, i) => i).filter(i => !excl2.has(i));
+          patternIndex = pool[Math.floor(Math.random() * pool.length)];
         }
+      }
+      if (!isValidPatternIndexBatch(patternIndex)) {
+        patternIndex = 0;
       }
 
       // Grid size (프로덕션과 동일)
@@ -3574,7 +4115,12 @@ function TestTab({
       {/* Sequential Auto Process Panel - auto_single mode */}
       {testMode === 'auto_single' && (() => {
         const untestedLevels = levels.filter(l => !l.meta.match_score || l.meta.match_score === 0);
-        const failedLevels = levels.filter(l => l.meta.match_score !== undefined && l.meta.match_score > 0 && l.meta.match_score < 70);
+        // 동적 컷오프 사용 — handleSequentialProcess 와 동일 기준이어야 통과/실패 표시가 일치한다
+        const failedLevels = levels.filter(l =>
+          l.meta.match_score !== undefined &&
+          l.meta.match_score > 0 &&
+          l.meta.match_score < computeSequentialPassThreshold(l.meta.target_difficulty)
+        );
         const targetLevels = [...untestedLevels, ...failedLevels].sort((a, b) => a.meta.level_number - b.meta.level_number);
         const allSelected = targetLevels.length > 0 && targetLevels.every(l => selectedSequentialLevels.has(l.meta.level_number));
 
@@ -3589,7 +4135,7 @@ function TestTab({
             </div>
 
             <p className="text-xs text-gray-500">
-              테스트 → 미달(70% 미만)시 재생성 → 재테스트 반복 (최대 5회)
+              테스트 → 미달 시 재생성 → 재테스트 반복 (최대 5회). 통과 컷은 70%, 어려운 레벨(target ≥ 0.5)은 BE tolerance에 맞춰 최소 61%까지 완화.
             </p>
 
             {/* Progress Display */}
@@ -3722,7 +4268,7 @@ function TestTab({
                         <span className="ml-2 flex-1 text-gray-300">Lv.{levelNum}</span>
                         <span className={`w-14 text-center font-medium ${
                           isUntested ? 'text-gray-500' :
-                          (level.meta.match_score || 0) >= 70 ? 'text-green-400' : 'text-red-400'
+                          (level.meta.match_score || 0) >= computeSequentialPassThreshold(level.meta.target_difficulty) ? 'text-green-400' : 'text-red-400'
                         }`}>
                           {isUntested ? '미측정' : `${level.meta.match_score?.toFixed(0)}%`}
                         </span>
@@ -3745,23 +4291,57 @@ function TestTab({
             )}
 
             {/* Results Summary */}
-            {!isSequentialProcessing && sequentialProgress.results.length > 0 && (
-              <div className="border border-gray-700 rounded-lg p-3 space-y-2">
-                <div className="text-xs text-gray-400">최근 처리 결과</div>
-                <div className="max-h-[100px] overflow-y-auto space-y-1">
-                  {sequentialProgress.results.slice(-10).map(r => (
-                    <div key={r.level_number} className={`flex items-center justify-between text-xs px-2 py-1 rounded ${
-                      r.success ? 'bg-green-900/30' : 'bg-red-900/30'
-                    }`}>
-                      <span className="text-gray-300">Lv.{r.level_number}</span>
-                      <span className={r.success ? 'text-green-400' : 'text-red-400'}>
-                        {r.final_score.toFixed(0)}% ({r.attempts}회 시도)
-                      </span>
+            {!isSequentialProcessing && sequentialProgress.results.length > 0 && (() => {
+              const failed = sequentialProgress.results.filter(r => !r.success);
+              const tooEasy = failed.filter(r => r.direction === 'too_easy').length;
+              const tooHard = failed.filter(r => r.direction === 'too_hard').length;
+              const worstBotDist = failed.reduce<Record<string, number>>((acc, r) => {
+                if (r.worst_bot) acc[r.worst_bot] = (acc[r.worst_bot] || 0) + 1;
+                return acc;
+              }, {});
+              const worstBotEntries = Object.entries(worstBotDist).sort((a, b) => b[1] - a[1]);
+              return (
+                <div className="border border-gray-700 rounded-lg p-3 space-y-2">
+                  <div className="text-xs text-gray-400">최근 처리 결과</div>
+                  {failed.length > 0 && (
+                    <div className="bg-gray-900/50 rounded p-2 space-y-1 text-xs">
+                      <div className="text-gray-400">실패 분포 ({failed.length}건)</div>
+                      <div className="flex gap-3">
+                        <span className="text-yellow-400">너무 쉬움: {tooEasy}</span>
+                        <span className="text-red-400">너무 어려움: {tooHard}</span>
+                      </div>
+                      {worstBotEntries.length > 0 && (
+                        <div className="text-gray-400">
+                          주 원인 봇: {worstBotEntries.map(([b, c]) => `${b}×${c}`).join(', ')}
+                        </div>
+                      )}
                     </div>
-                  ))}
+                  )}
+                  <div className="max-h-[140px] overflow-y-auto space-y-1">
+                    {sequentialProgress.results.slice(-10).map(r => (
+                      <div key={r.level_number} className={`flex items-center justify-between text-xs px-2 py-1 rounded ${
+                        r.success ? 'bg-green-900/30' : 'bg-red-900/30'
+                      }`}>
+                        <span className="text-gray-300">Lv.{r.level_number}</span>
+                        <div className="flex items-center gap-2">
+                          {!r.success && r.worst_bot && r.worst_gap_pp !== undefined && (
+                            <span className="text-gray-400">
+                              {r.worst_bot} {r.worst_gap_pp > 0 ? '+' : ''}{r.worst_gap_pp.toFixed(0)}pp
+                            </span>
+                          )}
+                          {r.pass_threshold !== undefined && r.pass_threshold !== 70 && (
+                            <span className="text-gray-500">컷:{r.pass_threshold}</span>
+                          )}
+                          <span className={r.success ? 'text-green-400' : 'text-red-400'}>
+                            {r.final_score.toFixed(0)}% ({r.attempts}회)
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
           </div>
         ) : null;
       })()}
@@ -3960,7 +4540,20 @@ function TestTab({
                         </span>
                         <span className="w-12 text-center text-gray-300 font-medium">Lv.{level.meta.level_number}</span>
                         <span className="w-16 text-center text-xs">
-                          {level.meta.pattern_index !== undefined ? (
+                          {level.meta.template_id ? (() => {
+                            // [v15.55] 템플릿 기반 레벨 — source_level_id에서 번호 파싱 → #123
+                            const m = level.meta.template_id.match(/(\d+)(?!.*\d)/);
+                            const label = m ? `#${m[1]}` : '📋';
+                            const diffStr = level.meta.template_source_difficulty != null
+                              ? ` 📊${(level.meta.template_source_difficulty * 100).toFixed(0)}`
+                              : '';
+                            return (
+                              <span className="text-violet-300 font-medium"
+                                title={`레벨 템플릿: ${level.meta.template_id}${diffStr}`}>
+                                {label}
+                              </span>
+                            );
+                          })() : level.meta.pattern_index !== undefined && level.meta.pattern_index >= 0 ? (
                             <span className="text-purple-400" title={getPatternByIndex(level.meta.pattern_index)?.name || `패턴 ${level.meta.pattern_index}`}>
                               {getPatternByIndex(level.meta.pattern_index)?.icon || '🎨'}
                             </span>
@@ -4025,6 +4618,20 @@ function TestTab({
           </div>
         ) : null;
       })()}
+
+      {/* Meta Integrity Scanner — declared useTileCount vs actual tile types */}
+      {testMode === 'auto_batch' && (
+        <MetaIntegrityPanel
+          batchId={batchId}
+          onRegenerateLevel={(n) => handleRegenerateLevel(n)}
+          onBulkRegenerate={async (numbers) => {
+            const result = await batchRegenerateCore(numbers);
+            if (result) {
+              addNotification('success', `메타 결함 일괄 재생성 완료: ${result.successCount}개 성공, ${result.failCount}개 실패`);
+            }
+          }}
+        />
+      )}
 
       {/* Batch Auto Test Panel */}
       {testMode === 'auto_batch' && (
@@ -4480,6 +5087,23 @@ function TestTab({
       <div className="w-80 flex flex-col bg-gray-800 rounded-lg overflow-hidden">
         {/* Filters */}
         <div className="p-3 border-b border-gray-700 space-y-2">
+          {/* [v15.56] 생성 중 실시간 갱신 인디케이터 + 수동 새로고침 */}
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-gray-400">
+              레벨 {levels.length}개
+              {isGenerating && (
+                <span className="ml-1 text-green-400 animate-pulse">● 생성 중 — 5초마다 자동 갱신</span>
+              )}
+            </span>
+            <button
+              onClick={() => loadLevels()}
+              disabled={isLoading}
+              className="px-2 py-0.5 rounded text-[10px] bg-gray-700 hover:bg-gray-600 text-gray-300 disabled:opacity-50"
+              title="현재까지 저장된 레벨 즉시 새로고침"
+            >
+              🔄 새로고침
+            </button>
+          </div>
           <input
             type="text"
             placeholder="레벨 번호 검색..."
@@ -4672,16 +5296,21 @@ function TestTab({
             <div className="divide-y divide-gray-700">
               {filteredLevels.map((level) => {
                 const isChecked = selectedRegenLevels.has(level.meta.level_number);
+                const isTemplateBased = !!level.meta.template_id;
+                const templateNumMatch = isTemplateBased ? level.meta.template_id!.match(/(\d+)(?!.*\d)/) : null;
+                const templateNum = templateNumMatch ? templateNumMatch[1] : null;
                 return (
                 <div
                   key={level.meta.level_number}
                   onClick={() => handleSelectLevel(level)}
                   className={`p-3 cursor-pointer transition-colors ${
                     selectedLevel?.meta.level_number === level.meta.level_number
-                      ? 'bg-indigo-900/50'
+                      ? (isTemplateBased ? 'bg-violet-800/60 border-l-4 border-violet-400' : 'bg-indigo-900/50')
                       : isChecked
                         ? 'bg-indigo-900/30'
-                        : 'hover:bg-gray-700/50'
+                        : isTemplateBased
+                          ? 'bg-violet-900/20 hover:bg-violet-900/40 border-l-4 border-violet-700'
+                          : 'hover:bg-gray-700/50'
                   }`}
                 >
                   <div className="flex items-center justify-between">
@@ -4728,10 +5357,16 @@ function TestTab({
                         />
                       )}
                       <div>
-                        <div className="text-sm font-medium text-white">
+                        <div className={`text-sm font-medium ${isTemplateBased ? 'text-violet-200' : 'text-white'}`}>
+                          {isTemplateBased && <span className="text-violet-400 mr-1">📋</span>}
                           레벨 {level.meta.level_number}
+                          {isTemplateBased && templateNum && (
+                            <span className="ml-2 text-xs text-violet-400 font-normal">
+                              ← 템플릿 #{templateNum}
+                            </span>
+                          )}
                         </div>
-                        <div className="text-xs text-gray-400">
+                        <div className={`text-xs ${isTemplateBased ? 'text-violet-400' : 'text-gray-400'}`}>
                           난이도: {level.meta.actual_difficulty.toFixed(3)} ({(level.meta.actual_difficulty * 100).toFixed(0)}%)
                         </div>
                         {level.meta.generated_at && (
@@ -4747,15 +5382,94 @@ function TestTab({
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      {/* Pattern indicator */}
-                      {level.meta.pattern_index !== undefined && (
+                      {/* Pattern / Template indicator */}
+                      {isTemplateBased ? (
+                        <span
+                          className="text-xs px-1.5 py-0.5 rounded bg-violet-700 text-white font-bold"
+                          title={`레벨 템플릿: ${level.meta.template_id}${
+                            level.meta.template_source_difficulty != null
+                              ? ` (측정 난이도 ${(level.meta.template_source_difficulty * 100).toFixed(0)})`
+                              : ''
+                          }`}
+                        >
+                          📋 {templateNum ? `#${templateNum}` : 'tpl'}
+                        </span>
+                      ) : level.meta.pattern_index !== undefined && level.meta.pattern_index >= 0 ? (
                         <span
                           className="text-xs px-1 py-0.5 rounded bg-purple-900/50 text-purple-300"
                           title={getPatternByIndex(level.meta.pattern_index)?.name || `패턴 ${level.meta.pattern_index}`}
                         >
                           {getPatternByIndex(level.meta.pattern_index)?.icon || '🎨'}
                         </span>
-                      )}
+                      ) : null}
+                      {/* Tile-deadlock check button — 정적 검사
+                          빨강(확정): 타입별 3배수 위반 = 클리어 불가
+                          노랑(주의): OOB 타일 (각 레이어 col/row 밖) = 디바이스에서 잘려 픽 불가 → 잠재적 데드락
+                          초록(통과): 둘 다 정상 */}
+                      {(() => {
+                        const div = checkTileDivisibility(level.level_json);
+                        const oob = detectOOBTiles(level.level_json);
+                        const isDeadlock = !div.ok;
+                        const hasOob = !isDeadlock && oob.count > 0;
+                        let tooltip: string;
+                        if (isDeadlock) {
+                          tooltip = `데드락 확정: ${div.offenders.map(o => `${o.type}=${o.count} 잔여${o.remainder}`).join(' · ')}`;
+                        } else if (hasOob) {
+                          tooltip = `디바이스 잘림 위험: ${oob.count}개 타일이 레이어 col/row 밖 — 디바이스에서 렌더 안 되어 픽 불가`;
+                        } else {
+                          tooltip = '정적 검사 통과 (타입별 3배수 ✓, OOB 없음)';
+                        }
+                        return (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const lines: string[] = [];
+                              if (div.ok) {
+                                lines.push('타입별 3배수: 통과 ✓');
+                                const counts = Object.entries(div.perType)
+                                  .sort((a, b) => parseInt(a[0].slice(1)) - parseInt(b[0].slice(1)))
+                                  .map(([t, n]) => `${t}=${n}`).join(', ');
+                                if (counts) lines.push(`(${counts})`);
+                                if (div.internalCount > 0) {
+                                  lines.push(`craft/stack 내부 타일 ${div.internalCount}개로 부족분 ${div.neededFromInternal}개 보충 가능 (잔여 ${div.internalCount - div.neededFromInternal}개는 3개씩 매칭).`);
+                                }
+                              } else {
+                                lines.push(`타입별 3배수 위반: ${div.offenders.length}개 (확정 데드락)`);
+                                div.offenders.forEach(o => {
+                                  lines.push(`  · ${o.type} = ${o.count}개 (잔여 ${o.remainder})`);
+                                });
+                                if (div.internalCount > 0) {
+                                  lines.push(`craft/stack 내부 ${div.internalCount}개로 부족분 ${div.neededFromInternal}개 메우려면 부족 또는 정합 안 맞음.`);
+                                }
+                                lines.push('→ 끝에 잔여 타일 → 클리어 불가');
+                              }
+                              if (oob.count === 0) {
+                                lines.push('레이어 OOB 타일: 없음 ✓');
+                              } else {
+                                lines.push(`레이어 OOB 타일: ${oob.count}개 (디바이스에서 잘려 픽 불가)`);
+                                oob.detail.slice(0, 5).forEach(d => {
+                                  lines.push(`  · L${d.layer} (선언 ${d.declared}) @ ${d.pos} = ${d.tile_type}`);
+                                });
+                                lines.push('→ 디바이스에서 그 타일이 렌더되지 않아 클리어 불가능할 수 있음');
+                              }
+                              addNotification(
+                                isDeadlock ? 'error' : hasOob ? 'warning' : 'success',
+                                `Lv.${level.meta.level_number} 정적 데드락 검사:\n${lines.join('\n')}`
+                              );
+                            }}
+                            className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                              isDeadlock
+                                ? 'bg-red-700 hover:bg-red-600 text-red-100'
+                                : hasOob
+                                  ? 'bg-yellow-700 hover:bg-yellow-600 text-yellow-100'
+                                  : 'bg-emerald-700 hover:bg-emerald-600 text-emerald-100'
+                            }`}
+                            title={tooltip}
+                          >
+                            {isDeadlock ? '🔒 !' : hasOob ? '🔒 ⚠' : '🔒 ✓'}
+                          </button>
+                        );
+                      })()}
                       {/* Validate button */}
                       {(() => {
                         const isValidating = validatingLevels.has(level.meta.level_number);
@@ -4967,6 +5681,42 @@ function TestTab({
                 </div>
               )}
 
+              {/* [v15.40] 중앙정렬 수정 버튼 */}
+              <div className="mt-2 flex items-center gap-2">
+                <button
+                  onClick={async () => {
+                    try {
+                      const levelJson = {
+                        ...(selectedLevel.level_json as unknown as Record<string, unknown>),
+                        level_number: selectedLevel.meta.level_number,
+                      };
+                      const response = await fixCentering([levelJson]);
+                      if (response.results.length > 0) {
+                        const result = response.results[0];
+                        if (result.was_modified) {
+                          const { saveProductionLevel } = await import('../../storage/productionStorage');
+                          const updated = {
+                            ...selectedLevel,
+                            level_json: result.level_json as unknown as LevelJSON,
+                          };
+                          await saveProductionLevel(batchId, updated);
+                          setSelectedLevel(updated);
+                          addNotification('success', `중앙정렬 수정됨 (${result.center_diff_before.toFixed(1)} → ${result.center_diff_after.toFixed(1)})`);
+                          loadLevels();
+                        } else {
+                          addNotification('info', '이미 정렬됨');
+                        }
+                      }
+                    } catch (err) {
+                      addNotification('error', '중앙정렬 실패');
+                    }
+                  }}
+                  className="px-3 py-1 text-xs bg-blue-600/30 text-blue-300 rounded hover:bg-blue-600/50 transition-colors"
+                >
+                  📐 중앙정렬 수정
+                </button>
+              </div>
+
               {/* Previous playtest results */}
               {selectedLevel.meta.playtest_results && selectedLevel.meta.playtest_results.length > 0 && (
                 <div className="mt-3 p-2 bg-gray-700/50 rounded">
@@ -5004,6 +5754,103 @@ function TestTab({
                   </pre>
                 </div>
               )}
+
+              {/* [v15.40] 레이어 실루엣 미리보기 */}
+              {(() => {
+                const lj = selectedLevel.level_json as unknown as Record<string, unknown>;
+                const numLayers = (lj.layer as number) || 1;
+                const SILHOUETTE_COLORS = ['#3b82f6', '#22c55e', '#a855f7', '#f97316', '#ec4899', '#06b6d4'];
+
+                // 레이어별 타일 위치 수집
+                type SCell = { layers: number[] };
+                const layerInfos: { layer: number; cols: number; rows: number; positions: string[] }[] = [];
+                for (let i = 0; i < numLayers; i++) {
+                  const ld = lj[`layer_${i}`] as Record<string, unknown> | undefined;
+                  if (!ld) continue;
+                  const tiles = ld.tiles as Record<string, unknown> | undefined;
+                  if (!tiles || Object.keys(tiles).length === 0) continue;
+                  layerInfos.push({
+                    layer: i,
+                    cols: parseInt(String(ld.col || '8')),
+                    rows: parseInt(String(ld.row || '8')),
+                    positions: Object.keys(tiles).filter(k => k.includes('_')),
+                  });
+                }
+
+                if (layerInfos.length < 2) return null;
+
+                // 기준: L0
+                const baseCols = layerInfos[0].cols;
+                const baseRows = layerInfos[0].rows;
+                const subW = baseCols * 2 + 2;
+                const subH = baseRows * 2 + 2;
+                const grid: SCell[][] = Array.from({ length: subH }, () =>
+                  Array.from({ length: subW }, () => ({ layers: [] }))
+                );
+
+                const baseCX = baseCols / 2;
+                const baseCY = baseRows / 2;
+
+                for (const lv of layerInfos) {
+                  const isOdd = lv.layer % 2 === 1;
+                  const lvCX = isOdd ? (lv.cols + 1) / 2 : lv.cols / 2;
+                  const lvCY = isOdd ? (lv.rows + 1) / 2 : lv.rows / 2;
+                  const shiftX = baseCX - lvCX;
+                  const shiftY = baseCY - lvCY;
+
+                  for (const pos of lv.positions) {
+                    const [xs, ys] = pos.split('_');
+                    const x = parseInt(xs), y = parseInt(ys);
+                    const vx = x + (isOdd ? 0.5 : 0) + shiftX;
+                    const vy = y + (isOdd ? 0.5 : 0) + shiftY;
+                    const sx = Math.round(vx * 2);
+                    const sy = Math.round(vy * 2);
+                    for (let dy = 0; dy < 2; dy++) {
+                      for (let dx = 0; dx < 2; dx++) {
+                        const ny = sy + dy, nx = sx + dx;
+                        if (ny >= 0 && ny < subH && nx >= 0 && nx < subW) {
+                          if (!grid[ny][nx].layers.includes(lv.layer)) {
+                            grid[ny][nx].layers.push(lv.layer);
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+
+                return (
+                  <div className="mt-2 p-2 bg-gray-800/50 rounded">
+                    <div className="text-[10px] text-gray-500 mb-1">
+                      실루엣 ({layerInfos.map(l => `L${l.layer}:${l.cols}×${l.rows}`).join(' ')})
+                    </div>
+                    <div className="inline-block">
+                      {grid.map((row, y) => (
+                        <div key={y} className="flex">
+                          {row.map((cell, x) => {
+                            const has = cell.layers.length > 0;
+                            const top = has ? cell.layers[cell.layers.length - 1] : -1;
+                            return (
+                              <div key={x} style={{
+                                width: 3, height: 3,
+                                backgroundColor: has ? SILHOUETTE_COLORS[top % SILHOUETTE_COLORS.length] : 'transparent',
+                                opacity: has ? 0.8 : 0,
+                              }} />
+                            );
+                          })}
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex gap-1 mt-1">
+                      {layerInfos.map(l => (
+                        <span key={l.layer} className="text-[8px] text-gray-500 flex items-center gap-0.5">
+                          <span style={{ width: 4, height: 4, backgroundColor: SILHOUETTE_COLORS[l.layer % SILHOUETTE_COLORS.length], display: 'inline-block', borderRadius: 1 }} />
+                          L{l.layer}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
 
             {/* Level preview with test controls overlay */}
@@ -5773,6 +6620,38 @@ function ReviewTab({
     }
   };
 
+  // [v15.40] 개별 레벨 중앙정렬
+  const [centeringLevel, setCenteringLevel] = useState<number | null>(null);
+  const handleFixCenteringSingle = async (level: ProductionLevel) => {
+    const levelNumber = level.meta.level_number;
+    setCenteringLevel(levelNumber);
+    try {
+      const levelJson = {
+        ...(level.level_json as unknown as Record<string, unknown>),
+        level_number: levelNumber,
+      };
+      const response = await fixCentering([levelJson]);
+      if (response.results.length > 0) {
+        const result = response.results[0];
+        if (result.was_modified) {
+          const { saveProductionLevel } = await import('../../storage/productionStorage');
+          await saveProductionLevel(batchId, {
+            ...level,
+            level_json: result.level_json as unknown as LevelJSON,
+          });
+          addNotification('success', `레벨 ${levelNumber} 중앙정렬 수정됨 (${result.center_diff_before.toFixed(1)} → ${result.center_diff_after.toFixed(1)})`);
+          loadLevels();
+        } else {
+          addNotification('info', `레벨 ${levelNumber}: 이미 정렬됨`);
+        }
+      }
+    } catch (err) {
+      addNotification('error', `레벨 ${levelNumber} 중앙정렬 실패`);
+    } finally {
+      setCenteringLevel(null);
+    }
+  };
+
   return (
     <div className="space-y-4">
       {/* Mode Toggle */}
@@ -5873,6 +6752,15 @@ function ReviewTab({
                       )}
                     </div>
                     <div className="flex gap-2">
+                      {/* [v15.40] 중앙정렬 버튼 */}
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={centeringLevel === level.meta.level_number}
+                        onClick={() => handleFixCenteringSingle(level)}
+                      >
+                        {centeringLevel === level.meta.level_number ? '...' : '정렬'}
+                      </Button>
                       {level.meta.status !== 'approved' && level.meta.status !== 'exported' && (
                         <Button
                           size="sm"
@@ -5996,6 +6884,299 @@ function getStatusLabel(status: LevelStatus): string {
     case 'exported': return '출시됨';
     default: return status;
   }
+}
+
+// [v15.55] 레벨 템플릿 할당 패널 — 프로덕션 생성 전 특정 레벨에 템플릿을 바인딩
+interface TemplateMeta {
+  template_id: string;
+  name: string;
+  source_level_id?: string | null;
+  measured_difficulty?: number | null;
+  autoplay_grade?: string | null;
+  layer_count: number;
+  total_tiles: number;
+}
+
+function TemplateAssignmentPanel({
+  batch,
+  assignments,
+  onAssignmentsChange,
+  autoAssign,
+  onAutoAssignChange,
+}: {
+  batch: ProductionBatch;
+  assignments: Record<number, string>;
+  onAssignmentsChange: (next: Record<number, string>) => void;
+  autoAssign: boolean;
+  onAutoAssignChange: (v: boolean) => void;
+}) {
+  const [templates, setTemplates] = useState<TemplateMeta[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [manualAssignInput, setManualAssignInput] = useState<Record<string, string>>({});
+  const [warnings, setWarnings] = useState<string[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const res = await apiClient.get('/debug/level-templates');
+        if (!cancelled) setTemplates(res.data.templates || []);
+      } catch {
+        if (!cancelled) setTemplates([]);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const batchRange = useMemo(() => {
+    // batch의 시작/끝 레벨 범위 — batch에 level_numbers가 있으면 그 범위, 없으면 1..total
+    const n = batch.total_levels || 1000;
+    return { start: 1, end: n };
+  }, [batch.total_levels]);
+
+  const parseSourceLevelNum = (sourceId?: string | null): number | null => {
+    if (!sourceId) return null;
+    const m = sourceId.match(/(\d+)/);
+    return m ? parseInt(m[1]) : null;
+  };
+
+  const handleManualAssign = (templateId: string) => {
+    const inp = manualAssignInput[templateId]?.trim();
+    if (!inp) return;
+    const n = parseInt(inp);
+    if (!isFinite(n) || n < 1) {
+      alert('올바른 레벨 번호를 입력하세요.');
+      return;
+    }
+    if (n < batchRange.start || n > batchRange.end) {
+      if (!window.confirm(`레벨 ${n}은 배치 범위(${batchRange.start}~${batchRange.end}) 밖입니다. 그래도 할당할까요?`)) return;
+    }
+    const next = { ...assignments };
+    // 같은 레벨에 다른 템플릿 이미 있으면 덮어쓰기 확인
+    if (next[n] && next[n] !== templateId) {
+      const prev = templates.find(t => t.template_id === next[n]);
+      if (!window.confirm(`레벨 ${n}은 이미 "${prev?.name || next[n]}" 에 할당됨. 덮어쓸까요?`)) return;
+    }
+    // 같은 템플릿이 다른 레벨에 할당된 경우 해제
+    for (const k of Object.keys(next)) {
+      if (next[parseInt(k)] === templateId) delete next[parseInt(k)];
+    }
+    next[n] = templateId;
+    onAssignmentsChange(next);
+    setManualAssignInput(prev => ({ ...prev, [templateId]: '' }));
+  };
+
+  const handleClear = (levelNum: number) => {
+    const next = { ...assignments };
+    delete next[levelNum];
+    onAssignmentsChange(next);
+  };
+
+  const handleClearAll = () => {
+    if (!window.confirm('모든 템플릿 할당을 해제할까요?')) return;
+    onAssignmentsChange({});
+  };
+
+  const handleAutoFillFromSource = () => {
+    const next = { ...assignments };
+    const warns: string[] = [];
+    let added = 0;
+    for (const tpl of templates) {
+      const alreadyAssigned = Object.values(next).includes(tpl.template_id);
+      if (alreadyAssigned) continue;
+      const sourceNum = parseSourceLevelNum(tpl.source_level_id);
+      if (sourceNum === null) {
+        warns.push(`${tpl.name}: source 번호 파싱 실패`);
+        continue;
+      }
+      if (sourceNum < batchRange.start || sourceNum > batchRange.end) {
+        warns.push(`${tpl.name}: source ${sourceNum} 배치 범위 밖`);
+        continue;
+      }
+      if (next[sourceNum]) {
+        warns.push(`${tpl.name}: 레벨 ${sourceNum} 이미 할당됨`);
+        continue;
+      }
+      next[sourceNum] = tpl.template_id;
+      added++;
+    }
+    onAssignmentsChange(next);
+    setWarnings(warns);
+    if (added === 0 && warns.length === 0) {
+      setWarnings(['자동 할당 가능한 템플릿이 없습니다.']);
+    }
+  };
+
+  const assignedEntries = Object.entries(assignments)
+    .map(([k, v]) => ({ level: parseInt(k), templateId: v }))
+    .sort((a, b) => a.level - b.level);
+
+  const unassignedCount = templates.filter(
+    t => !Object.values(assignments).includes(t.template_id)
+  ).length;
+  const unmeasuredCount = templates.filter(t => t.measured_difficulty == null).length;
+
+  return (
+    <div className="bg-gray-800 rounded-lg p-3 border border-violet-900/50">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center justify-between text-left"
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium text-violet-300">
+            📋 레벨 템플릿 할당 ({assignedEntries.length}개 할당됨)
+          </span>
+          {templates.length > 0 && (
+            <span className="text-[10px] text-gray-500">
+              전체 {templates.length} · 미할당 {unassignedCount} · 미측정 {unmeasuredCount}
+            </span>
+          )}
+        </div>
+        <span className="text-xs text-violet-500">{expanded ? '접기' : '펼치기'}</span>
+      </button>
+
+      {expanded && (
+        <div className="mt-3 space-y-3">
+          {loading && <div className="text-xs text-gray-500">로딩 중...</div>}
+
+          {!loading && templates.length === 0 && (
+            <div className="text-xs text-gray-500 bg-gray-900/50 rounded p-3 text-center">
+              저장된 레벨 템플릿이 없습니다.<br />
+              패턴 임포트 탭에서 레벨 템플릿을 먼저 저장하세요.
+            </div>
+          )}
+
+          {templates.length > 0 && (
+            <>
+              {/* 자동 배치 토글 */}
+              <div className="flex items-center gap-2 bg-gray-900/50 rounded p-2">
+                <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
+                  <input type="checkbox" checked={autoAssign}
+                    onChange={e => onAutoAssignChange(e.target.checked)}
+                    className="accent-violet-500" />
+                  미할당 템플릿 자동 배치 (측정 난이도 기반)
+                </label>
+                <span className="text-[10px] text-gray-500">
+                  수동 할당 외 템플릿은 measured_difficulty에 맞는 레벨 슬롯에 자동 삽입
+                </span>
+              </div>
+
+              {/* 수동 할당 — 템플릿 목록 */}
+              <details open className="bg-gray-900/50 rounded p-2">
+                <summary className="text-xs font-medium text-gray-300 cursor-pointer mb-2">
+                  수동 할당 ({templates.length}개 템플릿)
+                </summary>
+                <div className="flex flex-wrap gap-1 mb-2">
+                  <button
+                    onClick={handleAutoFillFromSource}
+                    className="px-2 py-0.5 rounded text-[10px] bg-violet-700 hover:bg-violet-600 text-white"
+                    title="source_level_id 번호 기반 일괄 할당"
+                  >
+                    🎯 source 번호로 일괄 자동 채우기
+                  </button>
+                  {assignedEntries.length > 0 && (
+                    <button
+                      onClick={handleClearAll}
+                      className="px-2 py-0.5 rounded text-[10px] bg-red-900/40 hover:bg-red-800 text-red-300"
+                    >
+                      🗑️ 전체 해제
+                    </button>
+                  )}
+                </div>
+                <div className="max-h-48 overflow-y-auto space-y-1">
+                  {templates.map(tpl => {
+                    const assignedLevel = Object.entries(assignments).find(([, v]) => v === tpl.template_id)?.[0];
+                    const sourceNum = parseSourceLevelNum(tpl.source_level_id);
+                    return (
+                      <div key={tpl.template_id}
+                        className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] ${
+                          assignedLevel ? 'bg-violet-900/40 border border-violet-700' : 'bg-gray-800'
+                        }`}
+                      >
+                        <span className="flex-1 truncate text-gray-300" title={tpl.template_id}>
+                          {tpl.name}
+                          <span className="ml-1 text-gray-500">({tpl.layer_count}L, {tpl.total_tiles}t)</span>
+                          {tpl.measured_difficulty != null ? (
+                            <span className="ml-1 text-blue-300">📊 {(tpl.measured_difficulty * 100).toFixed(0)}</span>
+                          ) : (
+                            <span className="ml-1 text-gray-600">📊 -</span>
+                          )}
+                        </span>
+                        {assignedLevel ? (
+                          <>
+                            <span className="text-violet-300 shrink-0">→ 레벨 {assignedLevel}</span>
+                            <button onClick={() => handleClear(parseInt(assignedLevel))}
+                              className="text-red-400 hover:text-red-300 shrink-0">✕</button>
+                          </>
+                        ) : (
+                          <>
+                            <input
+                              type="number"
+                              min={batchRange.start} max={batchRange.end}
+                              value={manualAssignInput[tpl.template_id] || ''}
+                              onChange={e => setManualAssignInput(prev => ({ ...prev, [tpl.template_id]: e.target.value }))}
+                              placeholder={sourceNum ? `${sourceNum}` : '레벨#'}
+                              className="w-14 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[10px]"
+                              onKeyDown={e => e.key === 'Enter' && handleManualAssign(tpl.template_id)}
+                            />
+                            <button onClick={() => handleManualAssign(tpl.template_id)}
+                              className="px-1.5 py-0.5 rounded text-[10px] bg-violet-700 hover:bg-violet-600 text-white shrink-0"
+                            >할당</button>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </details>
+
+              {/* 현재 할당 목록 */}
+              {assignedEntries.length > 0 && (
+                <details open className="bg-gray-900/50 rounded p-2">
+                  <summary className="text-xs font-medium text-green-400 cursor-pointer mb-2">
+                    할당 완료 ({assignedEntries.length}개)
+                  </summary>
+                  <div className="max-h-32 overflow-y-auto space-y-0.5">
+                    {assignedEntries.map(({ level, templateId }) => {
+                      const tpl = templates.find(t => t.template_id === templateId);
+                      return (
+                        <div key={level} className="flex items-center gap-1 text-[10px] px-2 py-0.5">
+                          <span className="text-gray-400 w-12">Lv.{level}</span>
+                          <span className="text-violet-300 flex-1 truncate">
+                            ← {tpl?.name || templateId}
+                            {tpl?.measured_difficulty != null && (
+                              <span className="ml-1 text-blue-400">📊{(tpl.measured_difficulty * 100).toFixed(0)}</span>
+                            )}
+                          </span>
+                          <button onClick={() => handleClear(level)}
+                            className="text-red-400 hover:text-red-300">✕</button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </details>
+              )}
+
+              {warnings.length > 0 && (
+                <div className="bg-yellow-900/30 border border-yellow-700 rounded p-2 space-y-0.5 max-h-24 overflow-y-auto">
+                  <div className="text-[10px] text-yellow-300 font-medium">⚠️ 자동 할당 경고 ({warnings.length})</div>
+                  {warnings.map((w, i) => (
+                    <div key={i} className="text-[10px] text-yellow-400">{w}</div>
+                  ))}
+                  <button onClick={() => setWarnings([])}
+                    className="text-[9px] text-yellow-500 hover:text-yellow-300 mt-1">닫기</button>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // Export sub-components

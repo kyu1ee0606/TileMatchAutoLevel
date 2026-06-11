@@ -775,7 +775,9 @@ export class GameEngine {
         boxTile.effectData.remaining = (boxTile.effectData.remaining || totalCount) - 1;
       } else if (isCrafted && this.previewMode) {
         // previewMode: 스폰 안 함, remaining 유지 (원래 count 표시)
-        console.log(`[Craft] Preview mode - skipping spawn at spawnPos=${spawnPos}, remaining=${boxTile.effectData.remaining}`);
+        // [v15.57] 첫 스폰 타일 타입을 박스에 저장 → 렌더러에서 "다음에 나올 타일" 아이콘 표시 가능
+        boxTile.effectData.currentTileType = actualTileType;
+        console.log(`[Craft] Preview mode - skipping spawn at spawnPos=${spawnPos}, remaining=${boxTile.effectData.remaining}, currentTileType=${actualTileType}`);
       }
     }
 
@@ -898,7 +900,15 @@ export class GameEngine {
 
   /**
    * 타일이 상위 레이어에 의해 막혀있는지 확인
-   * 백엔드 _is_blocked_by_upper와 동일한 로직
+   * 백엔드 _is_blocked_by_upper와 동일한 로직.
+   *
+   * [v15.49 revert] 디바이스 실제 동작 검증 결과 원래 col-기반 로직이 정확함을 확인.
+   *   디바이스: 상위 타일 (a, b) 가 하위 (a, b), (a+1, b), (a, b+1), (a+1, b+1)
+   *     4개를 막음 (DOWN-RIGHT 영역) — 동일/다른 사이즈 무관.
+   *   원래 col-기반 로직(upper_col > cur_col → UPPER_BIGGER, else UPPER_SMALLER)이
+   *   typical pyramid에서도 device와 일치. 패턴 모드(모든 레이어 동일 col)에서도
+   *   else 분기로 떨어져 UPPER_SMALLER 사용 → device와 일치.
+   *   v15.48 (parity 기반으로 변경)이 lower-odd 케이스에서 디바이스와 어긋났음.
    */
   isBlockedByUpper(tile: TileState): boolean {
     if (tile.layerIdx >= this.state.maxLayerIdx) return false;
@@ -913,19 +923,15 @@ export class GameEngine {
       const upperParity = upperLayerIdx % 2;
       const upperLayerCol = this.state.layerCols.get(upperLayerIdx) || 7;
 
-      // 패리티와 레이어 크기에 따른 블로킹 오프셋 결정
       let blockingOffsets: [number, number][];
-
       if (tileParity === upperParity) {
-        // 같은 패리티: 같은 위치만 확인
         blockingOffsets = BLOCKING_OFFSETS_SAME_PARITY;
+      } else if (upperLayerCol > curLayerCol) {
+        blockingOffsets = BLOCKING_OFFSETS_UPPER_BIGGER;
       } else {
-        // 다른 패리티: 레이어 col 비교
-        if (upperLayerCol > curLayerCol) {
-          blockingOffsets = BLOCKING_OFFSETS_UPPER_BIGGER;
-        } else {
-          blockingOffsets = BLOCKING_OFFSETS_UPPER_SMALLER;
-        }
+        // upper_col <= cur_col (동일 사이즈 포함) → UPPER_SMALLER
+        // upper at (a,b) blocks lower at (a,b), (a+1,b), (a,b+1), (a+1,b+1) (DOWN-RIGHT)
+        blockingOffsets = BLOCKING_OFFSETS_UPPER_SMALLER;
       }
 
       for (const [dx, dy] of blockingOffsets) {

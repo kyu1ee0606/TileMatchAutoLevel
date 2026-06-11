@@ -96,6 +96,7 @@ function collectAllTiles(levelData: LevelJSON): Array<{
 /**
  * Create a DOM element with all tiles for html-to-image capture.
  * Uses inline base64 images to avoid CORS issues.
+ * Applies layer offset to match game view (odd layers offset by 0.5 tile).
  */
 async function createCaptureElement(
   tiles: ReturnType<typeof collectAllTiles>,
@@ -106,11 +107,16 @@ async function createCaptureElement(
   const usedWidth = bounds.maxX - bounds.minX + 1;
   const usedHeight = bounds.maxY - bounds.minY + 1;
 
+  // Check if there are odd layers (need extra space for offset)
+  const maxLayer = Math.max(...tiles.map(t => t.layer));
+  const hasOddLayers = maxLayer >= 1;
+  const extraOffsetTiles = hasOddLayers ? 0.5 : 0;
+
   // Calculate tile size - render at larger size for better quality
   const renderSize = Math.max(targetSize * 2, 256);
-  const tileSize = Math.floor(renderSize / Math.max(usedWidth, usedHeight));
-  const canvasWidth = usedWidth * tileSize;
-  const canvasHeight = usedHeight * tileSize;
+  const tileSize = Math.floor(renderSize / Math.max(usedWidth + extraOffsetTiles, usedHeight + extraOffsetTiles));
+  const canvasWidth = Math.ceil((usedWidth + extraOffsetTiles) * tileSize);
+  const canvasHeight = Math.ceil((usedHeight + extraOffsetTiles) * tileSize);
 
   // Create container
   const container = document.createElement('div');
@@ -179,12 +185,16 @@ async function createCaptureElement(
   // Track image load promises for DOM images
   const imagePromises: Promise<void>[] = [];
 
-  // Render each tile
+  // Render each tile with layer offset (same as GameBoard.tsx)
+  // Even layers (0, 2, 4...) - no offset
+  // Odd layers (1, 3, 5...) - offset by 0.5 tile
   for (const tile of tiles) {
     const relX = tile.x - bounds.minX;
     const relY = tile.y - bounds.minY;
-    const px = relX * tileSize;
-    const py = relY * tileSize;
+    const isOddLayer = tile.layer % 2 === 1;
+    const layerOffset = isOddLayer ? tileSize * 0.5 : 0;
+    const px = relX * tileSize + layerOffset;
+    const py = relY * tileSize + layerOffset;
 
     const tileInfo = TILE_TYPES[tile.tileType];
 

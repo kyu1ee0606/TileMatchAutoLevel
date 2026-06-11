@@ -23,6 +23,7 @@ export interface LevelJSON {
   randSeed?: number;  // 랜덤 시드
   unlockTile?: number;  // key 기믹: 버퍼 잠금 슬롯 수 (key 타일 3개로 1칸 해제)
   timea?: number;  // time_attack 기믹: 제한 시간 (초)
+  rewardCoin?: number;  // GBoost 업로드용 리워드 코인 (없으면 백엔드 기본값 10)
   [key: `layer_${number}`]: LevelLayer;
 }
 
@@ -108,6 +109,10 @@ export interface GenerationResult {
   actual_difficulty: number;
   grade: DifficultyGrade;
   generation_time_ms: number;
+  // True when backend could not fully resolve deadlock — candidate likely unclearable.
+  playability_warning?: boolean;
+  // Best clear rate observed during deadlock resolution (0-1). 1.0 when not measured.
+  estimated_clear_rate?: number;
 }
 
 // Simulation result

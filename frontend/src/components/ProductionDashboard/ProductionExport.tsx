@@ -134,6 +134,30 @@ export function ProductionExport({
   const [overwrite, setOverwrite] = useState(true);
   const [backupBeforeOverwrite, setBackupBeforeOverwrite] = useState(true);
 
+  // [v15.51] 업로드 대상 ID 미리보기 — 실제 level_number 기반.
+  // 기존 UI는 gboostStartIndex 기반 synthetic 번호를 표시해서 batch에 레벨 7만 있어도
+  // "level_1"로 보여 사용자 혼란을 일으켰음. 이제 실제 업로드되는 ID를 정확히 보여줌.
+  const [previewTargetIds, setPreviewTargetIds] = useState<string[]>([]);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  // Reward coin bulk override (applies only to GBoost upload payload — does not modify saved level)
+  // mode 'preserve': use existing level_json.rewardCoin (or backend default 10)
+  // mode 'fixed':    apply the same coin value to every uploaded level
+  // mode 'tiered':   apply different values for boss (level%10===0) / special (level%10===9) / normal
+  type RewardCoinMode = 'preserve' | 'fixed' | 'tiered';
+  const [rewardCoinMode, setRewardCoinMode] = useState<RewardCoinMode>('preserve');
+  const [rewardCoinFixed, setRewardCoinFixed] = useState(10);
+  const [rewardCoinBoss, setRewardCoinBoss] = useState(50);
+  const [rewardCoinSpecial, setRewardCoinSpecial] = useState(30);
+  const [rewardCoinNormal, setRewardCoinNormal] = useState(10);
+
+  // autoCollectCount (암호화) bulk override (upload payload only — does not modify saved level)
+  // mode 'preserve':     use existing level_json.autoCollectCount (or 0)
+  // mode 'multiples10':  set the given value on levels where level_number % 10 === 0, 0 (해제) on others
+  type AutoCollectMode = 'preserve' | 'multiples10';
+  const [autoCollectMode, setAutoCollectMode] = useState<AutoCollectMode>('preserve');
+  const [autoCollectValue, setAutoCollectValue] = useState(1);
+
   // Upload state
   const [gboostPhase, setGboostPhase] = useState<GBoostPhase>('config');
   const [gboostProgress, setGboostProgress] = useState({ current: 0, total: 0 });
@@ -181,6 +205,25 @@ export function ProductionExport({
       setUploadResult({ success: 0, failed: 0, skipped: 0 });
     }
   }, [gboostBoardId, gboostLevelPrefix, gboostStartIndex, useRange, rangeStart, rangeEnd]);
+
+  // 미리보기 ID 계산 — config 변경 시마다 실제 업로드 대상 산출
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setPreviewLoading(true);
+      try {
+        const exportable = await getExportableLevels();
+        if (cancelled) return;
+        setPreviewTargetIds(exportable.map(l => `${gboostLevelPrefix}${l.meta.level_number}`));
+      } catch {
+        if (!cancelled) setPreviewTargetIds([]);
+      } finally {
+        if (!cancelled) setPreviewLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [batchId, gboostLevelPrefix, useRange, rangeStart, rangeEnd, totalReady]);
 
   // Get target level ID from actual level number
   const getTargetLevelId = (levelNumber: number): string => {
@@ -332,18 +375,19 @@ export function ProductionExport({
     setConflictingLevels([]);
 
     try {
-      // Get target IDs
-      const targetIds: ConflictInfo[] = [];
-      for (let i = 0; i < effectiveCount; i++) {
-        const levelNum = effectiveStart + i;
-        targetIds.push({
-          targetId: getTargetLevelId(levelNum),
-          levelNumber: levelNum,
-        });
-      }
+      // [v15.51] Conflict-check 대상 ID는 실제 업로드와 동일한 규칙 — 즉 각 레벨의
+      // 실제 level_number 기반으로 산출. 기존: effectiveStart부터 1씩 증가하는 synthetic
+      // 번호로 만들었기 때문에 batch에 레벨 7만 있어도 ID가 level_1로 표시되어
+      // 실제 업로드 대상(level_7)과 불일치 → 사용자 혼란.
+      const exportableForCheck = await getExportableLevels();
+      const targetIds: ConflictInfo[] = exportableForCheck.map(l => ({
+        targetId: getTargetLevelId(l.meta.level_number),
+        levelNumber: l.meta.level_number,
+      }));
 
-      // Get existing levels from server
-      const existingLevels = await listFromGBoost(gboostBoardId, gboostLevelPrefix, 1000);
+      // Get existing levels from server (fetch more than needed to ensure all conflicts are detected)
+      const fetchLimit = Math.max(targetIds.length + 100, 2000);
+      const existingLevels = await listFromGBoost(gboostBoardId, gboostLevelPrefix, fetchLimit);
       const existingIds = new Set(existingLevels.levels.map(l => l.id));
 
       // Find conflicts
@@ -416,6 +460,28 @@ export function ProductionExport({
       // 충돌 레벨 ID 집합 (overwrite=false일 때 건너뛰기 위함)
       const conflictIds = new Set(conflictingLevels.map(c => c.targetId));
 
+      // Decide rewardCoin per level based on UI mode (does not mutate saved level data).
+      const resolveRewardCoin = (levelNumber: number, savedLevel: LevelJSON): number | null => {
+        if (rewardCoinMode === 'preserve') return null; // do not override
+        if (rewardCoinMode === 'fixed') return Math.max(0, Math.floor(rewardCoinFixed));
+        // tiered
+        const isBoss = levelNumber > 0 && levelNumber % 10 === 0;
+        const isSpecial = levelNumber % 10 === 9;
+        if (isBoss) return Math.max(0, Math.floor(rewardCoinBoss));
+        if (isSpecial) return Math.max(0, Math.floor(rewardCoinSpecial));
+        // Avoid unused-var TS warning: explicitly read savedLevel for parity with future per-level rules
+        void savedLevel;
+        return Math.max(0, Math.floor(rewardCoinNormal));
+      };
+
+      // Decide autoCollectCount (암호화) per level based on UI mode (upload payload only).
+      const resolveAutoCollect = (levelNumber: number): number | null => {
+        if (autoCollectMode === 'preserve') return null; // do not override
+        // multiples10: 10·20·30… 레벨은 설정값, 나머지는 0 (해제)
+        const isMultipleOf10 = levelNumber > 0 && levelNumber % 10 === 0;
+        return isMultipleOf10 ? Math.max(0, Math.floor(autoCollectValue)) : 0;
+      };
+
       for (let i = 0; i < exportableLevels.length; i++) {
         const level = exportableLevels[i];
         const targetId = getTargetLevelId(level.meta.level_number);
@@ -427,9 +493,19 @@ export function ProductionExport({
           continue;
         }
 
+        // 업로드 페이로드에만 rewardCoin / autoCollectCount 주입 (저장본은 그대로 둠)
+        const overrideCoin = resolveRewardCoin(level.meta.level_number, level.level_json);
+        const overrideAutoCollect = resolveAutoCollect(level.meta.level_number);
+        let uploadJson: LevelJSON = level.level_json;
+        if (overrideCoin !== null || overrideAutoCollect !== null) {
+          uploadJson = { ...level.level_json };
+          if (overrideCoin !== null) uploadJson.rewardCoin = overrideCoin;
+          if (overrideAutoCollect !== null) uploadJson.autoCollectCount = overrideAutoCollect;
+        }
+
         try {
           // saveToGBoost는 level_json을 직접 받아서 TownPop 변환 및 썸네일 생성
-          await saveToGBoost(gboostBoardId, targetId, level.level_json);
+          await saveToGBoost(gboostBoardId, targetId, uploadJson);
           successCount++;
         } catch (err) {
           console.error(`Failed to upload ${targetId}:`, err);
@@ -727,15 +803,184 @@ export function ProductionExport({
                 </div>
 
                 <p className="text-xs text-gray-500">
-                  {gboostLevelPrefix}{gboostStartIndex} ~ {gboostLevelPrefix}{gboostStartIndex + effectiveCount - 1} ({effectiveCount}개)
+                  {previewLoading ? (
+                    <span>대상 ID 계산 중…</span>
+                  ) : previewTargetIds.length === 0 ? (
+                    <span>업로드 가능한 레벨이 없습니다.</span>
+                  ) : previewTargetIds.length === 1 ? (
+                    <span>업로드 대상: <code className="text-gray-300">{previewTargetIds[0]}</code> (1개)</span>
+                  ) : previewTargetIds.length <= 5 ? (
+                    <span>업로드 대상: <code className="text-gray-300">{previewTargetIds.join(', ')}</code> ({previewTargetIds.length}개)</span>
+                  ) : (
+                    <span>
+                      업로드 대상: <code className="text-gray-300">{previewTargetIds[0]}</code> ~{' '}
+                      <code className="text-gray-300">{previewTargetIds[previewTargetIds.length - 1]}</code>{' '}
+                      ({previewTargetIds.length}개)
+                    </span>
+                  )}
                 </p>
+
+                {/* Reward Coin bulk override (upload-time only, does not modify saved level) */}
+                <div className="bg-gray-900/50 border border-gray-700 rounded-lg p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-medium text-white">리워드 코인 (rewardCoin) 일괄 설정</h4>
+                    <span className="text-[10px] text-gray-500">저장본 유지 · 업로드 페이로드만 덮어씀</span>
+                  </div>
+
+                  <div className="flex gap-2 text-xs">
+                    {[
+                      { v: 'preserve', label: '레벨 저장값 유지' },
+                      { v: 'fixed', label: '일괄 고정값' },
+                      { v: 'tiered', label: '타입별 차등' },
+                    ].map(opt => (
+                      <label
+                        key={opt.v}
+                        className={`flex-1 px-2 py-1.5 text-center rounded border cursor-pointer ${
+                          rewardCoinMode === opt.v
+                            ? 'bg-blue-900/40 border-blue-500 text-blue-200'
+                            : 'bg-gray-800 border-gray-700 text-gray-400 hover:bg-gray-700'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="rewardCoinMode"
+                          value={opt.v}
+                          checked={rewardCoinMode === opt.v}
+                          onChange={(e) => setRewardCoinMode(e.target.value as typeof rewardCoinMode)}
+                          className="hidden"
+                        />
+                        {opt.label}
+                      </label>
+                    ))}
+                  </div>
+
+                  {rewardCoinMode === 'fixed' && (
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs text-gray-400 whitespace-nowrap">고정값</label>
+                      <input
+                        type="number"
+                        min={0}
+                        step={1}
+                        value={rewardCoinFixed}
+                        onChange={(e) => setRewardCoinFixed(parseInt(e.target.value, 10) || 0)}
+                        className="flex-1 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-xs text-white"
+                      />
+                      <span className="text-xs text-gray-500">코인 / 레벨</span>
+                    </div>
+                  )}
+
+                  {rewardCoinMode === 'tiered' && (
+                    <div className="grid grid-cols-3 gap-2">
+                      <div>
+                        <label className="block text-[11px] text-orange-300 mb-0.5">보스 (10·20·…)</label>
+                        <input
+                          type="number"
+                          min={0}
+                          step={1}
+                          value={rewardCoinBoss}
+                          onChange={(e) => setRewardCoinBoss(parseInt(e.target.value, 10) || 0)}
+                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-xs text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] text-purple-300 mb-0.5">특수 (9·19·…)</label>
+                        <input
+                          type="number"
+                          min={0}
+                          step={1}
+                          value={rewardCoinSpecial}
+                          onChange={(e) => setRewardCoinSpecial(parseInt(e.target.value, 10) || 0)}
+                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-xs text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] text-gray-300 mb-0.5">일반</label>
+                        <input
+                          type="number"
+                          min={0}
+                          step={1}
+                          value={rewardCoinNormal}
+                          onChange={(e) => setRewardCoinNormal(parseInt(e.target.value, 10) || 0)}
+                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-xs text-white"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {rewardCoinMode === 'preserve' && (
+                    <p className="text-[11px] text-gray-500">
+                      각 레벨의 level_json.rewardCoin 값을 그대로 사용 (없으면 백엔드 기본값 10).
+                    </p>
+                  )}
+                </div>
+
+                {/* autoCollectCount (암호화) bulk override (upload-time only, does not modify saved level) */}
+                <div className="bg-gray-900/50 border border-gray-700 rounded-lg p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-medium text-white">암호화 (autoCollectCount) 일괄 설정</h4>
+                    <span className="text-[10px] text-gray-500">저장본 유지 · 업로드 페이로드만 덮어씀</span>
+                  </div>
+
+                  <div className="flex gap-2 text-xs">
+                    {[
+                      { v: 'preserve', label: '레벨 저장값 유지' },
+                      { v: 'multiples10', label: '10의 배수 레벨만 설정' },
+                    ].map(opt => (
+                      <label
+                        key={opt.v}
+                        className={`flex-1 px-2 py-1.5 text-center rounded border cursor-pointer ${
+                          autoCollectMode === opt.v
+                            ? 'bg-blue-900/40 border-blue-500 text-blue-200'
+                            : 'bg-gray-800 border-gray-700 text-gray-400 hover:bg-gray-700'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="autoCollectMode"
+                          value={opt.v}
+                          checked={autoCollectMode === opt.v}
+                          onChange={(e) => setAutoCollectMode(e.target.value as typeof autoCollectMode)}
+                          className="hidden"
+                        />
+                        {opt.label}
+                      </label>
+                    ))}
+                  </div>
+
+                  {autoCollectMode === 'multiples10' && (
+                    <>
+                      <div className="flex items-center gap-2">
+                        <label className="text-xs text-gray-400 whitespace-nowrap">설정값</label>
+                        <input
+                          type="number"
+                          min={0}
+                          max={999}
+                          step={1}
+                          value={autoCollectValue}
+                          onChange={(e) => setAutoCollectValue(parseInt(e.target.value, 10) || 0)}
+                          className="flex-1 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-xs text-white"
+                        />
+                        <span className="text-xs text-gray-500">(0 = 해제)</span>
+                      </div>
+                      <p className="text-[11px] text-gray-500">
+                        10·20·30… 레벨에 설정값 적용, 나머지 레벨은 0(해제)으로 업로드.
+                      </p>
+                    </>
+                  )}
+
+                  {autoCollectMode === 'preserve' && (
+                    <p className="text-[11px] text-gray-500">
+                      각 레벨의 level_json.autoCollectCount 값을 그대로 사용 (없으면 0 = 해제).
+                    </p>
+                  )}
+                </div>
 
                 <Button
                   onClick={handleCheckConflicts}
-                  disabled={effectiveCount === 0}
+                  disabled={previewTargetIds.length === 0}
                   className="w-full"
                 >
-                  서버 확인 후 업로드 ({effectiveCount}개)
+                  서버 확인 후 업로드 ({previewTargetIds.length}개)
                 </Button>
               </>
             )}

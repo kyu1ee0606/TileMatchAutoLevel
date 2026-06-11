@@ -10,6 +10,9 @@ import { SimulationViewer } from './components/SimulationViewer';
 import { PlayTab } from './components/PlayTab';
 import { ProductionDashboard } from './components/ProductionDashboard';
 import { BenchmarkDashboard } from './components/BenchmarkDashboard';
+import { PatternDebugPanel } from './components/PatternDebugPanel';
+import { ColorBalancePanel } from './components/ColorBalancePanel';
+import { PatternImportPanel } from './components/PatternImportPanel';
 import { useLevelStore } from './stores/levelStore';
 import { useUIStore, type TabId } from './stores/uiStore';
 import { useSimulationStore } from './stores/simulationStore';
@@ -257,6 +260,9 @@ function AppContent() {
     { id: 'generator', label: '자동 생성', icon: '🎲' },
     { id: 'local', label: '로컬 레벨', icon: '💾' },
     { id: 'production', label: '프로덕션', icon: '🚀' },
+    { id: 'pattern-debug', label: '패턴 디버그', icon: '🔧' },
+    { id: 'color-balance', label: '색상 테스트', icon: '🎨' },
+    { id: 'pattern-import', label: '패턴 임포트', icon: '📁' },
     { id: 'benchmark', label: '벤치마크', icon: '📊' },
     { id: 'gboost', label: '게임부스트', icon: '☁️' },
     { id: 'play', label: '플레이', icon: '▶️' },
@@ -424,9 +430,22 @@ function AppContent() {
             <GBoostPanel />
           </div>
         )}
-        {activeTab === 'production' && (
+        <div className="max-w-6xl mx-auto" style={{ display: activeTab === 'production' ? 'block' : 'none' }}>
+          <ProductionDashboard />
+        </div>
+        {activeTab === 'pattern-debug' && (
           <div className="max-w-6xl mx-auto">
-            <ProductionDashboard />
+            <PatternDebugPanel />
+          </div>
+        )}
+        {activeTab === 'color-balance' && (
+          <div className="max-w-4xl mx-auto">
+            <ColorBalancePanel />
+          </div>
+        )}
+        {activeTab === 'pattern-import' && (
+          <div className="max-w-5xl mx-auto">
+            <PatternImportPanel />
           </div>
         )}
         {activeTab === 'benchmark' && (

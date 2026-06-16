@@ -170,6 +170,17 @@ export interface ProductionLevelMeta {
   regen_lower_bound?: number;       // 난이도 하한 (너무 쉬웠던 경계)
   regen_upper_bound?: number;       // 난이도 상한 (너무 어려웠던 경계)
 
+  // [MC 0.5단계] 몬테카를로 스킬 스윕 측정/교체 기록
+  mc_measurement?: {
+    theta0: number | null;
+    k: number | null;
+    difficulty_score: number | null;   // 1-AUC
+    classification: string;
+    measured_at: string;
+  };
+  mc_replaced_backup?: LevelJSON;      // 교체 직전 원본 (1세대 롤백용)
+  mc_replaced_at?: string;
+
   // 상태 관리
   status: LevelStatus;
   status_updated_at: string;

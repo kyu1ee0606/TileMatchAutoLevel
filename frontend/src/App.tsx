@@ -13,6 +13,7 @@ import { BenchmarkDashboard } from './components/BenchmarkDashboard';
 import { PatternDebugPanel } from './components/PatternDebugPanel';
 import { ColorBalancePanel } from './components/ColorBalancePanel';
 import { PatternImportPanel } from './components/PatternImportPanel';
+import { RLSimulationPanel } from './components/RLSimulationPanel';
 import { useLevelStore } from './stores/levelStore';
 import { useUIStore, type TabId } from './stores/uiStore';
 import { useSimulationStore } from './stores/simulationStore';
@@ -260,6 +261,7 @@ function AppContent() {
     { id: 'generator', label: '자동 생성', icon: '🎲' },
     { id: 'local', label: '로컬 레벨', icon: '💾' },
     { id: 'production', label: '프로덕션', icon: '🚀' },
+    { id: 'rl-sim', label: 'RL 시뮬레이션', icon: '🧠' },
     { id: 'pattern-debug', label: '패턴 디버그', icon: '🔧' },
     { id: 'color-balance', label: '색상 테스트', icon: '🎨' },
     { id: 'pattern-import', label: '패턴 임포트', icon: '📁' },
@@ -446,6 +448,11 @@ function AppContent() {
         {activeTab === 'pattern-import' && (
           <div className="max-w-5xl mx-auto">
             <PatternImportPanel />
+          </div>
+        )}
+        {activeTab === 'rl-sim' && (
+          <div className="max-w-6xl mx-auto">
+            <RLSimulationPanel />
           </div>
         )}
         {activeTab === 'benchmark' && (

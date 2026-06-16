@@ -45,6 +45,11 @@ class BotProfile:
     # Simulation settings
     weight: float = 1.0                # 난이도 계산 시 가중치
 
+    # [RL 시뮬레이션] 기믹 인지율 주입 (DI) — None이면 기존 bot_type 기반 테이블 사용.
+    # 스킬 스윕용 보간 봇이 θ에 따라 연속적인 인지율을 갖도록 외부에서 주입한다.
+    # 레거시 5종 봇은 항상 None이므로 기존 동작 무변경.
+    gimmick_notice_override: Optional[Dict[str, float]] = None
+
     def to_dict(self) -> Dict:
         """Convert to dictionary."""
         return {

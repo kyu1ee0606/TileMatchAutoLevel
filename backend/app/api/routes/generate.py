@@ -54,6 +54,66 @@ def _get_bot_pool() -> ProcessPoolExecutor:
     return _bot_process_pool
 
 
+# ============================================================
+# Generation ProcessPoolExecutor
+# /api/generate는 동기 CPU 작업(절차적 배치 + 내부 데드락 봇 시뮬)이라 단일
+# uvicorn 워커의 GIL에서 직렬화된다. 프론트가 10개를 동시 호출해도 실측 병렬효율
+# 3.6배에 그침. 생성 작업을 별도 프로세스 풀에 오프로드해 GIL을 탈출, 코어 수만큼
+# 진짜 병렬화한다 (RL 시뮬 _parallel_point_sweep과 동일한 방법). 생성 코드는 그대로라
+# 레벨 품질 변화 없음.
+# ============================================================
+_gen_process_pool: ProcessPoolExecutor | None = None
+GEN_POOL_WORKERS = max(2, min(8, (os.cpu_count() or 4) - 2))
+
+
+def _get_gen_pool() -> ProcessPoolExecutor:
+    """레벨 생성용 프로세스 풀 (lazy)."""
+    global _gen_process_pool
+    if _gen_process_pool is None:
+        _gen_process_pool = ProcessPoolExecutor(max_workers=GEN_POOL_WORKERS)
+        logger.info(f"[GEN_POOL] Created ProcessPoolExecutor with {GEN_POOL_WORKERS} workers (PID={os.getpid()})")
+    return _gen_process_pool
+
+
+def warmup_gen_pool() -> None:
+    """워커 프로세스 미리 스폰 — 첫 요청의 콜드스타트 지연 제거 (startup 훅에서 호출)."""
+    try:
+        pool = _get_gen_pool()
+        list(pool.map(int, range(GEN_POOL_WORKERS)))
+        logger.info("[GEN_POOL] warmed up")
+    except Exception:
+        logger.exception("[GEN_POOL] warmup failed")
+
+
+def shutdown_gen_pool() -> None:
+    """앱 종료 시 생성 풀 정리 (main.py shutdown 훅에서 호출)."""
+    global _gen_process_pool
+    if _gen_process_pool is not None:
+        _gen_process_pool.shutdown(wait=False)
+        _gen_process_pool = None
+
+
+def _generate_core_worker(request_dict: dict) -> dict:
+    """
+    프로세스 풀 워커 — 단일 레벨 생성 전체(_generate_level_impl)를 별도 프로세스에서 실행.
+
+    워커마다 자체 LevelGenerator를 만들고 random을 재시드해 동시 포크된 워커 간
+    동일 randSeed(중복 레벨)를 방지한다. 결과/예외를 dict로 직렬화해 반환.
+    """
+    try:
+        random.seed(os.urandom(8))
+        request = GenerateRequest(**request_dict)
+        generator = LevelGenerator()
+        response = _generate_level_impl(request, generator)
+        return {"ok": True, "response": response}
+    except HTTPException as he:
+        return {"ok": False, "status": he.status_code, "detail": str(he.detail)}
+    except Exception as e:
+        import traceback
+        logger.error(f"[GEN_POOL] worker failed: {e}\n{traceback.format_exc()}")
+        return {"ok": False, "status": 400, "detail": f"Generation failed: {e}"}
+
+
 def _simulate_single_bot(args: Tuple[str, dict, int, int]) -> Tuple[str, float]:
     """
     Top-level function for ProcessPoolExecutor (must be picklable).
@@ -930,16 +990,34 @@ def generate_fallback_level(
 
 
 @router.post("/generate", response_model=GenerateResponse)
-def generate_level(
-    request: GenerateRequest,
-    generator: LevelGenerator = Depends(get_level_generator),
-) -> GenerateResponse:
+async def generate_level(request: GenerateRequest) -> GenerateResponse:
     """
     Generate a level with target difficulty.
 
+    CPU 작업(절차적 배치 + 내부 데드락 봇 시뮬)을 프로세스 풀에 오프로드해
+    GIL을 탈출 — 동시 요청이 코어 수만큼 실제 병렬 실행된다. 생성 로직 자체는
+    _generate_level_impl 그대로라 결과 동일.
+    """
+    import asyncio
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        _get_gen_pool(), _generate_core_worker, request.model_dump()
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=result.get("status", 400), detail=result.get("detail", "Generation failed"))
+    return result["response"]
+
+
+def _generate_level_impl(
+    request: GenerateRequest,
+    generator: LevelGenerator,
+) -> GenerateResponse:
+    """
+    레벨 생성 핵심 로직 (프로세스 풀 워커에서 호출 — 동기 함수).
+
     Args:
         request: GenerateRequest with generation parameters.
-        generator: LevelGenerator dependency.
+        generator: LevelGenerator instance.
 
     Returns:
         GenerateResponse with generated level and actual difficulty.

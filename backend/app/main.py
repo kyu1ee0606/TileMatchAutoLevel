@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .config import get_settings
-from .api.routes import analyze, generate, gboost, assess, simulate, leveling
+from .api.routes import analyze, generate, gboost, assess, simulate, leveling, rl_sim
 
 _diag_logger = logging.getLogger("diag.422")
 
@@ -56,6 +56,7 @@ app.include_router(gboost.router)
 app.include_router(assess.router)
 app.include_router(simulate.router)
 app.include_router(leveling.router)
+app.include_router(rl_sim.router)
 
 
 @app.get("/")
@@ -78,12 +79,26 @@ async def root():
     }
 
 
+@app.on_event("startup")
+async def startup_event():
+    """프로세스 풀 워밍업 — 첫 요청의 워커 스폰 지연(2~3초) 제거 (RL 시뮬 + 레벨 생성)."""
+    import asyncio
+    from .api.routes.rl_sim import warmup_pool
+    from .api.routes.generate import warmup_gen_pool
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, warmup_pool)
+    loop.run_in_executor(None, warmup_gen_pool)
+
+
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup ProcessPoolExecutor on shutdown."""
-    from .api.routes.generate import _bot_process_pool
+    from .api.routes.generate import _bot_process_pool, shutdown_gen_pool
     if _bot_process_pool is not None:
         _bot_process_pool.shutdown(wait=False)
+    shutdown_gen_pool()
+    from .api.routes.rl_sim import shutdown_pool
+    shutdown_pool()
 
 
 @app.get("/health")

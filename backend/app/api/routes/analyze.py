@@ -1,8 +1,9 @@
 """Level analysis API routes."""
 import time
+import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from fastapi import APIRouter, Depends, HTTPException
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 from ...models.schemas import (
     AnalyzeRequest,
@@ -552,6 +553,127 @@ def _run_bot_simulation(
     )
 
 
+def _run_bot_sim_chunk(args: Tuple) -> Dict[str, Any]:
+    """
+    ProcessPool 워커 (피클러블, 모듈 레벨) — 한 프로파일의 iteration 청크를 실행하고
+    병합 가능한 원시 집계를 반환. GIL을 탈출해 코어 수만큼 진짜 병렬.
+    """
+    profile_name, level_json, iterations, max_moves, seed, early_term = args
+    from ...core.bot_simulator import BotSimulator
+    from ...models.bot_profile import get_profile
+    simulator = BotSimulator()
+    profile = get_profile(profile_name)
+    result = simulator.simulate_with_profile(
+        level_json=level_json,
+        profile=profile,
+        iterations=iterations,
+        max_moves=max_moves,
+        seed=seed,
+        early_termination=early_term,
+    )
+    n = result.iterations
+    return {
+        "profile": profile_name,
+        "n": n,
+        "cleared": round(result.clear_rate * n),
+        "sum_moves": result.avg_moves * n,
+        "sum_combo": result.avg_combo * n,
+        "min_moves": result.min_moves,
+        "max_moves": result.max_moves,
+        "mean_moves": result.avg_moves,
+        # 표본분산 → M2 (Chan 병합용). n<=1이면 0.
+        "m2_moves": (result.std_moves ** 2) * (n - 1) if n > 1 else 0.0,
+    }
+
+
+def _run_profiles_parallel(
+    profiles: List[str],
+    level_json: Dict[str, Any],
+    iterations: int,
+    max_moves: int,
+    seed: int | None,
+    target_rates: Dict[str, float],
+    early_termination: bool = True,
+) -> List[BotClearStats]:
+    """
+    프로파일 × iteration 청크를 CPU 프로세스 풀에 분배해 병렬 시뮬 후 프로파일별로 병합.
+
+    - GIL 탈출(프로세스) + early_termination(명백한 0%/100% 조기 종료)으로
+      순차검증 핵심 병목 제거.
+    - 청크 시드는 누적 오프셋으로 겹치지 않게 분리(고정 시드일 때 중복 방지).
+    - clear_rate/avg/min/max/combo는 정확 병합, std는 Chan 병렬분산으로 정확 병합.
+    """
+    from .generate import _get_gen_pool, GEN_POOL_WORKERS
+
+    # 프로파일당 청크 수: 총 태스크가 풀 워커를 채우도록
+    chunks_per_profile = max(1, round(GEN_POOL_WORKERS / max(1, len(profiles))))
+    tasks: List[Tuple] = []
+    for profile_name in profiles:
+        base = iterations // chunks_per_profile
+        rem = iterations % chunks_per_profile
+        offset = 0
+        for c in range(chunks_per_profile):
+            chunk_iters = base + (1 if c < rem else 0)
+            if chunk_iters <= 0:
+                continue
+            chunk_seed = None if seed is None else seed + offset
+            tasks.append((profile_name, level_json, chunk_iters, max_moves, chunk_seed, early_termination))
+            offset += chunk_iters
+
+    pool = _get_gen_pool()
+    raw = list(pool.map(_run_bot_sim_chunk, tasks))
+
+    # 프로파일별 병합
+    merged: Dict[str, Dict[str, Any]] = {}
+    for r in raw:
+        p = r["profile"]
+        if p not in merged:
+            merged[p] = {"n": 0, "cleared": 0, "sum_moves": 0.0, "sum_combo": 0.0,
+                         "min_moves": None, "max_moves": None, "mean": 0.0, "m2": 0.0}
+        m = merged[p]
+        # Chan 병렬분산 병합
+        nb, mb, m2b = r["n"], r["mean_moves"], r["m2_moves"]
+        if nb > 0:
+            na, ma, m2a = m["n"], m["mean"], m["m2"]
+            nab = na + nb
+            delta = mb - ma
+            m["mean"] = ma + delta * nb / nab
+            m["m2"] = m2a + m2b + delta * delta * na * nb / nab
+            m["n"] = nab
+        m["cleared"] += r["cleared"]
+        m["sum_moves"] += r["sum_moves"]
+        m["sum_combo"] += r["sum_combo"]
+        m["min_moves"] = r["min_moves"] if m["min_moves"] is None else min(m["min_moves"], r["min_moves"])
+        m["max_moves"] = r["max_moves"] if m["max_moves"] is None else max(m["max_moves"], r["max_moves"])
+
+    bot_stats: List[BotClearStats] = []
+    for profile_name in profiles:
+        m = merged.get(profile_name)
+        if not m or m["n"] == 0:
+            bot_stats.append(BotClearStats(
+                profile=profile_name,
+                profile_display=BOT_DISPLAY_NAMES.get(profile_name, profile_name),
+                clear_rate=0.0, target_clear_rate=target_rates.get(profile_name, 0.5),
+                avg_moves=0.0, min_moves=0, max_moves=0, std_moves=0.0, avg_combo=0.0, iterations=0,
+            ))
+            continue
+        n = m["n"]
+        std = math.sqrt(m["m2"] / (n - 1)) if n > 1 else 0.0
+        bot_stats.append(BotClearStats(
+            profile=profile_name,
+            profile_display=BOT_DISPLAY_NAMES.get(profile_name, profile_name),
+            clear_rate=m["cleared"] / n,
+            target_clear_rate=target_rates.get(profile_name, 0.5),
+            avg_moves=m["sum_moves"] / n,
+            min_moves=m["min_moves"] or 0,
+            max_moves=m["max_moves"] or 0,
+            std_moves=std,
+            avg_combo=m["sum_combo"] / n,
+            iterations=n,
+        ))
+    return bot_stats
+
+
 @router.post("/analyze/autoplay", response_model=AutoPlayResponse)
 def analyze_autoplay(
     request: AutoPlayRequest,
@@ -613,41 +735,13 @@ def analyze_autoplay(
         # Calculate max moves based on level
         max_moves = _calculate_max_moves(level_json)
 
-        # Run simulations in parallel
-        bot_stats: List[BotClearStats] = []
-        with ThreadPoolExecutor(max_workers=min(5, len(profiles))) as executor:
-            futures = {
-                executor.submit(
-                    _run_bot_simulation,
-                    profile,
-                    level_json,
-                    iterations,
-                    max_moves,
-                    seed,
-                    target_rates.get(profile, 0.5),
-                ): profile
-                for profile in profiles
-            }
-
-            for future in as_completed(futures):
-                try:
-                    stats = future.result()
-                    bot_stats.append(stats)
-                except Exception as e:
-                    profile = futures[future]
-                    # Create a failed stats entry
-                    bot_stats.append(BotClearStats(
-                        profile=profile,
-                        profile_display=BOT_DISPLAY_NAMES.get(profile, profile),
-                        clear_rate=0.0,
-                        target_clear_rate=target_rates.get(profile, 0.5),
-                        avg_moves=0.0,
-                        min_moves=0,
-                        max_moves=0,
-                        std_moves=0.0,
-                        avg_combo=0.0,
-                        iterations=0,
-                    ))
+        # Run simulations in parallel across the CPU process pool (GIL escape).
+        # 프로파일 × iteration 청크로 코어를 채우고 early_termination으로 명백한
+        # 0%/100% 레벨을 조기 종료 — 순차검증의 핵심 병목(ThreadPool GIL 직렬화) 제거.
+        bot_stats: List[BotClearStats] = _run_profiles_parallel(
+            profiles, level_json, iterations, max_moves, seed, target_rates,
+            early_termination=True,
+        )
 
         # Sort by profile order
         profile_order = list(BASE_TARGET_CLEAR_RATES.keys())

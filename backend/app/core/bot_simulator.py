@@ -3870,6 +3870,12 @@ class BotSimulator:
         # Map effect type to string key
         effect_key = effect_type.value if hasattr(effect_type, 'value') else str(effect_type)
 
+        # [RL 시뮬레이션] DI: 프로파일에 주입된 연속 인지율이 있으면 우선 사용
+        # (스킬 스윕 보간 봇 전용 — 레거시 봇은 None이라 기존 경로 그대로)
+        override = getattr(profile, "gimmick_notice_override", None)
+        if override is not None:
+            return override.get(effect_key, 1.0)
+
         # Get rates tuple (NOVICE, CASUAL, AVERAGE, EXPERT, OPTIMAL)
         rates = GIMMICK_NOTICE_RATES.get(effect_key, (1.0, 1.0, 1.0, 1.0, 1.0))
 

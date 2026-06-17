@@ -176,6 +176,17 @@ export async function updateProductionBatch(
   });
 }
 
+// 레벨 쓰기 리스너 — 서버 자동 동기화(디바운스 push)용. productionServerSync가 등록한다.
+const _writeListeners = new Set<(batchId: string) => void>();
+export function onLevelsWritten(cb: (batchId: string) => void): void {
+  _writeListeners.add(cb);
+}
+function _notifyWritten(batchId: string): void {
+  for (const cb of _writeListeners) {
+    try { cb(batchId); } catch { /* 리스너 오류 무시 */ }
+  }
+}
+
 /**
  * 레벨 저장 (단일)
  */
@@ -196,7 +207,7 @@ export async function saveProductionLevel(
     const request = store.put(record);
 
     request.onerror = () => reject(request.error);
-    request.onsuccess = () => resolve();
+    request.onsuccess = () => { _notifyWritten(batchId); resolve(); };
   });
 }
 
@@ -233,6 +244,7 @@ export async function saveProductionLevels(
       request.onsuccess = () => {
         completed++;
         if (completed === levels.length && !hasError) {
+          _notifyWritten(batchId);
           resolve();
         }
       };

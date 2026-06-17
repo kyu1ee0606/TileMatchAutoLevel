@@ -16,6 +16,7 @@ import {
   saveProductionLevels,
   putBatchRaw,
   listProductionBatches,
+  onLevelsWritten,
 } from './productionStorage';
 
 export interface ServerBatchSummary {
@@ -24,6 +25,7 @@ export interface ServerBatchSummary {
   level_count: number;
   saved_at: number;
   size_bytes: number;
+  version: number;
 }
 
 interface ServerBatchPayload {
@@ -31,19 +33,52 @@ interface ServerBatchPayload {
   batch: ProductionBatch;
   levels: ProductionLevel[];
   saved_at: number;
+  version: number;
 }
 
-/** 로컬 배치(메타+레벨)를 서버 파일에 저장. */
-export async function pushBatchToServer(batchId: string): Promise<boolean> {
+/** 충돌(다른 브라우저 선수정) 시 던지는 에러. */
+export class SyncConflictError extends Error {
+  serverVersion: number;
+  constructor(batchId: string, serverVersion: number) {
+    super(`sync conflict: ${batchId} (server v${serverVersion})`);
+    this.name = 'SyncConflictError';
+    this.serverVersion = serverVersion;
+  }
+}
+
+// 배치별 마지막으로 알던 서버 버전(낙관적 동시성 기준).
+const knownVersions = new Map<string, number>();
+
+export function getKnownVersion(batchId: string): number | undefined {
+  return knownVersions.get(batchId);
+}
+
+/**
+ * 로컬 배치(메타+레벨)를 서버 파일에 저장.
+ * @param force true면 버전 검사 없이 강제 덮어쓰기(수동 "서버 저장"·최초 저장).
+ *              false면 낙관적 동시성 — 서버가 더 최신이면 SyncConflictError.
+ */
+export async function pushBatchToServer(batchId: string, opts?: { force?: boolean }): Promise<boolean> {
   const batch = await getProductionBatch(batchId);
   if (!batch) return false;
   const levels = await getProductionLevelsByBatch(batchId);
-  await apiClient.put(`/production/batches/${batchId}`, {
-    batch_id: batchId,
-    batch,
-    levels,
-  });
-  return true;
+  const base_version = opts?.force ? null : (knownVersions.get(batchId) ?? null);
+  try {
+    const r = await apiClient.put<{ version: number }>(`/production/batches/${batchId}`, {
+      batch_id: batchId,
+      batch,
+      levels,
+      base_version,
+    });
+    knownVersions.set(batchId, r.data.version);
+    return true;
+  } catch (e: unknown) {
+    const err = e as { response?: { status?: number; data?: { detail?: { server_version?: number } } } };
+    if (err.response?.status === 409) {
+      throw new SyncConflictError(batchId, err.response.data?.detail?.server_version ?? 0);
+    }
+    throw e;
+  }
 }
 
 /** 서버에 저장된 배치 요약 목록. */
@@ -52,12 +87,13 @@ export async function listServerBatches(): Promise<ServerBatchSummary[]> {
   return r.data;
 }
 
-/** 서버 배치 1개를 IndexedDB로 가져오기(upsert). */
+/** 서버 배치 1개를 IndexedDB로 가져오기(upsert) + 버전 기록. */
 export async function pullBatchToLocal(batchId: string): Promise<void> {
   const r = await apiClient.get<ServerBatchPayload>(`/production/batches/${batchId}`);
-  const { batch, levels } = r.data;
+  const { batch, levels, version } = r.data;
   if (batch) await putBatchRaw(batch);
   if (levels && levels.length > 0) await saveProductionLevels(batchId, levels);
+  knownVersions.set(batchId, version ?? 0);
 }
 
 /** 서버 파일 삭제. */
@@ -89,4 +125,41 @@ export async function pullAllToLocal(): Promise<number> {
     }
   }
   return pulled;
+}
+
+// ── 자동 push (디바운스) + 충돌 처리 ─────────────────────────────────────────
+const PUSH_DEBOUNCE_MS = 4000;
+const pushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+let conflictHandler: ((batchId: string, serverVersion: number) => void) | null = null;
+
+/** 충돌(다른 브라우저 선수정) 발생 시 UI 알림 콜백 등록. */
+export function setConflictHandler(cb: (batchId: string, serverVersion: number) => void): void {
+  conflictHandler = cb;
+}
+
+/**
+ * 디바운스 push — 레벨 편집이 잦을 때(순차처리·일괄재생성 등) 코얼레싱.
+ * 마지막 편집 후 PUSH_DEBOUNCE_MS 뒤 1회만 서버에 올린다. 낙관적 동시성(force=false).
+ */
+export function schedulePush(batchId: string): void {
+  if (!batchId) return;
+  const existing = pushTimers.get(batchId);
+  if (existing) clearTimeout(existing);
+  pushTimers.set(batchId, setTimeout(async () => {
+    pushTimers.delete(batchId);
+    try {
+      await pushBatchToServer(batchId);
+    } catch (e) {
+      if (e instanceof SyncConflictError) conflictHandler?.(batchId, e.serverVersion);
+      // 그 외(서버 미가동 등)는 조용히 무시
+    }
+  }, PUSH_DEBOUNCE_MS));
+}
+
+let autoSyncRegistered = false;
+/** productionStorage 레벨 쓰기마다 자동 디바운스 push 등록. 앱당 1회. */
+export function registerAutoSync(): void {
+  if (autoSyncRegistered) return;
+  autoSyncRegistered = true;
+  onLevelsWritten((batchId) => schedulePush(batchId));
 }

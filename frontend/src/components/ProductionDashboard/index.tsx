@@ -47,7 +47,7 @@ import {
   renameProductionBatch,
   recalculateBatchCounts,
 } from '../../storage/productionStorage';
-import { pullAllToLocal, pushBatchToServer } from '../../storage/productionServerSync';
+import { pullAllToLocal, pushBatchToServer, registerAutoSync, setConflictHandler, SyncConflictError } from '../../storage/productionServerSync';
 import { ProductionExport } from './ProductionExport';
 import { BatchApprovalPanel } from './BatchApprovalPanel';
 import { BatchVerifyPanel } from './BatchVerifyPanel';
@@ -301,6 +301,12 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
 
   // Initialize DB and load batches
   useEffect(() => {
+    // 자동 서버 동기화: 레벨 편집(순차처리·재생성·승인 등)마다 디바운스 push.
+    // 충돌(다른 브라우저 선수정) 시 경고만 — 새로고침 시 최신 반영(로컬 미저장분 보호).
+    registerAutoSync();
+    setConflictHandler((bid, sv) =>
+      addNotification('warning', `배치(${bid.slice(0, 12)})가 다른 브라우저에서 수정됨(v${sv}) — 새로고침하면 최신이 반영됩니다`));
+
     async function init() {
       try {
         await initProductionDB();
@@ -1411,8 +1417,19 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
                         const ok = await pushBatchToServer(selectedBatch.id);
                         addNotification(ok ? 'success' : 'warning',
                           ok ? '서버(로컬 파일)에 저장됨 — 다른 브라우저에서도 접근 가능' : '저장할 배치 없음');
-                      } catch {
-                        addNotification('error', '서버 저장 실패 (백엔드 확인)');
+                      } catch (e) {
+                        if (e instanceof SyncConflictError) {
+                          if (window.confirm('다른 브라우저에서 이 배치가 먼저 수정됐습니다. 현재 내용으로 덮어쓸까요?')) {
+                            try {
+                              await pushBatchToServer(selectedBatch.id, { force: true });
+                              addNotification('success', '서버에 강제 저장됨(덮어쓰기)');
+                            } catch {
+                              addNotification('error', '서버 저장 실패 (백엔드 확인)');
+                            }
+                          }
+                        } else {
+                          addNotification('error', '서버 저장 실패 (백엔드 확인)');
+                        }
                       }
                     }}
                     title="이 배치를 로컬 파일로 저장 → 같은 컴퓨터의 다른 브라우저에서도 접근"

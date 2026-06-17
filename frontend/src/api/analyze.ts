@@ -306,3 +306,69 @@ export async function fixCentering(levels: Record<string, unknown>[]): Promise<F
   );
   return response.data;
 }
+
+// ============================================================
+// 솔버블 검증 (A* 완전탐색 솔버) — /analyze/solvability[/batch]
+// ============================================================
+
+export type SolvabilityVerdict = 'PROVEN_SOLVABLE' | 'PROVEN_IMPOSSIBLE' | 'UNCERTAIN';
+
+export interface SolvabilityResult {
+  verdict: SolvabilityVerdict;
+  reason: string;
+  nodes_expanded: number;
+  moves_to_clear: number | null;
+  divisibility_violation: Record<string, number> | null;
+  distribution_bug_suspect: boolean;
+}
+
+export interface SolvabilityBatchItem {
+  level_number: number;
+  level_json: LevelJSON;
+}
+
+export interface SolvabilityBatchResultItem extends SolvabilityResult {
+  level_number: number;
+  error: string | null;
+}
+
+export interface SolvabilityBatchResponse {
+  results: SolvabilityBatchResultItem[];
+  elapsed_ms: number;
+}
+
+/** 단일 레벨 솔버블 판정 (A* 완전탐색). */
+export async function analyzeSolvability(
+  levelJson: LevelJSON,
+  options?: { nodeBudget?: number; timeBudgetS?: number }
+): Promise<SolvabilityResult> {
+  const response = await apiClient.post<SolvabilityResult>(
+    '/analyze/solvability',
+    {
+      level_json: levelJson,
+      node_budget: options?.nodeBudget ?? 60000,
+      time_budget_s: options?.timeBudgetS ?? 5.0,
+    },
+    { timeout: Math.max(30000, (options?.timeBudgetS ?? 5.0) * 1000 + 15000) }
+  );
+  return response.data;
+}
+
+/** 배치 솔버블 판정 (프로세스풀 병렬, 최대 32레벨/요청). */
+export async function batchAnalyzeSolvability(
+  levels: SolvabilityBatchItem[],
+  options?: { nodeBudget?: number; timeBudgetS?: number }
+): Promise<SolvabilityBatchResponse> {
+  const timeBudget = options?.timeBudgetS ?? 5.0;
+  const timeoutMs = Math.max(60000, levels.length * timeBudget * 1000 + 30000);
+  const response = await apiClient.post<SolvabilityBatchResponse>(
+    '/analyze/solvability/batch',
+    {
+      levels,
+      node_budget: options?.nodeBudget ?? 60000,
+      time_budget_s: timeBudget,
+    },
+    { timeout: timeoutMs }
+  );
+  return response.data;
+}

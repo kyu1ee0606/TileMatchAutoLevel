@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .config import get_settings
-from .api.routes import analyze, generate, gboost, assess, simulate, leveling, rl_sim
+from .api.routes import analyze, generate, gboost, assess, simulate, leveling, rl_sim, production_store
 
 _diag_logger = logging.getLogger("diag.422")
 
@@ -57,6 +57,7 @@ app.include_router(assess.router)
 app.include_router(simulate.router)
 app.include_router(leveling.router)
 app.include_router(rl_sim.router)
+app.include_router(production_store.router)
 
 
 @app.get("/")

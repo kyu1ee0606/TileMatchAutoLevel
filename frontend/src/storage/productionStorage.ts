@@ -101,6 +101,19 @@ export async function createProductionBatch(
 }
 
 /**
+ * 배치 직접 upsert (id 보존) — 서버 동기화 pull 용.
+ */
+export async function putBatchRaw(batch: ProductionBatch): Promise<void> {
+  const database = await initProductionDB();
+  return new Promise((resolve, reject) => {
+    const tx = database.transaction(STORES.BATCHES, 'readwrite');
+    const request = tx.objectStore(STORES.BATCHES).put(batch);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve();
+  });
+}
+
+/**
  * 배치 조회
  */
 export async function getProductionBatch(batchId: string): Promise<ProductionBatch | null> {

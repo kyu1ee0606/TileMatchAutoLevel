@@ -47,6 +47,7 @@ import {
   renameProductionBatch,
   recalculateBatchCounts,
 } from '../../storage/productionStorage';
+import { pullAllToLocal, pushBatchToServer } from '../../storage/productionServerSync';
 import { ProductionExport } from './ProductionExport';
 import { BatchApprovalPanel } from './BatchApprovalPanel';
 import { BatchVerifyPanel } from './BatchVerifyPanel';
@@ -303,6 +304,12 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
     async function init() {
       try {
         await initProductionDB();
+        // 서버(로컬 파일)에 저장된 배치를 IndexedDB로 동기화 → 같은 컴퓨터의 다른 브라우저에서
+        // 만든 배치도 현재 브라우저에 표시된다. 서버 미가동 시 조용히 무시(로컬만 사용).
+        try {
+          const pulled = await pullAllToLocal();
+          if (pulled > 0) addNotification('info', `서버에서 배치 ${pulled}개를 가져왔습니다`);
+        } catch { /* 서버 동기화 실패는 무시 */ }
         const loadedBatches = await listProductionBatches();
         setBatches(loadedBatches);
 
@@ -1101,6 +1108,9 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
       const updatedBatches = await listProductionBatches();
       setBatches(updatedBatches);
 
+      // 서버(로컬 파일)에 자동 저장 → 같은 컴퓨터의 다른 브라우저에서도 접근 가능
+      pushBatchToServer(selectedBatchId).catch(() => { /* 서버 미가동 시 무시 */ });
+
       addNotification(
         'success',
         `${completedCount}개 레벨 생성 완료! (실패: ${failedLevels.length}개)`
@@ -1392,6 +1402,22 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
                     onClick={startRename}
                   >
                     이름변경
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={async () => {
+                      try {
+                        const ok = await pushBatchToServer(selectedBatch.id);
+                        addNotification(ok ? 'success' : 'warning',
+                          ok ? '서버(로컬 파일)에 저장됨 — 다른 브라우저에서도 접근 가능' : '저장할 배치 없음');
+                      } catch {
+                        addNotification('error', '서버 저장 실패 (백엔드 확인)');
+                      }
+                    }}
+                    title="이 배치를 로컬 파일로 저장 → 같은 컴퓨터의 다른 브라우저에서도 접근"
+                  >
+                    ☁️ 서버 저장
                   </Button>
                   <Button
                     variant="danger"

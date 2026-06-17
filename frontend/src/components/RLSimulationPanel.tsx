@@ -11,6 +11,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   listProductionBatches,
   getProductionLevelsByBatch,
+  countLevelsByBatch,
   getProductionLevel,
   saveProductionLevel,
 } from '../storage/productionStorage';
@@ -162,11 +163,11 @@ export function RLSimulationPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 배치 변경 시 레벨 수 갱신
+  // 배치 변경 시 레벨 수 갱신 (count만 — 전체 레벨 로드 안 함)
   useEffect(() => {
     if (!selectedBatchId) return;
-    getProductionLevelsByBatch(selectedBatchId)
-      .then(levels => setBatchLevelCount(levels.length))
+    countLevelsByBatch(selectedBatchId)
+      .then(setBatchLevelCount)
       .catch(() => setBatchLevelCount(0));
   }, [selectedBatchId]);
 

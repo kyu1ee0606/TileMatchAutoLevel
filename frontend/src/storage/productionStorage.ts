@@ -283,6 +283,20 @@ export async function getProductionLevel(
 }
 
 /**
+ * 배치 레벨 수만 조회 (레벨 데이터 로드 없이 IndexedDB index.count 사용 — 메모리/속도 최적).
+ * getProductionLevelsByBatch(...).length는 1500개 level_json을 전부 로드하므로 카운트엔 부적합.
+ */
+export async function countLevelsByBatch(batchId: string): Promise<number> {
+  const database = await initProductionDB();
+  return new Promise((resolve, reject) => {
+    const tx = database.transaction(STORES.LEVELS, 'readonly');
+    const request = tx.objectStore(STORES.LEVELS).index('batch_id').count(batchId);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+  });
+}
+
+/**
  * 배치의 모든 레벨 조회
  */
 export async function getProductionLevelsByBatch(

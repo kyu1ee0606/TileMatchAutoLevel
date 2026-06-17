@@ -3411,54 +3411,75 @@ class LevelGenerator:
         all_positions = list(positions_by_coord.keys())
         random.shuffle(all_positions)
 
-        # Assign tiles position by position
-        # For each position, rotate through types to prevent same-type stacking
+        # [v16 🅒] 타입 공간 분산(뭉침 방지). 같은 타입이 2D 평면에서 인접해 뭉치면 시각적으로
+        # 어색하고 난이도 분포도 왜곡된다. 위치별 타입을 고를 때 '8-이웃 좌표에 이미 놓인 동일
+        # 타입 수'를 세어 가장 적은(=덜 뭉치는) 타입을 우선 선택한다(블루노이즈식 그리디).
+        # 불변식은 유지: type_targets(÷3) 초과 금지 + 같은 좌표 수직 동일타입 회피(데드락 방지).
+        anti_cluster = getattr(self, "_anti_cluster_tiles", True)
+        placed_2d: Dict[Tuple[int, int], List[str]] = defaultdict(list)
+
+        def _coord(p: str) -> Tuple[int, int]:
+            a, b = p.split("_")
+            return int(a), int(b)
+
+        def _neighbor_same(px: int, py: int, ttype: str) -> int:
+            n = 0
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    if dx == 0 and dy == 0:
+                        continue
+                    for placed in placed_2d.get((px + dx, py + dy), ()):  # type: ignore[arg-type]
+                        if placed == ttype:
+                            n += 1
+            return n
+
+        # For each position, choose types minimizing local same-type clustering
         type_rotation = list(tile_types)
         random.shuffle(type_rotation)
         rotation_idx = 0
 
         for pos in all_positions:
             layers = positions_by_coord[pos]
-            num_layers_at_pos = len(layers)
+            px, py = _coord(pos)
 
             # Assign different types to each layer at this position
             for i, layer_idx in enumerate(layers):
-                # Pick a type that's different from adjacent layers at same position
-                attempts = 0
-                while attempts < num_types * 2:
-                    candidate_type = type_rotation[(rotation_idx + i + attempts) % num_types]
+                prev_type = None
+                if i > 0:
+                    prev_tile = level[f"layer_{layers[i-1]}"]["tiles"].get(pos)
+                    if prev_tile:
+                        prev_type = prev_tile[0]
 
-                    # Check if we can use this type (haven't exceeded target)
-                    if type_counts[candidate_type] < type_targets[candidate_type]:
-                        # For middle layers, avoid same type as layer below if possible
-                        if i > 0 and attempts < num_types:
-                            prev_layer_key = f"layer_{layers[i-1]}"
-                            prev_tile = level[prev_layer_key]["tiles"].get(pos)
-                            if prev_tile and prev_tile[0] == candidate_type:
-                                attempts += 1
-                                continue
-
-                        # Assign this type
-                        layer_key = f"layer_{layer_idx}"
-                        level[layer_key]["tiles"][pos] = [candidate_type, ""]
-                        type_counts[candidate_type] += 1
-                        break
-
-                    attempts += 1
-                else:
-                    # Fallback: assign any available type
-                    for t in tile_types:
-                        if type_counts[t] < type_targets[t]:
-                            layer_key = f"layer_{layer_idx}"
-                            level[layer_key]["tiles"][pos] = [t, ""]
-                            type_counts[t] += 1
-                            break
+                # 후보: 타깃 여유가 있는 타입
+                eligible = [t for t in tile_types if type_counts[t] < type_targets[t]]
+                chosen = None
+                if eligible:
+                    if anti_cluster:
+                        # (이웃 동일타입 수, 수직 동일타입 위반, 로테이션 거리)로 정렬 — 적을수록 우선
+                        def _key(t: str, _start=rotation_idx):
+                            vert = 1 if (prev_type is not None and t == prev_type) else 0
+                            try:
+                                rot = (type_rotation.index(t) - _start) % num_types
+                            except ValueError:
+                                rot = num_types
+                            return (_neighbor_same(px, py, t), vert, rot)
+                        chosen = min(eligible, key=_key)
                     else:
-                        # Last resort: just pick any type
-                        t = random.choice(tile_types)
-                        layer_key = f"layer_{layer_idx}"
-                        level[layer_key]["tiles"][pos] = [t, ""]
-                        type_counts[t] += 1
+                        # 기존 로테이션 방식(수직 회피 우선)
+                        order = [type_rotation[(rotation_idx + i + a) % num_types] for a in range(num_types)]
+                        for cand in order:
+                            if cand in eligible and not (prev_type is not None and cand == prev_type):
+                                chosen = cand
+                                break
+                        if chosen is None:
+                            chosen = next((c for c in order if c in eligible), eligible[0])
+                else:
+                    # 타깃 모두 소진 — 최후수단(÷3 후처리에서 정정)
+                    chosen = random.choice(tile_types)
+
+                level[f"layer_{layer_idx}"]["tiles"][pos] = [chosen, ""]
+                type_counts[chosen] += 1
+                placed_2d[(px, py)].append(chosen)
 
             # Rotate starting point for next position group
             rotation_idx = (rotation_idx + 1) % num_types

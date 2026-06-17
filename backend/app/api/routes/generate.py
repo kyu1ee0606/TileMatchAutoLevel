@@ -1628,12 +1628,13 @@ def generate_validated_level(
     # - E등급: 레이어 증가 (6-7 → 6-8), 기믹 증가 (3 → 4), moves_ratio 감소 (0.70 → 0.65)
     # - D등급: 레이어 증가 (5-6 → 5-7)
     DIFFICULTY_PROFILES = {
+        # [v16] 그리드 7x7 캡에 맞춰 어려운 등급의 레이어 상향 — 면적 대신 깊이로 난이도 확보.
         "S": {"min_diff": 0.0, "max_diff": 0.2, "moves_ratio": 1.5, "min_layers": 1, "max_layers": 2, "tiles": 4, "gimmicks": 0},
         "A": {"min_diff": 0.2, "max_diff": 0.35, "moves_ratio": 1.35, "min_layers": 2, "max_layers": 3, "tiles": 4, "gimmicks": 1},
-        "B": {"min_diff": 0.35, "max_diff": 0.5, "moves_ratio": 1.10, "min_layers": 3, "max_layers": 4, "tiles": 5, "gimmicks": 2},
-        "C": {"min_diff": 0.5, "max_diff": 0.7, "moves_ratio": 0.88, "min_layers": 4, "max_layers": 5, "tiles": 6, "gimmicks": 2},
-        "D": {"min_diff": 0.7, "max_diff": 0.85, "moves_ratio": 0.78, "min_layers": 5, "max_layers": 7, "tiles": 7, "gimmicks": 3},
-        "E": {"min_diff": 0.85, "max_diff": 1.0, "moves_ratio": 0.65, "min_layers": 6, "max_layers": 8, "tiles": 8, "gimmicks": 4},
+        "B": {"min_diff": 0.35, "max_diff": 0.5, "moves_ratio": 1.10, "min_layers": 3, "max_layers": 5, "tiles": 5, "gimmicks": 2},
+        "C": {"min_diff": 0.5, "max_diff": 0.7, "moves_ratio": 0.88, "min_layers": 5, "max_layers": 7, "tiles": 6, "gimmicks": 2},
+        "D": {"min_diff": 0.7, "max_diff": 0.85, "moves_ratio": 0.78, "min_layers": 7, "max_layers": 9, "tiles": 7, "gimmicks": 3},
+        "E": {"min_diff": 0.85, "max_diff": 1.0, "moves_ratio": 0.65, "min_layers": 9, "max_layers": 11, "tiles": 8, "gimmicks": 4},
     }
 
     def get_profile(target_diff):
@@ -1850,27 +1851,26 @@ def generate_validated_level(
     # - 작은 그리드 = 적은 타일 = 쉬움 (S등급)
     # - 큰 그리드 = 많은 타일 = 어려움 (D등급)
     # 각 난이도는 연속된 2개 사이즈 중 랜덤 선택 (다양성 제공)
+    # [v16] 가시 그리드 최대 7x7 캡 — grid_size는 홀수 레이어 기준, 짝수는 +1이라 가시=grid+1.
+    # 따라서 grid_size 최대 6(짝수층 7). 그 이상은 타일이 작아짐. 난이도는 레이어로 확보.
     if request.target_difficulty <= 0.2:
-        # S등급 (매우 쉬움): 5x5 또는 6x6
-        grid_choice = random.choice([5, 6])
+        # S등급: 4 또는 5 (짝수층 5~6)
+        grid_choice = random.choice([4, 5])
     elif request.target_difficulty <= 0.4:
-        # A등급 (쉬움): 5x5 또는 6x6
+        # A등급: 5 (짝수층 6)
         grid_choice = random.choice([5, 6])
     elif request.target_difficulty <= 0.6:
-        # B등급 (보통): 6x6 또는 7x7
-        grid_choice = random.choice([6, 7])
-    elif request.target_difficulty <= 0.8:
-        # C등급 (어려움): 7x7 또는 8x8
-        grid_choice = random.choice([7, 8])
+        # B등급: 6 (짝수층 7)
+        grid_choice = 6
     else:
-        # D등급 (매우 어려움): 7x7 또는 8x8
-        grid_choice = random.choice([7, 8])
+        # C/D/E등급: 6 고정 (짝수층 7 = 가시 캡). 난이도는 레이어로 확보
+        grid_choice = 6
 
     calibrated_grid = [grid_choice, grid_choice]
 
     current_grid_size = calibrated_grid.copy()
-    min_grid_size = 5  # Minimum grid dimension
-    max_grid_size = 9  # Maximum grid dimension
+    min_grid_size = 4  # Minimum grid dimension
+    max_grid_size = 6  # Maximum grid dimension (홀수층 6 → 가시 7x7 캡)
 
     for attempt in range(1, effective_max_retries + 1):
         try:

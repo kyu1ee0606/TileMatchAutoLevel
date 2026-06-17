@@ -181,16 +181,19 @@ def get_gboost_style_gimmicks(level_number: int) -> Dict[str, Any]:
 # ============================================================================
 LEVEL_CONFIG_TABLE = [
     # (max_level, min_layers, max_layers, grid_size, tile_range, tile_types, description)
+    # [v16] 가시 그리드 최대 7x7 캡(인게임 타일 가독성). grid_size는 '홀수 레이어' 기준이고
+    # 짝수 레이어는 +1이라 가시 최대 = grid_size+1 → grid_size 최대 6(짝수층 7). 줄어든 면적은
+    # 레이어 층수 상향으로 보충해 난이도(깊이/블로킹)·타일 총량 유지.
     (3,    1, 2, 4, (9, 18),   4,  "Tutorial - 튜토리얼 (1-3)"),
-    (10,   3, 4, 5, (30, 36),  5,  "Tutorial - 후반 튜토리얼 (4-10)"),     # 6x6/5x5 그리드, 최소 30타일
-    (30,   3, 4, 6, (30, 48),  6,  "Early - 초반 (11-30)"),                # 최소 30타일
-    (60,   3, 4, 7, (30, 50),  8,  "Early-Mid - 초중반 (31-60)"),
-    (100,  4, 5, 8, (50, 80),  9,  "Mid - 중반 (61-100)"),
-    (225,  4, 5, 8, (60, 90),  9,  "Mid-Late - 중후반 (101-225)"),
-    (600,  4, 5, 8, (70, 100), 10, "Standard - A등급 주력 (226-600)"),
-    (1125, 5, 5, 8, (75, 105), 11, "Advanced - B등급 기준선 (601-1125)"),
-    (1500, 5, 6, 8, (84, 120), 12, "Expert - C/D등급 (1126-1500)"),
-    (99999, 5, 6, 8, (96, 120), 13, "Master - 엔드게임 (1501+)"),
+    (10,   3, 4, 5, (30, 36),  5,  "Tutorial - 후반 튜토리얼 (4-10)"),
+    (30,   3, 4, 5, (30, 48),  6,  "Early - 초반 (11-30)"),
+    (60,   3, 4, 6, (30, 50),  8,  "Early-Mid - 초중반 (31-60)"),
+    (100,  4, 6, 6, (50, 80),  9,  "Mid - 중반 (61-100)"),
+    (225,  5, 7, 6, (60, 90),  9,  "Mid-Late - 중후반 (101-225)"),
+    (600,  6, 8, 6, (70, 100), 10, "Standard - A등급 주력 (226-600)"),
+    (1125, 7, 9, 6, (75, 105), 11, "Advanced - B등급 기준선 (601-1125)"),
+    (1500, 8, 10, 6, (84, 120), 12, "Expert - C/D등급 (1126-1500)"),
+    (99999, 8, 10, 6, (96, 120), 13, "Master - 엔드게임 (1501+)"),
 ]
 
 
@@ -1087,7 +1090,7 @@ class LevelGenerator:
             boundary_cols = params.grid_size[0] + 1  # Even layer size
             boundary_rows = params.grid_size[1] + 1
 
-        for layer_idx in range(7):
+        for layer_idx in range(15):  # [v16] 레이어 상한 상향(가드로 안전)
             layer_key = f"layer_{layer_idx}"
             if layer_key in level and "tiles" in level[layer_key]:
                 tiles = level[layer_key]["tiles"]
@@ -2488,21 +2491,22 @@ class LevelGenerator:
                 if is_tutorial_mode:
                     max_layers = min(max_layers, 3)
                     min_layers = min(min_layers, 2)
+                # [v16] 7x7 캡으로 면적이 줄어든 만큼 깊이(레이어)로 난이도 확보 — 상한 상향.
                 elif target < 0.4:
                     # A grade: 3-4 layers
                     min_layers = max(min_layers, 3)
                     max_layers = min(max_layers, 4)
                 elif target < 0.6:
-                    # B grade: 4-5 layers
+                    # B grade: 4-6 layers
                     min_layers = max(min_layers, 4)
-                    max_layers = min(max_layers, 5)
-                elif target < 0.8:
-                    # C grade: 5-6 layers
-                    min_layers = max(min_layers, 5)
                     max_layers = min(max_layers, 6)
-                else:
-                    # D grade: 6-8 layers (use full range)
+                elif target < 0.8:
+                    # C grade: 6-8 layers
                     min_layers = max(min_layers, 6)
+                    max_layers = min(max_layers, 8)
+                else:
+                    # D/E grade: 7-10 layers (use full config range)
+                    min_layers = max(min_layers, 7)
 
                 # Ensure min <= max
                 if min_layers > max_layers:
@@ -9451,7 +9455,7 @@ class LevelGenerator:
         # Count current gimmicks to cap at ~15% of total tiles
         total_tiles = 0
         total_gimmicks = 0
-        for layer_idx in range(8):
+        for layer_idx in range(15):  # [v16] 레이어 상한 상향(가드로 안전)
             layer_key = f"layer_{layer_idx}"
             tiles = level.get(layer_key, {}).get("tiles", {})
             total_tiles += len(tiles)
@@ -9485,7 +9489,7 @@ class LevelGenerator:
                 new_level = action(level)
                 # Check if obstacle was actually added
                 new_gimmick_count = 0
-                for layer_idx in range(8):
+                for layer_idx in range(15):  # [v16] 레이어 상한 상향(가드로 안전)
                     layer_key = f"layer_{layer_idx}"
                     tiles = new_level.get(layer_key, {}).get("tiles", {})
                     for tile_data in tiles.values():

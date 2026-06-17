@@ -85,7 +85,7 @@ class GenerateRequest(BaseModel):
     """Request schema for level generation."""
     target_difficulty: float = Field(..., ge=0.0, le=1.0, description="Target difficulty (0.0-1.0)")
     grid_size: Tuple[int, int] = Field(default=(7, 7), description="Grid size (cols, rows)")
-    max_layers: int = Field(default=7, ge=1, le=7, description="Maximum number of layers (1-7)")
+    max_layers: int = Field(default=7, ge=1, le=12, description="Maximum number of layers (1-12)")
     tile_types: Optional[List[str]] = Field(default=None, description="Tile types to use")
     obstacle_types: Optional[List[str]] = Field(default=None, description="Obstacle types to use")
     goals: Optional[List[GoalConfig]] = Field(default=None, description="Goal configurations")
@@ -99,7 +99,7 @@ class GenerateRequest(BaseModel):
         description="Total tile count across all layers (must be divisible by 3)"
     )
     active_layer_count: Optional[int] = Field(
-        default=None, ge=1, le=7,
+        default=None, ge=1, le=12,
         description="Number of active layers to use"
     )
     layer_tile_configs: Optional[List[LayerTileConfig]] = Field(
@@ -512,7 +512,7 @@ class ValidatedGenerateRequest(BaseModel):
     """Request schema for simulation-validated level generation."""
     target_difficulty: float = Field(..., ge=0.0, le=1.0, description="Target difficulty (0.0-1.0)")
     grid_size: Tuple[int, int] = Field(default=(7, 7), description="Grid size (cols, rows)")
-    max_layers: int = Field(default=7, ge=1, le=7, description="Maximum number of layers")
+    max_layers: int = Field(default=7, ge=1, le=12, description="Maximum number of layers")
     tile_types: Optional[List[str]] = Field(default=None, description="Tile types to use")
     obstacle_types: Optional[List[str]] = Field(default=None, description="Obstacle types to use")
     goals: Optional[List[GoalConfig]] = Field(default=None, description="Goal configurations")

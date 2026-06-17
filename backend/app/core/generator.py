@@ -800,11 +800,10 @@ class LevelGenerator:
         """
         start_time = time.time()
 
-        # [역생성 v3-1단계] 모든 속성 기믹 허용(frog/teleport/bomb/curtain/unknown 포함).
-        # 역생성이 witness 타입배정 후 봇클리어 검증 + degrade(위험 기믹 단계적 제거)로 솔버블 보장.
-        # 컨테이너(craft/stack) goal은 아직 미지원이라 제거(2단계 예정).
+        # [역생성 v3-2단계] 모든 속성 기믹 + 컨테이너(craft/stack) goal 허용.
+        # witness는 plain 타일만 배정(컨테이너 내부는 t0 분배·÷3 보장), 봇클리어 검증 + degrade로
+        # 솔버블 보장. (goals를 비우지 않음 → 컨테이너 포함.)
         if getattr(params, "use_reverse_generation", False):
-            params.goals = []
             if not params.obstacle_types:
                 params.obstacle_types = ["ice", "grass", "chain", "link", "frog", "bomb", "curtain", "teleport"]
 

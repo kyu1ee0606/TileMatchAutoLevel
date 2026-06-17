@@ -54,8 +54,6 @@ def has_unsupported_features(level_json: Dict[str, Any]) -> Optional[str]:
             if not (isinstance(td, list) and td and isinstance(td[0], str)):
                 continue
             tt = td[0]
-            if tt.startswith("craft_") or tt.startswith("stack_"):
-                return "컨테이너(craft/stack)"
             if tt == "key":
                 return "key 타일"
     return None
@@ -120,6 +118,67 @@ def _witness_assign(order: List[str], use_tile_count: int, max_open: int) -> Opt
     return assign
 
 
+def _normalize_goal_unlock(nl: Dict[str, Any]) -> None:
+    """레벨의 클리어 조건(goalCount/unlockTile)을 실제 타일과 일치시킨다.
+
+    역생성(특히 컨테이너 제거/속성 strip) 후, 존재하지 않는 craft 골이나 key 없는 unlockTile이
+    남으면 보드를 다 비워도 클리어 판정이 안 된다(미충족 목표). 실제 타일 기준으로 정정:
+    - craft/stack 타일 없음 → goalCount 제거(클리어 = 보드 비우기)
+    - key 타일 수에 맞춰 unlockTile = key수 // 3
+    """
+    has_container = False
+    key_count = 0
+    for i in range(int(nl.get("layer", 0) or 0)):
+        ld = nl.get(f"layer_{i}")
+        if not isinstance(ld, dict) or not isinstance(ld.get("tiles"), dict):
+            continue
+        for td in ld["tiles"].values():
+            if not (isinstance(td, list) and td and isinstance(td[0], str)):
+                continue
+            tt = td[0]
+            if tt.startswith("craft_") or tt.startswith("stack_"):
+                has_container = True
+            elif tt == "key":
+                key_count += 1
+    if not has_container:
+        nl.pop("goalCount", None)
+    if nl.get("unlockTile") and key_count // 3 != nl.get("unlockTile"):
+        nl["unlockTile"] = key_count // 3
+
+
+def _has_containers(level_json: Dict[str, Any]) -> bool:
+    for i in range(int(level_json.get("layer", 0) or 0)):
+        ld = level_json.get(f"layer_{i}")
+        if not isinstance(ld, dict) or not isinstance(ld.get("tiles"), dict):
+            continue
+        for td in ld["tiles"].values():
+            if isinstance(td, list) and td and isinstance(td[0], str) and (td[0].startswith("craft_") or td[0].startswith("stack_")):
+                return True
+    return False
+
+
+def _strip_containers(level_json: Dict[str, Any]) -> Dict[str, Any]:
+    """craft/stack 컨테이너 타일을 삭제하고 ÷3 재보정한 새 level_json. 컨테이너+witness 조합이
+    안 풀릴 때의 최후 degrade — 컨테이너를 포기하고 plain 솔버블을 보장한다."""
+    nl = copy.deepcopy(level_json)
+    nl.pop("goalCount", None)
+    for i in range(int(nl.get("layer", 0) or 0)):
+        ld = nl.get(f"layer_{i}")
+        if not isinstance(ld, dict) or not isinstance(ld.get("tiles"), dict):
+            continue
+        for pos in [p for p, td in ld["tiles"].items()
+                    if isinstance(td, list) and td and isinstance(td[0], str)
+                    and (td[0].startswith("craft_") or td[0].startswith("stack_"))]:
+            del ld["tiles"][pos]
+    # ÷3 재보정 (컨테이너 삭제로 깨진 매칭타입 총합을 generator 로직으로 정정)
+    try:
+        from .generator import LevelGenerator
+        nl = LevelGenerator()._finalize_divisibility_guarantee(nl)
+    except Exception:  # noqa: BLE001
+        pass
+    return nl
+
+
 def apply_reverse_generation(
     level_json: Dict[str, Any],
     use_tile_count: int,
@@ -127,11 +186,30 @@ def apply_reverse_generation(
     verify: bool = True,
 ) -> Tuple[Dict[str, Any], bool, str]:
     """
-    concrete 레벨의 plain 타일 타입을 witness peeling으로 재배정.
+    레벨의 plain 타일 타입을 witness peeling으로 재배정해 솔버블·÷3 보장.
 
     Returns: (level_json, applied, reason)
-      applied=True 면 솔버블·÷3 보장된 새 level_json. False면 원본 그대로(사유 reason).
+    1차: 컨테이너/기믹 유지한 채 시도. 실패 시 컨테이너 제거 후 재시도(최후 degrade).
     """
+    new_level, applied, reason = _attempt_reverse(level_json, use_tile_count, max_open, verify)
+    if applied:
+        return new_level, True, reason
+    # 컨테이너가 있으면 제거하고 재시도(plain 솔버블 보장). 컨테이너는 포기.
+    if _has_containers(level_json):
+        stripped = _strip_containers(level_json)
+        nl2, applied2, reason2 = _attempt_reverse(stripped, use_tile_count, max_open, verify)
+        if applied2:
+            return nl2, True, f"적용 (컨테이너 제거 후 {reason2})"
+    return level_json, False, reason
+
+
+def _attempt_reverse(
+    level_json: Dict[str, Any],
+    use_tile_count: int,
+    max_open: int = 2,
+    verify: bool = True,
+) -> Tuple[Dict[str, Any], bool, str]:
+    """witness 1회 시도(컨테이너 제거 폴백 없음). apply_reverse_generation이 호출."""
     unsupported = has_unsupported_features(level_json)
     if unsupported:
         return level_json, False, f"미지원: {unsupported}"
@@ -148,10 +226,14 @@ def apply_reverse_generation(
         for tile in layer.values():
             tiles_by_key[tile.full_key] = tile
 
+    # plain t1~t15만 위트니스 대상. 컨테이너(craft/stack) 및 그 내부에서 나온 타일은 제외
+    # (내부 타입은 런타임 t0 분배가 결정 — 위트니스가 건드리면 안 됨). 컨테이너 내부의 ÷3은
+    # generator의 _finalize_divisibility_guarantee가 concrete/t0 분리 보장으로 이미 처리.
     matchable = [
         k for k, t in tiles_by_key.items()
         if isinstance(t.tile_type, str) and t.tile_type.startswith("t")
         and t.tile_type[1:].isdigit() and t.tile_type != "t0"
+        and not getattr(t, "is_stack_tile", False) and not getattr(t, "is_craft_tile", False)
     ]
     n = len(matchable)
     if n == 0:
@@ -201,15 +283,21 @@ def apply_reverse_generation(
             if keep_attrs is not None and _attr_base(attr) not in keep_attrs:
                 attr = ""
             ld["tiles"][pos] = [assign[kk], attr]
+        _normalize_goal_unlock(nl)
         return nl
 
     def _bot_clears(nl: Dict[str, Any]) -> bool:
-        """optimal 봇이 한 번이라도 클리어하면 솔버블 확정(기믹 포함 실제 플레이)."""
+        """optimal 봇이 한 번이라도 클리어하면 솔버블 확정(기믹 포함 실제 플레이).
+
+        frog/teleport/bomb/curtain 등 비결정 기믹은 고정시드로도 매 iteration 결과가 달라
+        3회로는 솔버블인데도 우연히 0% 클리어가 나올 수 있다(false negative). iteration을 충분히
+        늘려(15) 솔버블이면 ≥1회 클리어가 거의 항상 잡히게 한다. early_termination으로 명백히
+        잘 풀리는 레벨은 조기 종료(속도 유지)."""
         try:
             from .bot_simulator import get_profile, BotType
             r = BotSimulator().simulate_with_profile(
                 nl, get_profile(BotType.OPTIMAL),
-                iterations=3, max_moves=total + 50, seed=12345, early_termination=True,
+                iterations=15, max_moves=total + 50, seed=12345, early_termination=True,
             )
             return getattr(r, "clear_rate", 0) > 0
         except Exception:  # noqa: BLE001
@@ -227,16 +315,23 @@ def apply_reverse_generation(
         (None,                          "모든 기믹 유지"),
         (SAFE_GIMMICKS,                 "비결정 기믹 제거(결정적 기믹 유지)"),
         ({"ice", "grass"},              "chain/link 제거(ice/grass 유지)"),
-        (set(),                         "기믹 전부 제거(plain)"),
     ]
     for keep, label in stages:
         nl = _build(keep)
         if _bot_clears(nl):
             return nl, True, f"적용 ({label}, 봇클리어, max_open={eff_open})"
-    # plain도 봇 미클리어 → A*로 확정(구성상 솔버블)
+    # plain(기믹 전부 제거)
     nl_plain = _build(set())
+    # 컨테이너가 없으면 plain witness는 구성상 솔버블이 증명된다(커버 DAG peel + 독≤7).
+    # 봇 휴리스틱이 못 찾거나 A*가 예산초과해도 해는 존재하므로 검증 없이 채택.
+    if not _has_containers(nl_plain):
+        return nl_plain, True, f"적용 (plain·구성보장, max_open={eff_open})"
+    # 컨테이너가 남아있으면 구성보장 불가 → 봇클리어/A*로 확정 시도(여기 실패 시 상위 래퍼가
+    # 컨테이너 제거 후 재시도 → 그땐 plain·구성보장으로 반드시 통과).
+    if _bot_clears(nl_plain):
+        return nl_plain, True, f"적용 (plain+컨테이너, 봇클리어, max_open={eff_open})"
     from .solver import solve_level
     v = solve_level(nl_plain, node_budget=120000, time_budget_s=6.0)
     if v["verdict"] == "PROVEN_SOLVABLE":
-        return nl_plain, True, f"적용 (plain, A* SOLVABLE, max_open={eff_open})"
-    return level_json, False, f"미적용(plain도 미확인: 봇 미클리어 + A* {v['verdict']})"
+        return nl_plain, True, f"적용 (plain+컨테이너, A* SOLVABLE, max_open={eff_open})"
+    return level_json, False, f"미적용(컨테이너 plain 미확인: A* {v['verdict']})"

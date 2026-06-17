@@ -39,10 +39,11 @@ def _attr_base(attr: Any) -> str:
 
 
 def has_unsupported_features(level_json: Dict[str, Any]) -> Optional[str]:
-    """역생성이 처리 못 하는 요소가 있으면 사유 문자열, 없으면 None.
+    """역생성이 (현 단계에서) 처리 못 하는 '타일 타입' 요소가 있으면 사유, 없으면 None.
 
-    [v2] 안전 기믹(ice/grass/chain/link)은 허용. 컨테이너(craft/stack)·key 타일·비결정 기믹
-    (frog/teleport/bomb/curtain/unknown/lock)만 미지원으로 폴백 처리.
+    [v3-1단계] 모든 '속성 기믹'(ice/grass/chain/link/frog/teleport/bomb/curtain/unknown)은 허용.
+    위트니스는 plain 타입만 배정하고, 봇클리어 검증+degrade로 솔버블을 보장하므로 속성 기믹은
+    막지 않는다. 컨테이너(craft/stack)·key 타일은 타일 구조 자체가 달라 2/3단계에서 다룬다.
     """
     num_layers = int(level_json.get("layer", 0) or 0)
     for i in range(num_layers):
@@ -57,9 +58,6 @@ def has_unsupported_features(level_json: Dict[str, Any]) -> Optional[str]:
                 return "컨테이너(craft/stack)"
             if tt == "key":
                 return "key 타일"
-            ab = _attr_base(td[1] if len(td) > 1 else "")
-            if ab and ab not in SAFE_GIMMICKS:
-                return f"미지원 기믹({ab})"
     return None
 
 
@@ -220,19 +218,23 @@ def apply_reverse_generation(
     if not verify:
         return _build(None), True, f"적용 (검증생략, max_open={eff_open})"
 
-    # degrade 단계: 기믹 최대 유지 → 실패 시 단계적 제거(솔버블 보장). 각 단계 봇클리어로 확정.
-    # 1) 안전 기믹 전부 유지(ice/grass/chain/link)
-    nl_full = _build(SAFE_GIMMICKS)
-    if _bot_clears(nl_full):
-        return nl_full, True, f"적용 (기믹 유지, 봇클리어, max_open={eff_open})"
-    # 2) chain/link 제거, ice/grass만 유지 (ice/grass는 순서 불변이라 거의 항상 통과)
-    nl_ig = _build({"ice", "grass"})
-    if _bot_clears(nl_ig):
-        return nl_ig, True, f"적용 (chain/link 제거·ice/grass 유지, max_open={eff_open})"
-    # 3) 기믹 전부 제거(plain) — 위트니스 구성상 솔버블. 봇클리어 또는 A*로 확정.
+    # degrade 단계: 기믹 최대 유지 → 실패 시 위험요소 단계적 제거(솔버블 보장). 각 단계 봇클리어 확정.
+    #  0) 모든 속성 기믹 유지(frog/teleport/bomb/curtain/unknown 포함)
+    #  1) 비결정 기믹 제거, 결정적 기믹(ice/grass/chain/link)만 유지
+    #  2) chain/link 제거, ice/grass만 유지
+    #  3) 전부 제거(plain) — 위트니스 구성상 솔버블, A*로 확정
+    stages = [
+        (None,                          "모든 기믹 유지"),
+        (SAFE_GIMMICKS,                 "비결정 기믹 제거(결정적 기믹 유지)"),
+        ({"ice", "grass"},              "chain/link 제거(ice/grass 유지)"),
+        (set(),                         "기믹 전부 제거(plain)"),
+    ]
+    for keep, label in stages:
+        nl = _build(keep)
+        if _bot_clears(nl):
+            return nl, True, f"적용 ({label}, 봇클리어, max_open={eff_open})"
+    # plain도 봇 미클리어 → A*로 확정(구성상 솔버블)
     nl_plain = _build(set())
-    if _bot_clears(nl_plain):
-        return nl_plain, True, f"적용 (기믹 전부 제거·plain, max_open={eff_open})"
     from .solver import solve_level
     v = solve_level(nl_plain, node_budget=120000, time_budget_s=6.0)
     if v["verdict"] == "PROVEN_SOLVABLE":

@@ -49,6 +49,10 @@ export class SyncConflictError extends Error {
 // 배치별 마지막으로 알던 서버 버전(낙관적 동시성 기준).
 const knownVersions = new Map<string, number>();
 
+// 서버→로컬 pull 진행 중 플래그. pull은 saveProductionLevels를 호출하는데, 그게 쓰기 리스너를
+// 통해 자동 push를 트리거하면 'pull→write→push' 피드백이 생긴다. pull 중에는 push를 억제한다.
+let _syncing = false;
+
 export function getKnownVersion(batchId: string): number | undefined {
   return knownVersions.get(batchId);
 }
@@ -102,9 +106,13 @@ export async function deleteServerBatch(batchId: string): Promise<void> {
 }
 
 /**
- * 서버의 모든 배치를 IndexedDB로 동기화(upsert). 앱/프로덕션 탭 로드 시 호출하면
+ * 서버 배치 중 '로컬에 없는 것만' IndexedDB로 가져온다. 앱/프로덕션 탭 로드 시 호출하면
  * 다른 브라우저에서 만든 배치가 현재 브라우저에도 나타난다.
- * 반환: 새로 가져온(로컬에 없던) 배치 수.
+ *
+ * ⚠️ 이미 로컬에 있는 배치는 다시 pull하지 않는다 — 전 배치(수십 개 × 1500레벨)를 매 마운트
+ * 메모리로 로드/재기록하면 브라우저 메모리가 폭증(수십 GB)한다. 신규 배치만 가져온다.
+ * (로컬 배치 갱신이 필요하면 사용자가 명시적으로 동기화하거나 새로고침)
+ * 반환: 새로 가져온 배치 수.
  */
 export async function pullAllToLocal(): Promise<number> {
   let serverBatches: ServerBatchSummary[];
@@ -116,13 +124,19 @@ export async function pullAllToLocal(): Promise<number> {
   if (serverBatches.length === 0) return 0;
   const localIds = new Set((await listProductionBatches()).map(b => b.id));
   let pulled = 0;
-  for (const sb of serverBatches) {
-    try {
-      await pullBatchToLocal(sb.batch_id);
-      if (!localIds.has(sb.batch_id)) pulled++;
-    } catch {
-      // 개별 실패는 건너뜀
+  _syncing = true;
+  try {
+    for (const sb of serverBatches) {
+      if (localIds.has(sb.batch_id)) continue; // 이미 로컬에 있으면 스킵(메모리 폭증 방지)
+      try {
+        await pullBatchToLocal(sb.batch_id);
+        pulled++;
+      } catch {
+        // 개별 실패는 건너뜀
+      }
     }
+  } finally {
+    _syncing = false;
   }
   return pulled;
 }
@@ -178,7 +192,7 @@ export function setConflictHandler(cb: (batchId: string, serverVersion: number) 
  * 마지막 편집 후 PUSH_DEBOUNCE_MS 뒤 1회만 서버에 올린다. 낙관적 동시성(force=false).
  */
 export function schedulePush(batchId: string): void {
-  if (!batchId) return;
+  if (!batchId || _syncing) return; // pull로 인한 쓰기는 push 트리거 금지(피드백 방지)
   const existing = pushTimers.get(batchId);
   if (existing) clearTimeout(existing);
   pushTimers.set(batchId, setTimeout(async () => {

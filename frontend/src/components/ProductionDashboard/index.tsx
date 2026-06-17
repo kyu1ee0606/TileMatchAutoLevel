@@ -47,7 +47,7 @@ import {
   renameProductionBatch,
   recalculateBatchCounts,
 } from '../../storage/productionStorage';
-import { pullAllToLocal, pushBatchToServer, registerAutoSync, setConflictHandler, SyncConflictError } from '../../storage/productionServerSync';
+import { syncBidirectional, pushBatchToServer, registerAutoSync, setConflictHandler, SyncConflictError } from '../../storage/productionServerSync';
 import { ProductionExport } from './ProductionExport';
 import { BatchApprovalPanel } from './BatchApprovalPanel';
 import { BatchVerifyPanel } from './BatchVerifyPanel';
@@ -310,11 +310,12 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
     async function init() {
       try {
         await initProductionDB();
-        // 서버(로컬 파일)에 저장된 배치를 IndexedDB로 동기화 → 같은 컴퓨터의 다른 브라우저에서
-        // 만든 배치도 현재 브라우저에 표시된다. 서버 미가동 시 조용히 무시(로컬만 사용).
+        // 양방향 동기화: 로컬-only 배치는 서버(로컬 파일)로 올리고, 서버 배치는 로컬로 내린다.
+        // → 같은 컴퓨터의 어느 브라우저든 모든 배치가 보인다. 서버 미가동 시 조용히 무시.
         try {
-          const pulled = await pullAllToLocal();
-          if (pulled > 0) addNotification('info', `서버에서 배치 ${pulled}개를 가져왔습니다`);
+          const { pushed, pulled } = await syncBidirectional();
+          if (pushed > 0 || pulled > 0)
+            addNotification('info', `서버 동기화: 업로드 ${pushed}개 · 다운로드 ${pulled}개`);
         } catch { /* 서버 동기화 실패는 무시 */ }
         const loadedBatches = await listProductionBatches();
         setBatches(loadedBatches);

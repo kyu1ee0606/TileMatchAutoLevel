@@ -127,6 +127,42 @@ export async function pullAllToLocal(): Promise<number> {
   return pulled;
 }
 
+/**
+ * 로컬(IndexedDB)에만 있고 서버엔 없는 배치를 서버로 업로드.
+ * 이 기능 추가 전에 만든 기존 배치를 처음 마운트 때 서버에 올려, 다른 브라우저에서도 보이게 함.
+ * 반환: 업로드한 배치 수.
+ */
+export async function pushLocalMissingToServer(): Promise<number> {
+  let serverIds: Set<string>;
+  try {
+    serverIds = new Set((await listServerBatches()).map(b => b.batch_id));
+  } catch {
+    return 0; // 서버 미가동 — 무시
+  }
+  const local = await listProductionBatches();
+  let pushed = 0;
+  for (const b of local) {
+    if (serverIds.has(b.id)) continue; // 이미 서버에 있음
+    try {
+      await pushBatchToServer(b.id, { force: true }); // 서버에 없으므로 강제(=최초 저장)
+      pushed++;
+    } catch {
+      // 개별 실패는 건너뜀
+    }
+  }
+  return pushed;
+}
+
+/**
+ * 마운트용 양방향 동기화: 로컬-only 배치는 서버로 올리고(push), 서버 배치는 로컬로 내림(pull).
+ * → 같은 컴퓨터의 어느 브라우저든 모든 배치가 보인다.
+ */
+export async function syncBidirectional(): Promise<{ pushed: number; pulled: number }> {
+  const pushed = await pushLocalMissingToServer();
+  const pulled = await pullAllToLocal();
+  return { pushed, pulled };
+}
+
 // ── 자동 push (디바운스) + 충돌 처리 ─────────────────────────────────────────
 const PUSH_DEBOUNCE_MS = 4000;
 const pushTimers = new Map<string, ReturnType<typeof setTimeout>>();

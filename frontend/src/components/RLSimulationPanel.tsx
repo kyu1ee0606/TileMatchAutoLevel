@@ -29,6 +29,7 @@ import {
   type RLSearchResponse,
   type RLSearchBest,
 } from '../api/rlSim';
+import { batchAnalyzeSolvability, type SolvabilityVerdict } from '../api/analyze';
 import { useUIStore } from '../stores/uiStore';
 
 interface LevelSweepRow {
@@ -97,6 +98,11 @@ export function RLSimulationPanel() {
 
   // 결과
   const [rows, setRows] = useState<LevelSweepRow[]>([]);
+
+  // 언클리어러블 의심 레벨 → A* 솔버블 일괄 검증
+  const [solvRunning, setSolvRunning] = useState(false);
+  const [solvProgress, setSolvProgress] = useState({ current: 0, total: 0 });
+  const [solvResults, setSolvResults] = useState<{ level_number: number; verdict: SolvabilityVerdict; reason: string }[]>([]);
 
   // 0.5단계: 목표 스케줄 모드
   // 'linear': 수동 2점 선형 보간 / 'batch': 배치 난이도 그래프(메타 target_difficulty) 참조
@@ -443,6 +449,43 @@ ${tableLines.join('\n')}
       addNotification('error', '레벨 로드 실패');
     }
   }, [selectedBatchId, openPreview, addNotification]);
+
+  // 언클리어러블 의심 레벨을 A* 솔버블로 일괄 검증 (의심이 진짜 불가능인지 / 봇 한계인지 확정)
+  const verifySuspectsSolvability = useCallback(async () => {
+    if (solvRunning || !selectedBatchId || summary.suspectLevels.length === 0) return;
+    setSolvRunning(true);
+    setSolvResults([]);
+    setSolvProgress({ current: 0, total: summary.suspectLevels.length });
+    try {
+      const all = await getProductionLevelsByBatch(selectedBatchId);
+      const suspectSet = new Set(summary.suspectLevels);
+      const targets = all.filter(l => suspectSet.has(l.meta.level_number));
+      const results: { level_number: number; verdict: SolvabilityVerdict; reason: string }[] = [];
+      const chunkSize = 16;
+      for (let i = 0; i < targets.length; i += chunkSize) {
+        const chunk = targets.slice(i, i + chunkSize);
+        try {
+          const resp = await batchAnalyzeSolvability(
+            chunk.map(l => ({ level_number: l.meta.level_number, level_json: l.level_json })),
+            { timeBudgetS: 4, nodeBudget: 80000 },
+          );
+          for (const r of resp.results) results.push({ level_number: r.level_number, verdict: r.verdict, reason: r.reason });
+        } catch {
+          for (const l of chunk) results.push({ level_number: l.meta.level_number, verdict: 'UNCERTAIN', reason: '요청 오류' });
+        }
+        results.sort((a, b) => a.level_number - b.level_number);
+        setSolvResults([...results]);
+        setSolvProgress({ current: Math.min(i + chunkSize, targets.length), total: targets.length });
+      }
+      const imp = results.filter(r => r.verdict === 'PROVEN_IMPOSSIBLE').length;
+      const sol = results.filter(r => r.verdict === 'PROVEN_SOLVABLE').length;
+      addNotification('success', `솔버블 검증 완료: 풀림 ${sol} · 불가능 ${imp} · 미확정 ${results.length - sol - imp}`);
+    } catch {
+      addNotification('error', '솔버블 검증 실패');
+    } finally {
+      setSolvRunning(false);
+    }
+  }, [solvRunning, selectedBatchId, summary.suspectLevels, addNotification]);
 
   // ─── 0.5단계: 판정 + 자동 교체 ───
 
@@ -1061,9 +1104,45 @@ ${tableLines.join('\n')}
             )}
           </div>
           {summary.suspectCount > 0 && (
-            <p className="text-xs text-red-400 mt-2">
-              언클리어러블 의심 레벨: {summary.suspectLevels.join(', ')}
-            </p>
+            <div className="mt-2">
+              <p className="text-xs text-red-400">
+                언클리어러블 의심 레벨: {summary.suspectLevels.join(', ')}
+              </p>
+              <div className="flex items-center gap-2 mt-1.5">
+                <button
+                  onClick={verifySuspectsSolvability}
+                  disabled={solvRunning}
+                  className="px-3 py-1 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-xs rounded font-medium"
+                  title="의심 레벨을 A* 완전탐색으로 검증 — 진짜 불가능인지 봇 한계(풀림)인지 확정"
+                >
+                  {solvRunning
+                    ? `🧩 솔버블 검증 중… ${solvProgress.current}/${solvProgress.total}`
+                    : `🧩 의심 레벨 솔버블 일괄 검증 (${summary.suspectCount}개)`}
+                </button>
+                <span className="text-[11px] text-gray-500">봇이 못 깬 게 진짜 불가능인지 확정합니다</span>
+              </div>
+              {solvResults.length > 0 && (
+                <div className="mt-2 bg-gray-900/50 rounded p-2">
+                  {(() => {
+                    const sol = solvResults.filter(r => r.verdict === 'PROVEN_SOLVABLE');
+                    const imp = solvResults.filter(r => r.verdict === 'PROVEN_IMPOSSIBLE');
+                    const unc = solvResults.filter(r => r.verdict === 'UNCERTAIN');
+                    return (
+                      <>
+                        <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] mb-1">
+                          <span className="text-green-400">✅ 풀림(봇 한계): {sol.length}{sol.length > 0 ? ` — ${sol.map(r => r.level_number).join(', ')}` : ''}</span>
+                          <span className="text-red-400">❌ 진짜 불가능: {imp.length}{imp.length > 0 ? ` — ${imp.map(r => r.level_number).join(', ')}` : ''}</span>
+                          <span className="text-yellow-400">❔ 미확정: {unc.length}{unc.length > 0 ? ` — ${unc.map(r => r.level_number).join(', ')}` : ''}</span>
+                        </div>
+                        <p className="text-[10px] text-gray-500">
+                          ✅풀림 = 솔버가 클리어 경로를 찾음(봇만 못 깬 것, 재생성 불필요) · ❌불가능 = 구조적 데드락/÷3 위반(재생성 권장) · ❔미확정 = 예산 초과(기믹 포함 등)
+                        </p>
+                      </>
+                    );
+                  })()}
+                </div>
+              )}
+            </div>
           )}
           {summary.luckCount > 0 && (
             <p className="text-xs text-yellow-300 mt-1">

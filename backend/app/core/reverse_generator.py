@@ -39,23 +39,12 @@ def _attr_base(attr: Any) -> str:
 
 
 def has_unsupported_features(level_json: Dict[str, Any]) -> Optional[str]:
-    """역생성이 (현 단계에서) 처리 못 하는 '타일 타입' 요소가 있으면 사유, 없으면 None.
+    """역생성이 처리 못 하는 요소가 있으면 사유, 없으면 None.
 
-    [v3-1단계] 모든 '속성 기믹'(ice/grass/chain/link/frog/teleport/bomb/curtain/unknown)은 허용.
-    위트니스는 plain 타입만 배정하고, 봇클리어 검증+degrade로 솔버블을 보장하므로 속성 기믹은
-    막지 않는다. 컨테이너(craft/stack)·key 타일은 타일 구조 자체가 달라 2/3단계에서 다룬다.
+    [v3-3단계] 모든 속성 기믹 + 컨테이너(craft/stack) + key 타일까지 허용.
+    위트니스는 plain 타입만 배정하고, _normalize_goal_unlock(goalCount/unlockTile 정정) +
+    봇클리어 검증 + degrade(컨테이너/key 제거 폴백)로 솔버블을 보장한다. 현재 막는 요소는 없다.
     """
-    num_layers = int(level_json.get("layer", 0) or 0)
-    for i in range(num_layers):
-        ld = level_json.get(f"layer_{i}")
-        if not isinstance(ld, dict) or not isinstance(ld.get("tiles"), dict):
-            continue
-        for td in ld["tiles"].values():
-            if not (isinstance(td, list) and td and isinstance(td[0], str)):
-                continue
-            tt = td[0]
-            if tt == "key":
-                return "key 타일"
     return None
 
 
@@ -157,20 +146,35 @@ def _has_containers(level_json: Dict[str, Any]) -> bool:
     return False
 
 
-def _strip_containers(level_json: Dict[str, Any]) -> Dict[str, Any]:
-    """craft/stack 컨테이너 타일을 삭제하고 ÷3 재보정한 새 level_json. 컨테이너+witness 조합이
-    안 풀릴 때의 최후 degrade — 컨테이너를 포기하고 plain 솔버블을 보장한다."""
+def _has_special(level_json: Dict[str, Any]) -> bool:
+    """컨테이너(craft/stack) 또는 key 타일이 있으면 True (제거 폴백 대상)."""
+    for i in range(int(level_json.get("layer", 0) or 0)):
+        ld = level_json.get(f"layer_{i}")
+        if not isinstance(ld, dict) or not isinstance(ld.get("tiles"), dict):
+            continue
+        for td in ld["tiles"].values():
+            if isinstance(td, list) and td and isinstance(td[0], str):
+                if td[0].startswith("craft_") or td[0].startswith("stack_") or td[0] == "key":
+                    return True
+    return False
+
+
+def _strip_special(level_json: Dict[str, Any]) -> Dict[str, Any]:
+    """컨테이너(craft/stack)·key 타일을 삭제하고 goalCount/unlockTile 제거 + ÷3 재보정한 새
+    level_json. 특수 타일+witness 조합이 안 풀릴 때의 최후 degrade — 특수 타일을 포기하고
+    plain 솔버블을 보장한다."""
     nl = copy.deepcopy(level_json)
     nl.pop("goalCount", None)
+    nl["unlockTile"] = 0
     for i in range(int(nl.get("layer", 0) or 0)):
         ld = nl.get(f"layer_{i}")
         if not isinstance(ld, dict) or not isinstance(ld.get("tiles"), dict):
             continue
         for pos in [p for p, td in ld["tiles"].items()
                     if isinstance(td, list) and td and isinstance(td[0], str)
-                    and (td[0].startswith("craft_") or td[0].startswith("stack_"))]:
+                    and (td[0].startswith("craft_") or td[0].startswith("stack_") or td[0] == "key")]:
             del ld["tiles"][pos]
-    # ÷3 재보정 (컨테이너 삭제로 깨진 매칭타입 총합을 generator 로직으로 정정)
+    # ÷3 재보정 (특수타일 삭제로 깨진 매칭타입 총합을 generator 로직으로 정정)
     try:
         from .generator import LevelGenerator
         nl = LevelGenerator()._finalize_divisibility_guarantee(nl)
@@ -189,17 +193,17 @@ def apply_reverse_generation(
     레벨의 plain 타일 타입을 witness peeling으로 재배정해 솔버블·÷3 보장.
 
     Returns: (level_json, applied, reason)
-    1차: 컨테이너/기믹 유지한 채 시도. 실패 시 컨테이너 제거 후 재시도(최후 degrade).
+    1차: 컨테이너/key/기믹 유지한 채 시도. 실패 시 특수타일(컨테이너·key) 제거 후 재시도.
     """
     new_level, applied, reason = _attempt_reverse(level_json, use_tile_count, max_open, verify)
     if applied:
         return new_level, True, reason
-    # 컨테이너가 있으면 제거하고 재시도(plain 솔버블 보장). 컨테이너는 포기.
-    if _has_containers(level_json):
-        stripped = _strip_containers(level_json)
+    # 컨테이너/key가 있으면 제거하고 재시도(plain 솔버블 보장). 특수타일은 포기.
+    if _has_special(level_json):
+        stripped = _strip_special(level_json)
         nl2, applied2, reason2 = _attempt_reverse(stripped, use_tile_count, max_open, verify)
         if applied2:
-            return nl2, True, f"적용 (컨테이너 제거 후 {reason2})"
+            return nl2, True, f"적용 (특수타일 제거 후 {reason2})"
     return level_json, False, reason
 
 
@@ -322,9 +326,9 @@ def _attempt_reverse(
             return nl, True, f"적용 ({label}, 봇클리어, max_open={eff_open})"
     # plain(기믹 전부 제거)
     nl_plain = _build(set())
-    # 컨테이너가 없으면 plain witness는 구성상 솔버블이 증명된다(커버 DAG peel + 독≤7).
-    # 봇 휴리스틱이 못 찾거나 A*가 예산초과해도 해는 존재하므로 검증 없이 채택.
-    if not _has_containers(nl_plain):
+    # 특수타일(컨테이너·key)이 없으면 plain witness는 구성상 솔버블이 증명된다(커버 DAG peel +
+    # 독≤7). 봇 휴리스틱이 못 찾거나 A*가 예산초과해도 해는 존재하므로 검증 없이 채택.
+    if not _has_special(nl_plain):
         return nl_plain, True, f"적용 (plain·구성보장, max_open={eff_open})"
     # 컨테이너가 남아있으면 구성보장 불가 → 봇클리어/A*로 확정 시도(여기 실패 시 상위 래퍼가
     # 컨테이너 제거 후 재시도 → 그땐 plain·구성보장으로 반드시 통과).

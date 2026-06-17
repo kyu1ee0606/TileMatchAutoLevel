@@ -118,6 +118,9 @@ export function PatternSynthModal({ onClose, onAccepted }: Props) {
   const [accepted, setAccepted] = useState<Set<number>>(new Set()); // 채택된 컨셉 인덱스
   const [acceptedCount, setAcceptedCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [autoCount, setAutoCount] = useState(8);   // AI 자동 채택 개수
+  const [autoLoading, setAutoLoading] = useState(false);
+  const [autoSaved, setAutoSaved] = useState<SynthConcept[]>([]); // 자동 저장된 컨셉(미리보기)
 
   const generate = useCallback(async () => {
     setLoading(true);
@@ -141,6 +144,34 @@ export function PatternSynthModal({ onClose, onAccepted }: Props) {
       setLoading(false);
     }
   }, [maxGrid, minGrid, count, symmetry, fillMin, fillMax]);
+
+  // AI 자동 큐레이션: 대량 생성 → 비주얼 상위 N개 자동 저장
+  const autoGenerate = useCallback(async () => {
+    setAutoLoading(true);
+    setError(null);
+    setAutoSaved([]);
+    try {
+      const res = await apiClient.post('/patterns/auto-generate', {
+        count: autoCount,
+        max_grid: maxGrid,
+        min_grid: minGrid,
+        symmetry: symmetry || null,
+        fill_min: fillMin,
+        fill_max: fillMax,
+        seed: Math.floor(Math.random() * 1_000_000),
+      });
+      // saved.patterns[].variants 는 SynthConcept.variants 와 호환
+      const saved = (res.data.patterns || []).map((p: { strategy: string; symmetry: string; score: number; sizes: number[]; variants: SynthVariant[] }) => ({
+        strategy: p.strategy, symmetry: p.symmetry, score: p.score, sizes: p.sizes, variants: p.variants,
+      })) as SynthConcept[];
+      setAutoSaved(saved);
+      if (saved.length > 0) onAccepted(); // 라이브러리 새로고침
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'AI 자동 생성 실패');
+    } finally {
+      setAutoLoading(false);
+    }
+  }, [autoCount, maxGrid, minGrid, symmetry, fillMin, fillMax, onAccepted]);
 
   const acceptOne = useCallback(async (concept: SynthConcept, idx: number) => {
     if (accepted.has(idx)) return;
@@ -210,13 +241,40 @@ export function PatternSynthModal({ onClose, onAccepted }: Props) {
                 onChange={e => setFillMax(Math.max(+e.target.value, fillMin))} className="w-20" />
             </div>
           </label>
-          <button onClick={generate} disabled={loading}
+          <button onClick={generate} disabled={loading || autoLoading}
             className="px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold">
-            {loading ? '생성 중…' : '🎲 생성'}
+            {loading ? '생성 중…' : '🎲 생성(수동채택)'}
           </button>
+          {/* AI 자동 큐레이션 */}
+          <div className="flex items-end gap-1 pl-3 ml-1 border-l border-gray-700">
+            <label className="flex flex-col gap-0.5">
+              <span className="text-gray-400">AI 자동 개수</span>
+              <input type="number" min={1} max={48} value={autoCount} onChange={e => setAutoCount(Math.max(1, Math.min(48, +e.target.value)))}
+                className="w-16 px-2 py-1 rounded bg-gray-800 text-white border border-gray-700" />
+            </label>
+            <button onClick={autoGenerate} disabled={loading || autoLoading}
+              title="대량 생성 후 비주얼 점수 상위 N개를 자동 채택·저장"
+              className="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold">
+              {autoLoading ? 'AI 생성 중…' : '✨ AI 자동 N개 저장'}
+            </button>
+          </div>
         </div>
 
         {error && <div className="px-4 py-2 text-[11px] text-red-400 bg-red-900/20">{error}</div>}
+
+        {autoSaved.length > 0 && (
+          <div className="px-4 py-2 border-b border-emerald-800 bg-emerald-900/20">
+            <div className="text-[11px] text-emerald-300 mb-1.5">✨ AI가 비주얼 상위 {autoSaved.length}개를 자동 저장했습니다 (라이브러리에 추가됨)</div>
+            <div className="flex flex-wrap gap-2">
+              {autoSaved.map((c, i) => (
+                <div key={i} className="rounded border border-emerald-700 bg-gray-800/40 p-1.5 flex flex-col items-center">
+                  <StackedPreview variants={c.variants} />
+                  <div className="text-[8px] text-gray-400 mt-0.5">{c.strategy}·{c.symmetry} · {c.score}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* 컨셉 목록 (각 컨셉 = 사이즈별 변형 묶음) */}
         <div className="flex-1 overflow-y-auto p-4 space-y-3">

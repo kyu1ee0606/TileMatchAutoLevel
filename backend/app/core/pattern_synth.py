@@ -230,6 +230,23 @@ def _symmetry_score(cells: Set[Cell], g: int) -> float:
     return best
 
 
+def _compactness(cells: Set[Cell]) -> float:
+    """윤곽 매끄러움/둥글기. 같은 면적에서 둘레가 짧을수록(=둥글고 깔끔할수록) 1에 가까움.
+    들쭉날쭉한 윤곽/가시 모양은 둘레가 길어 낮은 점수."""
+    area = len(cells)
+    if area == 0:
+        return 0.0
+    perimeter = 0
+    for (x, y) in cells:
+        for dx, dy in _NEI4:
+            if (x + dx, y + dy) not in cells:
+                perimeter += 1
+    if perimeter <= 0:
+        return 1.0
+    ideal = 4.0 * math.sqrt(area)  # 정사각/원형 근사의 이상 둘레
+    return max(0.0, min(1.0, ideal / perimeter))
+
+
 def _score(cells: Set[Cell], g: int, fill_range: Tuple[float, float]) -> Tuple[float, Dict]:
     area = len(cells)
     if area == 0:
@@ -239,15 +256,18 @@ def _score(cells: Set[Cell], g: int, fill_range: Tuple[float, float]) -> Tuple[f
     conn = 1.0 if len(comps) == 1 else max(0.0, 1.0 - 0.34 * (len(comps) - 1))
     holes = len(_single_holes(cells, g))
     solidity = max(0.0, 1.0 - 0.5 * holes)  # 단일홀 1개당 -0.5 (강한 감점)
+    compact = _compactness(cells)           # 윤곽 매끄러움(둥글기)
     fr = area / (g * g)
     lo, hi = fill_range
     mid = (lo + hi) / 2
     fill_score = math.exp(-((fr - mid) ** 2) / (2 * (0.18 ** 2)))
-    composite = 0.40 * sym + 0.25 * conn + 0.25 * solidity + 0.10 * fill_score
+    # 비주얼 품질: 대칭 우선 + 단일컴포넌트 + 단일홀 없음 + 매끄러운 윤곽 + 적정 채움
+    composite = 0.34 * sym + 0.20 * conn + 0.20 * solidity + 0.16 * compact + 0.10 * fill_score
     return composite, {
         "symmetry": round(sym, 3),
         "connectivity": round(conn, 3),
         "solidity": round(solidity, 3),
+        "compactness": round(compact, 3),
         "single_holes": holes,
         "fill_rate": round(fr, 3),
         "components": len(comps),

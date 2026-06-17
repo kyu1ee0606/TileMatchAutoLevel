@@ -2281,6 +2281,65 @@ async def patterns_synthesize(request: PatternSynthesizeRequest):
     return {"concepts": concepts, "count": len(concepts)}
 
 
+class PatternAutoGenerateRequest(_BaseModel):
+    count: int = 8                    # 자동 채택할 '비주얼 우수' 컨셉 수
+    max_grid: int = 7
+    min_grid: int = 4
+    symmetry: Optional[str] = None
+    fill_min: float = 0.45
+    fill_max: float = 0.85
+    seed: Optional[int] = None
+    pool_multiplier: int = 12         # 후보 풀 배수(클수록 더 많이 생성→상위만 채택→품질↑)
+
+
+@router.post("/patterns/auto-generate")
+async def patterns_auto_generate(request: PatternAutoGenerateRequest):
+    """
+    [v16 🅑] AI 자동 큐레이션: 대량 컨셉 풀을 생성·비주얼 점수로 랭킹해 상위 N개를
+    custom_patterns.json에 자동 저장(사람 수동 채택 불필요). 각 컨셉은 모든 사이즈 변형 묶음
+    + ÷3 보장. 저장된 인덱스/미리보기를 반환.
+    """
+    from ...core.pattern_synth import synthesize_concepts
+
+    n = max(1, min(int(request.count), 48))
+    g_max = max(4, min(int(request.max_grid), 12))
+    g_min = max(4, min(int(request.min_grid), g_max))
+    # 상위 N만 채택하므로 oversample을 크게 → 풀에서 비주얼 최상위만 선별
+    concepts = synthesize_concepts(
+        min_grid=g_min,
+        max_grid=g_max,
+        count=n,
+        symmetry=request.symmetry,
+        fill_range=(request.fill_min, request.fill_max),
+        seed=request.seed,
+        oversample=max(4, int(request.pool_multiplier)),
+    )
+
+    data = _load_custom_patterns()
+    saved = []
+    for c in concepts:
+        idx = _next_custom_index(data)
+        for v in c["variants"]:
+            size_key = f"{idx}_{v['grid_size']}x{v['grid_size']}"
+            data[size_key] = {
+                "grid_size": v["grid_size"],
+                "positions": v["positions"],
+                "count": v["count"],
+                "synth": True,
+                "name": f"ai_{c['strategy']}_{c['symmetry']}",
+            }
+        saved.append({
+            "pattern_index": idx,
+            "sizes": c["sizes"],
+            "score": c["score"],
+            "strategy": c["strategy"],
+            "symmetry": c["symmetry"],
+            "variants": c["variants"],  # 미리보기용(grid 포함)
+        })
+    _save_custom_patterns(data)
+    return {"saved_count": len(saved), "patterns": saved}
+
+
 class PatternVariant(_BaseModel):
     grid_size: int
     positions: List[str]

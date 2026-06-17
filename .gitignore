@@ -50,3 +50,8 @@ backend/app/storage/local_levels/*.json
 
 # Production batch store (server-side local file sync — large runtime data)
 backend/data/production/
+
+# 절차생성/AI 패턴 DB (런타임 데이터)
+backend/data/patterns.db
+backend/data/patterns.db-wal
+backend/data/patterns.db-shm

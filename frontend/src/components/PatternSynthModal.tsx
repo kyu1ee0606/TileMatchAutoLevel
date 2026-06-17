@@ -1,5 +1,7 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import apiClient from '../api/client';
+import { renderLevelCanvasPreview } from '../utils/levelPreview';
+import type { LevelJSON, LevelLayer } from '../types';
 
 // [v16 🅑] 절차적 패턴 '컨셉 묶음' 생성 + 큐레이션 모달
 // 한 컨셉 = (전략·대칭·채움률 고정)을 여러 그리드 사이즈로 렌더한 변형 묶음.
@@ -46,62 +48,74 @@ const SYMMETRY_OPTIONS = [
   { value: 'none', label: '비대칭' },
 ];
 
+// 단일 사이즈 변형을 실제 타일 렌더러로 미리보기(단색 더미 아님).
 function VariantPreview({ v }: { v: SynthVariant }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const key = `${v.grid_size}:${v.positions.length}`;
+  useEffect(() => {
+    let alive = true;
+    setUrl(null);
+    renderLevelCanvasPreview(conceptToLevelJSON([v]), 168).then(u => { if (alive) setUrl(u); }).catch(() => {});
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
   return (
     <div className="flex flex-col items-center">
-      <div className="w-14 h-14">
-        {v.grid.map((row, y) => (
-          <div key={y} className="flex">
-            {row.map((cell, x) => (
-              <div key={x} className={`flex-1 aspect-square ${cell ? 'bg-blue-500' : 'bg-gray-800'}`} style={{ margin: '0.3px' }} />
-            ))}
-          </div>
-        ))}
+      <div className="w-14 h-14 rounded bg-gray-900 overflow-hidden flex items-center justify-center">
+        {url ? <img src={url} alt="" style={{ width: 56, height: 56, objectFit: 'contain' }} />
+             : <span className="text-[7px] text-gray-600">…</span>}
       </div>
       <div className="text-[8px] text-gray-500 mt-0.5">{v.grid_size}×{v.grid_size}·{v.count}t</div>
     </div>
   );
 }
 
-// 모든 사이즈 변형을 레이어로 쌓았을 때의 '위에서 본(top-down)' 합성 미리보기.
-// 큰 사이즈=하단(layer 1), 작은 사이즈=상단으로 중앙정렬 → 각 셀은 그 위치를 덮는 '최상위 층'으로
-// 채색(작은 층이 큰 층을 가림 = 실제 게임 occlusion). 중앙=상단층(밝음), 가장자리=하단층(어두움)
-// → 인게임 피라미드 실루엣 근사. 빈칸=회색.
-function StackedPreview({ variants }: { variants: SynthVariant[] }) {
-  if (!variants.length) return null;
-  // 큰→작은 = 하단→상단 (layer 1..n). 나중(작은)이 덮어써 top-down 점유를 표현.
-  const ordered = [...variants].sort((a, b) => b.grid_size - a.grid_size);
-  const G = ordered[0].grid_size;
-  const top: number[][] = Array.from({ length: G }, () => Array(G).fill(0));
+// 컨셉의 모든 사이즈 변형을 레이어로 쌓아 합성한 '레벨 JSON'을 만든다.
+// 큰 사이즈=하단(layer_0), 작은 사이즈=상단으로 각 변형을 공통 프레임 중앙에 배치하고,
+// 실제 타일 타입(t1..6 순환)을 부여 → 프로덕션 탭과 동일한 렌더러로 실제 타일 이미지 렌더.
+function conceptToLevelJSON(variants: SynthVariant[], useTileCount = 6): LevelJSON {
+  const ordered = [...variants].sort((a, b) => b.grid_size - a.grid_size); // 큰→작은 = 하단→상단
+  const G = ordered.length ? ordered[0].grid_size : 7;
+  const lv: LevelJSON = { layer: ordered.length, useTileCount };
   ordered.forEach((v, li) => {
     const g = v.grid_size;
-    const off = Math.floor((G - g) / 2); // 중앙정렬
-    for (const p of v.positions) {
+    const off = Math.floor((G - g) / 2); // 공통 프레임 중앙정렬
+    const tiles: LevelLayer['tiles'] = {};
+    v.positions.forEach((p, ti) => {
       const [x, y] = p.split('_').map(Number);
       const cx = x + off, cy = y + off;
-      if (cx >= 0 && cx < G && cy >= 0 && cy < G) top[cy][cx] = li + 1; // 1=하단 … n=상단
-    }
+      const t = `t${(ti % useTileCount) + 1}`; // 실제 타일 타입 순환(컬러풀)
+      tiles[`${cx}_${cy}`] = [t, ''];
+    });
+    // 렌더러는 짝수 레이어 기준 프레임 + 홀수 레이어 0.5 오프셋 → col/row는 표시용
+    (lv as unknown as Record<string, LevelLayer>)[`layer_${li}`] = {
+      col: String(G), row: String(G), num: String(v.positions.length), tiles,
+    };
   });
-  const maxLayer = ordered.length;
-  const colorFor = (d: number): string => {
-    if (d <= 0) return 'bg-gray-800';
-    const ramp = ['bg-indigo-900', 'bg-indigo-700', 'bg-blue-500', 'bg-cyan-400', 'bg-amber-300', 'bg-yellow-200'];
-    const i = Math.min(ramp.length - 1, Math.round(((d - 1) / Math.max(1, maxLayer - 1)) * (ramp.length - 1)));
-    return ramp[i];
-  };
+  return lv;
+}
+
+// 프로덕션 탭과 동일한 실제 타일 렌더러로 컨셉 합성 미리보기(실제 타일 이미지).
+function LevelLikePreview({ variants, size = 88 }: { variants: SynthVariant[]; size?: number }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const key = variants.map(v => `${v.grid_size}:${v.positions.length}`).join('|');
+  useEffect(() => {
+    let alive = true;
+    setUrl(null);
+    const lv = conceptToLevelJSON(variants);
+    renderLevelCanvasPreview(lv, size * 3).then(u => { if (alive) setUrl(u); }).catch(() => {});
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, size]);
   return (
     <div className="flex flex-col items-center">
-      <div className="w-20 h-20">
-        {top.map((row, y) => (
-          <div key={y} className="flex">
-            {row.map((d, x) => (
-              <div key={x} className={`flex-1 aspect-square ${colorFor(d)}`} style={{ margin: '0.3px' }}
-                title={d > 0 ? `${d}층(아래1~위${maxLayer})` : ''} />
-            ))}
-          </div>
-        ))}
+      <div className="rounded bg-gray-900 overflow-hidden flex items-center justify-center"
+        style={{ width: size, height: size }}>
+        {url
+          ? <img src={url} alt="concept preview" style={{ width: size, height: size, objectFit: 'contain' }} />
+          : <span className="text-[8px] text-gray-600">렌더…</span>}
       </div>
-      <div className="text-[8px] text-gray-400 mt-0.5">쌓임(위에서)</div>
+      <div className="text-[8px] text-gray-400 mt-0.5">쌓임(실제타일)</div>
     </div>
   );
 }
@@ -268,7 +282,7 @@ export function PatternSynthModal({ onClose, onAccepted }: Props) {
             <div className="flex flex-wrap gap-2">
               {autoSaved.map((c, i) => (
                 <div key={i} className="rounded border border-emerald-700 bg-gray-800/40 p-1.5 flex flex-col items-center">
-                  <StackedPreview variants={c.variants} />
+                  <LevelLikePreview variants={c.variants} size={72} />
                   <div className="text-[8px] text-gray-400 mt-0.5">{c.strategy}·{c.symmetry} · {c.score}</div>
                 </div>
               ))}
@@ -285,9 +299,9 @@ export function PatternSynthModal({ onClose, onAccepted }: Props) {
             const isAccepted = accepted.has(idx);
             return (
               <div key={idx} className={`rounded border p-3 flex items-center gap-4 ${isAccepted ? 'border-green-500 bg-green-900/20' : 'border-gray-700 bg-gray-800/40'}`}>
-                {/* 합성(모든 사이즈 쌓음) 미리보기 — 강조 */}
+                {/* 합성(모든 사이즈 쌓음) 미리보기 — 실제 타일 렌더(프로덕션 동일) */}
                 <div className="shrink-0 pr-3 border-r border-gray-700">
-                  <StackedPreview variants={c.variants} />
+                  <LevelLikePreview variants={c.variants} size={96} />
                 </div>
                 {/* 사이즈별 개별 변형 */}
                 <div className="flex-1 flex items-end gap-3 overflow-x-auto">

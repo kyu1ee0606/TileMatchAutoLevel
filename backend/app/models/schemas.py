@@ -76,8 +76,8 @@ class LayerPatternConfig(BaseModel):
     pattern_index: Optional[int] = Field(
         default=None,
         ge=0,
-        le=99,
-        description="Specific pattern index (0-99) for aesthetic mode. None = auto-select"
+        le=9999,
+        description="Specific pattern index for aesthetic mode (0-63 빌트인, 64+ 커스텀/AI). None = auto-select"
     )
 
 
@@ -126,8 +126,8 @@ class GenerateRequest(BaseModel):
     pattern_index: Optional[int] = Field(
         default=None,
         ge=0,
-        le=99,
-        description="Specific pattern index (0-99) for aesthetic mode. None = auto-select best pattern"
+        le=9999,
+        description="Specific pattern index for aesthetic mode (0-63 빌트인, 64+ 커스텀/AI). None = auto-select"
     )
     # Auto gimmick selection parameters
     auto_select_gimmicks: bool = Field(
@@ -518,7 +518,7 @@ class ValidatedGenerateRequest(BaseModel):
     goals: Optional[List[GoalConfig]] = Field(default=None, description="Goal configurations")
     symmetry_mode: Optional[str] = Field(default=None, description="Symmetry mode")
     pattern_type: Optional[str] = Field(default=None, description="Pattern type")
-    pattern_index: Optional[int] = Field(default=None, ge=0, le=99, description="Specific pattern index (0-99) for aesthetic mode")
+    pattern_index: Optional[int] = Field(default=None, ge=0, le=9999, description="Specific pattern index for aesthetic mode (커스텀/AI 포함)")
     layer_pattern_configs: Optional[List[LayerPatternConfig]] = Field(
         default=None,
         description="Per-layer pattern settings for aesthetic variety"
@@ -673,7 +673,7 @@ class BatchVerifyRegenerateLevelItem(BaseModel):
     symmetry_mode: Optional[str] = Field(default=None, description="Original symmetry mode")
     pattern_type: Optional[str] = Field(default=None, description="Original pattern type")
     # [v15.40] 재생성 시 패턴 모양 보존
-    pattern_index: Optional[int] = Field(default=None, ge=0, le=99, description="Original pattern index for shape preservation")
+    pattern_index: Optional[int] = Field(default=None, ge=0, le=9999, description="Original pattern index for shape preservation")
 
 
 class BatchVerifyRegenerateRequest(BaseModel):

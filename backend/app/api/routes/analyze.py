@@ -2210,7 +2210,16 @@ async def debug_pattern_delete(pattern_index: int, grid_size: Optional[int] = No
                 removed.append(key)
     if removed:
         _save_custom_patterns(data)
-    return {"deleted": True, "pattern_index": pattern_index, "removed_keys": removed}
+    # synth 패턴은 DB가 정본 — DB에서도 삭제(없으면 0행, 무해). grid_size 단위 삭제는
+    # 컨셉(모든 사이즈)을 함께 두는 게 일관적이라 인덱스 통째 삭제 시에만 DB 제거.
+    db_removed = 0
+    if grid_size is None:
+        try:
+            from ...core import pattern_db
+            db_removed = pattern_db.delete_index(pattern_index)
+        except Exception:
+            db_removed = 0
+    return {"deleted": True, "pattern_index": pattern_index, "removed_keys": removed, "db_rows_removed": db_removed}
 
 
 @router.get("/debug/custom-patterns")
@@ -2315,19 +2324,16 @@ async def patterns_auto_generate(request: PatternAutoGenerateRequest):
         oversample=max(4, int(request.pool_multiplier)),
     )
 
-    data = _load_custom_patterns()
+    from ...core import pattern_db
+
     saved = []
     for c in concepts:
-        idx = _next_custom_index(data)
-        for v in c["variants"]:
-            size_key = f"{idx}_{v['grid_size']}x{v['grid_size']}"
-            data[size_key] = {
-                "grid_size": v["grid_size"],
-                "positions": v["positions"],
-                "count": v["count"],
-                "synth": True,
-                "name": f"ai_{c['strategy']}_{c['symmetry']}",
-            }
+        idx = pattern_db.next_index()
+        pattern_db.save_concept(
+            idx, c["variants"], score=c["score"],
+            strategy=c["strategy"], symmetry=c["symmetry"],
+            name=f"ai_{c['strategy']}_{c['symmetry']}",
+        )
         saved.append({
             "pattern_index": idx,
             "sizes": c["sizes"],
@@ -2336,7 +2342,7 @@ async def patterns_auto_generate(request: PatternAutoGenerateRequest):
             "symmetry": c["symmetry"],
             "variants": c["variants"],  # 미리보기용(grid 포함)
         })
-    _save_custom_patterns(data)
+    pattern_db.materialize_to_json()  # DB(정본) → custom_patterns.json (생성기/에디터용)
     return {"saved_count": len(saved), "patterns": saved}
 
 
@@ -2372,23 +2378,16 @@ async def patterns_accept(request: PatternAcceptRequest):
         if len(v.positions) % 3 != 0:
             raise HTTPException(status_code=400, detail=f"{v.grid_size}x{v.grid_size} positions 개수({len(v.positions)})가 3의 배수가 아님")
 
-    data = _load_custom_patterns()
-    idx = request.pattern_index if request.pattern_index is not None else _next_custom_index(data)
-    saved_sizes: List[int] = []
-    for v in variants:
-        size_key = f"{idx}_{v.grid_size}x{v.grid_size}"
-        entry: Dict[str, Any] = {
-            "grid_size": v.grid_size,
-            "positions": v.positions,
-            "count": len(v.positions),
-            "synth": True,  # 절차적 생성 표식
-        }
-        if request.name:
-            entry["name"] = request.name
-        data[size_key] = entry
-        saved_sizes.append(v.grid_size)
-    _save_custom_patterns(data)
-    return {"saved": True, "pattern_index": idx, "sizes": sorted(saved_sizes), "variant_count": len(variants)}
+    from ...core import pattern_db
+
+    idx = request.pattern_index if request.pattern_index is not None else pattern_db.next_index()
+    saved_sizes = pattern_db.save_concept(
+        idx,
+        [{"grid_size": v.grid_size, "positions": v.positions} for v in variants],
+        name=request.name,
+    )
+    pattern_db.materialize_to_json()  # DB(정본) → custom_patterns.json (생성기/에디터용)
+    return {"saved": True, "pattern_index": idx, "sizes": saved_sizes, "variant_count": len(variants)}
 
 
 # ===== 패턴 활성/비활성 설정 =====

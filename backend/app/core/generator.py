@@ -548,6 +548,38 @@ class LevelGenerator:
 
         return positions
 
+    @classmethod
+    def _get_synth_pattern_indices(cls, max_size: Optional[int] = None) -> List[int]:
+        """[v16 🅑] 절차생성으로 채택된 패턴 인덱스(synth=true) 목록. 자동 믹스 풀에 주입용.
+
+        custom_patterns.json을 _get_custom_pattern과 같은 캐시로 읽는다. max_size 지정 시
+        해당 크기 이하 변형이 하나라도 있는 인덱스만 반환(렌더 시 size-fit fallback과 정합).
+        """
+        import os, json as json_mod
+        _this_dir = os.path.dirname(os.path.abspath(__file__))
+        pattern_file = os.path.normpath(os.path.join(_this_dir, "..", "..", "data", "custom_patterns.json"))
+        try:
+            mtime = os.path.getmtime(pattern_file)
+            if cls._custom_patterns_cache is None or mtime > cls._custom_patterns_mtime:
+                with open(pattern_file, "r") as f:
+                    cls._custom_patterns_cache = json_mod.load(f)
+                cls._custom_patterns_mtime = mtime
+        except (FileNotFoundError, json_mod.JSONDecodeError):
+            return []
+        found: Dict[int, bool] = {}
+        for k, v in (cls._custom_patterns_cache or {}).items():
+            if not isinstance(v, dict) or not v.get("synth"):
+                continue
+            try:
+                idx = int(k.split("_")[0])
+            except (ValueError, IndexError):
+                continue
+            size = v.get("grid_size", 0)
+            if max_size is not None and isinstance(size, int) and size > max_size:
+                continue
+            found[idx] = True
+        return sorted(found.keys())
+
     # ============================================================
     # Tile Creation Helper Methods
     # ============================================================
@@ -2132,6 +2164,17 @@ class LevelGenerator:
 
         # Bottom layer patterns (structural base - can be simpler)
         bottom_patterns = [0, 1, 2, 3, 4, 5, 20, 21]
+
+        # [v16 🅑] 절차생성(synth) 패턴을 자동 믹스 풀에 주입 — 라이브러리에 채택분이 있으면
+        # 상위/중간 레이어 후보로 섞는다. synth 패턴은 ÷3·대칭·연결성이 보장돼 미관에 유리.
+        # 크기 미스매치는 _get_custom_pattern의 size-fit fallback이 처리하므로 안전.
+        synth_indices = self._get_synth_pattern_indices()
+        if synth_indices:
+            # 너무 압도하지 않게 후보 풀 크기에 비례한 소량만 가중 주입(중복 추가로 확률↑)
+            top_layer_patterns = top_layer_patterns + synth_indices
+            medium_top_patterns = medium_top_patterns + synth_indices
+            hard_top_patterns = hard_top_patterns + synth_indices
+            middle_patterns = middle_patterns + synth_indices
 
         # ===== PATTERN ASSIGNMENT LOGIC =====
 

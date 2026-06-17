@@ -65,9 +65,9 @@
 
 ## 6. 진행 현황
 - [x] 🅐 7×7 캡 + 레이어 난이도  ← **완료·검증 (2026-06-17)**
-- [ ] 🅑-1 패턴 생성 백엔드  ← 다음
-- [ ] 🅑-2 큐레이션 UI
-- [ ] 🅒 타입 분산 배치
+- [x] 🅑-1 패턴 생성 백엔드  ← **완료·검증 (2026-06-17)**
+- [x] 🅑-2 큐레이션 UI  ← **완료 (2026-06-17)**
+- [ ] 🅒 타입 분산 배치  ← 다음
 
 ### 🅐 구현·검증 결과 (2026-06-17)
 - **parity 보정**: grid_size는 *홀수 레이어* 기준이고 짝수 레이어는 +1 → 가시 최대 = grid_size+1.
@@ -89,3 +89,20 @@
   깊은(7층) 레벨은 상태공간이 커서 A* 60s 미증명(UNCERTAIN)이나 ÷3 보장 + 역생성 constructive
   witness + 봇 클리어(rate>0)로 플레이 가능 확인.
 - ⚠️ **미해결 사용자 확인 필요**: Unity 클라이언트가 동일 7×7 footprint에 7~10 레이어 깊이 렌더링을 지원하는지.
+
+### 🅑 구현·검증 결과 (2026-06-17)
+- **백엔드** `app/core/pattern_synth.py` (신규): 대칭(상하좌우/4방회전/좌우/상하/점대칭) 기반
+  절차 생성 + 전략(blob/diamond/ring/random/frame) + **÷3 강제 보정**(돌출부 제거 우선) +
+  단일홀 메움 + 미적 스코어(대칭40·연결25·solidity25·채움10) + Jaccard 다양성 선택.
+- **엔드포인트** `analyze.py`:
+  - `POST /api/patterns/synthesize` — 후보 N개(positions+미리보기 grid+점수). 모두 ÷3 보장.
+  - `POST /api/patterns/accept` — 채택분을 custom_patterns.json에 저장(64+ 자동 인덱스, `synth:true` 표식).
+- **자동 사용 통합** `generator.py`: `_get_synth_pattern_indices()`로 채택 synth 인덱스를
+  `_generate_auto_layer_pattern_configs`의 top/medium/hard/middle 풀에 주입 → 일반 생성에서
+  자동 채택. 크기 미스매치는 `_get_custom_pattern` size-fit fallback이 흡수(안전).
+- **프론트** `PatternSynthModal.tsx` (신규) + PatternDebugPanel에 [🧩 절차생성] 버튼:
+  최대/최소 그리드·대칭·후보수·채움률 설정 → 생성 → 후보 렌더링 미리보기 → 개별 [채택].
+- **검증**: synthesize/accept 엔드포인트 동작, 명시 pattern_index=synth → 해당 모양 렌더 확인,
+  synth 라이브러리 존재 상태 auto-mix 회귀(Lv30/300/700) 전부 ÷3 OK·≤7×7·PROVEN_SOLVABLE.
+  tsc 통과, Vite 클린 컴파일. (Playwright MCP 미연결로 웹뷰 자동테스트는 생략)
+- 테스트로 추가한 synth 패턴은 커밋 전 custom_patterns.json 원복(사용자가 UI로 직접 생성).

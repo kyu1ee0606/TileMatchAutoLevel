@@ -7,6 +7,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import apiClient from '../api/client';
+import { PatternSynthModal } from './PatternSynthModal';
 import { getPatternByIndex } from '../constants/patterns';
 import GameBoard from './GamePlayer/GameBoard';
 import { createGameEngine } from '../engine/gameEngine';
@@ -559,6 +560,7 @@ export function PatternDebugPanel() {
     }
   };
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
+  const [showSynthModal, setShowSynthModal] = useState(false);
   const [sortMode, setSortMode] = useState<'order' | 'name' | 'count'>('order');
 
   useEffect(() => { loadPatterns(); loadConfig(); }, [gridSize]);
@@ -865,6 +867,10 @@ export function PatternDebugPanel() {
             <button onClick={createNewPattern}
               className="px-2 py-1 rounded bg-green-700 hover:bg-green-600 text-white text-[10px]"
             >+ 추가</button>
+            <button onClick={() => setShowSynthModal(true)}
+              className="px-2 py-1 rounded bg-indigo-700 hover:bg-indigo-600 text-white text-[10px]"
+              title="절차적으로 ÷3-보장 패턴 생성 후 채택"
+            >🧩 절차생성</button>
             <div className="flex-1" />
             <div className="flex gap-0.5">
               <button onClick={() => setViewMode('grid')}
@@ -1809,6 +1815,13 @@ export function PatternDebugPanel() {
           )}
         </div>
       </div>
+
+      {showSynthModal && (
+        <PatternSynthModal
+          onClose={() => setShowSynthModal(false)}
+          onAccepted={() => loadPatterns()}
+        />
+      )}
     </div>
   );
 }

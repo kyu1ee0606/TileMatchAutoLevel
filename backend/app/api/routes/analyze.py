@@ -2220,6 +2220,97 @@ async def debug_list_custom_patterns():
     return {"custom_patterns": {k: v for k, v in data.items()}}
 
 
+# ===== [v16 🅑] 절차적 패턴 생성 + 큐레이션 =====
+def _positions_to_grid(positions: List[str], g: int) -> List[List[int]]:
+    """미리보기용 2D 0/1 그리드."""
+    grid = [[0] * g for _ in range(g)]
+    for p in positions:
+        try:
+            x, y = (int(v) for v in p.split("_"))
+        except (ValueError, TypeError):
+            continue
+        if 0 <= x < g and 0 <= y < g:
+            grid[y][x] = 1
+    return grid
+
+
+def _next_custom_index(data: Dict[str, Any]) -> int:
+    """custom_patterns에서 다음 빈 인덱스(>=64)."""
+    used = set()
+    for k in data.keys():
+        try:
+            used.add(int(k.split("_")[0]))
+        except ValueError:
+            continue
+    idx = 64
+    while idx in used:
+        idx += 1
+    return idx
+
+
+class PatternSynthesizeRequest(_BaseModel):
+    max_grid: int = 7                 # 가시 footprint 한 변 최대 (4~7 권장)
+    min_grid: Optional[int] = None    # 미지정 시 max_grid와 동일
+    count: int = 12                   # 반환 후보 수
+    symmetry: Optional[str] = None    # both|h|v|rot180|quad|none, None이면 다양하게
+    fill_min: float = 0.45
+    fill_max: float = 0.85
+    seed: Optional[int] = None
+
+
+@router.post("/patterns/synthesize")
+async def patterns_synthesize(request: PatternSynthesizeRequest):
+    """
+    [v16 🅑] 절차적으로 ÷3-보장 패턴 후보를 생성·랭킹해 반환.
+    각 후보는 positions + 미리보기 grid + 미적 점수(breakdown) 포함. 저장은 별도(accept).
+    """
+    from ...core.pattern_synth import synthesize_patterns
+
+    g_max = max(4, min(int(request.max_grid), 12))
+    cands = synthesize_patterns(
+        max_grid=g_max,
+        count=max(1, min(int(request.count), 48)),
+        min_grid=request.min_grid,
+        symmetry=request.symmetry,
+        fill_range=(request.fill_min, request.fill_max),
+        seed=request.seed,
+    )
+    for c in cands:
+        c["grid"] = _positions_to_grid(c["positions"], c["grid_size"])
+    return {"candidates": cands, "count": len(cands)}
+
+
+class PatternAcceptRequest(_BaseModel):
+    positions: List[str]
+    grid_size: int
+    pattern_index: Optional[int] = None  # 미지정 시 다음 빈 인덱스 자동 배정
+    name: Optional[str] = None
+
+
+@router.post("/patterns/accept")
+async def patterns_accept(request: PatternAcceptRequest):
+    """
+    [v16 🅑] 큐레이션 UI에서 채택한 후보를 custom_patterns.json에 저장(라이브러리 확장).
+    pattern_index 미지정 시 64+ 다음 빈 인덱스 자동 배정. ÷3 검증 후 저장.
+    """
+    if len(request.positions) % 3 != 0:
+        raise HTTPException(status_code=400, detail=f"positions 개수({len(request.positions)})가 3의 배수가 아님")
+    data = _load_custom_patterns()
+    idx = request.pattern_index if request.pattern_index is not None else _next_custom_index(data)
+    size_key = f"{idx}_{request.grid_size}x{request.grid_size}"
+    entry: Dict[str, Any] = {
+        "grid_size": request.grid_size,
+        "positions": request.positions,
+        "count": len(request.positions),
+        "synth": True,  # 절차적 생성 표식
+    }
+    if request.name:
+        entry["name"] = request.name
+    data[size_key] = entry
+    _save_custom_patterns(data)
+    return {"saved": True, "pattern_index": idx, "grid_size": request.grid_size, "count": len(request.positions)}
+
+
 # ===== 패턴 활성/비활성 설정 =====
 
 @router.post("/debug/pattern-rename")

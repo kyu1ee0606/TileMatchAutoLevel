@@ -467,7 +467,8 @@ ${tableLines.join('\n')}
         try {
           const resp = await batchAnalyzeSolvability(
             chunk.map(l => ({ level_number: l.meta.level_number, level_json: l.level_json })),
-            { timeBudgetS: 4, nodeBudget: 80000 },
+            // 시간 제한 없이(노드 예산까지) 끝까지 탐색 → 의심 레벨을 최대한 확정
+            { timeBudgetS: 0, nodeBudget: 1000000 },
           );
           for (const r of resp.results) results.push({ level_number: r.level_number, verdict: r.verdict, reason: r.reason });
         } catch {
@@ -1113,13 +1114,13 @@ ${tableLines.join('\n')}
                   onClick={verifySuspectsSolvability}
                   disabled={solvRunning}
                   className="px-3 py-1 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-xs rounded font-medium"
-                  title="의심 레벨을 A* 완전탐색으로 검증 — 진짜 불가능인지 봇 한계(풀림)인지 확정"
+                  title="의심 레벨을 A* 완전탐색으로 검증(시간 제한 없이 노드 예산까지) — 진짜 불가능인지 봇 한계(풀림)인지 확정"
                 >
                   {solvRunning
                     ? `🧩 솔버블 검증 중… ${solvProgress.current}/${solvProgress.total}`
-                    : `🧩 의심 레벨 솔버블 일괄 검증 (${summary.suspectCount}개)`}
+                    : `🧩 의심 레벨 솔버블 일괄 검증 (${summary.suspectCount}개, 시간무제한)`}
                 </button>
-                <span className="text-[11px] text-gray-500">봇이 못 깬 게 진짜 불가능인지 확정합니다</span>
+                <span className="text-[11px] text-gray-500">봇이 못 깬 게 진짜 불가능인지 끝까지 탐색해 확정합니다</span>
               </div>
               {solvResults.length > 0 && (
                 <div className="mt-2 bg-gray-900/50 rounded p-2">

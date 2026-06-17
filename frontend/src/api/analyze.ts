@@ -362,7 +362,9 @@ export async function batchAnalyzeSolvability(
   options?: { nodeBudget?: number; timeBudgetS?: number }
 ): Promise<SolvabilityBatchResponse> {
   const timeBudget = options?.timeBudgetS ?? 5.0;
-  const timeoutMs = Math.max(60000, levels.length * timeBudget * 1000 + 30000);
+  // timeBudget<=0(무제한)이면 노드예산으로만 종료 — 레벨당 넉넉히 잡아 axios 조기 타임아웃 방지.
+  const perLevelMs = timeBudget > 0 ? timeBudget * 1000 : 90000;
+  const timeoutMs = Math.max(60000, levels.length * perLevelMs + 30000);
   const response = await apiClient.post<SolvabilityBatchResponse>(
     '/analyze/solvability/batch',
     {

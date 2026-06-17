@@ -1229,7 +1229,7 @@ from pydantic import BaseModel as _BaseModel, Field as _Field
 class SolvabilityRequest(_BaseModel):
     level_json: Dict[str, Any]
     node_budget: int = _Field(default=60000, ge=1000, le=2000000)
-    time_budget_s: float = _Field(default=5.0, ge=0.5, le=60.0)
+    time_budget_s: float = _Field(default=5.0, ge=0.0, le=600.0)  # 0 = 무제한(노드예산만), 최대 600s
 
 
 class SolvabilityResult(_BaseModel):
@@ -1250,7 +1250,7 @@ class SolvabilityBatchItem(_BaseModel):
 class SolvabilityBatchRequest(_BaseModel):
     levels: List[SolvabilityBatchItem]
     node_budget: int = _Field(default=60000, ge=1000, le=2000000)
-    time_budget_s: float = _Field(default=5.0, ge=0.5, le=60.0)
+    time_budget_s: float = _Field(default=5.0, ge=0.0, le=600.0)  # 0 = 무제한(노드예산만), 최대 600s
 
 
 class SolvabilityBatchResultItem(SolvabilityResult):

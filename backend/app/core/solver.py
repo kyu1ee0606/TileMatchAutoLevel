@@ -221,8 +221,10 @@ def solve_level(
     t_start = time.monotonic()
     timed_out = False
 
+    # time_budget_s <= 0 → 벽시계 무제한(노드 예산만으로 종료). 의심 레벨 정밀 검증용.
+    no_time_limit = time_budget_s <= 0
     while heap and nodes < node_budget:
-        if nodes % 256 == 0 and (time.monotonic() - t_start) > time_budget_s:
+        if not no_time_limit and nodes % 256 == 0 and (time.monotonic() - t_start) > time_budget_s:
             timed_out = True
             break
         remaining, _, _, state, depth = heapq.heappop(heap)

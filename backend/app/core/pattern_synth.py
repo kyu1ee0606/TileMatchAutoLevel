@@ -506,13 +506,20 @@ def synthesize_concepts(
 
     concepts.sort(key=lambda c: c["score"], reverse=True)
 
+    # [v16] 매 생성마다 다른 모양이 나오도록 '품질 풀에서 시드 기반 무작위 추출'.
+    # 점수 상위만 결정적으로 반환하면(특히 결정적 모티프) 시드를 바꿔도 같은 셋이 나온다.
+    # → 점수 상위 풀(품질 보장)을 만든 뒤 rng로 섞어 다양성 선택 → 시드별로 다른 셋.
+    pool_size = min(len(concepts), max(count * 3, count + 12))
+    pool = concepts[:pool_size]
+    rng.shuffle(pool)
+
     # 다양성 선택: 최대 사이즈 변형의 Jaccard 유사도로 중복 컨셉 억제
     def _big_cells(c: Dict) -> Set[Cell]:
         return {tuple(map(int, p.split("_"))) for p in c["variants"][-1]["positions"]}
 
     picked: List[Dict] = []
     picked_cells: List[Set[Cell]] = []
-    for c in concepts:
+    for c in pool:
         if len(picked) >= count:
             break
         cs = _big_cells(c)
@@ -522,12 +529,16 @@ def synthesize_concepts(
         picked_cells.append(cs)
     if len(picked) < count:
         chosen = {id(p) for p in picked}
-        for c in concepts:
+        for c in pool + concepts:  # 풀 우선, 모자라면 전체에서 보충
             if len(picked) >= count:
                 break
             if id(c) not in chosen:
                 picked.append(c)
-    return picked[:count]
+                chosen.add(id(c))
+    # 표시는 품질 우선(점수 내림차순) — '무엇을' 뽑을지는 시드 기반, '순서'는 점수.
+    picked = picked[:count]
+    picked.sort(key=lambda c: c["score"], reverse=True)
+    return picked
 
 
 def synthesize_patterns(

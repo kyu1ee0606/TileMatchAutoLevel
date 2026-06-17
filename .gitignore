@@ -47,3 +47,6 @@ htmlcov/
 
 # Generated level files
 backend/app/storage/local_levels/*.json
+
+# Production batch store (server-side local file sync — large runtime data)
+backend/data/production/

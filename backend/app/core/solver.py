@@ -19,6 +19,7 @@ A* / best-first 완전탐색 솔버 — 레벨 클리어 가능성을 양방향 
 import heapq
 import logging
 import time
+from dataclasses import replace
 from typing import Dict, Any, List, Optional, Tuple
 
 from .bot_simulator import BotSimulator
@@ -112,6 +113,25 @@ def _state_signature(state) -> Tuple:
 
 def _remaining_count(state) -> int:
     return sum(1 for layer in state.tiles.values() for t in layer.values() if not t.picked)
+
+
+def _copy_state(sim, state):
+    """솔버용 mid-game 완전 복사.
+
+    BotSimulator._fast_copy_state는 '한 시뮬 iteration 시작용 base 복사'라 dock_tiles/
+    stacked_tiles/moves_used/combo 등 진행중 누적값을 초기화한다(봇은 같은 state에 누적
+    플레이하므로 무관). 솔버는 진행중 상태를 복사하므로 이 누적값을 반드시 복원해야 한다.
+    (복원 안 하면 dock이 매 수마다 비워져 3매치가 영원히 안 일어나 false IMPOSSIBLE.)
+    """
+    import copy as _copy
+    child = sim._fast_copy_state(state)
+    child.dock_tiles = [_copy.copy(t) for t in state.dock_tiles]
+    child.moves_used = state.moves_used
+    child.combo_count = getattr(state, "combo_count", 0)
+    child.total_tiles_cleared = getattr(state, "total_tiles_cleared", 0)
+    if getattr(state, "stacked_tiles", None):
+        child.stacked_tiles = {k: _copy.copy(v) for k, v in state.stacked_tiles.items()}
+    return child
 
 
 def solve_level(
@@ -216,9 +236,16 @@ def solve_level(
         moves.sort(key=lambda m: (not m.will_match,))
 
         for move in moves:
-            child = sim._fast_copy_state(state)
+            child = _copy_state(sim, state)
+            # 🔴 핵심: move.tile_state는 '부모' state의 타일 객체를 가리킨다. 복사된 child에
+            # 그대로 적용하면 부모 타일을 건드려 child 보드가 안 바뀐다(타일 제거 안 됨 → 영원히
+            # 클리어 불가로 오판). 반드시 child의 동일 위치 타일로 tile_state를 교체해 적용한다.
+            child_tile = child.tiles.get(move.layer_idx, {}).get(move.position)
+            if child_tile is None:
+                continue
+            cmove = replace(move, tile_state=child_tile)
             try:
-                sim._apply_move(child, move)
+                sim._apply_move(child, cmove)
             except Exception:
                 continue
             sim._is_game_over(child)  # cleared/failed 플래그 세팅

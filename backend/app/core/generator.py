@@ -1119,6 +1119,12 @@ class LevelGenerator:
         # 여기서는 정상 경로 속도 회복.
         # 이전(v15.43): 매 generate마다 _quick_deadlock_check 5 iter 추가 호출 → 누적 비용 큼.
 
+        # [v16] 최종 ÷3 클리어가능성 보장 (모든 변형 단계 이후, FINAL_REPAIR 직전).
+        # 총합 (concrete + t0)을 ÷3으로 맞춘다 → t0 레벨은 분배기가 per-type을 보장,
+        # concrete 레벨은 바로 아래 FINAL_REPAIR가 per-type relabel로 마무리.
+        # fast/slow path 무관하게 항상 실행 — '비÷3 출고' 회귀를 구조적으로 차단.
+        level = self._finalize_divisibility_guarantee(level)
+
         # [v15.47] STRUCTURAL guarantee: every regular tile type (t1..t15) MUST have a
         # count that is a multiple of 3 in the final level. Otherwise the level is
         # mathematically unclearable (leftover tiles can never form a triple).
@@ -12435,6 +12441,208 @@ class LevelGenerator:
         # Use best seed found
         level["randSeed"] = best_seed
         return level
+
+    def _finalize_divisibility_guarantee(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        [v16] 최종 ÷3 클리어가능성 보장 — generate()의 모든 변형 단계 '이후', FINAL_REPAIR '직전'에
+        딱 한 번 실행하는 권위 있는 게이트.
+
+        왜 필요한가 (이전 시도들의 결함):
+        - `_ensure_tile_count_divisible_by_3`(L883/891), `_ensure_valid_t0_distribution`(L981)는
+          너무 일찍 호출된다. 이후 boundary 삭제(L1083) / pyramid(L1106) / centering(L1107)이
+          타일 카운트를 다시 깨뜨리는데 재검사가 없다.
+        - `_ensure_valid_t0_distribution`은 `_goal_divisibility_fixed` one-shot 가드가 있어 후속
+          단계가 다시 깨도 재작동하지 못하고, 폴백이 craft/stack 내부 조정에만 의존한다.
+        - 인라인 FINAL_REPAIR는 타일을 relabel만 하고 위치를 추가/삭제하지 않아 '총합 비÷3'을
+          절대 못 고치며, t0 레벨(전체의 70%)은 카운트 자체를 보지도 않는다.
+        결과적으로 fast path(skip_deadlock_check=True, 기본값)가 비÷3 = 클리어 불가능 레벨을 출고했다
+        (실측 raw의 ~80%). 이 메서드가 모든 경우를 '맨 마지막'에 한 곳에서 처리한다. 멱등(재실행 안전).
+
+        불변식(증명): t0 분배 후 모든 매칭타입(t1~t15)이 ÷3 ⟺ (concrete_total + t0_count) ≡ 0 (mod 3).
+        key 타일은 unlockTile×3로 항상 ÷3이라 무관. 따라서 (concrete + t0)를 ÷3으로 맞추면 충분하고,
+        concrete-only 레벨은 이어지는 FINAL_REPAIR가 per-type relabel로 마무리한다(총합 ÷3이면 항상 성공).
+
+        조정 수단: '잉여 t0/타일 위치 제거'(추가 아님). 타일을 빼는 것은 블로킹/난이도를 완화할 뿐
+        새 데드락을 만들 수 없어 가장 안전하다. r ∈ {1,2}개만 제거하므로 구조 영향도 미미.
+        """
+        level = self._sync_layer_num_fields(level)
+        num_layers = int(level.get("layer", 0) or 0)
+
+        def _scan():
+            """현재 레벨 구성 스캔: concrete 카운트/위치, regular t0 위치, 컨테이너(craft/stack)."""
+            c_counts: Dict[str, int] = {}
+            t0_regular: List[Tuple[int, str]] = []
+            containers: List[Tuple[int, str, list]] = []
+            for li in range(num_layers):
+                tiles = level.get(f"layer_{li}", {}).get("tiles", {})
+                for pos, td in tiles.items():
+                    if not (isinstance(td, list) and td and isinstance(td[0], str)):
+                        continue
+                    tt = td[0]
+                    if tt == "t0":
+                        t0_regular.append((li, pos))
+                    elif tt.startswith("craft_") or tt.startswith("stack_"):
+                        containers.append((li, pos, td))
+                    elif tt.startswith("t") and tt[1:].isdigit():
+                        c_counts[tt] = c_counts.get(tt, 0) + 1
+                    # key/기타 특수타일은 무시 (key는 unlockTile×3로 ÷3 보장)
+            return c_counts, t0_regular, containers
+
+        def _internal(td) -> int:
+            if len(td) > 2 and isinstance(td[2], list) and td[2]:
+                try:
+                    return int(td[2][0])
+                except (ValueError, TypeError):
+                    return 0
+            return 0
+
+        # concrete(고정 타일)와 t0(런타임 분배)를 '분리'해 각각 독립적으로 ÷3 보장한다.
+        # 이렇게 하면 분배기의 toAdd(부분합 완성)에 의존하지 않는다 — 하이브리드(concrete 다수 +
+        # 작은 컨테이너 t0)에서 t0가 toAdd에 부족해 깨지던 문제를 구조적으로 제거.
+        # 불변식: concrete 각 타입 ÷3  AND  t0_count ÷3  ⟹  분배 후 전체 per-type ÷3.
+
+        # ── Step 1: concrete 총합 ÷3 (잉여 제거; relabel은 총합을 못 바꾸므로 먼저 보정) ──
+        c_counts, c_pos = self._concrete_positions(level, num_layers)
+        rc = sum(c_counts.values()) % 3
+        if rc:
+            removed = 0
+            for tt in sorted(c_pos, key=lambda t: (-(c_counts[t] % 3), -c_counts[t])):
+                while c_pos[tt] and removed < rc:
+                    li, pos = c_pos[tt].pop()
+                    lk = f"layer_{li}"
+                    if pos in level.get(lk, {}).get("tiles", {}):
+                        del level[lk]["tiles"][pos]
+                        removed += 1
+                if removed >= rc:
+                    break
+            level = self._sync_layer_num_fields(level)
+
+        # ── Step 2: concrete per-type ÷3 (통합 relabel; 총합 ÷3 전제에서 항상 성공) ──
+        self._consolidate_concrete_divisibility(level, num_layers)
+
+        # ── Step 3: t0_count ÷3 (regular t0 → 컨테이너 내부[>=MIN_GOAL_COUNT] 제거) ──
+        _, t0_regular, containers = _scan()
+        t0_count = len(t0_regular) + sum(_internal(td) for _, _, td in containers)
+        rt = t0_count % 3
+        if rt:
+            removed = 0
+            touched_container = False
+            for li, pos in sorted(t0_regular, key=lambda x: -x[0]):
+                if removed >= rt:
+                    break
+                lk = f"layer_{li}"
+                if pos in level.get(lk, {}).get("tiles", {}):
+                    del level[lk]["tiles"][pos]
+                    removed += 1
+            if removed < rt:
+                for li, pos, td in containers:
+                    if removed >= rt:
+                        break
+                    intern = _internal(td)
+                    take = min(intern - self.MIN_GOAL_COUNT, rt - removed)
+                    if take > 0:
+                        td[2][0] = intern - take
+                        removed += take
+                        touched_container = True
+            if touched_container:
+                gc: Dict[str, int] = {}
+                for _, _, td in containers:
+                    gc[td[0]] = gc.get(td[0], 0) + _internal(td)
+                level["goalCount"] = gc
+            if removed < rt:
+                logger.error(
+                    f"[FINALIZE_DIV] t0_count ÷3 보정 실패 (필요 {rt}, 제거 {removed})"
+                )
+                self._last_playability_warning = True
+            level = self._sync_layer_num_fields(level)
+
+        # ── Step 4: 방어적 최종 검증 (실제 분배 측정). 위 불변식이 보장하므로 통상 통과 ──
+        c_final, _, containers = _scan()
+        t0_final = len([p for li in range(num_layers)
+                        for p in level.get(f"layer_{li}", {}).get("tiles", {})
+                        if level[f"layer_{li}"]["tiles"][p][0] == "t0"]) \
+            + sum(_internal(td) for _, _, td in containers)
+        if t0_final > 0 and not self._t0_distribution_is_clean(level, c_final, t0_final):
+            logger.error(
+                f"[FINALIZE_DIV] 최종 검증 실패(예상밖) — concrete={c_final} t0={t0_final}. "
+                "playability_warning=True"
+            )
+            self._last_playability_warning = True
+
+        return level
+
+    def _consolidate_concrete_divisibility(self, level: Dict[str, Any], num_layers: int) -> None:
+        """
+        순수 concrete 레벨의 per-type ÷3 보장(총합 ÷3 전제 — 앞 단계가 보장).
+        각 타입의 잉여 단위(count%3)를 떼어 모은 뒤, 3개씩 묶어 한 타입으로 relabel한다.
+        위치는 보존(패턴 모양 유지)하고 타일 이름만 바꾼다. 인라인 FINAL_REPAIR의 rem1+rem2
+        페어링은 3×rem1 같은 케이스를 못 고치므로 여기서 통합 방식으로 확실히 처리한다.
+        """
+        counts, positions = self._concrete_positions(level, num_layers)
+        offenders = {t: c for t, c in counts.items() if c % 3 != 0}
+        if not offenders:
+            return
+        surplus: List[Tuple[int, str]] = []
+        for t in offenders:
+            for _ in range(counts[t] % 3):
+                if positions.get(t):
+                    surplus.append(positions[t].pop())
+        clean_types = [t for t, c in counts.items() if c % 3 == 0 and c > 0]
+        other_pool = [t for t, c in counts.items() if (c - (c % 3)) > 0]
+        fallback = clean_types[0] if clean_types else (other_pool[0] if other_pool else next(iter(counts), "t1"))
+        i = 0
+        while i + 3 <= len(surplus):
+            for li, pos in surplus[i:i + 3]:
+                lk = f"layer_{li}"
+                cur = level.get(lk, {}).get("tiles", {}).get(pos)
+                if isinstance(cur, list) and cur:
+                    gimmick = cur[1] if len(cur) > 1 else ""
+                    level[lk]["tiles"][pos] = [fallback, gimmick]
+            i += 3
+        if len(surplus) % 3 != 0:
+            logger.error(
+                f"[FINALIZE_DIV] concrete 통합 relabel 잔여 {len(surplus) % 3} — 총합 비÷3 의심"
+            )
+            self._last_playability_warning = True
+
+    def _concrete_positions(self, level: Dict[str, Any], num_layers: int) -> Tuple[Dict[str, int], Dict[str, List[Tuple[int, str]]]]:
+        """concrete(t1~t15) 타입별 카운트와 위치 목록."""
+        counts: Dict[str, int] = {}
+        positions: Dict[str, List[Tuple[int, str]]] = {}
+        for li in range(num_layers):
+            tiles = level.get(f"layer_{li}", {}).get("tiles", {})
+            for pos, td in tiles.items():
+                if isinstance(td, list) and td and isinstance(td[0], str):
+                    tt = td[0]
+                    if tt.startswith("t") and tt[1:].isdigit() and tt != "t0":
+                        counts[tt] = counts.get(tt, 0) + 1
+                        positions.setdefault(tt, []).append((li, pos))
+        return counts, positions
+
+    def _detect_tile_offset(self, concrete_counts: Dict[str, int], use_tile_count: int) -> int:
+        """기존 concrete 타입이 t11~ 처럼 오프셋된 경우 분배 오프셋 계산(bot/_ensure_valid_t0_distribution과 동일)."""
+        existing = [t for t in concrete_counts if t.startswith("t") and t[1:].isdigit()]
+        if not existing:
+            return 0
+        min_num = min(int(t[1:]) for t in existing)
+        return min_num - 1 if min_num > use_tile_count else 0
+
+    def _t0_distribution_is_clean(self, level: Dict[str, Any], concrete_counts: Dict[str, int], t0_count: int) -> bool:
+        """현재 randSeed로 t0를 분배했을 때 모든 매칭타입이 ÷3인지 측정(인게임/봇과 동일 경로)."""
+        use_tile_count = min(level.get("useTileCount", 6) or 6, self.MAX_USE_TILE_COUNT)
+        offset = self._detect_tile_offset(concrete_counts, use_tile_count)
+        assigns = TileDistributor.assign_t0_tiles(
+            t0_count=t0_count, use_tile_count=use_tile_count,
+            rand_seed=int(level.get("randSeed", 0) or 0),
+            shuffle_tile=level.get("xShuffleTile", 0),
+            type_imbalance=level.get("xTypeImbalance", 0),
+            unlock_tile=level.get("unlockTile", level.get("xUnlockTile", 0)),
+            tile_type_offset=offset, existing_tile_counts=concrete_counts,
+        )
+        combined = dict(concrete_counts)
+        for t in assigns:
+            combined[t] = combined.get(t, 0) + 1
+        return not any(c % 3 for c in combined.values())
 
     def _validate_layer_distribution(
         self, level: Dict[str, Any], use_tile_count: int

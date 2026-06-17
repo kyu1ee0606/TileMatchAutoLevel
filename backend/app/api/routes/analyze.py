@@ -1223,6 +1223,92 @@ def _calc_visual_center_diff(level: Dict[str, Any]) -> float:
     return max(centers) - min(centers)
 
 
+from pydantic import BaseModel as _BaseModel, Field as _Field
+
+
+class SolvabilityRequest(_BaseModel):
+    level_json: Dict[str, Any]
+    node_budget: int = _Field(default=60000, ge=1000, le=2000000)
+    time_budget_s: float = _Field(default=5.0, ge=0.5, le=60.0)
+
+
+class SolvabilityResult(_BaseModel):
+    verdict: str                      # PROVEN_SOLVABLE | PROVEN_IMPOSSIBLE | UNCERTAIN
+    reason: str
+    nodes_expanded: int
+    moves_to_clear: Optional[int] = None
+    divisibility_violation: Optional[Dict[str, int]] = None
+    distribution_bug_suspect: bool = False
+
+
+class SolvabilityBatchItem(_BaseModel):
+    level_number: int
+    level_json: Dict[str, Any]
+
+
+class SolvabilityBatchRequest(_BaseModel):
+    levels: List[SolvabilityBatchItem]
+    node_budget: int = _Field(default=60000, ge=1000, le=2000000)
+    time_budget_s: float = _Field(default=5.0, ge=0.5, le=60.0)
+
+
+class SolvabilityBatchResultItem(SolvabilityResult):
+    level_number: int
+    error: Optional[str] = None
+
+
+class SolvabilityBatchResponse(_BaseModel):
+    results: List[SolvabilityBatchResultItem]
+    elapsed_ms: int
+
+
+@router.post("/analyze/solvability", response_model=SolvabilityResult)
+def analyze_solvability(request: SolvabilityRequest) -> SolvabilityResult:
+    """
+    완전탐색 A* 솔버로 레벨 클리어 가능성을 확정 판정 (휴리스틱 봇과 독립).
+    PROVEN_SOLVABLE(witness 발견) / PROVEN_IMPOSSIBLE(÷3 위반 또는 상태공간 소진) /
+    UNCERTAIN(예산 초과). t0 분배 ÷3 위반은 분배 버그로 별도 표시.
+    """
+    from ...core.solver import solve_level
+    r = solve_level(request.level_json, node_budget=request.node_budget, time_budget_s=request.time_budget_s)
+    return SolvabilityResult(
+        verdict=r["verdict"],
+        reason=r["reason"],
+        nodes_expanded=r["nodes_expanded"],
+        moves_to_clear=r.get("moves_to_clear"),
+        divisibility_violation=r.get("divisibility_violation"),
+        distribution_bug_suspect=r.get("distribution_bug_suspect", False),
+    )
+
+
+@router.post("/analyze/solvability/batch", response_model=SolvabilityBatchResponse)
+def analyze_solvability_batch(request: SolvabilityBatchRequest) -> SolvabilityBatchResponse:
+    """레벨 묶음을 프로세스 풀로 병렬 솔버 판정 (레벨 단위 분배)."""
+    from ...core.solver import solve_level_task
+    from .generate import _get_gen_pool
+
+    started = time.time()
+    tasks = [{"level_number": it.level_number, "level_json": it.level_json,
+              "node_budget": request.node_budget, "time_budget_s": request.time_budget_s}
+             for it in request.levels]
+    pool = _get_gen_pool()
+    raw = list(pool.map(solve_level_task, tasks))
+
+    items: List[SolvabilityBatchResultItem] = []
+    for r in raw:
+        items.append(SolvabilityBatchResultItem(
+            level_number=r.get("level_number") or 0,
+            error=r.get("error"),
+            verdict=r.get("verdict", "UNCERTAIN"),
+            reason=r.get("reason", ""),
+            nodes_expanded=r.get("nodes_expanded", 0),
+            moves_to_clear=r.get("moves_to_clear"),
+            divisibility_violation=r.get("divisibility_violation"),
+            distribution_bug_suspect=r.get("distribution_bug_suspect", False),
+        ))
+    return SolvabilityBatchResponse(results=items, elapsed_ms=int((time.time() - started) * 1000))
+
+
 @router.post("/analyze/fix-centering", response_model=FixCenteringResponse)
 async def fix_centering(request: FixCenteringRequest):
     """[v15.40] 기존 레벨 데이터에 시각적 중앙정렬만 적용 (재생성 없음).

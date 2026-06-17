@@ -800,6 +800,13 @@ class LevelGenerator:
         """
         start_time = time.time()
 
+        # [역생성] v1은 컨테이너(craft/stack)·순서기믹 미지원 → 적용 가능하도록 plain concrete로 강제.
+        # goal/obstacle/tutorial 기믹 제거. 난이도는 모양(레이어/블로킹) + max_open 레버로 확보.
+        if getattr(params, "use_reverse_generation", False):
+            params.goals = []
+            params.obstacle_types = []
+            params.tutorial_gimmick = None
+
         # Check if user has specified per-layer tile configs OR total_tile_count (strict mode)
         # In strict mode, we respect user's tile counts exactly without adjustment
         # Only fixed layout levels (2, 3) and explicit per-layer configs are strict

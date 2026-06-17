@@ -251,6 +251,9 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
     tolerance: 20.0,          // 허용 오차 (%)
     simulation_iterations: 20, // 시뮬레이션 반복 횟수 (가볍게)
   });
+  // [역생성] concrete 솔버블 보장 모드. 켜면 컨테이너/순서기믹 없는 plain concrete로 생성되며
+  // witness-peeling 타입배정으로 솔버블·÷3 구조적 보장. 적용 레벨은 🧩역 배지 표시.
+  const [useReverseGen, setUseReverseGen] = useState(false);
   const [generationProgress, setGenerationProgress] = useState<ProductionGenerationProgress>({
     status: 'idle',
     total_sets: 0,
@@ -778,6 +781,8 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
               available_gimmicks: ['craft', 'stack', 'chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport', 'unknown'],
               gimmick_unlock_levels: batch.gimmick_unlock_levels || PROFESSIONAL_GIMMICK_UNLOCK_LEVELS,
               level_number: levelNumber,
+              // [역생성] 켜면 백엔드가 컨테이너/기믹 제거 후 witness 타입배정 → 솔버블 보장
+              use_reverse_generation: useReverseGen,
             };
 
             let result;
@@ -1451,6 +1456,8 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             onValidationConfigChange={setValidationConfig}
             useCoreBots={useCoreBots}
             onUseCoreBotsChange={setUseCoreBots}
+            useReverseGen={useReverseGen}
+            onUseReverseGenChange={setUseReverseGen}
           />
         )}
 
@@ -1827,6 +1834,8 @@ function GenerateTab({
   onValidationConfigChange,
   useCoreBots,
   onUseCoreBotsChange,
+  useReverseGen,
+  onUseReverseGenChange,
 }: {
   batch: ProductionBatch;
   progress: ProductionGenerationProgress;
@@ -1844,6 +1853,8 @@ function GenerateTab({
   onValidationConfigChange: (config: { max_retries: number; tolerance: number; simulation_iterations: number }) => void;
   useCoreBots: boolean;
   onUseCoreBotsChange: (value: boolean) => void;
+  useReverseGen: boolean;
+  onUseReverseGenChange: (value: boolean) => void;
 }) {
   const [playtestStrategy, setPlaytestStrategy] = useState<PlaytestStrategy>('sample_boss');
 
@@ -1955,6 +1966,25 @@ function GenerateTab({
                 </p>
               </div>
             )}
+          </div>
+
+          {/* [역생성] 솔버블 보장 모드 토글 */}
+          <div className="bg-gray-700/40 rounded-lg p-3">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" checked={useReverseGen}
+                onChange={(e) => onUseReverseGenChange(e.target.checked)} />
+              <span className="text-sm text-white font-medium">🧩 역생성 (솔버블 보장)</span>
+            </label>
+            <p className="text-xs text-gray-400 mt-1">
+              켜면 <span className="text-emerald-400">컨테이너/순서기믹 없는 plain concrete</span> 레벨로 생성하고
+              witness-peeling 타입배정으로 <span className="text-emerald-400">솔버블·÷3을 구조적으로 보장</span>합니다.
+              적용된 레벨은 리스트에 <span className="text-emerald-400">🧩역</span> 배지로 표시됩니다.
+              {useReverseGen && (
+                <span className="block text-yellow-400 mt-1">
+                  ⚠️ craft/stack 골과 기믹이 제거됩니다(난이도는 레이어 구조로 확보). 봇클리어/A* 확정된 레벨만 적용됩니다.
+                </span>
+              )}
+            </p>
           </div>
 
           {/* 레벨 템플릿 할당 패널 */}
@@ -4539,6 +4569,9 @@ function TestTab({
                         <span className="flex-1 text-gray-300">
                         </span>
                         <span className="w-12 text-center text-gray-300 font-medium">Lv.{level.meta.level_number}</span>
+                        {(level.level_json as unknown as Record<string, unknown> | undefined)?.reverse_generated === true && (
+                          <span className="text-emerald-400 text-xs font-medium" title="역생성 — 솔버블·÷3 구조적 보장 (witness peeling)">🧩역</span>
+                        )}
                         <span className="w-16 text-center text-xs">
                           {level.meta.template_id ? (() => {
                             // [v15.55] 템플릿 기반 레벨 — source_level_id에서 번호 파싱 → #123

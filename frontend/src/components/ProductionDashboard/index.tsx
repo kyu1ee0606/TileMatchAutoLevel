@@ -310,27 +310,29 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
     async function init() {
       try {
         await initProductionDB();
-        // 양방향 동기화: 로컬-only 배치는 서버(로컬 파일)로 올리고, 서버 배치는 로컬로 내린다.
-        // → 같은 컴퓨터의 어느 브라우저든 모든 배치가 보인다. 서버 미가동 시 조용히 무시.
-        try {
-          const { pushed, pulled } = await syncBidirectional();
-          if (pushed > 0 || pulled > 0)
-            addNotification('info', `서버 동기화: 업로드 ${pushed}개 · 다운로드 ${pulled}개`);
-        } catch { /* 서버 동기화 실패는 무시 */ }
+        // 로컬 배치를 먼저 표시해 탭이 즉시 뜨게 한다(서버 동기화로 UI를 막지 않음).
         const loadedBatches = await listProductionBatches();
         setBatches(loadedBatches);
-
-        // Auto-select latest batch
         if (loadedBatches.length > 0) {
-          const latest = loadedBatches.sort((a, b) =>
+          const latest = [...loadedBatches].sort((a, b) =>
             new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
           )[0];
           setSelectedBatchId(latest.id);
         }
+        setIsLoading(false);
+
+        // 서버(로컬 파일) 동기화는 백그라운드 — 다른 브라우저 배치 반영. UI 블로킹 안 함.
+        syncBidirectional()
+          .then(({ pushed, pulled }) => {
+            if (pushed > 0 || pulled > 0) {
+              addNotification('info', `서버 동기화: 업로드 ${pushed}개 · 다운로드 ${pulled}개`);
+              listProductionBatches().then(setBatches).catch(() => {});
+            }
+          })
+          .catch(() => { /* 서버 미가동 등 — 무시 */ });
       } catch (err) {
         console.error('Failed to initialize production DB:', err);
         addNotification('error', '프로덕션 DB 초기화 실패');
-      } finally {
         setIsLoading(false);
       }
     }

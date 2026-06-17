@@ -169,6 +169,94 @@ def _strat_frame(g: int, rng: random.Random, fill: float) -> Set[Cell]:
 _STRATS = (_strat_blob, _strat_diamond, _strat_ring, _strat_random, _strat_frame)
 
 
+# ──────────────────── 모티프(인식 가능한 '특정 모양') ────────────────────
+# 비대칭 모드에서 문자·화살표·기호 같은 '특정 모양을 나타내는 창의적 배치'를 생성한다.
+# 정규화 좌표(0~1, y는 아래로 증가)의 선분(stroke)/다각형(fill)으로 정의 → 임의 g로 래스터화해
+# 모든 사이즈에 일관된 모양을 만든다. 일부는 좌우/상하 비대칭이라 'none' 모드 다양성을 크게 늘린다.
+
+def _pt_seg_dist(px: float, py: float, x0: float, y0: float, x1: float, y1: float) -> float:
+    dx, dy = x1 - x0, y1 - y0
+    if dx == 0 and dy == 0:
+        return math.hypot(px - x0, py - y0)
+    t = max(0.0, min(1.0, ((px - x0) * dx + (py - y0) * dy) / (dx * dx + dy * dy)))
+    return math.hypot(px - (x0 + t * dx), py - (y0 + t * dy))
+
+
+def _raster_strokes(g: int, segs: List[Tuple[float, float, float, float]], thick: float) -> Set[Cell]:
+    """선분 집합을 g×g 격자에 두께 thick(셀 단위)로 래스터화."""
+    cells: Set[Cell] = set()
+    for x in range(g):
+        cxp, cyp = x + 0.5, 0.0
+        for y in range(g):
+            cyp = y + 0.5
+            for (a, b, c, d) in segs:
+                if _pt_seg_dist(cxp, cyp, a * g, b * g, c * g, d * g) <= thick:
+                    cells.add((x, y))
+                    break
+    return cells
+
+
+def _fill_polygon(g: int, poly: List[Tuple[float, float]]) -> Set[Cell]:
+    """정규화 다각형 내부를 g×g 격자로 채움(짝수-홀수 규칙)."""
+    pts = [(px * g, py * g) for px, py in poly]
+    cells: Set[Cell] = set()
+    n = len(pts)
+    for x in range(g):
+        for y in range(g):
+            px, py = x + 0.5, y + 0.5
+            inside = False
+            j = n - 1
+            for i in range(n):
+                xi, yi = pts[i]
+                xj, yj = pts[j]
+                if ((yi > py) != (yj > py)) and (px < (xj - xi) * (py - yi) / (yj - yi + 1e-9) + xi):
+                    inside = not inside
+                j = i
+            if inside:
+                cells.add((x, y))
+    return cells
+
+
+def _thick(g: int) -> float:
+    return max(0.6, 0.135 * g)
+
+
+# 모티프 정의: 이름 → (종류, 데이터). stroke=선분리스트, fill=다각형.
+_MOTIF_STROKES: Dict[str, List[Tuple[float, float, float, float]]] = {
+    "L": [(0.30, 0.12, 0.30, 0.86), (0.30, 0.86, 0.80, 0.86)],
+    "T": [(0.15, 0.18, 0.85, 0.18), (0.50, 0.18, 0.50, 0.86)],
+    "F": [(0.32, 0.12, 0.32, 0.88), (0.32, 0.12, 0.78, 0.12), (0.32, 0.48, 0.68, 0.48)],
+    "E": [(0.32, 0.12, 0.32, 0.88), (0.32, 0.12, 0.78, 0.12), (0.32, 0.50, 0.68, 0.50), (0.32, 0.88, 0.78, 0.88)],
+    "H": [(0.25, 0.12, 0.25, 0.88), (0.75, 0.12, 0.75, 0.88), (0.25, 0.50, 0.75, 0.50)],
+    "Z": [(0.20, 0.16, 0.80, 0.16), (0.80, 0.16, 0.20, 0.86), (0.20, 0.86, 0.80, 0.86)],
+    "N": [(0.25, 0.88, 0.25, 0.12), (0.25, 0.12, 0.78, 0.88), (0.78, 0.88, 0.78, 0.12)],
+    "Y": [(0.20, 0.12, 0.50, 0.50), (0.80, 0.12, 0.50, 0.50), (0.50, 0.50, 0.50, 0.88)],
+    "X": [(0.20, 0.16, 0.80, 0.84), (0.80, 0.16, 0.20, 0.84)],
+    "arrow_up": [(0.50, 0.88, 0.50, 0.16), (0.50, 0.16, 0.26, 0.44), (0.50, 0.16, 0.74, 0.44)],
+    "arrow_ne": [(0.18, 0.86, 0.82, 0.20), (0.82, 0.20, 0.50, 0.20), (0.82, 0.20, 0.82, 0.54)],
+    "check": [(0.18, 0.55, 0.42, 0.80), (0.42, 0.80, 0.82, 0.22)],
+    "bolt": [(0.62, 0.10, 0.34, 0.52), (0.34, 0.52, 0.56, 0.52), (0.56, 0.52, 0.30, 0.90)],
+    "plus": [(0.50, 0.16, 0.50, 0.84), (0.18, 0.50, 0.82, 0.50)],
+    "flag": [(0.26, 0.10, 0.26, 0.90), (0.26, 0.14, 0.78, 0.14), (0.78, 0.14, 0.78, 0.46), (0.78, 0.46, 0.26, 0.46)],
+    "step": [(0.18, 0.85, 0.40, 0.85), (0.40, 0.85, 0.40, 0.58), (0.40, 0.58, 0.62, 0.58), (0.62, 0.58, 0.62, 0.30), (0.62, 0.30, 0.84, 0.30)],
+}
+_MOTIF_FILLS: Dict[str, List[Tuple[float, float]]] = {
+    "triangle": [(0.5, 0.10), (0.90, 0.88), (0.10, 0.88)],
+    "tri_right": [(0.14, 0.12), (0.86, 0.5), (0.14, 0.88)],
+    "tri_corner": [(0.12, 0.12), (0.88, 0.12), (0.12, 0.88)],   # 비대칭 직각삼각형
+    "heart": [(0.5, 0.32), (0.30, 0.12), (0.12, 0.30), (0.5, 0.90), (0.88, 0.30), (0.70, 0.12)],
+}
+_MOTIF_NAMES: List[str] = list(_MOTIF_STROKES.keys()) + list(_MOTIF_FILLS.keys())
+
+
+def _make_motif(name: str, g: int) -> Set[Cell]:
+    if name in _MOTIF_STROKES:
+        return _raster_strokes(g, _MOTIF_STROKES[name], _thick(g))
+    if name in _MOTIF_FILLS:
+        return _fill_polygon(g, _MOTIF_FILLS[name])
+    return set()
+
+
 # ──────────────────── ÷3 보정 ────────────────────
 def _removal_priority(cells: Set[Cell]) -> List[Cell]:
     """제거 우선순위: 채워진 이웃이 적은(돌출/끝) 셀부터. 동률은 바깥쪽부터."""
@@ -305,6 +393,20 @@ def _make_cells(g: int, strat, mode: str, fill: float, rng: random.Random) -> Op
     return cells
 
 
+def _make_motif_cells(name: str, g: int) -> Optional[Set[Cell]]:
+    """모티프(특정 모양) 1개를 사이즈 g로: 래스터화→연결성→÷3 보장. 모양 보존 위해
+    단일홀 메움은 하되 대칭화는 하지 않는다(비대칭 모양 유지). 실패 시 None."""
+    cells = _make_motif(name, g)
+    cells = _largest_component(cells)         # 끊긴 획 조각 제거
+    cells = _fill_single_holes(cells, g)
+    if len(cells) < 5 or len(cells) > g * g:
+        return None
+    cells = _enforce_div3(cells, g)           # 돌출부 제거로 ÷3(획 끝부터 → 모양 영향 최소)
+    if not cells or len(cells) % 3 != 0:
+        return None
+    return cells
+
+
 def synthesize_concepts(
     min_grid: int,
     max_grid: int,
@@ -335,21 +437,42 @@ def synthesize_concepts(
     seen_concept: Set[Tuple] = set()
     attempts = max(count * oversample, 24)
     for _ in range(attempts):
-        mode = symmetry if symmetry in SYMMETRY_MODES else rng.choice(("both", "h", "v", "rot180", "quad"))
-        strat = rng.choice(_STRATS)
+        # 모드/생성방식 결정.
+        # - 'none' 요청: 항상 모티프(특정 모양) → 창의적·인식 가능한 비대칭 배치.
+        # - 대칭 모드 요청: 기하 전략 + 해당 대칭.
+        # - 자동(None): 40% 모티프(비대칭 특정모양) + 60% 대칭 기하 → 둘 다 풍부히.
+        if symmetry == "none":
+            use_motif, mode = True, "none"
+        elif symmetry in SYMMETRY_MODES:
+            use_motif, mode = False, symmetry
+        else:
+            if rng.random() < 0.4:
+                use_motif, mode = True, "none"
+            else:
+                use_motif, mode = False, rng.choice(("both", "h", "v", "rot180", "quad"))
+
+        if use_motif:
+            motif = rng.choice(_MOTIF_NAMES)
+            strat_label = f"motif:{motif}"
+        else:
+            strat = rng.choice(_STRATS)
+            strat_label = strat_names[strat]
         fill = rng.uniform(*fill_range)
         cseed = rng.randint(0, 2**31 - 1)  # 컨셉 시드: 모든 사이즈에 동일 적용 → 일관성
 
         variants: List[Dict] = []
         ok = True
         for g in sizes:
-            # 같은 컨셉 파라미터를 모든 사이즈에 적용. 사이즈별 fill 미세 변동 허용(÷3 달성 보조).
-            cells = None
-            for fadj in (0.0, -0.07, 0.07, -0.14, 0.14):
-                f = min(0.92, max(0.25, fill + fadj))
-                cells = _make_cells(g, strat, mode, f, random.Random(cseed))
-                if cells:
-                    break
+            if use_motif:
+                cells = _make_motif_cells(motif, g)  # 결정적: 모든 사이즈 동일 모양
+            else:
+                # 같은 컨셉 파라미터를 모든 사이즈에 적용. 사이즈별 fill 미세 변동 허용(÷3 보조).
+                cells = None
+                for fadj in (0.0, -0.07, 0.07, -0.14, 0.14):
+                    f = min(0.92, max(0.25, fill + fadj))
+                    cells = _make_cells(g, strat, mode, f, random.Random(cseed))
+                    if cells:
+                        break
             if not cells:
                 ok = False
                 break
@@ -367,7 +490,7 @@ def synthesize_concepts(
 
         # 컨셉 중복 제거: 가장 큰 사이즈 변형의 셀 시그니처 기준
         big = variants[-1]
-        sig = (mode, strat_names[strat], tuple(sorted(tuple(map(int, p.split("_"))) for p in big["positions"])))
+        sig = (mode, strat_label, tuple(sorted(tuple(map(int, p.split("_"))) for p in big["positions"])))
         if sig in seen_concept:
             continue
         seen_concept.add(sig)
@@ -375,7 +498,7 @@ def synthesize_concepts(
         agg = round(sum(v["score"] for v in variants) / len(variants), 4)
         concepts.append({
             "symmetry": mode,
-            "strategy": strat_names[strat],
+            "strategy": strat_label,
             "score": agg,
             "sizes": sizes,
             "variants": variants,

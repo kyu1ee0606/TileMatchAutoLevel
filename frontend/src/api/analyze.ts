@@ -320,6 +320,8 @@ export interface SolvabilityResult {
   moves_to_clear: number | null;
   divisibility_violation: Record<string, number> | null;
   distribution_bug_suspect: boolean;
+  /** frog 등 솔버가 완전 모델링 못 하는 기믹 — 있으면 UNCERTAIN(불가능 단정 보류) */
+  unsupported_gimmicks?: string[] | null;
 }
 
 export interface SolvabilityBatchItem {

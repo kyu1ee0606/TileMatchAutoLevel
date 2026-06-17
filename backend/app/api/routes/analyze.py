@@ -1239,6 +1239,7 @@ class SolvabilityResult(_BaseModel):
     moves_to_clear: Optional[int] = None
     divisibility_violation: Optional[Dict[str, int]] = None
     distribution_bug_suspect: bool = False
+    unsupported_gimmicks: Optional[List[str]] = None  # frog 등 솔버 미지원 기믹(UNCERTAIN 사유)
 
 
 class SolvabilityBatchItem(_BaseModel):
@@ -1305,6 +1306,7 @@ def analyze_solvability_batch(request: SolvabilityBatchRequest) -> SolvabilityBa
             moves_to_clear=r.get("moves_to_clear"),
             divisibility_violation=r.get("divisibility_violation"),
             distribution_bug_suspect=r.get("distribution_bug_suspect", False),
+            unsupported_gimmicks=r.get("unsupported_gimmicks"),
         ))
     return SolvabilityBatchResponse(results=items, elapsed_ms=int((time.time() - started) * 1000))
 

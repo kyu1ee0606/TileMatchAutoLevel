@@ -29,6 +29,7 @@ interface SolvRow {
   moves_to_clear: number | null;
   nodes_expanded: number;
   divisibility_violation: Record<string, number> | null;
+  unsupported_gimmicks?: string[] | null;
   error?: string;
 }
 
@@ -135,6 +136,7 @@ export function SolvabilityPanel() {
             moves_to_clear: r.moves_to_clear,
             nodes_expanded: r.nodes_expanded,
             divisibility_violation: r.divisibility_violation,
+            unsupported_gimmicks: r.unsupported_gimmicks,
             error: r.error || undefined,
           });
         }
@@ -177,6 +179,12 @@ export function SolvabilityPanel() {
 
   const impossibleLevels = useMemo(
     () => rows.filter(r => r.verdict === 'PROVEN_IMPOSSIBLE').map(r => r.level_number),
+    [rows],
+  );
+
+  const gimmickUncertain = useMemo(
+    () => rows.filter(r => r.verdict === 'UNCERTAIN' && r.unsupported_gimmicks && r.unsupported_gimmicks.length > 0)
+      .map(r => r.level_number),
     [rows],
   );
 
@@ -300,7 +308,13 @@ export function SolvabilityPanel() {
           )}
           {summary.uncertain > 0 && (
             <div className="mt-2 text-[11px] text-gray-500">
-              ❔ 미확정은 상태공간이 커 예산 내 확정 못 한 것 — 시간/노드 예산을 늘리면 일부가 확정됩니다 (불가능은 아님).
+              ❔ 미확정 = 불가능이 아님. ① 상태공간이 커 예산 초과(시간/노드 예산 ↑ 시 일부 확정)
+              {gimmickUncertain.length > 0 && (
+                <span className="text-yellow-500">
+                  {' '}② 솔버 미지원 기믹 포함({gimmickUncertain.length}개) — frog/teleport/bomb 등은 솔버가 완전 모델링 못 해
+                  불가능 단정을 보류합니다(실제론 풀릴 수 있음). 해당 레벨: {gimmickUncertain.join(', ')}
+                </span>
+              )}
             </div>
           )}
         </div>

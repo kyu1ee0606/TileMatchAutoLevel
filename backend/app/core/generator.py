@@ -1205,6 +1205,26 @@ class LevelGenerator:
         except Exception as e:
             logger.warning(f"[FINAL_REPAIR] failed: {e}")
 
+        # [역생성] concrete(컨테이너/순서기믹 없는) 레벨에 witness-peeling 타입배정 적용.
+        # 적용 성공 시 솔버블·÷3 구조적 보장. 미지원 레벨/실패는 자동 스킵(원본 유지).
+        # 표시: level["reverse_generated"] = bool, level["reverse_generation_reason"] = str.
+        if getattr(params, "use_reverse_generation", False):
+            try:
+                from .reverse_generator import apply_reverse_generation
+                utc = level.get("useTileCount", 5) or 5
+                rev_level, applied, reason = apply_reverse_generation(
+                    level, use_tile_count=utc,
+                    max_open=getattr(params, "reverse_generation_max_open", 2),
+                    verify=True,
+                )
+                level = rev_level
+                level["reverse_generated"] = applied
+                level["reverse_generation_reason"] = reason
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[REVERSE_GEN] failed: {e}")
+                level["reverse_generated"] = False
+                level["reverse_generation_reason"] = f"오류: {e}"
+
         generation_time_ms = int((time.time() - start_time) * 1000)
 
         return GenerationResult(

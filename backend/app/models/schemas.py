@@ -156,6 +156,8 @@ class GenerateRequest(BaseModel):
         ge=1,
         description="Current level number (used for gimmick unlock checking)"
     )
+    use_reverse_generation: bool = Field(default=False, description="[역생성] concrete(컨테이너/순서기믹 없는) 레벨에 witness-peeling 타입배정 적용 → 솔버블·÷3 보장. 적용 시 level_json.reverse_generated=true")
+    reverse_generation_max_open: int = Field(default=2, ge=1, le=3, description="역생성 난이도 레버(동시 미완성 그룹 수 1~3, 클수록 어려움)")
 
 
 class GenerateResponse(BaseModel):
@@ -556,6 +558,8 @@ class ValidatedGenerateRequest(BaseModel):
     use_best_match: bool = Field(default=True, description="Use best match strategy - always return best result after max_retries")
     use_core_bots_only: bool = Field(default=False, description="Use only 3 core bots (casual/average/expert) for faster validation - 40% speed boost")
     skip_deadlock_check: bool = Field(default=True, description="Skip internal deadlock checking for ultra-fast generation (use batch verify for post-validation)")
+    use_reverse_generation: bool = Field(default=False, description="[역생성] concrete(컨테이너/순서기믹 없는) 레벨에 witness-peeling 타입배정 적용 → 솔버블·÷3 보장. 적용 시 level_json.reverse_generated=true")
+    reverse_generation_max_open: int = Field(default=2, ge=1, le=3, description="역생성 난이도 레버(동시 미완성 그룹 수 1~3, 클수록 어려움)")
 
 
 class ValidatedGenerateResponse(BaseModel):

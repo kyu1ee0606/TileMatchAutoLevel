@@ -28,6 +28,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_NODE_BUDGET = 60000
 DEFAULT_TIME_BUDGET_S = 5.0  # 벽시계 제한 — 큰 레벨에서 행 방지(초과 시 UNCERTAIN)
 
+# 솔버(=봇 엔진)의 모델이 불완전/비결정적인 기믹.
+# 이런 기믹이 있으면 이동을 과소 생성해 '풀 수 있는데도 막다른 길'로 보일 수 있다(false dead-end).
+# → '구조적 데드락' 결론을 신뢰 불가 → PROVEN_IMPOSSIBLE 대신 UNCERTAIN으로 강등.
+# (÷3 수학적 위반은 기믹과 무관하므로 그대로 IMPOSSIBLE 유지.)
+# 설계 근거: SOLVABILITY_REDESIGN.md "미지원 기믹 포함 레벨은 UNCERTAIN 처리".
+UNRELIABLE_GIMMICKS = {"frog", "teleport", "bomb", "curtain", "unknown"}
+
 
 def _clearability_type_counts(level_json: Dict[str, Any]) -> Dict[str, int]:
     """실게임(클라이언트) 분배 기준 매칭타입별(t1~t15) 최종 카운트.
@@ -144,6 +151,18 @@ def solve_level(
             if isinstance(t, list) and t and isinstance(t[0], str) and t[0] == "t0":
                 raw_t0 += 1
 
+    # 솔버 모델이 불완전한 기믹 탐지 — 구조적 IMPOSSIBLE 신뢰성 판단용
+    unreliable: set = set()
+    for i in range(int(level_json.get("layer", 0) or 0)):
+        ld = level_json.get(f"layer_{i}")
+        if not isinstance(ld, dict) or not isinstance(ld.get("tiles"), dict):
+            continue
+        for t in ld["tiles"].values():
+            if isinstance(t, list) and len(t) > 1 and isinstance(t[1], str) and t[1]:
+                base = t[1].split("_")[0].lower()
+                if base in UNRELIABLE_GIMMICKS:
+                    unreliable.add(base)
+
     try:
         base_state = sim._create_initial_state(lvl, lvl["max_moves"])
         sim._precompute_blocking_map(base_state)
@@ -234,6 +253,19 @@ def solve_level(
         }
 
     # 상태공간 완전 소진했는데 클리어 못 함 → 진짜 불가능 증명
+    # 상태공간 완전 소진했는데 클리어 못 함 → 보통 진짜 구조적 데드락.
+    # 단, 솔버 모델이 불완전한 기믹(frog/teleport/bomb/curtain/unknown)이 있으면 이동을 과소
+    # 생성해 '풀 수 있는데도' 막다른 길로 보였을 수 있다 → IMPOSSIBLE 단정 불가, UNCERTAIN 강등.
+    if unreliable:
+        return {
+            "verdict": "UNCERTAIN",
+            "reason": f"도달 상태({nodes}개) 모두 막혔으나 미지원 기믹({', '.join(sorted(unreliable))}) 포함 — "
+                      f"솔버가 해당 기믹 이동을 완전 모델링 못 해 false 데드락 가능. 불가능 단정 보류",
+            "nodes_expanded": nodes,
+            "moves_to_clear": None,
+            "divisibility_violation": None,
+            "unsupported_gimmicks": sorted(unreliable),
+        }
     return {
         "verdict": "PROVEN_IMPOSSIBLE",
         "reason": f"도달 가능한 모든 상태({nodes}개) 탐색했으나 클리어 경로 없음 — 구조적 데드락",

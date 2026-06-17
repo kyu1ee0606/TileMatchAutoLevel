@@ -105,6 +105,21 @@ def _generate_core_worker(request_dict: dict) -> dict:
         request = GenerateRequest(**request_dict)
         generator = LevelGenerator()
         response = _generate_level_impl(request, generator)
+        # [역생성] 경로 독립 후처리 — _generate_level_impl 내부 분기(고정레이아웃/폴백/특수모양)가
+        # 많아 params 플래그가 모든 경로에 닿지 않는다. 단일 초크포인트에서 보장한다.
+        # core(generator.generate)에서 이미 적용했으면 'reverse_generated' 키 존재 → 건너뜀.
+        if getattr(request, "use_reverse_generation", False) and hasattr(response, "level_json"):
+            lj = response.level_json
+            if "reverse_generated" not in lj:
+                from ...core.reverse_generator import apply_reverse_generation
+                utc = lj.get("useTileCount", 5) or 5
+                rev, applied, reason = apply_reverse_generation(
+                    lj, use_tile_count=utc,
+                    max_open=getattr(request, "reverse_generation_max_open", 2), verify=True,
+                )
+                rev["reverse_generated"] = applied
+                rev["reverse_generation_reason"] = reason
+                response.level_json = rev
         return {"ok": True, "response": response}
     except HTTPException as he:
         return {"ok": False, "status": he.status_code, "detail": str(he.detail)}
@@ -1250,6 +1265,9 @@ def _generate_level_impl(
         tutorial_gimmick_min_count=3,  # Ensure at least 3 tutorial gimmicks are visible
         # [연구 근거] 레벨 번호 전달 - unknown 비율 동적 계산용
         level_number=request.level_number,
+        # [역생성] concrete 레벨 솔버블 보장 (요청 플래그)
+        use_reverse_generation=request.use_reverse_generation,
+        reverse_generation_max_open=request.reverse_generation_max_open,
     )
 
     # Try generation with up to 3 fallback attempts
@@ -1903,6 +1921,9 @@ def generate_validated_level(
                 level_number=request.level_number,
                 # Fast generation mode - skip deadlock check (use batch verify later)
                 skip_deadlock_check=request.skip_deadlock_check,
+                # [역생성] concrete 레벨 솔버블 보장 (요청 플래그)
+                use_reverse_generation=request.use_reverse_generation,
+                reverse_generation_max_open=request.reverse_generation_max_open,
             )
 
             result = generator.generate(params)

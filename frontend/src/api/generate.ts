@@ -24,6 +24,10 @@ export interface GenerateRequest {
   // Gimmick unlock system
   gimmick_unlock_levels?: Record<string, number>;  // e.g., {chain: 50, frog: 100}
   level_number?: number;  // Current level number for unlock checking
+  // [역생성] concrete(컨테이너/순서기믹 없는) 레벨에 witness-peeling 타입배정 → 솔버블·÷3 보장.
+  // 적용 시 응답 level_json.reverse_generated=true.
+  use_reverse_generation?: boolean;
+  reverse_generation_max_open?: number;  // 난이도 레버(1~3)
 }
 
 export interface SimulateRequest {
@@ -43,6 +47,8 @@ export async function generateLevel(
     gimmick_intensity?: number;  // 0.0=no gimmicks, 1.0=normal, 2.0=double
     gimmick_unlock_levels?: Record<string, number>;  // e.g., {chain: 50, frog: 100}
     level_number?: number;  // Current level number for unlock checking
+    use_reverse_generation?: boolean;  // [역생성] concrete 솔버블 보장
+    reverse_generation_max_open?: number;
   }
 ): Promise<GenerationResult> {
   const request: GenerateRequest = {
@@ -66,6 +72,9 @@ export async function generateLevel(
     // Gimmick unlock system
     gimmick_unlock_levels: gimmickOptions?.gimmick_unlock_levels,
     level_number: gimmickOptions?.level_number,
+    // [역생성]
+    use_reverse_generation: gimmickOptions?.use_reverse_generation,
+    reverse_generation_max_open: gimmickOptions?.reverse_generation_max_open,
   };
 
   // Increase timeout when using auto gimmick selection (requires additional processing)

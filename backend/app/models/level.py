@@ -169,6 +169,10 @@ class GenerationParams:
     layer_pattern_overrides: Optional[List[Dict[str, Any]]] = None
     # Fast generation mode - skip internal deadlock checking
     skip_deadlock_check: bool = True  # Skip deadlock check for ultra-fast generation (use batch verify later)
+    # [역생성] concrete(컨테이너/순서기믹 없는) 레벨에 witness-peeling 타입배정 적용 → 솔버블 보장.
+    # 적용된 레벨은 level_json["reverse_generated"]=True로 표시. 미지원 레벨은 자동 스킵(False).
+    use_reverse_generation: bool = False
+    reverse_generation_max_open: int = 2  # 난이도 레버(동시 미완성 그룹 수, 1~3). 클수록 어려움.
 
     def __post_init__(self):
         """Set default values after initialization."""

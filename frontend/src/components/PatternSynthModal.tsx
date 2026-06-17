@@ -63,6 +63,49 @@ function VariantPreview({ v }: { v: SynthVariant }) {
   );
 }
 
+// 모든 사이즈 변형을 레이어로 쌓았을 때의 '위에서 본(top-down)' 합성 미리보기.
+// 큰 사이즈=하단(layer 1), 작은 사이즈=상단으로 중앙정렬 → 각 셀은 그 위치를 덮는 '최상위 층'으로
+// 채색(작은 층이 큰 층을 가림 = 실제 게임 occlusion). 중앙=상단층(밝음), 가장자리=하단층(어두움)
+// → 인게임 피라미드 실루엣 근사. 빈칸=회색.
+function StackedPreview({ variants }: { variants: SynthVariant[] }) {
+  if (!variants.length) return null;
+  // 큰→작은 = 하단→상단 (layer 1..n). 나중(작은)이 덮어써 top-down 점유를 표현.
+  const ordered = [...variants].sort((a, b) => b.grid_size - a.grid_size);
+  const G = ordered[0].grid_size;
+  const top: number[][] = Array.from({ length: G }, () => Array(G).fill(0));
+  ordered.forEach((v, li) => {
+    const g = v.grid_size;
+    const off = Math.floor((G - g) / 2); // 중앙정렬
+    for (const p of v.positions) {
+      const [x, y] = p.split('_').map(Number);
+      const cx = x + off, cy = y + off;
+      if (cx >= 0 && cx < G && cy >= 0 && cy < G) top[cy][cx] = li + 1; // 1=하단 … n=상단
+    }
+  });
+  const maxLayer = ordered.length;
+  const colorFor = (d: number): string => {
+    if (d <= 0) return 'bg-gray-800';
+    const ramp = ['bg-indigo-900', 'bg-indigo-700', 'bg-blue-500', 'bg-cyan-400', 'bg-amber-300', 'bg-yellow-200'];
+    const i = Math.min(ramp.length - 1, Math.round(((d - 1) / Math.max(1, maxLayer - 1)) * (ramp.length - 1)));
+    return ramp[i];
+  };
+  return (
+    <div className="flex flex-col items-center">
+      <div className="w-20 h-20">
+        {top.map((row, y) => (
+          <div key={y} className="flex">
+            {row.map((d, x) => (
+              <div key={x} className={`flex-1 aspect-square ${colorFor(d)}`} style={{ margin: '0.3px' }}
+                title={d > 0 ? `${d}층(아래1~위${maxLayer})` : ''} />
+            ))}
+          </div>
+        ))}
+      </div>
+      <div className="text-[8px] text-gray-400 mt-0.5">쌓임(위에서)</div>
+    </div>
+  );
+}
+
 export function PatternSynthModal({ onClose, onAccepted }: Props) {
   const [maxGrid, setMaxGrid] = useState(7);
   const [minGrid, setMinGrid] = useState(4);
@@ -184,6 +227,11 @@ export function PatternSynthModal({ onClose, onAccepted }: Props) {
             const isAccepted = accepted.has(idx);
             return (
               <div key={idx} className={`rounded border p-3 flex items-center gap-4 ${isAccepted ? 'border-green-500 bg-green-900/20' : 'border-gray-700 bg-gray-800/40'}`}>
+                {/* 합성(모든 사이즈 쌓음) 미리보기 — 강조 */}
+                <div className="shrink-0 pr-3 border-r border-gray-700">
+                  <StackedPreview variants={c.variants} />
+                </div>
+                {/* 사이즈별 개별 변형 */}
                 <div className="flex-1 flex items-end gap-3 overflow-x-auto">
                   {c.variants.map((v, vi) => <VariantPreview key={vi} v={v} />)}
                 </div>

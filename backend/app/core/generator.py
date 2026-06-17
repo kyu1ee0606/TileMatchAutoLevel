@@ -800,12 +800,15 @@ class LevelGenerator:
         """
         start_time = time.time()
 
-        # [역생성] v1은 컨테이너(craft/stack)·순서기믹 미지원 → 적용 가능하도록 plain concrete로 강제.
-        # goal/obstacle/tutorial 기믹 제거. 난이도는 모양(레이어/블로킹) + max_open 레버로 확보.
+        # [역생성 v2] 컨테이너(craft/stack)는 미지원이라 goal 제거. 단 안전 기믹(ice/grass/chain/
+        # link)은 허용 — 역생성이 witness 타입배정 후 봇클리어로 검증해 채택/degrade한다.
+        # (비결정 기믹 frog/teleport/bomb/curtain/unknown은 제외.)
         if getattr(params, "use_reverse_generation", False):
+            _rev_safe = {"ice", "grass", "chain", "link"}
             params.goals = []
-            params.obstacle_types = []
-            params.tutorial_gimmick = None
+            params.obstacle_types = [o for o in (params.obstacle_types or []) if o in _rev_safe] or list(_rev_safe)
+            if params.tutorial_gimmick and params.tutorial_gimmick not in _rev_safe:
+                params.tutorial_gimmick = None
 
         # Check if user has specified per-layer tile configs OR total_tile_count (strict mode)
         # In strict mode, we respect user's tile counts exactly without adjustment

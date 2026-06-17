@@ -24,11 +24,12 @@ from .bot_simulator import BotSimulator
 
 logger = logging.getLogger(__name__)
 
-# 순서에 영향을 주는(=witness 제약이 필요한) 기믹/속성 — v1 미지원, 있으면 폴백.
-ORDERING_GIMMICKS = {
-    "chain", "link", "lock", "key", "teleport", "frog", "bomb",
-    "curtain", "unknown", "time", "timeattack",
-}
+# [v2] 역생성이 허용하는 안전 기믹(속성). 위트니스 타입배정은 기믹과 무관하고, 봇클리어
+# 검증으로 실제 플레이 가능성을 확정한다. ice/grass는 추가 탭만 요구(순서 불변), chain/link는
+# 결정적이라 봇이 정확히 모델링 → 검증 통과 시 채택, 실패 시 degrade(아래 단계적 제거).
+SAFE_GIMMICKS = {"ice", "grass", "chain", "link"}
+# 컨테이너(craft/stack)·key 타일 외에, 비결정/복잡 기믹은 여전히 미지원(붙어있으면 폴백).
+UNSUPPORTED_GIMMICKS = {"frog", "teleport", "bomb", "curtain", "unknown", "time", "timeattack", "lock"}
 
 
 def _attr_base(attr: Any) -> str:
@@ -38,7 +39,11 @@ def _attr_base(attr: Any) -> str:
 
 
 def has_unsupported_features(level_json: Dict[str, Any]) -> Optional[str]:
-    """v1 미지원 요소가 있으면 사유 문자열, 없으면 None."""
+    """역생성이 처리 못 하는 요소가 있으면 사유 문자열, 없으면 None.
+
+    [v2] 안전 기믹(ice/grass/chain/link)은 허용. 컨테이너(craft/stack)·key 타일·비결정 기믹
+    (frog/teleport/bomb/curtain/unknown/lock)만 미지원으로 폴백 처리.
+    """
     num_layers = int(level_json.get("layer", 0) or 0)
     for i in range(num_layers):
         ld = level_json.get(f"layer_{i}")
@@ -52,9 +57,9 @@ def has_unsupported_features(level_json: Dict[str, Any]) -> Optional[str]:
                 return "컨테이너(craft/stack)"
             if tt == "key":
                 return "key 타일"
-            attr = td[1] if len(td) > 1 else ""
-            if _attr_base(attr) in ORDERING_GIMMICKS:
-                return f"순서기믹({_attr_base(attr)})"
+            ab = _attr_base(td[1] if len(td) > 1 else "")
+            if ab and ab not in SAFE_GIMMICKS:
+                return f"미지원 기믹({ab})"
     return None
 
 
@@ -179,44 +184,57 @@ def apply_reverse_generation(
     if assign is None:
         return level_json, False, "witness 타입배정 실패"
 
-    # level_json에 타입 기록 (속성 보존)
-    new_level = copy.deepcopy(level_json)
-    for k, tile in tiles_by_key.items():
-        if k not in assign:
-            continue
-        layer_key = f"layer_{tile.layer_idx}"
-        pos = f"{tile.x_idx}_{tile.y_idx}"
-        ld = new_level.get(layer_key)
-        if not isinstance(ld, dict) or pos not in ld.get("tiles", {}):
-            continue
-        cur = ld["tiles"][pos]
-        attr = cur[1] if isinstance(cur, list) and len(cur) > 1 else ""
-        ld["tiles"][pos] = [assign[k], attr]
-
     eff_open = min(max_open, use_tile_count, 3)
-    if verify:
-        # 결정적 양성 확인: optimal 봇 시뮬이 한 번이라도 클리어하면 솔버블 확정.
-        # max_open=2 구성은 매치가 거의 즉시 보여 그리디로도 잘 풀린다.
-        # 봇이 못 깨면(드문 경우) A* 폴백 — IMPOSSIBLE이면 거부, 그 외 채택(구성상 솔버블).
-        from .bot_simulator import get_profile, BotType
-        total = sum(1 for layer in state.tiles.values() for _ in layer.values())
+    total = sum(1 for layer in state.tiles.values() for _ in layer.values())
+
+    def _build(keep_attrs: Optional[Set[str]]) -> Dict[str, Any]:
+        """assign된 타입으로 level_json 구성. keep_attrs=None이면 속성 전부 유지,
+        집합이면 base가 그 집합에 든 속성만 유지(나머지는 제거)."""
+        nl = copy.deepcopy(level_json)
+        for kk, tile in tiles_by_key.items():
+            if kk not in assign:
+                continue
+            ld = nl.get(f"layer_{tile.layer_idx}")
+            pos = f"{tile.x_idx}_{tile.y_idx}"
+            if not isinstance(ld, dict) or pos not in ld.get("tiles", {}):
+                continue
+            cur = ld["tiles"][pos]
+            attr = cur[1] if isinstance(cur, list) and len(cur) > 1 else ""
+            if keep_attrs is not None and _attr_base(attr) not in keep_attrs:
+                attr = ""
+            ld["tiles"][pos] = [assign[kk], attr]
+        return nl
+
+    def _bot_clears(nl: Dict[str, Any]) -> bool:
+        """optimal 봇이 한 번이라도 클리어하면 솔버블 확정(기믹 포함 실제 플레이)."""
         try:
-            sim2 = BotSimulator()
-            r = sim2.simulate_with_profile(
-                new_level, get_profile(BotType.OPTIMAL),
+            from .bot_simulator import get_profile, BotType
+            r = BotSimulator().simulate_with_profile(
+                nl, get_profile(BotType.OPTIMAL),
                 iterations=3, max_moves=total + 50, seed=12345, early_termination=True,
             )
-            cleared = getattr(r, "clear_rate", 0) > 0
+            return getattr(r, "clear_rate", 0) > 0
         except Exception:  # noqa: BLE001
-            cleared = False
-        if cleared:
-            return new_level, True, f"적용 (봇 클리어 확인, max_open={eff_open})"
-        # 봇 미클리어 → A*로 확정 시도. PROVEN_SOLVABLE만 채택, 그 외(IMPOSSIBLE/UNCERTAIN)는
-        # 확신 부족으로 폴백(원본 유지). 확실히 솔버블 확인된 레벨만 표시한다.
-        from .solver import solve_level
-        v = solve_level(new_level, node_budget=120000, time_budget_s=6.0)
-        if v["verdict"] == "PROVEN_SOLVABLE":
-            return new_level, True, f"적용 (A* PROVEN_SOLVABLE, max_open={eff_open})"
-        return level_json, False, f"미적용(확인 실패: 봇 미클리어 + A* {v['verdict']})"
+            return False
 
-    return new_level, True, f"적용 (검증생략, max_open={eff_open})"
+    if not verify:
+        return _build(None), True, f"적용 (검증생략, max_open={eff_open})"
+
+    # degrade 단계: 기믹 최대 유지 → 실패 시 단계적 제거(솔버블 보장). 각 단계 봇클리어로 확정.
+    # 1) 안전 기믹 전부 유지(ice/grass/chain/link)
+    nl_full = _build(SAFE_GIMMICKS)
+    if _bot_clears(nl_full):
+        return nl_full, True, f"적용 (기믹 유지, 봇클리어, max_open={eff_open})"
+    # 2) chain/link 제거, ice/grass만 유지 (ice/grass는 순서 불변이라 거의 항상 통과)
+    nl_ig = _build({"ice", "grass"})
+    if _bot_clears(nl_ig):
+        return nl_ig, True, f"적용 (chain/link 제거·ice/grass 유지, max_open={eff_open})"
+    # 3) 기믹 전부 제거(plain) — 위트니스 구성상 솔버블. 봇클리어 또는 A*로 확정.
+    nl_plain = _build(set())
+    if _bot_clears(nl_plain):
+        return nl_plain, True, f"적용 (기믹 전부 제거·plain, max_open={eff_open})"
+    from .solver import solve_level
+    v = solve_level(nl_plain, node_budget=120000, time_budget_s=6.0)
+    if v["verdict"] == "PROVEN_SOLVABLE":
+        return nl_plain, True, f"적용 (plain, A* SOLVABLE, max_open={eff_open})"
+    return level_json, False, f"미적용(plain도 미확인: 봇 미클리어 + A* {v['verdict']})"

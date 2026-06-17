@@ -2020,12 +2020,13 @@ function GenerateTab({
               <span className="text-sm text-white font-medium">🧩 역생성 (솔버블 보장)</span>
             </label>
             <p className="text-xs text-gray-400 mt-1">
-              켜면 <span className="text-emerald-400">컨테이너/순서기믹 없는 plain concrete</span> 레벨로 생성하고
-              witness-peeling 타입배정으로 <span className="text-emerald-400">솔버블·÷3을 구조적으로 보장</span>합니다.
+              켜면 witness-peeling 타입배정으로 <span className="text-emerald-400">솔버블·÷3을 구조적으로 보장</span>합니다.
+              <span className="text-emerald-400">ice/grass/chain/link 기믹은 포함</span>(봇클리어로 검증)되며,
               적용된 레벨은 리스트에 <span className="text-emerald-400">🧩역</span> 배지로 표시됩니다.
               {useReverseGen && (
                 <span className="block text-yellow-400 mt-1">
-                  ⚠️ craft/stack 골과 기믹이 제거됩니다(난이도는 레이어 구조로 확보). 봇클리어/A* 확정된 레벨만 적용됩니다.
+                  ⚠️ craft/stack 컨테이너와 비결정 기믹(frog/teleport/bomb/curtain)은 제외됩니다.
+                  기믹이 솔버블을 깨면 자동으로 단계적 제거(chain/link→ice/grass→plain) 후 봇클리어 확정된 것만 적용.
                 </span>
               )}
             </p>

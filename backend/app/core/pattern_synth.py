@@ -523,41 +523,42 @@ def synthesize_concepts(
             "variants": variants,
         })
 
-    concepts.sort(key=lambda c: c["score"], reverse=True)
-
-    # [v16] 매 생성마다 다른 모양이 나오도록 '품질 풀에서 시드 기반 무작위 추출'.
-    # 점수 상위만 결정적으로 반환하면(특히 결정적 모티프) 시드를 바꿔도 같은 셋이 나온다.
-    # → 점수 상위 풀(품질 보장)을 만든 뒤 rng로 섞어 다양성 선택 → 시드별로 다른 셋.
-    pool_size = min(len(concepts), max(count * 3, count + 12))
-    pool = concepts[:pool_size]
-    rng.shuffle(pool)
-
-    # 다양성 선택: 최대 사이즈 변형의 Jaccard 유사도로 중복 컨셉 억제
+    # [v16] '같은 모양만 반복' 문제 해결: 점수순 선택은 대칭 모티프(T·plus·triangle…)에
+    # 편향돼 매번 같은 base 형태가 나온다. 대신 **base 형태별 라운드로빈**으로 선택 →
+    # 매 생성마다 서로 다른 base 형태가 골고루, 시드별로 다른 셋.
     def _big_cells(c: Dict) -> Set[Cell]:
         return {tuple(map(int, p.split("_"))) for p in c["variants"][-1]["positions"]}
 
+    def _family(c: Dict) -> str:
+        # 변형마크(↻⇋) 제거한 base 형태 키. 기하 전략은 전략명 그대로.
+        return c["strategy"].replace("motif:", "").rstrip("↻⇋")
+
+    from collections import defaultdict
+    fam: Dict[str, List[Dict]] = defaultdict(list)
+    for c in concepts:
+        fam[_family(c)].append(c)
+    families = list(fam.keys())
+    rng.shuffle(families)                      # 형태 등장 순서 무작위
+    for f in families:
+        rng.shuffle(fam[f])                    # 형태 내 변형(방향/두께) 무작위
+
     picked: List[Dict] = []
     picked_cells: List[Set[Cell]] = []
-    for c in pool:
-        if len(picked) >= count:
-            break
+    guard = 0
+    fi = 0
+    while len(picked) < count and any(fam[f] for f in families) and guard < count * 60:
+        guard += 1
+        f = families[fi % len(families)]
+        fi += 1
+        if not fam[f]:
+            continue
+        c = fam[f].pop()
         cs = _big_cells(c)
         if any(len(cs & pc) / (len(cs | pc) or 1) >= 0.82 for pc in picked_cells):
             continue
         picked.append(c)
         picked_cells.append(cs)
-    if len(picked) < count:
-        chosen = {id(p) for p in picked}
-        for c in pool + concepts:  # 풀 우선, 모자라면 전체에서 보충
-            if len(picked) >= count:
-                break
-            if id(c) not in chosen:
-                picked.append(c)
-                chosen.add(id(c))
-    # 표시는 품질 우선(점수 내림차순) — '무엇을' 뽑을지는 시드 기반, '순서'는 점수.
-    picked = picked[:count]
-    picked.sort(key=lambda c: c["score"], reverse=True)
-    return picked
+    return picked[:count]
 
 
 def synthesize_patterns(

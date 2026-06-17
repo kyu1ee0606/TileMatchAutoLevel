@@ -14,10 +14,12 @@ import {
   getProductionLevelsByBatch,
 } from '../storage/productionStorage';
 import type { ProductionBatch, ProductionLevel } from '../types/production';
+import type { LevelJSON } from '../types';
 import {
   batchAnalyzeSolvability,
   type SolvabilityVerdict,
 } from '../api/analyze';
+import { renderLevelCanvasPreview } from '../utils/levelPreview';
 import { useUIStore } from '../stores/uiStore';
 
 interface SolvRow {
@@ -30,6 +32,7 @@ interface SolvRow {
   nodes_expanded: number;
   divisibility_violation: Record<string, number> | null;
   unsupported_gimmicks?: string[] | null;
+  level_json?: LevelJSON;
   error?: string;
 }
 
@@ -60,6 +63,28 @@ export function SolvabilityPanel() {
 
   const [rows, setRows] = useState<SolvRow[]>([]);
   const [onlyImpossible, setOnlyImpossible] = useState(false);
+
+  // 레벨 미리보기 팝업 (RL 탭과 동일)
+  const [preview, setPreview] = useState<{ title: string } | null>(null);
+  const [previewImg, setPreviewImg] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  const openPreview = useCallback(async (title: string, levelJson: LevelJSON | undefined) => {
+    if (!levelJson) {
+      addNotification('warning', '레벨 데이터가 없습니다 (다시 검증 후 시도)');
+      return;
+    }
+    setPreview({ title });
+    setPreviewImg(null);
+    setPreviewLoading(true);
+    try {
+      setPreviewImg(await renderLevelCanvasPreview(levelJson, 420));
+    } catch {
+      setPreviewImg(null);
+    } finally {
+      setPreviewLoading(false);
+    }
+  }, [addNotification]);
 
   // 배치 목록 로드
   useEffect(() => {
@@ -119,6 +144,7 @@ export function SolvabilityPanel() {
     for (const chunk of chunks) {
       if (cancelRef.current) break;
       const metaByLevel = new Map(chunk.map(l => [l.meta.level_number, l.meta]));
+      const jsonByLevel = new Map(chunk.map(l => [l.meta.level_number, l.level_json]));
       try {
         const response = await batchAnalyzeSolvability(
           chunk.map(l => ({ level_number: l.meta.level_number, level_json: l.level_json })),
@@ -137,6 +163,7 @@ export function SolvabilityPanel() {
             nodes_expanded: r.nodes_expanded,
             divisibility_violation: r.divisibility_violation,
             unsupported_gimmicks: r.unsupported_gimmicks,
+            level_json: jsonByLevel.get(r.level_number),
             error: r.error || undefined,
           });
         }
@@ -151,6 +178,7 @@ export function SolvabilityPanel() {
             moves_to_clear: null,
             nodes_expanded: 0,
             divisibility_violation: null,
+            level_json: l.level_json,
             error: (err as Error).message,
           });
         }
@@ -335,6 +363,7 @@ export function SolvabilityPanel() {
             <table className="w-full text-xs">
               <thead className="text-gray-400 sticky top-0 bg-gray-800">
                 <tr className="border-b border-gray-700">
+                  <th className="text-center py-1.5 px-1">보기</th>
                   <th className="text-left py-1.5 px-2">레벨</th>
                   <th className="text-left py-1.5 px-2">등급</th>
                   <th className="text-left py-1.5 px-2">판정</th>
@@ -348,6 +377,13 @@ export function SolvabilityPanel() {
                   const vs = VERDICT_STYLE[r.verdict];
                   return (
                     <tr key={r.level_number} className={`border-b border-gray-700/50 ${vs.bg}`}>
+                      <td className="py-1.5 px-1 text-center">
+                        <button
+                          onClick={() => openPreview(`Lv.${r.level_number} (${vs.label})`, r.level_json)}
+                          className="text-gray-400 hover:text-white"
+                          title="레벨 렌더링 보기"
+                        >👁</button>
+                      </td>
                       <td className="py-1.5 px-2 text-white font-medium">{r.level_number}</td>
                       <td className="py-1.5 px-2 text-gray-300">{r.grade}</td>
                       <td className={`py-1.5 px-2 font-medium ${vs.color}`}>{vs.label}</td>
@@ -359,6 +395,29 @@ export function SolvabilityPanel() {
                 })}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {/* 레벨 미리보기 팝업 (RL 탭과 동일) */}
+      {preview && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onClick={() => setPreview(null)}>
+          <div className="bg-gray-800 rounded-lg p-4 max-w-[480px] w-full" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-medium text-white">{preview.title}</h3>
+              <button className="text-gray-400 hover:text-white text-lg leading-none"
+                onClick={() => setPreview(null)}>✕</button>
+            </div>
+            <div className="flex items-center justify-center min-h-[200px] bg-gray-900 rounded">
+              {previewLoading ? (
+                <span className="text-gray-500 text-sm">렌더링 중...</span>
+              ) : previewImg ? (
+                <img src={previewImg} alt={preview.title} className="max-w-full max-h-[60vh]" />
+              ) : (
+                <span className="text-gray-500 text-sm">렌더링할 수 없습니다</span>
+              )}
+            </div>
           </div>
         </div>
       )}

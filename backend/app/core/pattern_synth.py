@@ -249,11 +249,25 @@ _MOTIF_FILLS: Dict[str, List[Tuple[float, float]]] = {
 _MOTIF_NAMES: List[str] = list(_MOTIF_STROKES.keys()) + list(_MOTIF_FILLS.keys())
 
 
-def _make_motif(name: str, g: int) -> Set[Cell]:
+def _tf_pt(x: float, y: float, rot: int, flip: bool) -> Tuple[float, float]:
+    """정규화 좌표를 중심(0.5,0.5) 기준 변형: flip(좌우반전) 후 rot×90° 회전."""
+    if flip:
+        x = 1.0 - x
+    dx, dy = x - 0.5, y - 0.5
+    for _ in range(rot % 4):
+        dx, dy = -dy, dx  # 90° 회전
+    return 0.5 + dx, 0.5 + dy
+
+
+def _make_motif(name: str, g: int, rot: int = 0, flip: bool = False, thick_mul: float = 1.0) -> Set[Cell]:
+    """모티프를 회전/반전/두께 변형해 래스터화. 변형으로 ~20 기본형 → 수백 고유형 확장."""
     if name in _MOTIF_STROKES:
-        return _raster_strokes(g, _MOTIF_STROKES[name], _thick(g))
+        segs = [(*_tf_pt(a, b, rot, flip), *_tf_pt(c, d, rot, flip))
+                for (a, b, c, d) in _MOTIF_STROKES[name]]
+        return _raster_strokes(g, segs, _thick(g) * thick_mul)
     if name in _MOTIF_FILLS:
-        return _fill_polygon(g, _MOTIF_FILLS[name])
+        poly = [_tf_pt(px, py, rot, flip) for (px, py) in _MOTIF_FILLS[name]]
+        return _fill_polygon(g, poly)
     return set()
 
 
@@ -393,10 +407,10 @@ def _make_cells(g: int, strat, mode: str, fill: float, rng: random.Random) -> Op
     return cells
 
 
-def _make_motif_cells(name: str, g: int) -> Optional[Set[Cell]]:
-    """모티프(특정 모양) 1개를 사이즈 g로: 래스터화→연결성→÷3 보장. 모양 보존 위해
+def _make_motif_cells(name: str, g: int, rot: int = 0, flip: bool = False, thick_mul: float = 1.0) -> Optional[Set[Cell]]:
+    """모티프(특정 모양) 1개를 사이즈 g·변형으로: 래스터화→연결성→÷3 보장. 모양 보존 위해
     단일홀 메움은 하되 대칭화는 하지 않는다(비대칭 모양 유지). 실패 시 None."""
-    cells = _make_motif(name, g)
+    cells = _make_motif(name, g, rot, flip, thick_mul)
     cells = _largest_component(cells)         # 끊긴 획 조각 제거
     cells = _fill_single_holes(cells, g)
     if len(cells) < 5 or len(cells) > g * g:
@@ -453,7 +467,12 @@ def synthesize_concepts(
 
         if use_motif:
             motif = rng.choice(_MOTIF_NAMES)
-            strat_label = f"motif:{motif}"
+            # 변형(회전·반전·두께)으로 ~20 기본형을 수백 고유형으로 확장 → 개수 상한↑·다양성↑
+            m_rot = rng.randint(0, 3)
+            m_flip = rng.random() < 0.5
+            m_thick = rng.choice((0.85, 1.0, 1.0, 1.2))
+            rmark = "↻" * m_rot + ("⇋" if m_flip else "")
+            strat_label = f"motif:{motif}{rmark}"
         else:
             strat = rng.choice(_STRATS)
             strat_label = strat_names[strat]
@@ -464,7 +483,7 @@ def synthesize_concepts(
         ok = True
         for g in sizes:
             if use_motif:
-                cells = _make_motif_cells(motif, g)  # 결정적: 모든 사이즈 동일 모양
+                cells = _make_motif_cells(motif, g, m_rot, m_flip, m_thick)  # 결정적: 모든 사이즈 동일 변형
             else:
                 # 같은 컨셉 파라미터를 모든 사이즈에 적용. 사이즈별 fill 미세 변동 허용(÷3 보조).
                 cells = None

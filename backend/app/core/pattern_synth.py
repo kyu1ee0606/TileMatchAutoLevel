@@ -259,6 +259,134 @@ def _to_positions(cells: Set[Cell]) -> List[str]:
     return [f"{x}_{y}" for (x, y) in sorted(cells, key=lambda c: (c[1], c[0]))]
 
 
+def _grid_of(cells: Set[Cell], g: int) -> List[List[int]]:
+    grid = [[0] * g for _ in range(g)]
+    for (x, y) in cells:
+        if 0 <= x < g and 0 <= y < g:
+            grid[y][x] = 1
+    return grid
+
+
+def _make_cells(g: int, strat, mode: str, fill: float, rng: random.Random) -> Optional[Set[Cell]]:
+    """단일 사이즈 모양 1개 생성: 전략→대칭화→연결성→단일홀메움→÷3 보장. 실패 시 None."""
+    cells = _symmetrize(strat(g, rng, fill), g, mode)
+    cells = _largest_component(cells)
+    cells = _fill_single_holes(cells, g)
+    if len(cells) < 6 or len(cells) > g * g:
+        return None
+    cells = _enforce_div3(cells, g)
+    if not cells or len(cells) % 3 != 0:
+        return None
+    cells = _fill_single_holes(cells, g)
+    if len(cells) % 3 != 0:
+        cells = _enforce_div3(cells, g)
+        if not cells or len(cells) % 3 != 0:
+            return None
+    return cells
+
+
+def synthesize_concepts(
+    min_grid: int,
+    max_grid: int,
+    count: int = 12,
+    symmetry: Optional[str] = None,
+    fill_range: Tuple[float, float] = (0.45, 0.85),
+    seed: Optional[int] = None,
+    oversample: int = 8,
+) -> List[Dict]:
+    """
+    [v16 🅑] '모양 컨셉' 묶음 생성. 한 컨셉 = (전략·대칭·채움률 고정)을 [min_grid..max_grid]
+    모든 그리드 사이즈로 렌더한 변형 묶음. 레벨은 레이어마다 grid/grid+1 사이즈를 번갈아 쓰므로
+    한 인덱스에 필요한 모든 사이즈 변형이 있어야 일관된 모양으로 렌더된다.
+
+    각 변형은 ÷3 보장. 컨셉은 모든 사이즈를 빠짐없이 채워야 채택 가능(불완전 컨셉은 폐기).
+
+    Returns:
+        [{symmetry, strategy, score, sizes:[g...], variants:[{grid_size,positions,count,grid,breakdown}]}]
+        (score 내림차순)
+    """
+    min_grid = max(4, int(min_grid))
+    max_grid = max(min_grid, int(max_grid))
+    sizes = list(range(min_grid, max_grid + 1))
+    rng = random.Random(seed)
+    strat_names = {s: n for s, n in zip(_STRATS, ("blob", "diamond", "ring", "random", "frame"))}
+
+    concepts: List[Dict] = []
+    seen_concept: Set[Tuple] = set()
+    attempts = max(count * oversample, 24)
+    for _ in range(attempts):
+        mode = symmetry if symmetry in SYMMETRY_MODES else rng.choice(("both", "h", "v", "rot180", "quad"))
+        strat = rng.choice(_STRATS)
+        fill = rng.uniform(*fill_range)
+        cseed = rng.randint(0, 2**31 - 1)  # 컨셉 시드: 모든 사이즈에 동일 적용 → 일관성
+
+        variants: List[Dict] = []
+        ok = True
+        for g in sizes:
+            # 같은 컨셉 파라미터를 모든 사이즈에 적용. 사이즈별 fill 미세 변동 허용(÷3 달성 보조).
+            cells = None
+            for fadj in (0.0, -0.07, 0.07, -0.14, 0.14):
+                f = min(0.92, max(0.25, fill + fadj))
+                cells = _make_cells(g, strat, mode, f, random.Random(cseed))
+                if cells:
+                    break
+            if not cells:
+                ok = False
+                break
+            sc, bd = _score(cells, g, fill_range)
+            variants.append({
+                "grid_size": g,
+                "positions": _to_positions(cells),
+                "count": len(cells),
+                "grid": _grid_of(cells, g),
+                "score": round(sc, 4),
+                "breakdown": bd,
+            })
+        if not ok or len(variants) != len(sizes):
+            continue
+
+        # 컨셉 중복 제거: 가장 큰 사이즈 변형의 셀 시그니처 기준
+        big = variants[-1]
+        sig = (mode, strat_names[strat], tuple(sorted(tuple(map(int, p.split("_"))) for p in big["positions"])))
+        if sig in seen_concept:
+            continue
+        seen_concept.add(sig)
+
+        agg = round(sum(v["score"] for v in variants) / len(variants), 4)
+        concepts.append({
+            "symmetry": mode,
+            "strategy": strat_names[strat],
+            "score": agg,
+            "sizes": sizes,
+            "variants": variants,
+        })
+
+    concepts.sort(key=lambda c: c["score"], reverse=True)
+
+    # 다양성 선택: 최대 사이즈 변형의 Jaccard 유사도로 중복 컨셉 억제
+    def _big_cells(c: Dict) -> Set[Cell]:
+        return {tuple(map(int, p.split("_"))) for p in c["variants"][-1]["positions"]}
+
+    picked: List[Dict] = []
+    picked_cells: List[Set[Cell]] = []
+    for c in concepts:
+        if len(picked) >= count:
+            break
+        cs = _big_cells(c)
+        if any(len(cs & pc) / (len(cs | pc) or 1) >= 0.82 for pc in picked_cells):
+            continue
+        picked.append(c)
+        picked_cells.append(cs)
+    if len(picked) < count:
+        chosen = {id(p) for p in picked}
+        for c in concepts:
+            if len(picked) >= count:
+                break
+            if id(c) not in chosen:
+                picked.append(c)
+    return picked[:count]
+
+
 def synthesize_patterns(
     max_grid: int,
     count: int = 12,

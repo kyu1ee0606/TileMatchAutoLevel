@@ -321,6 +321,55 @@ def _enforce_div3(cells: Set[Cell], g: int) -> Optional[Set[Cell]]:
     return cur
 
 
+def _enforce_div3_symmetric(cells: Set[Cell], g: int, mode: str) -> Optional[Set[Cell]]:
+    """대칭(mode) 유지하며 ÷3 보정. 외곽 셀의 '궤도(orbit)'를 통째로 제거 →
+    한쪽만 깎여 비대칭/nick 되는 문제 방지. orbit 단위라 제거량이 곧 대칭 보존.
+    단일 셀 깎기(_enforce_div3)와 달리 좌우/상하 균형 유지. 실패 시 일반 보정 폴백."""
+    if mode == "none":
+        return _enforce_div3(cells, g)
+    cur = set(cells)
+    r = len(cur) % 3
+    if r == 0:
+        return cur if cur else None
+
+    def deg(c: Cell, s: Set[Cell]) -> int:
+        return sum(1 for dx, dy in _NEI4 if (c[0] + dx, c[1] + dy) in s)
+
+    cx = sum(c[0] for c in cur) / len(cur)
+    cy = sum(c[1] for c in cur) / len(cur)
+    # 후보 궤도: 외곽(저연결·바깥) 셀 기준, 중복 제거. 제거량 ≡ r(mod 3)인 궤도 우선.
+    seen_orbit: Set[Tuple] = set()
+    orbits: List[Set[Cell]] = []
+    for c in sorted(cur, key=lambda c: (deg(c, cur), -math.hypot(c[0] - cx, c[1] - cy))):
+        orb = _orbit(c[0], c[1], g, mode) & cur
+        key = tuple(sorted(orb))
+        if key in seen_orbit or not orb:
+            continue
+        seen_orbit.add(key)
+        orbits.append(orb)
+
+    # 단일 궤도 제거로 ÷3 + 연결성 유지되는 것 채택
+    for orb in orbits:
+        if len(orb) % 3 != r % 3:
+            continue
+        trial = cur - orb
+        if not trial:
+            continue
+        if len(_components(trial)) <= max(1, len(_components(cur))) and len(trial) % 3 == 0:
+            return trial
+    # 두 궤도 조합 (작은 모양에서 단일로 안 맞을 때)
+    for i in range(len(orbits)):
+        for j in range(i + 1, len(orbits)):
+            orb = orbits[i] | orbits[j]
+            if len(orb) % 3 != r % 3:
+                continue
+            trial = cur - orb
+            if trial and len(trial) % 3 == 0 and len(_components(trial)) <= max(1, len(_components(cur))):
+                return trial
+    # 대칭 보존 실패 → 일반 보정 폴백(÷3은 보장)
+    return _enforce_div3(cur, g)
+
+
 # ──────────────────── 미적 스코어 ────────────────────
 def _symmetry_score(cells: Set[Cell], g: int) -> float:
     if not cells:
@@ -349,6 +398,14 @@ def _compactness(cells: Set[Cell]) -> float:
     return max(0.0, min(1.0, ideal / perimeter))
 
 
+def _protrusion_count(cells: Set[Cell]) -> int:
+    """채워진 이웃이 1개 이하인 셀 수 = 가시·스파이크·외톨이(=nick). 시각적 '찌그러짐' 핵심."""
+    return sum(
+        1 for c in cells
+        if sum(1 for dx, dy in _NEI4 if (c[0] + dx, c[1] + dy) in cells) <= 1
+    )
+
+
 def _score(cells: Set[Cell], g: int, fill_range: Tuple[float, float]) -> Tuple[float, Dict]:
     area = len(cells)
     if area == 0:
@@ -359,18 +416,25 @@ def _score(cells: Set[Cell], g: int, fill_range: Tuple[float, float]) -> Tuple[f
     holes = len(_single_holes(cells, g))
     solidity = max(0.0, 1.0 - 0.5 * holes)  # 단일홀 1개당 -0.5 (강한 감점)
     compact = _compactness(cells)           # 윤곽 매끄러움(둥글기)
+    spikes = _protrusion_count(cells)
+    # 깔끔함: 가시/스파이크 셀이 적을수록 1. 면적 대비 비율로 평가(작은 모양 과민 방지).
+    clean = max(0.0, 1.0 - spikes / max(4.0, area * 0.5))
     fr = area / (g * g)
     lo, hi = fill_range
     mid = (lo + hi) / 2
     fill_score = math.exp(-((fr - mid) ** 2) / (2 * (0.18 ** 2)))
-    # 비주얼 품질: 대칭 우선 + 단일컴포넌트 + 단일홀 없음 + 매끄러운 윤곽 + 적정 채움
-    composite = 0.34 * sym + 0.20 * conn + 0.20 * solidity + 0.16 * compact + 0.10 * fill_score
+    # 비주얼 품질(프로덕션): 대칭 + 단일컴포넌트 + 단일홀 없음 + 깔끔윤곽(가시 없음) + 적정채움.
+    # compact(둥글기) 가중을 낮춰 '둥근 블롭 수렴' 완화, clean(가시 제거)을 크게.
+    composite = (0.30 * sym + 0.16 * conn + 0.18 * solidity
+                 + 0.20 * clean + 0.10 * compact + 0.06 * fill_score)
     return composite, {
         "symmetry": round(sym, 3),
         "connectivity": round(conn, 3),
         "solidity": round(solidity, 3),
         "compactness": round(compact, 3),
+        "cleanliness": round(clean, 3),
         "single_holes": holes,
+        "protrusions": spikes,
         "fill_rate": round(fr, 3),
         "components": len(comps),
     }
@@ -390,32 +454,39 @@ def _grid_of(cells: Set[Cell], g: int) -> List[List[int]]:
 
 
 def _make_cells(g: int, strat, mode: str, fill: float, rng: random.Random) -> Optional[Set[Cell]]:
-    """단일 사이즈 모양 1개 생성: 전략→대칭화→연결성→단일홀메움→÷3 보장. 실패 시 None."""
+    """단일 사이즈 모양 1개 생성: 전략→대칭화→연결성→단일홀메움→대칭보존 ÷3 보장. 실패 시 None."""
     cells = _symmetrize(strat(g, rng, fill), g, mode)
     cells = _largest_component(cells)
     cells = _fill_single_holes(cells, g)
     if len(cells) < 6 or len(cells) > g * g:
         return None
-    cells = _enforce_div3(cells, g)
+    cells = _enforce_div3_symmetric(cells, g, mode)   # 대칭 유지하며 ÷3 (한쪽 깎임 방지)
     if not cells or len(cells) % 3 != 0:
         return None
     cells = _fill_single_holes(cells, g)
     if len(cells) % 3 != 0:
-        cells = _enforce_div3(cells, g)
+        cells = _enforce_div3_symmetric(cells, g, mode)
         if not cells or len(cells) % 3 != 0:
             return None
     return cells
 
 
-def _make_motif_cells(name: str, g: int, rot: int = 0, flip: bool = False, thick_mul: float = 1.0) -> Optional[Set[Cell]]:
-    """모티프(특정 모양) 1개를 사이즈 g·변형으로: 래스터화→연결성→÷3 보장. 모양 보존 위해
-    단일홀 메움은 하되 대칭화는 하지 않는다(비대칭 모양 유지). 실패 시 None."""
+def _make_motif_cells(name: str, g: int, rot: int = 0, flip: bool = False,
+                      thick_mul: float = 1.0, sym_mode: Optional[str] = None) -> Optional[Set[Cell]]:
+    """모티프(특정 모양) 1개를 사이즈 g·변형으로: 래스터화→(옵션)대칭화→연결성→÷3 보장.
+    sym_mode 지정 시 해당 대칭으로 미러 → 좌우/상하 반듯한 '예쁜' 버전(프로덕션용).
+    None이면 원형 모양 유지(비대칭 다양성). 실패 시 None."""
     cells = _make_motif(name, g, rot, flip, thick_mul)
+    if sym_mode and sym_mode != "none":
+        cells = _symmetrize(cells, g, sym_mode)       # 대칭 강제 → 항상 반듯
     cells = _largest_component(cells)         # 끊긴 획 조각 제거
     cells = _fill_single_holes(cells, g)
     if len(cells) < 5 or len(cells) > g * g:
         return None
-    cells = _enforce_div3(cells, g)           # 돌출부 제거로 ÷3(획 끝부터 → 모양 영향 최소)
+    if sym_mode and sym_mode != "none":
+        cells = _enforce_div3_symmetric(cells, g, sym_mode)  # 대칭 보존 ÷3
+    else:
+        cells = _enforce_div3(cells, g)       # 돌출부 제거로 ÷3(획 끝부터 → 모양 영향 최소)
     if not cells or len(cells) % 3 != 0:
         return None
     return cells
@@ -429,6 +500,8 @@ def synthesize_concepts(
     fill_range: Tuple[float, float] = (0.45, 0.85),
     seed: Optional[int] = None,
     oversample: int = 8,
+    pretty: bool = True,
+    min_quality: float = 0.55,
 ) -> List[Dict]:
     """
     [v16 🅑] '모양 컨셉' 묶음 생성. 한 컨셉 = (전략·대칭·채움률 고정)을 [min_grid..max_grid]
@@ -449,19 +522,25 @@ def synthesize_concepts(
 
     concepts: List[Dict] = []
     seen_concept: Set[Tuple] = set()
-    attempts = max(count * oversample, 24)
+    # pretty 게이트가 후보를 많이 걸러내므로 시도 횟수를 키워 목표 count를 채운다.
+    attempts = max(count * oversample * (3 if pretty else 1), 48)
     for _ in range(attempts):
         # 모드/생성방식 결정.
-        # - 'none' 요청: 항상 모티프(특정 모양) → 창의적·인식 가능한 비대칭 배치.
+        # - 'none' 요청: 항상 모티프(특정 모양). pretty면 대칭화로 반듯, 아니면 원형 비대칭.
         # - 대칭 모드 요청: 기하 전략 + 해당 대칭.
-        # - 자동(None): 40% 모티프(비대칭 특정모양) + 60% 대칭 기하 → 둘 다 풍부히.
+        # - 자동(None): 40% 모티프 + 60% 대칭 기하. pretty면 모티프도 대칭화 → 항상 깔끔.
+        motif_sym: Optional[str] = None  # 모티프 대칭화 모드(None=원형 유지)
         if symmetry == "none":
             use_motif, mode = True, "none"
+            # 사용자가 명시적으로 비대칭 원하면 그대로(원형 모양 유지)
         elif symmetry in SYMMETRY_MODES:
             use_motif, mode = False, symmetry
         else:
             if rng.random() < 0.4:
-                use_motif, mode = True, "none"
+                use_motif = True
+                # 자동 + pretty: 모티프를 대칭화 → 반듯한 '예쁜' 버전. 라벨도 대칭 모드로.
+                motif_sym = rng.choice(("v", "h", "both", "quad")) if pretty else None
+                mode = motif_sym or "none"
             else:
                 use_motif, mode = False, rng.choice(("both", "h", "v", "rot180", "quad"))
 
@@ -472,7 +551,8 @@ def synthesize_concepts(
             m_flip = rng.random() < 0.5
             m_thick = rng.choice((0.85, 1.0, 1.0, 1.2))
             rmark = "↻" * m_rot + ("⇋" if m_flip else "")
-            strat_label = f"motif:{motif}{rmark}"
+            sym_tag = f"⊕{motif_sym}" if motif_sym else ""
+            strat_label = f"motif:{motif}{rmark}{sym_tag}"
         else:
             strat = rng.choice(_STRATS)
             strat_label = strat_names[strat]
@@ -483,7 +563,7 @@ def synthesize_concepts(
         ok = True
         for g in sizes:
             if use_motif:
-                cells = _make_motif_cells(motif, g, m_rot, m_flip, m_thick)  # 결정적: 모든 사이즈 동일 변형
+                cells = _make_motif_cells(motif, g, m_rot, m_flip, m_thick, sym_mode=motif_sym)
             else:
                 # 같은 컨셉 파라미터를 모든 사이즈에 적용. 사이즈별 fill 미세 변동 허용(÷3 보조).
                 cells = None
@@ -496,6 +576,11 @@ def synthesize_concepts(
                 ok = False
                 break
             sc, bd = _score(cells, g, fill_range)
+            # 품질 게이트: 단일홀 있거나 가시(스파이크) 과다하면 '찌그러진' 변형 → 컨셉 폐기.
+            if pretty and (bd.get("single_holes", 0) > 0
+                           or bd.get("protrusions", 0) > max(2, len(cells) // 6)):
+                ok = False
+                break
             variants.append({
                 "grid_size": g,
                 "positions": _to_positions(cells),
@@ -515,6 +600,8 @@ def synthesize_concepts(
         seen_concept.add(sig)
 
         agg = round(sum(v["score"] for v in variants) / len(variants), 4)
+        if pretty and agg < min_quality:   # 평균 미적 점수 미달 → 폐기(못생긴 컨셉 컷)
+            continue
         concepts.append({
             "symmetry": mode,
             "strategy": strat_label,
@@ -530,8 +617,11 @@ def synthesize_concepts(
         return {tuple(map(int, p.split("_"))) for p in c["variants"][-1]["positions"]}
 
     def _family(c: Dict) -> str:
-        # 변형마크(↻⇋) 제거한 base 형태 키. 기하 전략은 전략명 그대로.
-        return c["strategy"].replace("motif:", "").rstrip("↻⇋")
+        # 변형마크(↻⇋)·대칭태그(⊕mode) 제거한 base 형태 키. 기하 전략은 전략명 그대로.
+        s = c["strategy"].replace("motif:", "")
+        if "⊕" in s:
+            s = s.split("⊕")[0]
+        return s.rstrip("↻⇋")
 
     from collections import defaultdict
     fam: Dict[str, List[Dict]] = defaultdict(list)

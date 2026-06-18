@@ -2265,6 +2265,7 @@ class PatternSynthesizeRequest(_BaseModel):
     fill_min: float = 0.45
     fill_max: float = 0.85
     seed: Optional[int] = None
+    cellular_only: bool = False       # True면 템플릿·모티프 배제, 순수 셀룰러 스프라이트만
 
 
 @router.post("/patterns/synthesize")
@@ -2286,6 +2287,7 @@ async def patterns_synthesize(request: PatternSynthesizeRequest):
         symmetry=request.symmetry,
         fill_range=(request.fill_min, request.fill_max),
         seed=request.seed,
+        cellular_only=request.cellular_only,
     )
     return {"concepts": concepts, "count": len(concepts)}
 

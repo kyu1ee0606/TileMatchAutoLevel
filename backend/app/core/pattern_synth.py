@@ -760,6 +760,7 @@ def synthesize_concepts(
     use_templates: bool = True,
     template_ratio: float = 0.30,
     cellular_ratio: float = 0.30,
+    cellular_only: bool = False,
 ) -> List[Dict]:
     """
     [v16 🅑] '모양 컨셉' 묶음 생성. 한 컨셉 = (전략·대칭·채움률 고정)을 [min_grid..max_grid]
@@ -794,7 +795,10 @@ def synthesize_concepts(
         motif_sym: Optional[str] = None  # 모티프 대칭화 모드(None=원형 유지)
         use_template = False
         use_cellular = False
-        if symmetry == "none":
+        if cellular_only:
+            # 순수 셀룰러 전용: 템플릿·모티프·기하 전부 배제, CA 스프라이트만 생성.
+            use_cellular, use_motif, mode = True, False, "cellular"
+        elif symmetry == "none":
             use_motif, mode = True, "none"
             # 사용자가 명시적으로 비대칭 원하면 그대로(원형 모양 유지)
         elif symmetry in SYMMETRY_MODES:

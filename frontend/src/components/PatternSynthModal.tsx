@@ -135,6 +135,7 @@ export function PatternSynthModal({ onClose, onAccepted }: Props) {
   const [autoCount, setAutoCount] = useState(8);   // AI 자동 채택 개수
   const [autoLoading, setAutoLoading] = useState(false);
   const [autoSaved, setAutoSaved] = useState<SynthConcept[]>([]); // 자동 저장된 컨셉(미리보기)
+  const [cellularOnly, setCellularOnly] = useState(false); // 순수 셀룰러 스프라이트 전용
 
   const generate = useCallback(async () => {
     setLoading(true);
@@ -150,6 +151,7 @@ export function PatternSynthModal({ onClose, onAccepted }: Props) {
         fill_min: fillMin,
         fill_max: fillMax,
         seed: Math.floor(Math.random() * 1_000_000),
+        cellular_only: cellularOnly,
       });
       setConcepts(res.data.concepts || []);
     } catch (e) {
@@ -157,7 +159,7 @@ export function PatternSynthModal({ onClose, onAccepted }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [maxGrid, minGrid, count, symmetry, fillMin, fillMax]);
+  }, [maxGrid, minGrid, count, symmetry, fillMin, fillMax, cellularOnly]);
 
   // AI 자동 큐레이션: 대량 생성 → 비주얼 상위 N개 자동 저장
   const autoGenerate = useCallback(async () => {
@@ -254,6 +256,10 @@ export function PatternSynthModal({ onClose, onAccepted }: Props) {
               <input type="range" min={0.3} max={1.0} step={0.05} value={fillMax}
                 onChange={e => setFillMax(Math.max(+e.target.value, fillMin))} className="w-20" />
             </div>
+          </label>
+          <label className="flex items-center gap-1 cursor-pointer select-none" title="템플릿·모티프 배제, 순수 셀룰러 스프라이트(Space Invaders식)만 생성">
+            <input type="checkbox" checked={cellularOnly} onChange={e => setCellularOnly(e.target.checked)} />
+            <span className="text-gray-300">🛸 셀룰러 전용</span>
           </label>
           <button onClick={generate} disabled={loading || autoLoading}
             className="px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold">

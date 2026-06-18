@@ -758,8 +758,8 @@ def synthesize_concepts(
     pretty: bool = True,
     min_quality: float = 0.55,
     use_templates: bool = True,
-    template_ratio: float = 0.5,
-    cellular_ratio: float = 0.22,
+    template_ratio: float = 0.30,
+    cellular_ratio: float = 0.30,
 ) -> List[Dict]:
     """
     [v16 🅑] '모양 컨셉' 묶음 생성. 한 컨셉 = (전략·대칭·채움률 고정)을 [min_grid..max_grid]
@@ -823,11 +823,12 @@ def synthesize_concepts(
             t_idx = rng.choice(tmpl_keys)
             t_rot = rng.randint(0, 3)
             t_flip = rng.random() < 0.5
-            # 서브모드: 60% plain · 25% perturb · 15% recombine(2개 이상일 때)
+            # 서브모드: plain은 원본 회전뿐이라 '기존과 똑같아 보임' → 비중 축소.
+            # 변주·재조합(원본과 다른 모양) 위주: 30% plain · 40% perturb · 30% recombine.
             rsub = rng.random()
-            if rsub < 0.60:
+            if rsub < 0.30:
                 t_submode = "plain"
-            elif rsub < 0.85:
+            elif rsub < 0.70:
                 t_submode = "perturb"
             elif len(tmpl_keys) >= 2:
                 t_submode = "recombine"
@@ -957,31 +958,70 @@ def synthesize_concepts(
             s = s.split("⊕")[0]
         return s.rstrip("↻⇋")
 
+    # [v16] 카테고리 할당량 선택. 순수 패밀리 라운드로빈은 패밀리 수가 많은 템플릿(50개)이
+    # 출력을 독점(생성비율 무관) → '기존 템플릿과 똑같아 보임'. 대신 카테고리별 목표 비중으로
+    # 슬롯을 배분하고, 카테고리 내부에서만 패밀리 라운드로빈 → 창의(cellular)·변형이 확실히 표면화.
+    def _category(c: Dict) -> str:
+        s = c["strategy"]
+        if s.startswith("cellular"):
+            return "cellular"
+        if s.startswith("tmpl:"):
+            body = s[5:]
+            return "tmpl_var" if ("+" in body or body.endswith("~p")) else "tmpl_plain"
+        if s.startswith("motif:"):
+            return "motif"
+        return "geom"
+
+    # 목표 출력 비중(합 1.0). plain 템플릿(원본 회전뿐=익숙함)은 최소, 창의·변형 우선.
+    weights = [("cellular", 0.30), ("tmpl_var", 0.22), ("motif", 0.20),
+               ("geom", 0.18), ("tmpl_plain", 0.10)]
+
     from collections import defaultdict
-    fam: Dict[str, List[Dict]] = defaultdict(list)
+    cat_fam: Dict[str, Dict[str, List[Dict]]] = defaultdict(lambda: defaultdict(list))
     for c in concepts:
-        fam[_family(c)].append(c)
-    families = list(fam.keys())
-    rng.shuffle(families)                      # 형태 등장 순서 무작위
-    for f in families:
-        rng.shuffle(fam[f])                    # 형태 내 변형(방향/두께) 무작위
+        cat_fam[_category(c)][_family(c)].append(c)
+    for cat in cat_fam:
+        for f in cat_fam[cat]:
+            rng.shuffle(cat_fam[cat][f])
 
     picked: List[Dict] = []
     picked_cells: List[Set[Cell]] = []
+
+    def _pick_from(cat: str, n: int) -> int:
+        if n <= 0 or cat not in cat_fam:
+            return 0
+        fams = list(cat_fam[cat].keys())
+        rng.shuffle(fams)
+        got, fi, guard = 0, 0, 0
+        while got < n and guard < n * 40 + 50 and any(cat_fam[cat][f] for f in fams):
+            guard += 1
+            f = fams[fi % len(fams)]
+            fi += 1
+            if not cat_fam[cat][f]:
+                continue
+            c = cat_fam[cat][f].pop()
+            cs = _big_cells(c)
+            if any(len(cs & pc) / (len(cs | pc) or 1) >= 0.82 for pc in picked_cells):
+                continue
+            picked.append(c)
+            picked_cells.append(cs)
+            got += 1
+        return got
+
+    # 1차: 카테고리별 목표 할당
+    for cat, w in weights:
+        _pick_from(cat, round(count * w))
+    # 2차: 부족분을 남은 컨셉으로 채움(카테고리 순회)
     guard = 0
-    fi = 0
-    while len(picked) < count and any(fam[f] for f in families) and guard < count * 60:
+    while len(picked) < count and guard < count * 20:
         guard += 1
-        f = families[fi % len(families)]
-        fi += 1
-        if not fam[f]:
-            continue
-        c = fam[f].pop()
-        cs = _big_cells(c)
-        if any(len(cs & pc) / (len(cs | pc) or 1) >= 0.82 for pc in picked_cells):
-            continue
-        picked.append(c)
-        picked_cells.append(cs)
+        before = len(picked)
+        for cat, _ in weights:
+            if len(picked) >= count:
+                break
+            _pick_from(cat, 1)
+        if len(picked) == before:      # 더 못 뽑음 → 종료
+            break
     return picked[:count]
 
 

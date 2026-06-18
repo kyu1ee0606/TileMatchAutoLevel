@@ -492,6 +492,120 @@ def _make_motif_cells(name: str, g: int, rot: int = 0, flip: bool = False,
     return cells
 
 
+# ──────────────────── 템플릿 기반 변형 (사람 제작 라이브러리 씨앗) ────────────────────
+# 사람이 손제작한 custom_patterns.json(인덱스 0~60)을 '씨앗'으로 회전·반전 변형해
+# 창의적 모양을 만든다. 시작점이 이미 검증된 미려 모양이라 결과 품질이 추상 모티프보다 높다.
+# 템플릿은 대부분 사이즈별(4x4~9x9) 변형을 이미 보유 → 번들 사이즈를 그대로 끌어 씀.
+
+import os
+import json as _json
+
+_TEMPLATE_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "data", "custom_patterns.json")
+)
+_TEMPLATES_CACHE: Optional[Dict[int, Dict[int, Set[Cell]]]] = None
+_TEMPLATES_MTIME: float = 0.0
+
+
+def _load_templates() -> Dict[int, Dict[int, Set[Cell]]]:
+    """custom_patterns.json → {index: {grid_size: cells}}. 파일 변경 시 자동 갱신.
+    인덱스 64+(synth 자동저장분)는 제외 → 사람 제작 0~60만 씨앗으로 사용. 없으면 {}."""
+    global _TEMPLATES_CACHE, _TEMPLATES_MTIME
+    try:
+        mtime = os.path.getmtime(_TEMPLATE_PATH)
+    except OSError:
+        return {}
+    if _TEMPLATES_CACHE is not None and mtime == _TEMPLATES_MTIME:
+        return _TEMPLATES_CACHE
+    out: Dict[int, Dict[int, Set[Cell]]] = {}
+    try:
+        with open(_TEMPLATE_PATH, encoding="utf-8") as f:
+            data = _json.load(f)
+    except (OSError, ValueError):
+        return {}
+    for key, val in data.items():
+        try:
+            idx = int(key.split("_", 1)[0])
+        except ValueError:
+            continue
+        if idx >= 64:           # synth 자동저장분은 씨앗에서 제외(사람 제작만)
+            continue
+        positions = val.get("positions") if isinstance(val, dict) else val
+        if not positions:
+            continue
+        cells = {tuple(map(int, p.split("_"))) for p in positions}
+        if not cells:
+            continue
+        g = max(max(c) for c in cells) + 1
+        out.setdefault(idx, {})[g] = cells
+    _TEMPLATES_CACHE = out
+    _TEMPLATES_MTIME = mtime
+    return out
+
+
+def _transform_cells(cells: Set[Cell], g: int, rot: int, flip: bool) -> Set[Cell]:
+    """g×g 격자 내에서 셀 집합을 flip(좌우반전)→rot×90° 회전."""
+    out: Set[Cell] = set()
+    for (x, y) in cells:
+        if flip:
+            x = g - 1 - x
+        for _ in range(rot % 4):
+            x, y = g - 1 - y, x       # 90° 회전
+        out.add((x, y))
+    return out
+
+
+def _rescale_cells(cells: Set[Cell], src_g: int, dst_g: int) -> Set[Cell]:
+    """템플릿을 다른 그리드 사이즈로 최근접 리스케일(해당 사이즈 변형이 없을 때 폴백)."""
+    if src_g == dst_g:
+        return set(cells)
+    out: Set[Cell] = set()
+    for y in range(dst_g):
+        for x in range(dst_g):
+            sx = min(src_g - 1, int((x + 0.5) * src_g / dst_g))
+            sy = min(src_g - 1, int((y + 0.5) * src_g / dst_g))
+            if (sx, sy) in cells:
+                out.add((x, y))
+    return out
+
+
+def _center_cells(cells: Set[Cell], g: int) -> Set[Cell]:
+    """셀 집합의 바운딩박스를 g×g 격자 중앙으로 이동(변형 후 구석 쏠림 방지)."""
+    if not cells:
+        return cells
+    xs = [c[0] for c in cells]
+    ys = [c[1] for c in cells]
+    w = max(xs) - min(xs) + 1
+    h = max(ys) - min(ys) + 1
+    ox = (g - w) // 2 - min(xs)
+    oy = (g - h) // 2 - min(ys)
+    return {(x + ox, y + oy) for (x, y) in cells}
+
+
+def _make_template_cells(idx: int, g: int, rot: int, flip: bool,
+                         templates: Dict[int, Dict[int, Set[Cell]]]) -> Optional[Set[Cell]]:
+    """템플릿 idx를 사이즈 g·변형(rot/flip)으로: 사이즈 변형 우선, 없으면 최근접 리스케일.
+    변형→중앙정렬→연결성→단일홀메움→÷3 보장. 실패 시 None."""
+    sizes = templates.get(idx)
+    if not sizes:
+        return None
+    base = sizes.get(g)
+    if base is None:                       # 해당 사이즈 없으면 가장 가까운 사이즈에서 리스케일
+        src_g = min(sizes.keys(), key=lambda s: abs(s - g))
+        base = _rescale_cells(sizes[src_g], src_g, g)
+    cells = _transform_cells(base, g, rot, flip)
+    cells = _center_cells(cells, g)        # 변형으로 틀어진 위치를 중앙 재정렬
+    cells = _largest_component(cells)
+    cells = _fill_single_holes(cells, g)
+    if len(cells) < 5 or len(cells) > g * g:
+        return None
+    if len(cells) % 3 != 0:
+        cells = _enforce_div3(cells, g)    # 템플릿 대칭축 불명 → 일반 보정(돌출부 제거)
+    if not cells or len(cells) % 3 != 0:
+        return None
+    return cells
+
+
 def synthesize_concepts(
     min_grid: int,
     max_grid: int,
@@ -502,6 +616,8 @@ def synthesize_concepts(
     oversample: int = 8,
     pretty: bool = True,
     min_quality: float = 0.55,
+    use_templates: bool = True,
+    template_ratio: float = 0.5,
 ) -> List[Dict]:
     """
     [v16 🅑] '모양 컨셉' 묶음 생성. 한 컨셉 = (전략·대칭·채움률 고정)을 [min_grid..max_grid]
@@ -519,6 +635,9 @@ def synthesize_concepts(
     sizes = list(range(min_grid, max_grid + 1))
     rng = random.Random(seed)
     strat_names = {s: n for s, n in zip(_STRATS, ("blob", "diamond", "ring", "random", "frame"))}
+    # 사람 제작 템플릿(0~60)을 씨앗으로 변형 → 창의적·고품질 모양. 비어있으면 기존 경로만.
+    templates = _load_templates() if use_templates else {}
+    tmpl_keys = list(templates.keys())
 
     concepts: List[Dict] = []
     seen_concept: Set[Tuple] = set()
@@ -528,15 +647,21 @@ def synthesize_concepts(
         # 모드/생성방식 결정.
         # - 'none' 요청: 항상 모티프(특정 모양). pretty면 대칭화로 반듯, 아니면 원형 비대칭.
         # - 대칭 모드 요청: 기하 전략 + 해당 대칭.
-        # - 자동(None): 40% 모티프 + 60% 대칭 기하. pretty면 모티프도 대칭화 → 항상 깔끔.
+        # - 자동(None): 템플릿 변형(주력) + 모티프 + 대칭 기하 혼합. pretty면 전부 깔끔.
         motif_sym: Optional[str] = None  # 모티프 대칭화 모드(None=원형 유지)
+        use_template = False
         if symmetry == "none":
             use_motif, mode = True, "none"
             # 사용자가 명시적으로 비대칭 원하면 그대로(원형 모양 유지)
         elif symmetry in SYMMETRY_MODES:
             use_motif, mode = False, symmetry
         else:
-            if rng.random() < 0.4:
+            r = rng.random()
+            t_cut = template_ratio if tmpl_keys else 0.0       # 템플릿 없으면 0
+            if r < t_cut:
+                use_template, use_motif = True, False
+                mode = "template"
+            elif r < t_cut + (1 - t_cut) * 0.45:
                 use_motif = True
                 # 자동 + pretty: 모티프를 대칭화 → 반듯한 '예쁜' 버전. 라벨도 대칭 모드로.
                 motif_sym = rng.choice(("v", "h", "both", "quad")) if pretty else None
@@ -544,7 +669,13 @@ def synthesize_concepts(
             else:
                 use_motif, mode = False, rng.choice(("both", "h", "v", "rot180", "quad"))
 
-        if use_motif:
+        if use_template:
+            t_idx = rng.choice(tmpl_keys)
+            t_rot = rng.randint(0, 3)
+            t_flip = rng.random() < 0.5
+            rmark = "↻" * t_rot + ("⇋" if t_flip else "")
+            strat_label = f"tmpl:{t_idx}{rmark}"
+        elif use_motif:
             motif = rng.choice(_MOTIF_NAMES)
             # 변형(회전·반전·두께)으로 ~20 기본형을 수백 고유형으로 확장 → 개수 상한↑·다양성↑
             m_rot = rng.randint(0, 3)
@@ -562,7 +693,9 @@ def synthesize_concepts(
         variants: List[Dict] = []
         ok = True
         for g in sizes:
-            if use_motif:
+            if use_template:
+                cells = _make_template_cells(t_idx, g, t_rot, t_flip, templates)
+            elif use_motif:
                 cells = _make_motif_cells(motif, g, m_rot, m_flip, m_thick, sym_mode=motif_sym)
             else:
                 # 같은 컨셉 파라미터를 모든 사이즈에 적용. 사이즈별 fill 미세 변동 허용(÷3 보조).
@@ -576,9 +709,11 @@ def synthesize_concepts(
                 ok = False
                 break
             sc, bd = _score(cells, g, fill_range)
-            # 품질 게이트: 단일홀 있거나 가시(스파이크) 과다하면 '찌그러진' 변형 → 컨셉 폐기.
-            if pretty and (bd.get("single_holes", 0) > 0
-                           or bd.get("protrusions", 0) > max(2, len(cells) // 6)):
+            # 품질 게이트: 단일홀/가시 과다 → '찌그러진' 변형 폐기.
+            # 템플릿은 사람 검증된 의도적 모양(창문홀·팔 등)이라 게이트 면제(÷3·연결성만 보장됨).
+            if pretty and not use_template and (
+                bd.get("single_holes", 0) > 0
+                or bd.get("protrusions", 0) > max(2, len(cells) // 6)):
                 ok = False
                 break
             variants.append({
@@ -600,7 +735,7 @@ def synthesize_concepts(
         seen_concept.add(sig)
 
         agg = round(sum(v["score"] for v in variants) / len(variants), 4)
-        if pretty and agg < min_quality:   # 평균 미적 점수 미달 → 폐기(못생긴 컨셉 컷)
+        if pretty and not use_template and agg < min_quality:  # 못생긴 컨셉 컷(템플릿 면제)
             continue
         concepts.append({
             "symmetry": mode,

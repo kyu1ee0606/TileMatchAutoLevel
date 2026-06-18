@@ -747,6 +747,24 @@ def _make_cellular_cells(g: int, rng: random.Random, fill: float) -> Optional[Se
     return cells
 
 
+def _resize_cellular(base: Set[Cell], src_g: int, dst_g: int) -> Optional[Set[Cell]]:
+    """셀룰러 크리처(src_g)를 다른 사이즈(dst_g)로 리스케일 → 번들 전 사이즈가 '같은 크리처'.
+    리스케일→대칭재보장→연결성→중앙정렬→÷3. 실패 시 None."""
+    if dst_g == src_g:
+        return set(base)
+    cells = _rescale_cells(base, src_g, dst_g)
+    cells = _symmetrize(_largest_component(cells), dst_g, "h")
+    cells = _fill_single_holes(cells, dst_g)
+    cells = _center_cells(cells, dst_g)
+    if len(cells) < 4 or len(cells) > dst_g * dst_g:
+        return None
+    if len(cells) % 3 != 0:
+        cells = _enforce_div3_symmetric(cells, dst_g, "h")
+    if not cells or len(cells) % 3 != 0:
+        return None
+    return cells
+
+
 def synthesize_concepts(
     min_grid: int,
     max_grid: int,
@@ -864,6 +882,16 @@ def synthesize_concepts(
         fill = rng.uniform(*fill_range)
         cseed = rng.randint(0, 2**31 - 1)  # 컨셉 시드: 모든 사이즈에 동일 적용 → 일관성
 
+        # 셀룰러: 번들 일관성 위해 '최대 사이즈에서 1개' 생성 → 작은 사이즈는 리스케일로 파생.
+        cell_base: Optional[Set[Cell]] = None
+        cell_base_g = max(sizes)
+        if use_cellular:
+            for fadj in (0.0, 0.1, -0.1, 0.2):
+                cell_base = _make_cellular_cells(cell_base_g, random.Random(cseed),
+                                                 min(0.85, max(0.4, fill + fadj)))
+                if cell_base:
+                    break
+
         variants: List[Dict] = []
         ok = True
         for g in sizes:
@@ -879,12 +907,8 @@ def synthesize_concepts(
                         if p:
                             cells = p   # 변주 성공 시 교체, 실패 시 원본 유지
             elif use_cellular:
-                # 사이즈별 시드(cseed+g)로 셀룰러 스프라이트. fill 변동으로 ÷3 보조.
-                cells = None
-                for fadj in (0.0, 0.1, -0.1, 0.2):
-                    cells = _make_cellular_cells(g, random.Random(cseed + g), min(0.85, max(0.4, fill + fadj)))
-                    if cells:
-                        break
+                # 최대 사이즈 base 크리처를 각 사이즈로 리스케일 → 번들 전체가 '같은 크리처'.
+                cells = _resize_cellular(cell_base, cell_base_g, g) if cell_base else None
             elif use_motif:
                 cells = _make_motif_cells(motif, g, m_rot, m_flip, m_thick, sym_mode=motif_sym)
             else:

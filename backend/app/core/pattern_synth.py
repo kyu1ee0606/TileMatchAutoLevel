@@ -606,6 +606,103 @@ def _make_template_cells(idx: int, g: int, rot: int, flip: bool,
     return cells
 
 
+# ──────────────────── 2차: disabled 제외 · 대칭 perturbation · 재조합 ────────────────────
+_PATTERN_CONFIG_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "data", "pattern_config.json")
+)
+
+
+def _disabled_template_indices() -> Set[int]:
+    """pattern_config.json의 disabled_patterns(사이즈별 dict 또는 리스트) → 비활성 인덱스 합집합.
+    사람이 '쓰지 말라'고 끈 템플릿은 씨앗에서 제외(의도 존중)."""
+    try:
+        with open(_PATTERN_CONFIG_PATH, encoding="utf-8") as f:
+            cfg = _json.load(f)
+    except (OSError, ValueError):
+        return set()
+    dis = cfg.get("disabled_patterns", [])
+    out: Set[int] = set()
+    if isinstance(dis, dict):
+        for lst in dis.values():
+            for v in (lst or []):
+                try:
+                    out.add(int(v))
+                except (ValueError, TypeError):
+                    continue
+    elif isinstance(dis, list):
+        for v in dis:
+            try:
+                out.add(int(v))
+            except (ValueError, TypeError):
+                continue
+    return out
+
+
+def _dominant_sym_mode(cells: Set[Cell], g: int) -> str:
+    """셀 집합이 가장 잘 맞는 대칭 모드. perturbation을 이 축으로 해야 대칭 유지됨."""
+    best, best_m = -1.0, "both"
+    for m in ("both", "quad", "v", "h", "rot180"):
+        match = sum(1 for c in cells if _orbit(c[0], c[1], g, m) <= cells)
+        frac = match / len(cells) if cells else 0.0
+        if frac > best:
+            best, best_m = frac, m
+    return best_m
+
+
+def _perturb_symmetric(cells: Set[Cell], g: int, rng: random.Random) -> Optional[Set[Cell]]:
+    """템플릿 셀을 대칭(궤도) 단위로 약하게 성장/수축 → 같은 씨앗에서 변종 다수.
+    대칭축·연결성·÷3 유지. 실패(불변식 깸) 시 None → 호출측이 원본 사용."""
+    if len(cells) < 6:
+        return None
+    mode = _dominant_sym_mode(cells, g)
+    grow = rng.random() < 0.5
+    cur = set(cells)
+    if grow:
+        # 프런티어(셀에 인접한 빈칸)의 궤도 하나를 추가
+        frontier = {(c[0] + dx, c[1] + dy)
+                    for c in cur for dx, dy in _NEI4
+                    if 0 <= c[0] + dx < g and 0 <= c[1] + dy < g and (c[0] + dx, c[1] + dy) not in cur}
+        if not frontier:
+            return None
+        seed = rng.choice(sorted(frontier))
+        orb = _orbit(seed[0], seed[1], g, mode) & {(x, y) for x in range(g) for y in range(g)}
+        cand = cur | orb
+    else:
+        # 외곽 저연결 셀의 궤도 하나를 제거
+        def deg(c):
+            return sum(1 for dx, dy in _NEI4 if (c[0] + dx, c[1] + dy) in cur)
+        outer = sorted(cur, key=lambda c: (deg(c), c))
+        seed = outer[0]
+        orb = _orbit(seed[0], seed[1], g, mode) & cur
+        cand = cur - orb
+    cand = _largest_component(cand)
+    cand = _fill_single_holes(cand, g)
+    if len(cand) < 6 or len(cand) > g * g:
+        return None
+    if len(cand) % 3 != 0:
+        cand = _enforce_div3_symmetric(cand, g, mode)
+    if not cand or len(cand) % 3 != 0:
+        return None
+    if cand == set(cells):          # 변화 없으면 의미 없음
+        return None
+    return cand
+
+
+def _recombine_cells(a: Set[Cell], b: Set[Cell], g: int, op: str) -> Optional[Set[Cell]]:
+    """두 템플릿 셀을 합집합/교집합으로 재조합 → 새 모양. 정리·÷3 보장. 실패 시 None."""
+    cells = (a | b) if op == "union" else (a & b)
+    cells = _largest_component(cells)
+    cells = _fill_single_holes(cells, g)
+    if len(cells) < 6 or len(cells) > g * g:
+        return None
+    cells = _center_cells(cells, g)
+    if len(cells) % 3 != 0:
+        cells = _enforce_div3(cells, g)
+    if not cells or len(cells) % 3 != 0:
+        return None
+    return cells
+
+
 def synthesize_concepts(
     min_grid: int,
     max_grid: int,
@@ -637,7 +734,8 @@ def synthesize_concepts(
     strat_names = {s: n for s, n in zip(_STRATS, ("blob", "diamond", "ring", "random", "frame"))}
     # 사람 제작 템플릿(0~60)을 씨앗으로 변형 → 창의적·고품질 모양. 비어있으면 기존 경로만.
     templates = _load_templates() if use_templates else {}
-    tmpl_keys = list(templates.keys())
+    disabled = _disabled_template_indices()           # 사람이 끈 템플릿은 씨앗 제외
+    tmpl_keys = [i for i in templates.keys() if i not in disabled]
 
     concepts: List[Dict] = []
     seen_concept: Set[Tuple] = set()
@@ -669,12 +767,30 @@ def synthesize_concepts(
             else:
                 use_motif, mode = False, rng.choice(("both", "h", "v", "rot180", "quad"))
 
+        t_submode = "plain"   # plain(회전/반전) | perturb(대칭변주) | recombine(재조합)
+        t_idx2 = None
         if use_template:
             t_idx = rng.choice(tmpl_keys)
             t_rot = rng.randint(0, 3)
             t_flip = rng.random() < 0.5
+            # 서브모드: 60% plain · 25% perturb · 15% recombine(2개 이상일 때)
+            rsub = rng.random()
+            if rsub < 0.60:
+                t_submode = "plain"
+            elif rsub < 0.85:
+                t_submode = "perturb"
+            elif len(tmpl_keys) >= 2:
+                t_submode = "recombine"
+                t_idx2 = rng.choice([k for k in tmpl_keys if k != t_idx])
+            else:
+                t_submode = "perturb"
             rmark = "↻" * t_rot + ("⇋" if t_flip else "")
-            strat_label = f"tmpl:{t_idx}{rmark}"
+            if t_submode == "perturb":
+                strat_label = f"tmpl:{t_idx}{rmark}~p"
+            elif t_submode == "recombine":
+                strat_label = f"tmpl:{t_idx}+{t_idx2}"
+            else:
+                strat_label = f"tmpl:{t_idx}{rmark}"
         elif use_motif:
             motif = rng.choice(_MOTIF_NAMES)
             # 변형(회전·반전·두께)으로 ~20 기본형을 수백 고유형으로 확장 → 개수 상한↑·다양성↑
@@ -694,7 +810,16 @@ def synthesize_concepts(
         ok = True
         for g in sizes:
             if use_template:
-                cells = _make_template_cells(t_idx, g, t_rot, t_flip, templates)
+                if t_submode == "recombine":
+                    ca = _make_template_cells(t_idx, g, t_rot, t_flip, templates)
+                    cb = _make_template_cells(t_idx2, g, 0, False, templates)
+                    cells = _recombine_cells(ca, cb, g, "union") if (ca and cb) else None
+                else:
+                    cells = _make_template_cells(t_idx, g, t_rot, t_flip, templates)
+                    if cells and t_submode == "perturb":
+                        p = _perturb_symmetric(cells, g, random.Random(cseed + g))
+                        if p:
+                            cells = p   # 변주 성공 시 교체, 실패 시 원본 유지
             elif use_motif:
                 cells = _make_motif_cells(motif, g, m_rot, m_flip, m_thick, sym_mode=motif_sym)
             else:
@@ -710,8 +835,9 @@ def synthesize_concepts(
                 break
             sc, bd = _score(cells, g, fill_range)
             # 품질 게이트: 단일홀/가시 과다 → '찌그러진' 변형 폐기.
-            # 템플릿은 사람 검증된 의도적 모양(창문홀·팔 등)이라 게이트 면제(÷3·연결성만 보장됨).
-            if pretty and not use_template and (
+            # plain 템플릿만 면제(사람 검증된 의도 모양). perturb/recombine은 합성이라 검증.
+            tmpl_exempt = use_template and t_submode == "plain"
+            if pretty and not tmpl_exempt and (
                 bd.get("single_holes", 0) > 0
                 or bd.get("protrusions", 0) > max(2, len(cells) // 6)):
                 ok = False
@@ -735,7 +861,8 @@ def synthesize_concepts(
         seen_concept.add(sig)
 
         agg = round(sum(v["score"] for v in variants) / len(variants), 4)
-        if pretty and not use_template and agg < min_quality:  # 못생긴 컨셉 컷(템플릿 면제)
+        # 못생긴 컨셉 컷. plain 템플릿만 면제(perturb/recombine은 합성이라 검증).
+        if pretty and not (use_template and t_submode == "plain") and agg < min_quality:
             continue
         concepts.append({
             "symmetry": mode,
@@ -753,7 +880,17 @@ def synthesize_concepts(
 
     def _family(c: Dict) -> str:
         # 변형마크(↻⇋)·대칭태그(⊕mode) 제거한 base 형태 키. 기하 전략은 전략명 그대로.
-        s = c["strategy"].replace("motif:", "")
+        s = c["strategy"]
+        if s.startswith("tmpl:"):
+            # 회전(↻⇋)만 묶고 서브모드(plain/perturb~p/recombine+)는 별도 패밀리 →
+            # 라운드로빈에서 변주·재조합도 표면화(다양성↑). 같은 인덱스 plain은 한 패밀리.
+            body = s[5:]
+            if "+" in body:                       # recombine: 두 인덱스 조합이 곧 패밀리
+                return f"tmpl:{body}"
+            if body.endswith("~p"):               # perturb: base+~p
+                return "tmpl:" + body[:-2].rstrip("↻⇋") + "~p"
+            return "tmpl:" + body.rstrip("↻⇋")    # plain
+        s = s.replace("motif:", "")
         if "⊕" in s:
             s = s.split("⊕")[0]
         return s.rstrip("↻⇋")

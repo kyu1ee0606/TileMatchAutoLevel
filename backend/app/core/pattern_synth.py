@@ -703,6 +703,50 @@ def _recombine_cells(a: Set[Cell], b: Set[Cell], g: int, op: str) -> Optional[Se
     return cells
 
 
+# ──────────────────── 셀룰러 스프라이트 (Space Invaders 계보, 손 안 타는 창의 모양) ────────────────────
+# 반쪽 중앙가중 시드 → 미러 대칭 → CA(고립셀 제거) 정제 → 연결성·÷3.
+# 무작위지만 좌우대칭이라 인간 눈에 '크리처/엠블럼'으로 인지됨. 사람 손 0.
+def _seed_left_weighted(g: int, rng: random.Random, fill: float) -> Set[Cell]:
+    """왼쪽 절반을 중앙축·중심 가중 확률로 채움. 가운데일수록 채움 확률↑ → 뼈대 형성(안 흩어짐)."""
+    half = (g + 1) // 2
+    cx, cy = (g - 1) / 2, (g - 1) / 2
+    norm = math.hypot(cx, cy) + 1e-9
+    cells: Set[Cell] = set()
+    for y in range(g):
+        for x in range(half):
+            d = math.hypot(x - cx, y - cy) / norm
+            spine = 1.0 if x == half - 1 else 0.0       # 미러 축(중앙열) 보강
+            p = min(0.95, max(0.0, fill * (1.25 - 0.7 * d) + 0.15 * spine))
+            if rng.random() < p:
+                cells.add((x, y))
+    return cells
+
+
+def _ca_deisolate(cells: Set[Cell], g: int) -> Set[Cell]:
+    """CA 1패스: 8이웃 중 채워진 이웃 2개 미만인 셀 제거(고립·파편 픽셀 정리). 대칭 입력→대칭 출력."""
+    def nb8(c: Cell) -> int:
+        return sum(1 for dx in (-1, 0, 1) for dy in (-1, 0, 1)
+                   if (dx or dy) and (c[0] + dx, c[1] + dy) in cells)
+    return {c for c in cells if nb8(c) >= 2}
+
+
+def _make_cellular_cells(g: int, rng: random.Random, fill: float) -> Optional[Set[Cell]]:
+    """셀룰러 스프라이트 1개: 중앙가중 반쪽시드 → 좌우미러 → CA정제 → 연결성·중앙정렬·÷3.
+    좌우대칭 크리처/엠블럼. 실패(너무 작음·÷3 불가) 시 None."""
+    cells = _symmetrize(_seed_left_weighted(g, rng, fill), g, "h")
+    cells = _ca_deisolate(cells, g)
+    cells = _symmetrize(_largest_component(cells), g, "h")   # 연결성+대칭 재보장
+    cells = _fill_single_holes(cells, g)
+    if len(cells) < 6 or len(cells) > g * g:
+        return None
+    cells = _center_cells(cells, g)                          # 수직/수평 중앙정렬
+    if len(cells) % 3 != 0:
+        cells = _enforce_div3_symmetric(cells, g, "h")
+    if not cells or len(cells) % 3 != 0:
+        return None
+    return cells
+
+
 def synthesize_concepts(
     min_grid: int,
     max_grid: int,
@@ -715,6 +759,7 @@ def synthesize_concepts(
     min_quality: float = 0.55,
     use_templates: bool = True,
     template_ratio: float = 0.5,
+    cellular_ratio: float = 0.22,
 ) -> List[Dict]:
     """
     [v16 🅑] '모양 컨셉' 묶음 생성. 한 컨셉 = (전략·대칭·채움률 고정)을 [min_grid..max_grid]
@@ -748,6 +793,7 @@ def synthesize_concepts(
         # - 자동(None): 템플릿 변형(주력) + 모티프 + 대칭 기하 혼합. pretty면 전부 깔끔.
         motif_sym: Optional[str] = None  # 모티프 대칭화 모드(None=원형 유지)
         use_template = False
+        use_cellular = False
         if symmetry == "none":
             use_motif, mode = True, "none"
             # 사용자가 명시적으로 비대칭 원하면 그대로(원형 모양 유지)
@@ -756,10 +802,14 @@ def synthesize_concepts(
         else:
             r = rng.random()
             t_cut = template_ratio if tmpl_keys else 0.0       # 템플릿 없으면 0
+            c_cut = t_cut + cellular_ratio                     # 셀룰러 스프라이트 구간
             if r < t_cut:
                 use_template, use_motif = True, False
                 mode = "template"
-            elif r < t_cut + (1 - t_cut) * 0.45:
+            elif r < c_cut:
+                use_cellular, use_motif = True, False          # Space Invaders식 크리처
+                mode = "cellular"
+            elif r < c_cut + (1 - c_cut) * 0.45:
                 use_motif = True
                 # 자동 + pretty: 모티프를 대칭화 → 반듯한 '예쁜' 버전. 라벨도 대칭 모드로.
                 motif_sym = rng.choice(("v", "h", "both", "quad")) if pretty else None
@@ -791,6 +841,9 @@ def synthesize_concepts(
                 strat_label = f"tmpl:{t_idx}+{t_idx2}"
             else:
                 strat_label = f"tmpl:{t_idx}{rmark}"
+        elif use_cellular:
+            cell_bucket = rng.randint(0, 5)   # 패밀리 6개로 분산 → 라운드로빈서 여러 개 표면화
+            strat_label = f"cellular#{cell_bucket}"
         elif use_motif:
             motif = rng.choice(_MOTIF_NAMES)
             # 변형(회전·반전·두께)으로 ~20 기본형을 수백 고유형으로 확장 → 개수 상한↑·다양성↑
@@ -820,6 +873,13 @@ def synthesize_concepts(
                         p = _perturb_symmetric(cells, g, random.Random(cseed + g))
                         if p:
                             cells = p   # 변주 성공 시 교체, 실패 시 원본 유지
+            elif use_cellular:
+                # 사이즈별 시드(cseed+g)로 셀룰러 스프라이트. fill 변동으로 ÷3 보조.
+                cells = None
+                for fadj in (0.0, 0.1, -0.1, 0.2):
+                    cells = _make_cellular_cells(g, random.Random(cseed + g), min(0.85, max(0.4, fill + fadj)))
+                    if cells:
+                        break
             elif use_motif:
                 cells = _make_motif_cells(motif, g, m_rot, m_flip, m_thick, sym_mode=motif_sym)
             else:
@@ -837,9 +897,11 @@ def synthesize_concepts(
             # 품질 게이트: 단일홀/가시 과다 → '찌그러진' 변형 폐기.
             # plain 템플릿만 면제(사람 검증된 의도 모양). perturb/recombine은 합성이라 검증.
             tmpl_exempt = use_template and t_submode == "plain"
+            # 셀룰러는 다리·안테나(돌출)가 크리처 특징이라 가시 게이트 면제(단일홀·점수는 적용).
+            spike_cap = 10**9 if use_cellular else max(2, len(cells) // 6)
             if pretty and not tmpl_exempt and (
                 bd.get("single_holes", 0) > 0
-                or bd.get("protrusions", 0) > max(2, len(cells) // 6)):
+                or bd.get("protrusions", 0) > spike_cap):
                 ok = False
                 break
             variants.append({

@@ -97,7 +97,7 @@ echo -e "${CYAN}[4/4] 서버 시작${NC}"
 echo -e "   🚀 백엔드 서버 시작중..."
 cd backend
 source venv/bin/activate
-uvicorn app.main:app --host 0.0.0.0 --port 8000 > /dev/null 2>&1 &
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload > /dev/null 2>&1 &
 BACKEND_PID=$!
 cd ..
 

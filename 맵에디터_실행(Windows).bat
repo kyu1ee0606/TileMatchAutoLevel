@@ -84,7 +84,7 @@ echo.
 echo [4/4] 서버 시작
 
 echo    백엔드 서버 시작중...
-start "TileMatch-Backend" /min cmd /c "cd backend && call venv\Scripts\activate.bat && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+start "TileMatch-Backend" /min cmd /c "cd backend && call venv\Scripts\activate.bat && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
 
 echo    백엔드 준비 대기중...
 timeout /t 5 /nobreak > nul

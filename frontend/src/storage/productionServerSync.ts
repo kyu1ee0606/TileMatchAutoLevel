@@ -68,13 +68,17 @@ export async function pushBatchToServer(batchId: string, opts?: { force?: boolea
   const levels = await getProductionLevelsByBatch(batchId);
   const base_version = opts?.force ? null : (knownVersions.get(batchId) ?? null);
   try {
-    const r = await apiClient.put<{ version: number }>(`/production/batches/${batchId}`, {
+    const r = await apiClient.put<{ version: number; divisibility_flagged?: number; divisibility_levels?: number[] }>(`/production/batches/${batchId}`, {
       batch_id: batchId,
       batch,
       levels,
       base_version,
     });
     knownVersions.set(batchId, r.data.version);
+    // 서버 ÷3 게이트가 클리어 불가 레벨을 검출하면 경고(저장은 됐으나 해당 레벨은 verification_passed=false 강제됨).
+    if (r.data.divisibility_flagged && r.data.divisibility_flagged > 0) {
+      divisibilityWarningHandler?.(batchId, r.data.divisibility_flagged, r.data.divisibility_levels ?? []);
+    }
     return true;
   } catch (e: unknown) {
     const err = e as { response?: { status?: number; data?: { detail?: { server_version?: number } } } };
@@ -185,6 +189,13 @@ let conflictHandler: ((batchId: string, serverVersion: number) => void) | null =
 /** 충돌(다른 브라우저 선수정) 발생 시 UI 알림 콜백 등록. */
 export function setConflictHandler(cb: (batchId: string, serverVersion: number) => void): void {
   conflictHandler = cb;
+}
+
+let divisibilityWarningHandler: ((batchId: string, flagged: number, levels: number[]) => void) | null = null;
+
+/** 저장 시 서버가 ÷3 위반(클리어 불가) 레벨을 검출하면 UI 경고 콜백 등록. */
+export function setDivisibilityWarningHandler(cb: (batchId: string, flagged: number, levels: number[]) => void): void {
+  divisibilityWarningHandler = cb;
 }
 
 /**

@@ -3,6 +3,24 @@
 ## Project Overview
 타일 매칭 퍼즐 게임의 레벨 자동 생성 및 난이도 분석 도구
 
+## 🎮 게임측 레벨 포맷 정본 (필요 시에만 참조 — 포인터)
+
+이 에디터가 생성한 레벨은 **GameBoost → sp_meowsgarden 게임**이 소비한다. 게임이 실제로 먹는 포맷의 **단일 진실 공급원(정본)** 은 게임 프로젝트 위키에 live 로 유지된다 (복사본 아님 — 항상 최신):
+
+```
+/Users/casualdev/sp_meowsgarden/Assets/15.Docs/claudedocs/nodes/DESIGN_LEVEL_MAP_SCHEMA.md
+```
+
+**언제 읽나 (조건부 — 아래 작업일 때만 위 파일 Read)**:
+- 레벨/맵 **JSON 스키마**(필드명·구조) 변경/검증
+- **타일 ID**(t1~t16/stack_*/craft_*) 또는 **효과/기믹**(ice/chain/grass/bomb_N/curtain/teleporter/frog) enum 추가·수정
+- **좌표계**(col_row→world)·**홀짝 레이어 규칙**·**num%3 검증** 관련 작업
+- 게임 배포 포맷이 "게임이 안 먹는다"는 이슈 디버깅
+
+**왜**: 이 에디터는 sp_template(타운팝) 기반이라, 게임이 **신규 기믹/필드 추가**하면 자동 반영 안 됨. 위 정본이 게임측 최신 계약 → 드리프트 점검 기준.
+
+> 일반 레벨 생성·난이도 분석 등 평상 작업엔 읽을 필요 없음. **포맷/enum 작업일 때만.**
+
 ## Testing Guidelines
 
 ### Playwright 활용 (적극 권장)

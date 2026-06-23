@@ -47,7 +47,7 @@ import {
   renameProductionBatch,
   recalculateBatchCounts,
 } from '../../storage/productionStorage';
-import { syncBidirectional, pushBatchToServer, registerAutoSync, setConflictHandler, SyncConflictError } from '../../storage/productionServerSync';
+import { syncBidirectional, pushBatchToServer, registerAutoSync, setConflictHandler, setDivisibilityWarningHandler, SyncConflictError } from '../../storage/productionServerSync';
 import { ProductionExport } from './ProductionExport';
 import { BatchApprovalPanel } from './BatchApprovalPanel';
 import { BatchVerifyPanel } from './BatchVerifyPanel';
@@ -306,6 +306,9 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
     registerAutoSync();
     setConflictHandler((bid, sv) =>
       addNotification('warning', `배치(${bid.slice(0, 12)})가 다른 브라우저에서 수정됨(v${sv}) — 새로고침하면 최신이 반영됩니다`));
+    // 저장 시 서버 ÷3 게이트가 클리어 불가(÷3 위반) 레벨을 검출하면 경고.
+    setDivisibilityWarningHandler((_bid, flagged, levels) =>
+      addNotification('warning', `⚠️ ÷3 위반(클리어 불가) ${flagged}개 레벨 검출 → verification_passed=false 처리됨${levels.length ? ` (예: ${levels.slice(0, 10).join(', ')}${levels.length > 10 ? '…' : ''})` : ''}. 재생성 필요.`));
 
     async function init() {
       try {

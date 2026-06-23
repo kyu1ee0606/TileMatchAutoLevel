@@ -73,6 +73,7 @@ export interface GameState {
   movesUsed: number;
   cleared: boolean;
   failed: boolean;
+  failReason: string;   // 실패 사유 (수동 플레이 게임오버 표시용)
   maxMoves: number;
   maxDockSlots: number;
   lockedSlots: number;  // key 기믹: 잠긴 슬롯 수 (key 타일 3개 매칭시 1 감소)
@@ -210,6 +211,7 @@ export class GameEngine {
       movesUsed: 0,
       cleared: false,
       failed: false,
+      failReason: '',
       maxMoves: 50,
       maxDockSlots: 7,
       lockedSlots: 0,
@@ -294,9 +296,19 @@ export class GameEngine {
       ? levelJson.layer
       : parseInt(String(levelJson.layer || '8'), 10);
 
-    this.state.maxMoves = typeof levelJson.max_moves === 'number'
-      ? levelJson.max_moves
-      : 50;
+    // 실제 게임은 이동 횟수 제한 없음(Dock.IsGameOver = 폭탄/덱풀만). max_moves 는 무한루프 방지용
+    // 안전 상한일 뿐. 1수=타일 1개 선택 → 모든 타일 선택에 '타일수'만큼 필요 → 타일수 + 50(여유).
+    if (typeof levelJson.max_moves === 'number' && levelJson.max_moves > 0) {
+      this.state.maxMoves = levelJson.max_moves;
+    } else {
+      let totalTiles = 0;
+      const nl = typeof levelJson.layer === 'number' ? levelJson.layer : parseInt(String(levelJson.layer || '0'), 10);
+      for (let i = 0; i < nl; i++) {
+        const ld = (levelJson as Record<string, unknown>)[`layer_${i}`] as { tiles?: Record<string, unknown> } | undefined;
+        if (ld?.tiles) totalTiles += Object.keys(ld.tiles).length;
+      }
+      this.state.maxMoves = totalTiles + 50;
+    }
 
     // key 기믹: unlockTile 값 읽어 lockedSlots 설정
     this.state.lockedSlots = typeof levelJson.unlockTile === 'number'
@@ -1438,6 +1450,7 @@ export class GameEngine {
     // 덱 가득 참 확인 (매칭 후에도)
     if (this.isDockFull()) {
       this.state.failed = true;
+      this.state.failReason = `덱(버퍼) 가득 참 — ${this.state.maxDockSlots}칸이 매칭 못 한 타일로 꽉 참 (3매치 못 만듦)`;
       return;
     }
 
@@ -1445,6 +1458,7 @@ export class GameEngine {
     for (const remaining of this.state.bombTiles.values()) {
       if (remaining <= 0) {
         this.state.failed = true;
+        this.state.failReason = '폭탄 폭발 — bomb 타일 카운트가 0에 도달 (제때 제거 못 함)';
         return;
       }
     }
@@ -1452,24 +1466,30 @@ export class GameEngine {
     // 최대 이동 횟수 초과
     if (this.state.movesUsed >= this.state.maxMoves) {
       this.state.failed = true;
+      const goals = Array.from(this.state.goalsRemaining.entries()).filter(([, v]) => v > 0).map(([k, v]) => `${k}×${v}`).join(', ');
+      this.state.failReason = `이동 횟수 소진 (${this.state.maxMoves}수) — 남은 목표: ${goals || '없음'}`;
       return;
     }
 
     // 잔디 클리어 불가 확인 (인접 타일 부족)
     if (this.checkGrassImpossible()) {
       this.state.failed = true;
+      this.state.failReason = '잔디(grass) 제거 불가 — 인접 타일이 부족해 잔디를 해제할 수 없음';
       return;
     }
 
     // 체인 클리어 불가 확인 (좌우 인접 타일 모두 제거됨)
     if (this.checkChainImpossible()) {
       this.state.failed = true;
+      this.state.failReason = '체인(chain) 해제 불가 — 좌우 인접 타일이 모두 제거돼 체인을 풀 수 없음';
       return;
     }
 
     // 선택 가능한 타일이 없으면 실패 (덮여있는 체인 등으로 인해 진행 불가)
     if (remainingTiles > 0 && this.getAvailableMoves().length === 0) {
       this.state.failed = true;
+      const goals = Array.from(this.state.goalsRemaining.entries()).filter(([, v]) => v > 0).map(([k, v]) => `${k}×${v}`).join(', ');
+      this.state.failReason = `데드락 — 선택 가능한 타일 없음 (기믹에 막혀 진행 불가). 남은 목표: ${goals || '없음'}, 남은 타일 ${remainingTiles}`;
       return;
     }
   }
@@ -1776,6 +1796,10 @@ export class GameEngine {
 
   isFailed(): boolean {
     return this.state.failed;
+  }
+
+  getFailReason(): string {
+    return this.state.failReason;
   }
 
   isGameOver(): boolean {

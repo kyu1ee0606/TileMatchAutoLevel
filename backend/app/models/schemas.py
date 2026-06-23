@@ -637,6 +637,9 @@ class BatchVerifyResultItem(BaseModel):
     match_score: float = Field(default=0, description="Match score (0-100%)")
     static_grade: str = Field(default="?", description="Static analysis grade")
     issues: List[str] = Field(default=[], description="List of issues found")
+    # [솔버 통과봇] 휴리스틱 봇 실패 시 A* 솔버가 클리어가능 증명하면 통과로 승격
+    solver_verified: bool = Field(default=False, description="A* 솔버가 PROVEN_SOLVABLE 로 통과시킴(봇 실패였으나 클리어가능)")
+    solver_verdict: Optional[str] = Field(default=None, description="A* 판정: PROVEN_SOLVABLE|PROVEN_IMPOSSIBLE|UNCERTAIN")
     # [v15.35] 재생성 관련 필드
     regenerated: bool = Field(default=False, description="Whether level was regenerated")
     regeneration_attempts: int = Field(default=0, description="Number of regeneration attempts")

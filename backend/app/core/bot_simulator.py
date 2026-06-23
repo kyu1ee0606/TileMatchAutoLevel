@@ -809,7 +809,16 @@ class BotSimulator:
 
         # Use level's max_moves if not specified
         if max_moves is None:
-            max_moves = level_json.get("max_moves", 30)
+            max_moves = level_json.get("max_moves")
+            if not max_moves:
+                # [수정] 실제 게임은 이동 횟수 제한이 없다(Dock.IsGameOver = 폭탄/덱풀만, 타이머 비활성).
+                # max_moves 는 봇 시뮬의 무한루프 방지용 안전 상한일 뿐. 봇의 1수 = 타일 1개 선택이므로
+                # 모든 타일을 선택하는 데 '최소 타일수'만큼 필요 → 타일수 + 50(여유)로 설정.
+                total_tiles = sum(
+                    len(level_json.get(f"layer_{i}", {}).get("tiles", {}))
+                    for i in range(int(level_json.get("layer", 0) or 0))
+                )
+                max_moves = total_tiles + 50
 
         # Check randSeed mode: 0 = random each play (only if honor_zero_seed=True), >0 = fixed seed
         level_rand_seed = level_json.get("randSeed", 0)

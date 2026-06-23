@@ -108,6 +108,7 @@ export function GamePlayer({ levelData, levelInfo, onGameEnd, onBack }: GamePlay
   const [tiles, setTiles] = useState<GameTile[]>([]);
   const [slots, setSlots] = useState<SlotTile[]>([]);
   const [gameState, setGameState] = useState<GameState>('idle');
+  const [failReason, setFailReason] = useState<string>('');
   const [stats, setStats] = useState<GameStats>(INITIAL_GAME_STATS);
   const [settings] = useState(DEFAULT_GAME_SETTINGS);
   const [lockedSlots, setLockedSlots] = useState<number>(0);  // unlockTile: 버퍼 잠금 수
@@ -281,6 +282,7 @@ export function GamePlayer({ levelData, levelInfo, onGameEnd, onBack }: GamePlay
             setGameState('won');
             onGameEnd?.(true, { ...stats, moves: stats.moves + 1 });
           } else if (engine.isFailed()) {
+            setFailReason(engine.getFailReason());
             setGameState('lost');
             onGameEnd?.(false, { ...stats, moves: stats.moves + 1 });
           }
@@ -310,6 +312,7 @@ export function GamePlayer({ levelData, levelInfo, onGameEnd, onBack }: GamePlay
   // Restart game
   const handleRestart = useCallback(() => {
     if (levelData) {
+      setFailReason('');
       initGame(levelData);
     }
   }, [levelData, initGame]);
@@ -466,7 +469,7 @@ export function GamePlayer({ levelData, levelInfo, onGameEnd, onBack }: GamePlay
             <div className="text-gray-400 mb-6">
               {gameState === 'won'
                 ? `Cleared in ${formatTime(stats.timeElapsed)} with ${stats.moves} moves!`
-                : 'Slots are full. Better luck next time!'}
+                : (failReason || '진행 불가 — 게임 오버')}
             </div>
             <div className="flex gap-4 justify-center">
               <button

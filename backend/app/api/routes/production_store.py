@@ -63,6 +63,45 @@ class SaveBatchResponse(BaseModel):
     level_count: int
     saved_at: float
     version: int
+    divisibility_flagged: int = 0          # ÷3 위반으로 verification_passed=False 강제된 레벨 수
+    divisibility_levels: List[int] = []     # 해당 레벨 번호(앞 50)
+
+
+def _enforce_divisibility_gate(levels: List[Dict[str, Any]]) -> List[int]:
+    """[안전망] 프로덕션 저장 경계 ÷3 게이트 — 생성 경로 무관.
+
+    어떤 경로로 만들어졌든(역생성 우회/구버전/forward/수동편집) 매칭타입 ÷3 위반 =
+    수학적으로 클리어 불가. 게임 분배(_clearability_type_counts, DB_Level.cs 포트) 기준으로
+    위반 레벨을 검출해 meta.verification_passed=False + divisibility_violation 을 강제 →
+    '불가능 레벨이 passed 로 프로덕션 유출'을 구조적으로 차단. (멱등)
+
+    배경: v16 ÷3 게이트는 generator.generate() 안에만 있어, generate() 를 우회한 레벨은
+    보호받지 못했다(실측: 1500 중 9 레벨 PROVEN_IMPOSSIBLE). 본 게이트가 최종 저장에서 모두 잡는다.
+    """
+    flagged: List[int] = []
+    try:
+        from ...core.solver import _clearability_type_counts
+    except Exception:
+        return flagged
+    for l in levels:
+        if not isinstance(l, dict):
+            continue
+        lj = l.get("level_json")
+        if not isinstance(lj, dict):
+            continue
+        try:
+            counts = _clearability_type_counts(lj)
+            bad = {t: c for t, c in counts.items() if c % 3 != 0}
+        except Exception:
+            continue
+        if bad:
+            m = l.setdefault("meta", {})
+            m["verification_passed"] = False
+            m["divisibility_violation"] = bad
+            ln = m.get("level_number")
+            if isinstance(ln, int):
+                flagged.append(ln)
+    return flagged
 
 
 def _current_version(batch_id: str) -> Optional[int]:
@@ -92,6 +131,8 @@ def save_batch(batch_id: str, req: SaveBatchRequest) -> SaveBatchResponse:
         )
     new_version = (cur or 0) + 1
     saved_at = time.time()
+    # [안전망] ÷3 게이트 — 생성 경로 무관하게 클리어 불가(÷3 위반) 레벨을 저장 직전 검출·플래그.
+    flagged = _enforce_divisibility_gate(req.levels)
     payload = {
         "batch_id": bid,
         "batch": req.batch,
@@ -110,7 +151,9 @@ def save_batch(batch_id: str, req: SaveBatchRequest) -> SaveBatchResponse:
             os.remove(tmp)
         raise
     return SaveBatchResponse(ok=True, batch_id=bid, level_count=len(req.levels),
-                             saved_at=saved_at, version=new_version)
+                             saved_at=saved_at, version=new_version,
+                             divisibility_flagged=len(flagged),
+                             divisibility_levels=flagged[:50])
 
 
 @router.get("/batches", response_model=List[BatchSummary])

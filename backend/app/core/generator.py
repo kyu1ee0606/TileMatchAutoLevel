@@ -9456,7 +9456,10 @@ class LevelGenerator:
         # CRITICAL: Check if pattern_index is specified (special shape level)
         # When pattern_index is set, we preserve tile positions and only adjust via gimmicks
         pattern_index = getattr(params, 'pattern_index', None) if params else None
-        preserve_pattern_shape = pattern_index is not None
+        # 패턴 보호는 level 자체의 플래그도 인정한다. 저장된 프로덕션 레벨은 pattern_index를
+        # 잃어버린 채(_preserve_pattern만 보유) 제자리 재튜닝되므로, 이 플래그를 존중해야
+        # 난이도 조정이 패턴 타일을 제거하지 않는다.
+        preserve_pattern_shape = pattern_index is not None or bool(level.get("_preserve_pattern"))
 
         # Check gimmick_intensity - if 0, don't add obstacles, only add tiles
         # For values between 0 and 1, use as probability multiplier
@@ -9676,7 +9679,8 @@ class LevelGenerator:
         # CRITICAL: Check if pattern_index is specified (special shape level)
         # When pattern_index is set, we preserve tile positions and only adjust via gimmicks
         pattern_index = getattr(params, 'pattern_index', None) if params else None
-        preserve_pattern_shape = pattern_index is not None
+        # 패턴 보호는 level 자체의 플래그도 인정(제자리 재튜닝되는 저장 레벨 대응).
+        preserve_pattern_shape = pattern_index is not None or bool(level.get("_preserve_pattern"))
 
         # For symmetric patterns OR pattern-specified levels, skip random tile removal to preserve shape
         if symmetry_mode != "none" or preserve_pattern_shape:

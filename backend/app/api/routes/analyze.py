@@ -879,6 +879,30 @@ def _verify_single_level(
         # Determine if passed
         passed = max_gap <= effective_tolerance and all(r > 0 for r in actual_rates.values())
 
+        # [솔버 통과봇] 휴리스틱 봇이 실패시켰지만 '봇이 못 깬 것'일 수 있다.
+        # A* 솔버가 클리어 경로를 증명(PROVEN_SOLVABLE)하면 통과로 승격(레벨은 클리어 가능).
+        # PROVEN_IMPOSSIBLE 면 실패 확정. UNCERTAIN 이면 봇 결과 유지(판정 보류).
+        # 비용 절약: passed=False 인 소수에만 실행.
+        solver_verified = False
+        solver_verdict = None
+        if not passed:
+            try:
+                from ...core.solver import solve_level
+                # 예산 상향: 순차검증 병렬 시 CPU 경합으로 쉬운 레벨도 6s 타임아웃 → UNCERTAIN 오판.
+                # 12s/300k 로 올려 시간제한 케이스 흡수(기믹 블라인드는 여전히 UNCERTAIN — 시간무관).
+                sv = solve_level(level_json, node_budget=300000, time_budget_s=12)
+                solver_verdict = sv.get("verdict")
+                if solver_verdict == "PROVEN_SOLVABLE":
+                    passed = True
+                    solver_verified = True
+                    issues.append("✅ A* 솔버 통과 — 봇은 못 깼으나 클리어 경로 증명됨(난이도 높음)")
+                elif solver_verdict == "PROVEN_IMPOSSIBLE":
+                    issues.append(f"⛔ A* 솔버 클리어 불가 확정: {sv.get('reason','')[:60]}")
+                else:
+                    issues.append(f"❔ A* 판정 보류({solver_verdict}) — 봇 결과 유지")
+            except Exception as ex:
+                issues.append(f"A* 솔버 fallback 실패: {str(ex)[:50]}")
+
         return BatchVerifyResultItem(
             level_id=level_id,
             passed=passed,
@@ -889,6 +913,8 @@ def _verify_single_level(
             match_score=round(match_score, 2),
             static_grade=static_grade,
             issues=issues,
+            solver_verified=solver_verified,
+            solver_verdict=solver_verdict,
         )
 
     except Exception as e:
@@ -1074,74 +1100,75 @@ def batch_verify_with_regeneration(
             # 재생성 시도
             best_result = original_result
             best_new_json = None
+            attempt = 0
 
-            for attempt in range(1, request.max_regeneration_retries + 1):
-                try:
-                    # 원본 파라미터 또는 level_json에서 추출
-                    grid_size = level_item.grid_size or original_json.get("grid_size", [8, 8])
-                    max_layers = level_item.max_layers or original_json.get("layer_count", 5)
-                    tile_types = level_item.tile_types or _extract_tile_types(original_json)
-                    obstacle_types = level_item.obstacle_types or _extract_obstacle_types(original_json)
-                    symmetry_mode = level_item.symmetry_mode or original_json.get("symmetry_mode", "vertical")
-                    pattern_type = level_item.pattern_type or original_json.get("pattern_type")
-                    # [v15.40] 재생성 시 pattern_index 보존 - 누락 시 모양이 깨짐
-                    pattern_index = level_item.pattern_index if hasattr(level_item, 'pattern_index') and level_item.pattern_index is not None else original_json.get("pattern_index")
+            try:
+                # 원본 파라미터 또는 level_json에서 추출
+                grid_size = level_item.grid_size or original_json.get("grid_size", [8, 8])
+                max_layers = level_item.max_layers or original_json.get("layer_count", 5)
+                tile_types = level_item.tile_types or _extract_tile_types(original_json)
+                obstacle_types = level_item.obstacle_types or _extract_obstacle_types(original_json)
+                pattern_type = level_item.pattern_type or original_json.get("pattern_type")
+                # [v15.40] 재생성 시 pattern_index 보존 - 누락 시 모양이 깨짐
+                pattern_index = level_item.pattern_index if hasattr(level_item, 'pattern_index') and level_item.pattern_index is not None else original_json.get("pattern_index")
+                goals = original_json.get("goals", [{"type": "stack", "direction": "s", "count": 3}])
 
-                    # goals 추출
-                    goals = original_json.get("goals", [{"type": "stack", "direction": "s", "count": 3}])
+                # [패턴 보존] pattern_index를 잃은 저장 패턴 레벨(_preserve_pattern 보유)은
+                # from-scratch 재생성 시 패턴모드 미진입 → 난이도조정이 타일을 제거 → 모양에 구멍.
+                # 이 경우 원본을 제자리 난이도 재튜닝(기믹만 조정)해 모양을 100% 보존한다.
+                if pattern_index is None and bool(original_json.get("_preserve_pattern")):
+                    new_json = _retune_pattern_level_in_place(
+                        original_json, target_difficulty, grid_size,
+                        obstacle_types, level_item.level_number,
+                    )
+                    attempt = 1
+                else:
+                    # [통합] 단순 재롤(generate) 대신 RL과 동일한 '적응 검증 생성'(generate_validated_level)을
+                    # 호출 → 내부에서 difficulty_offset/기믹/그리드/타일종류를 gap 기반 조정하며 목표 난이도로
+                    # 점차 수렴(MAX_GENERATION_ATTEMPTS 내부 루프). 동일 파라미터 재롤로는 수렴 안 하던 문제 해결.
+                    from .generate import generate_validated_level
+                    from ...models.schemas import ValidatedGenerateRequest
 
-                    # 재생성 파라미터 구성
-                    actual_symmetry = resolve_symmetry_mode(symmetry_mode, allow_none=False)
-
-                    params = GenerationParams(
+                    vreq = ValidatedGenerateRequest(
                         target_difficulty=target_difficulty,
                         grid_size=tuple(grid_size) if isinstance(grid_size, list) else grid_size,
                         max_layers=max_layers,
                         tile_types=tile_types,
                         obstacle_types=obstacle_types or [],
                         goals=goals,
-                        symmetry_mode=actual_symmetry,
                         pattern_type=pattern_type,
                         pattern_index=pattern_index,
                         level_number=level_item.level_number,
                     )
-
-                    # 레벨 생성
-                    generator = get_level_generator()
-                    gen_result = generator.generate(params)
-                    new_json = gen_result.level_json
+                    vresp = generate_validated_level(vreq, get_level_generator())
+                    new_json = vresp.level_json
                     new_json["target_difficulty"] = target_difficulty
+                    attempt = vresp.attempts
 
-                    # 새 레벨 검증
-                    verify_result = _verify_single_level(
-                        {
-                            "level_json": new_json,
-                            "level_id": level_id,
-                            "target_difficulty": target_difficulty,
-                        },
-                        request.regeneration_iterations,
-                        request.regeneration_tolerance,
-                        request.use_core_bots_only,
-                        analyzer,
-                        request.fast_mode,
-                        request.early_termination,
-                    )
+                # 적응 생성 결과 → 표준 검증으로 판정(솔버봇 fallback 포함, 일관된 BatchVerifyResultItem)
+                verify_result = _verify_single_level(
+                    {
+                        "level_json": new_json,
+                        "level_id": level_id,
+                        "target_difficulty": target_difficulty,
+                    },
+                    request.regeneration_iterations,
+                    request.regeneration_tolerance,
+                    request.use_core_bots_only,
+                    analyzer,
+                    request.fast_mode,
+                    request.early_termination,
+                )
 
-                    logger.info(f"[BATCH_VERIFY_REGEN] Level {level_id} attempt {attempt}: "
-                               f"match_score={verify_result.match_score:.1f}, passed={verify_result.passed}")
+                logger.info(f"[BATCH_VERIFY_REGEN] Level {level_id} 적응재생성 {attempt}회: "
+                           f"match_score={verify_result.match_score:.1f}, passed={verify_result.passed}")
 
-                    # 더 나은 결과면 업데이트
-                    if verify_result.match_score > best_result.match_score:
-                        best_result = verify_result
-                        best_new_json = new_json
+                if verify_result.match_score > best_result.match_score:
+                    best_result = verify_result
+                    best_new_json = new_json
 
-                    # 통과하면 조기 종료
-                    if verify_result.passed:
-                        break
-
-                except Exception as e:
-                    logger.warning(f"[BATCH_VERIFY_REGEN] Level {level_id} regeneration attempt {attempt} failed: {e}")
-                    continue
+            except Exception as e:
+                logger.warning(f"[BATCH_VERIFY_REGEN] Level {level_id} 적응재생성 실패: {e}")
 
             # 최종 결과 업데이트
             if best_new_json is not None:
@@ -1175,6 +1202,40 @@ def batch_verify_with_regeneration(
         execution_time_ms=execution_time_ms,
         regenerated_count=regenerated_count,
     )
+
+
+def _retune_pattern_level_in_place(
+    original_json: Dict[str, Any],
+    target_difficulty: float,
+    grid_size: Any,
+    obstacle_types: Optional[List[str]],
+    level_number: Optional[int],
+) -> Dict[str, Any]:
+    """[패턴 보존 재생성] pattern_index를 잃은 저장 패턴 레벨을 from-scratch 재생성하면
+    패턴모드에 진입하지 못해(_preserve_pattern은 pattern_index가 있을 때만 세팅됨) 난이도
+    조정 단계에서 타일이 제거되어 모양(템플릿)에 구멍이 생긴다.
+
+    대신 원본 level_json(이미 _preserve_pattern + 정확한 위치 보유)을 그대로 두고 난이도만
+    제자리 재튜닝한다. generator._adjust_difficulty 는 level['_preserve_pattern'] 를 존중해
+    타일을 추가/제거하지 않고 기믹(장애물)만 조정 → 모양 100% 보존.
+    """
+    import copy
+    from ...core.generator import GenerationParams
+    from ..deps import get_level_generator
+
+    gen = get_level_generator()
+    retuned = copy.deepcopy(original_json)
+    retuned["_preserve_pattern"] = True  # 방어적 보강(원본 누락 대비)
+    gparams = GenerationParams(
+        target_difficulty=target_difficulty,
+        grid_size=tuple(grid_size) if isinstance(grid_size, list) else grid_size,
+        symmetry_mode=original_json.get("symmetry_mode", "none"),
+        obstacle_types=obstacle_types or [],
+        level_number=level_number,
+    )
+    retuned = gen._adjust_difficulty(retuned, target_difficulty, params=gparams)
+    retuned["target_difficulty"] = target_difficulty
+    return retuned
 
 
 def _extract_tile_types(level_json: Dict[str, Any]) -> List[str]:
@@ -1335,6 +1396,9 @@ async def fix_centering(request: FixCenteringRequest):
         fixed_level = copy.deepcopy(level_data)
         fixed_level = generator._fix_visual_centering(fixed_level)
         fixed_level = generator._sync_layer_num_fields(fixed_level)
+        # [÷3 재보장] 중앙정렬(타일 위치 변형)이 매칭타입 ÷3 카운트를 깰 수 있으므로
+        # generate() 밖 변형 직후에도 권위 게이트를 한 번 더 통과(멱등). 클리어불가 출고 차단.
+        fixed_level = generator._finalize_divisibility_guarantee(fixed_level)
 
         # 수정 후 diff 계산
         diff_after = _calc_visual_center_diff(fixed_level)
@@ -1917,6 +1981,15 @@ async def generate_from_template(request: LevelTemplateFromTemplateRequest):
 
     # _preserve_pattern 플래그 추가 (프로덕션 후처리에서 구조 보호)
     level_json["_preserve_pattern"] = True
+
+    # [÷3 게이트] from-template 은 generator.generate() 를 우회하므로 v16 권위 게이트를
+    # 여기서 직접 호출(멱등). 템플릿이 비-÷3 타일 분배를 가지면 클리어 불가 레벨이 되는데,
+    # 게이트가 잉여 t0/타일 r(1~2)개 제거로 총합 ÷3 → 클리어가능 보장. (root: 우회 경로 차단)
+    try:
+        from ...core.generator import LevelGenerator
+        level_json = LevelGenerator()._finalize_divisibility_guarantee(level_json)
+    except Exception as ex:
+        print(f"[from-template] divisibility gate skipped: {ex}")
 
     # 3) 정적 분석으로 난이도/등급
     analyzer = LevelAnalyzer()

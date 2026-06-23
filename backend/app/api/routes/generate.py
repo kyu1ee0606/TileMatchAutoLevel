@@ -1331,6 +1331,10 @@ def _generate_level_impl(
             # Use local pattern_type variable (may be overridden for special shape levels)
             if pattern_type:
                 result.level_json["pattern_type"] = pattern_type
+            # Persist pattern_index so verify-regenerate can re-enter pattern mode
+            # (없으면 재생성이 pattern_index=None → 패턴보호 해제 → 모양 타일 제거됨)
+            if pattern_index is not None:
+                result.level_json["pattern_index"] = pattern_index
 
             # Mark if this was a fallback generation
             if attempt > 0:
@@ -1949,6 +1953,9 @@ def generate_validated_level(
             # Use local pattern_type variable (may be overridden for special shape levels)
             if pattern_type:
                 level_json["pattern_type"] = pattern_type
+            # Persist pattern_index so verify-regenerate can re-enter pattern mode
+            if pattern_index is not None:
+                level_json["pattern_index"] = pattern_index
 
             # FAST PATH: Skip bot simulation entirely when simulation is disabled
             if skip_simulation:
@@ -2028,6 +2035,9 @@ def generate_validated_level(
                 # Use local pattern_type variable (may be overridden for special shape levels)
                 if pattern_type:
                     best_result.level_json["pattern_type"] = pattern_type
+                # Persist pattern_index so verify-regenerate can re-enter pattern mode
+                if pattern_index is not None:
+                    best_result.level_json["pattern_index"] = pattern_index
                 best_actual_rates = actual_rates.copy()
                 best_target_rates = target_rates.copy()  # Store target rates for response
                 best_gaps = (avg_gap, max_gap)

@@ -9,6 +9,7 @@ import { useUIStore } from '../../stores/uiStore';
 import { generateLevel, enhanceLevel } from '../../api/generate';
 import apiClient from '../../api/client';
 import { analyzeAutoPlay, fixCentering } from '../../api/analyze';
+import { simulateLevelSkillSweep } from '../../api/rlSim';
 import GamePlayer from '../GamePlayer';
 import GameBoard from '../GamePlayer/GameBoard';
 import { createGameEngine } from '../../engine/gameEngine';
@@ -209,6 +210,57 @@ function computeSequentialPassThreshold(targetDifficulty: number | undefined): n
   else if (td >= 0.5) toleranceMult = 1.0 + ((td - 0.5) / 0.2) * 0.3;
   const allowedGap = 15 * toleranceMult;
   return Math.max(50, Math.round(100 - allowedGap * 2));
+}
+
+/**
+ * [v16 자가개선] 생성 난이도 학습 보정 (localStorage).
+ * 난이도=f(보드,타일,배치,층...) 고차원이라 손으로 표 못 만듦 → 검증결과로 자동 학습.
+ * (밴드 × td버킷) → 통과한 difficultyOffset 의 지수이동평균. 검증 돌릴수록 출발점이 좋아져
+ * 첫시도 통과율↑·시도횟수↓. 콜드스타트(데이터 없음)면 0(기존 공식).
+ */
+const CALIB_KEY = 'levelgen_calib_v1';
+function calibBucket(levelNumber: number, td: number): string {
+  const band = Math.floor(levelNumber / 100) * 100;     // 100단위 레벨밴드(보드크기 근사)
+  const tdb = Math.round(td * 20) / 20;                  // 0.05 td 버킷
+  return `${band}_${tdb}`;
+}
+function getLearnedOffset(levelNumber: number, td: number): number {
+  try {
+    const m = JSON.parse(localStorage.getItem(CALIB_KEY) || '{}');
+    const e = m[calibBucket(levelNumber, td)];
+    return e && typeof e.avg === 'number' ? Math.round(e.avg) : 0;
+  } catch { return 0; }
+}
+function recordPassedOffset(levelNumber: number, td: number, offset: number): void {
+  try {
+    const m = JSON.parse(localStorage.getItem(CALIB_KEY) || '{}');
+    const k = calibBucket(levelNumber, td);
+    const e = m[k] || { avg: offset, count: 0 };
+    // 통과한 offset 쪽으로 지수이동평균(최근 가중) — 변동 흡수하며 수렴
+    e.avg = (e.count || 0) === 0 ? offset : e.avg * 0.7 + offset * 0.3;
+    e.count = (e.count || 0) + 1;
+    m[k] = e;
+    localStorage.setItem(CALIB_KEY, JSON.stringify(m));
+  } catch { /* localStorage 불가 시 무시 (학습만 비활성) */ }
+}
+
+/**
+ * [v16] RL 통과 판정 (튜토리얼 예외 포함).
+ * 일반 레벨: 백엔드 verification_passed (|gap|<=tol AND not unclearable).
+ * 튜토리얼(1~10): 튜토리얼 겸 스테이지라 목표보다 쉬워도 OK — 한쪽 밴드(너무쉬움 허용,
+ *   너무어려움만 실패). gap = predicted - target (양수=쉬움). gap >= -tol 이면 통과.
+ */
+const TUTORIAL_MAX_LEVEL = 10;
+const RL_CLEAR_TOL = 0.12; // 백엔드 CLEAR_RATE_TOLERANCE 와 동일
+function rlVerificationPassed(
+  levelNumber: number,
+  rl: { verification_passed: boolean | null; classification: string; clear_rate_gap: number | null },
+): boolean {
+  if (rl.classification === 'unclearable_suspect') return false;
+  if (levelNumber <= TUTORIAL_MAX_LEVEL) {
+    return (rl.clear_rate_gap ?? 0) >= -RL_CLEAR_TOL; // 너무어려움(gap<<0)만 실패
+  }
+  return rl.verification_passed === true;
 }
 
 export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps) {
@@ -2358,6 +2410,11 @@ function TestTab({
     balance_status: string;
     bot_stats: { profile: string; clear_rate: number; target_clear_rate: number }[];
     recommendations: string[];
+    // [v16] RL 통합 — 수동테스트도 예측 유저 클리어율 1개로 표시
+    predicted_clear_rate?: number;
+    target_clear_rate?: number;
+    clear_rate_gap?: number;
+    rl_classification?: string;
   } | null>(null);
   const [autoTestIterations, setAutoTestIterations] = useState(100);
 
@@ -2470,6 +2527,46 @@ function TestTab({
     }
   }, [levels]);
 
+  // [v16] 레벨 선택 시 RL 예측 유저 클리어율 자동측정(없을 때 1회, 캐시).
+  // 봇 게이지와 함께 RL 게이지를 바로 보여주기 위함. 이미 predicted 있으면 스킵.
+  const rlAutoMeasuringRef = useRef<Set<number>>(new Set());
+  useEffect(() => {
+    const lvl = selectedLevel;
+    if (!lvl || !lvl.level_json) return;
+    if (lvl.meta.predicted_clear_rate !== undefined) return;          // 이미 RL 측정됨
+    const ln = lvl.meta.level_number;
+    if (rlAutoMeasuringRef.current.has(ln)) return;                   // 측정 중복 방지
+    rlAutoMeasuringRef.current.add(ln);
+    let cancelled = false;
+    (async () => {
+      try {
+        const rl = await simulateLevelSkillSweep({
+          level_json: lvl.level_json,
+          target_difficulty: lvl.meta.target_difficulty,
+        });
+        if (cancelled) return;
+        const predicted = rl.predicted_clear_rate;
+        const target = rl.target_clear_rate ?? 0;
+        const patch = {
+          predicted_clear_rate: predicted,
+          target_clear_rate: target,
+          clear_rate_gap: rl.clear_rate_gap ?? undefined,
+          rl_classification: rl.classification,
+          luck_suspect: rl.luck_suspect,
+          verified: true,
+          verification_passed: rlVerificationPassed(ln, rl),
+        };
+        await saveProductionLevels(batchId, [{ meta: { ...lvl.meta, ...patch }, level_json: lvl.level_json }]);
+        setLevels(prev => prev.map(l => l.meta.level_number === ln ? { ...l, meta: { ...l.meta, ...patch } } : l));
+      } catch {
+        /* 측정 실패 시 무시 (봇 게이지만 표시) */
+      } finally {
+        rlAutoMeasuringRef.current.delete(ln);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedLevel?.meta.level_number]);
+
   // Generate preview tiles when selected level changes
   useEffect(() => {
     if (!selectedLevel) {
@@ -2580,36 +2677,45 @@ function TestTab({
     setAutoTestResult(null);
 
     try {
-      const result = await analyzeAutoPlay(selectedLevel.level_json, {
-        iterations: autoTestIterations,
-        targetDifficulty: selectedLevel.meta.target_difficulty,
+      // [v16] RL 예측 유저 클리어율 기반 (봇 3종 → 통합 1개)
+      const rl = await simulateLevelSkillSweep({
+        level_json: selectedLevel.level_json,
+        target_difficulty: selectedLevel.meta.target_difficulty,
       });
+      const predicted = rl.predicted_clear_rate;
+      const target = rl.target_clear_rate ?? 0;
+      const gapPp = (rl.clear_rate_gap ?? predicted - target) * 100; // 양수=목표보다 쉬움
+      const matchScore = Math.max(0, 100 - Math.abs(gapPp) * 2);
+      const balance = rl.classification === 'unclearable_suspect'
+        ? 'too_hard'
+        : Math.abs(gapPp) <= 5 ? 'balanced' : gapPp > 0 ? 'too_easy' : 'too_hard';
 
       setAutoTestResult({
-        match_score: calculateMatchScoreFromBots(result.bot_stats),
-        autoplay_grade: result.autoplay_grade,
-        balance_status: result.balance_status,
-        bot_stats: result.bot_stats.map(s => ({
-          profile: s.profile,
-          clear_rate: s.clear_rate,
-          target_clear_rate: s.target_clear_rate,
-        })),
-        recommendations: result.recommendations,
+        match_score: matchScore,
+        autoplay_grade: rl.classification,
+        balance_status: balance,
+        bot_stats: [],
+        recommendations: rl.classification === 'unclearable_suspect'
+          ? ['최고 실력으로도 클리어 불가 — 재생성 필요']
+          : [],
+        predicted_clear_rate: predicted,
+        target_clear_rate: target,
+        clear_rate_gap: rl.clear_rate_gap ?? predicted - target,
+        rl_classification: rl.classification,
       });
 
-      // Update level meta with bot test result
-      // [v15.14] novice/casual 제외 - 검증용 3봇만 사용
-      const botClearRates = {
-        average: result.bot_stats.find(s => s.profile === 'average')?.clear_rate || 0,
-        expert: result.bot_stats.find(s => s.profile === 'expert')?.clear_rate || 0,
-        optimal: result.bot_stats.find(s => s.profile === 'optimal')?.clear_rate || 0,
-      };
-
-      // Save to production storage
+      // Save to production storage — RL 메타 (봇 대신 예측 클리어율)
       const updatedMeta = {
         ...selectedLevel.meta,
-        bot_clear_rates: botClearRates,
-        match_score: calculateMatchScoreFromBots(result.bot_stats),
+        verification_method: 'rl' as const,
+        predicted_clear_rate: predicted,
+        target_clear_rate: target,
+        clear_rate_gap: rl.clear_rate_gap ?? undefined,
+        rl_classification: rl.classification,
+        luck_suspect: rl.luck_suspect,
+        match_score: matchScore,
+        verified: true,
+        verification_passed: rlVerificationPassed(selectedLevel.meta.level_number, rl),
       };
 
       await saveProductionLevels(batchId, [{
@@ -2617,7 +2723,7 @@ function TestTab({
         level_json: selectedLevel.level_json,
       }]);
 
-      addNotification('success', `레벨 ${selectedLevel.meta.level_number} 자동 테스트 완료 (일치도: ${calculateMatchScoreFromBots(result.bot_stats).toFixed(0)}%)`);
+      addNotification('success', `레벨 ${selectedLevel.meta.level_number} 테스트 완료 (예측 클리어율 ${(predicted * 100).toFixed(0)}%, 목표 ${(target * 100).toFixed(0)}%)`);
       loadLevels();
       onStatsUpdate();
     } catch (err) {
@@ -2691,7 +2797,7 @@ function TestTab({
       return;
     }
 
-    const MAX_ATTEMPTS = 5; // Maximum regeneration attempts per level
+    const MAX_ATTEMPTS = 10; // [v16] 5→10: near-miss 통과율↑ (학습 출발점과 시너지). 시간↑ 감수.
     const BASE_PASS_THRESHOLD = 70; // 70% match score to pass
 
     sequentialAbortRef.current = new AbortController();
@@ -2720,12 +2826,15 @@ function TestTab({
       direction?: 'too_easy' | 'too_hard' | 'ok';
     }[] = [];
 
-    for (let i = 0; i < targetLevelNumbers.length; i++) {
-      if (signal.aborted) break;
-
-      const levelNumber = targetLevelNumbers[i];
+    // [v16] 레벨 단위 병렬 처리. 각 레벨은 독립(생성·측정·재생성)이고 저장은 IndexedDB 레벨별 put이라
+    // 동시 쓰기 안전. SEQ_CONCURRENCY개 워커가 큐에서 꺼내 동시 처리 → 4~6배 빠름.
+    const SEQ_CONCURRENCY = 4;
+    let _completed = 0;
+    const _queue = [...targetLevelNumbers];
+    const processOneLevel = async (levelNumber: number): Promise<void> => {
+      if (signal.aborted) return;
       let currentLevel = levels.find(l => l.meta.level_number === levelNumber);
-      if (!currentLevel) continue;
+      if (!currentLevel) return;
 
       let attempts = 0;
       let matchScore = 0;
@@ -2735,6 +2844,14 @@ function TestTab({
       let lastDirection: 'too_easy' | 'too_hard' | 'ok' | undefined;
       let lastTargetDifficulty: number | undefined = currentLevel.meta.target_difficulty;
       let lastPassThreshold = BASE_PASS_THRESHOLD;
+      // [v16 Phase2] best-of-N 유지: 전 attempt 중 목표(gap) 가장 가까운 버전 보관.
+      // 통과 못해도 최근접 버전을 최종 저장 → 단조개선 보장 (이전엔 마지막 attempt가 덮어써 더 나빠질 수 있었음).
+      let bestAbsGap = Infinity;
+      let bestIsClearable = false;  // [A2] 솔버블(언클리어러블 아님) 후보 우선
+      let bestSnapshot: { level_json: ProductionLevel['level_json']; meta: ProductionLevelMeta } | null = null;
+      // [v16 자가개선] 학습된 보정값에서 출발 (없으면 0). 검증 돌릴수록 좋은 출발점.
+      let difficultyOffset = getLearnedOffset(levelNumber, currentLevel.meta.target_difficulty);
+      let genOffset = difficultyOffset;  // 현재 측정중 레벨을 생성한 offset (통과 시 학습 기록용)
 
       while (attempts < MAX_ATTEMPTS && !passed && !signal.aborted) {
         attempts++;
@@ -2742,63 +2859,87 @@ function TestTab({
         lastPassThreshold = passThreshold;
         lastTargetDifficulty = currentLevel?.meta.target_difficulty;
 
-        // Update progress: testing
+        // Update progress: testing (병렬이라 현재 처리중 레벨/완료수 표시)
         setSequentialProgress(prev => ({
           ...prev,
-          currentIndex: i,
+          currentIndex: _completed,
           currentLevel: levelNumber,
           currentAttempt: attempts,
           status: 'testing',
         }));
 
-        // Test the level
+        // Test the level — [v16] RL 예측 유저 클리어율 기반 검증 (봇 match_score 대체)
         try {
-          const result = await analyzeAutoPlay(currentLevel.level_json, {
-            iterations: autoTestIterations,
-            targetDifficulty: currentLevel.meta.target_difficulty,
+          const rl = await simulateLevelSkillSweep({
+            level_json: currentLevel.level_json,
+            target_difficulty: currentLevel.meta.target_difficulty,
+            seed: attempts, // attempt별 시드 변경 — 재생성 재측정 독립성
           });
 
-          matchScore = calculateMatchScoreFromBots(result.bot_stats);
+          const predicted = rl.predicted_clear_rate;
+          const target = rl.target_clear_rate ?? 0;
+          const gapPp = (rl.clear_rate_gap ?? predicted - target) * 100; // 양수=목표보다 쉬움
+          // 레거시 UI/필터 호환용 match_score (0~100): 갭 작을수록 높음. 통과(±10%p)→80+
+          matchScore = Math.max(0, 100 - Math.abs(gapPp) * 2);
 
-          // [diagnostics] 봇별 갭 중 절댓값이 가장 큰 항목을 기록 — 실패 분류용
-          let worstBot = '';
-          let worstGapPp = 0;
-          for (const s of result.bot_stats) {
-            const gapPp = (s.clear_rate - s.target_clear_rate) * 100;
-            if (Math.abs(gapPp) > Math.abs(worstGapPp)) {
-              worstGapPp = gapPp;
-              worstBot = s.profile;
-            }
-          }
-          lastWorstBot = worstBot || undefined;
-          lastWorstGapPp = worstBot ? worstGapPp : undefined;
-          lastDirection = !worstBot
-            ? undefined
-            : Math.abs(worstGapPp) <= 5
+          // 실패 분류: gap 부호 (too_easy/too_hard). unclearable은 too_hard로.
+          lastWorstBot = undefined; // RL은 봇별 분해 없음
+          lastWorstGapPp = gapPp;
+          lastDirection = rl.classification === 'unclearable_suspect'
+            ? 'too_hard'
+            : Math.abs(gapPp) <= 5
               ? 'ok'
-              : worstGapPp > 0
+              : gapPp > 0
                 ? 'too_easy'
                 : 'too_hard';
 
-          // Save test result
-          // [v15.14] novice/casual 제외 - 검증용 3봇만 사용
-          const botClearRates = {
-            average: result.bot_stats.find(s => s.profile === 'average')?.clear_rate || 0,
-            expert: result.bot_stats.find(s => s.profile === 'expert')?.clear_rate || 0,
-            optimal: result.bot_stats.find(s => s.profile === 'optimal')?.clear_rate || 0,
+          // [v16 피드백제어] 측정 gap → 다음 재생성 난이도 조준.
+          // 생성변동(±30%p)이 커서 ±1 완만 스텝으로 점진 이동(급격 조정은 진동만 유발).
+          // 주목적: 시도마다 난이도 regime을 넓혀 best-of-5가 목표를 걸치게(탐색). clamp[-3,+3].
+          if (rl.classification === 'unclearable_suspect') {
+            difficultyOffset -= 1;
+          } else if (gapPp > 12) {
+            difficultyOffset += 1; // 너무쉬움 → 어렵게
+          } else if (gapPp < -12) {
+            difficultyOffset -= 1; // 너무어려움 → 쉽게
+          }
+          difficultyOffset = Math.max(-3, Math.min(3, difficultyOffset));
+
+          // 통과 판정: 튜토리얼(1~10) 예외 포함 (쉬움 허용). 일반은 백엔드 기준.
+          const isPassed = rlVerificationPassed(levelNumber, rl);
+
+          // RL 검증 메타 (봇 대신 예측 클리어율)
+          const rlMeta = {
+            verification_method: 'rl' as const,
+            predicted_clear_rate: predicted,
+            target_clear_rate: target,
+            clear_rate_gap: rl.clear_rate_gap ?? undefined,
+            rl_classification: rl.classification,
+            luck_suspect: rl.luck_suspect,
+            match_score: matchScore,
+            verified: true,
+            verification_passed: isPassed,
           };
 
-          // 동적 컷오프로 통과 여부 판정 — UI 표시 로직과 동일 기준
-          const isPassed = matchScore >= passThreshold;
+          // [v16 Phase2+A2] best-of-N: 솔버블 우선 → 그 안에서 목표 최근접(gap 최소).
+          // 언클리어러블(0% 클리어)은 gap이 작아도 절대 선택 안 함 (솔버블 후보 있으면).
+          const absGap = Math.abs(rl.clear_rate_gap ?? 1);
+          const isClearable = rl.classification !== 'unclearable_suspect' && rl.max_clear_rate >= 0.05;
+          const better =
+            bestSnapshot === null
+            || (isClearable && !bestIsClearable)                       // 솔버블이 비솔버블을 항상 이김
+            || (isClearable === bestIsClearable && absGap < bestAbsGap); // 동급이면 gap 최소
+          if (better) {
+            bestAbsGap = absGap;
+            bestIsClearable = isClearable;
+            bestSnapshot = {
+              level_json: currentLevel.level_json,
+              meta: { ...currentLevel.meta, ...rlMeta },
+            };
+          }
 
           await saveProductionLevels(batchId, [{
-            meta: {
-              ...currentLevel.meta,
-              bot_clear_rates: botClearRates,
-              match_score: matchScore,
-              verified: true,
-              verification_passed: isPassed,
-            },
+            meta: { ...currentLevel.meta, ...rlMeta },
             level_json: currentLevel.level_json,
           }]);
 
@@ -2806,16 +2947,7 @@ function TestTab({
           const scrollTop = levelListRef.current?.scrollTop || 0;
           setLevels(prev => prev.map(l =>
             l.meta.level_number === levelNumber
-              ? {
-                  ...l,
-                  meta: {
-                    ...l.meta,
-                    match_score: matchScore,
-                    bot_clear_rates: botClearRates,
-                    verified: true,
-                    verification_passed: isPassed,
-                  },
-                }
+              ? { ...l, meta: { ...l.meta, ...rlMeta } }
               : l
           ));
           // Restore scroll position after React re-render
@@ -2827,6 +2959,8 @@ function TestTab({
 
           if (isPassed) {
             passed = true;
+            // [v16 자가개선] 통과한 레벨을 만든 offset(genOffset)을 학습 기록 → 다음 검증의 출발점 개선.
+            recordPassedOffset(levelNumber, currentLevel.meta.target_difficulty, genOffset);
           } else if (attempts < MAX_ATTEMPTS && !signal.aborted) {
             // Regenerate if not passed
             setSequentialProgress(prev => ({ ...prev, status: 'regenerating' }));
@@ -2835,22 +2969,23 @@ function TestTab({
             // 같은 모양으로 색만 바꿔봐야 데드락 탈출 불가 → 일반 generate 경로로 강제 전환.
             // 데이터 분석 결과(2026-05-21) May7 배치의 23개 반복 실패 중 22개가 이 케이스였음.
             const hasTemplate = !!(currentLevel?.meta as { template_id?: string } | undefined)?.template_id;
-            const maxBotRate = Math.max(
-              botClearRates.average,
-              botClearRates.expert,
-              botClearRates.optimal,
-            );
-            const unclearableTemplate = hasTemplate && maxBotRate < 0.05;
+            // RL: 최고실력(max_clear_rate)으로도 못 깨면 언클리어러블. classification도 병행 확인.
+            const maxClearRate = rl.max_clear_rate;
+            const unclearableTemplate = hasTemplate
+              && (maxClearRate < 0.05 || rl.classification === 'unclearable_suspect');
             if (unclearableTemplate) {
               addNotification(
                 'warning',
-                `Lv.${levelNumber} 템플릿 언클리어러블 감지 (max bot ${(maxBotRate * 100).toFixed(0)}%) → 일반 생성 경로로 전환`
+                `Lv.${levelNumber} 템플릿 언클리어러블 감지 (max clear ${(maxClearRate * 100).toFixed(0)}%) → 일반 생성 경로로 전환`
               );
             }
 
-            // Use existing regeneration logic
+            // Use existing regeneration logic — 피드백 offset 전달(측정 gap 기반 난이도 조준)
+            // 이 regen이 만든 레벨을 다음 시도가 측정 → 그 레벨의 생성 offset 기록(통과 시 학습용)
+            genOffset = difficultyOffset;
             await handleRegenerateLevel(levelNumber, undefined, undefined, {
               forceNoTemplate: unclearableTemplate,
+              difficultyOffset,
             });
 
             // Reload the level after regeneration from storage
@@ -2864,6 +2999,18 @@ function TestTab({
         }
       }
 
+      // [v16 Phase2] 통과 못했으면 전 attempt 중 최근접(best) 버전을 최종 저장.
+      // bestSnapshot은 정의상 측정된 것 중 gap 최소 → 마지막 attempt가 best면 동일내용(무해), 아니면 단조개선.
+      if (!passed && bestSnapshot) {
+        await saveProductionLevels(batchId, [bestSnapshot]);
+        const snap = bestSnapshot;
+        setLevels(prev => prev.map(l =>
+          l.meta.level_number === levelNumber ? { ...l, meta: snap.meta, level_json: snap.level_json } : l
+        ));
+        matchScore = snap.meta.match_score ?? matchScore;
+        addNotification('info', `Lv.${levelNumber} 통과실패 → 최근접 버전 보관 (예측 ${((snap.meta.predicted_clear_rate ?? 0) * 100).toFixed(0)}%, 목표 ${((snap.meta.target_clear_rate ?? 0) * 100).toFixed(0)}%)`);
+      }
+
       results.push({
         level_number: levelNumber,
         attempts,
@@ -2875,7 +3022,39 @@ function TestTab({
         worst_gap_pp: lastWorstGapPp,
         direction: lastDirection,
       });
-      setSequentialProgress(prev => ({ ...prev, results: [...results] }));
+      _completed++;
+      setSequentialProgress(prev => ({ ...prev, currentIndex: _completed, results: [...results] }));
+    };
+
+    // 동시성 풀: SEQ_CONCURRENCY개 워커가 큐에서 레벨을 꺼내 병렬 처리
+    const _workers = Array.from({ length: Math.min(SEQ_CONCURRENCY, _queue.length || 1) }, async () => {
+      while (_queue.length > 0 && !signal.aborted) {
+        const ln = _queue.shift();
+        if (ln === undefined) break;
+        try {
+          await processOneLevel(ln);
+        } catch (e) {
+          console.error('[seq] 레벨 처리 실패', ln, e);
+        }
+      }
+    });
+    await Promise.all(_workers);
+
+    // [v16 QD 2차패스] 실패레벨 전용: 밴드별 다양성 풀 생성→RL측정→목표 최근접 배정.
+    // 양봉분포(20%/80%만, 중간 드묾)를 '풀에서 어쩌다 나온 중간값'으로 정면돌파. 풀 한 번에 측정해
+    // 통(bin)별로 두고 각 실패슬롯에 가장 근접한 솔버블 후보 배정 → 온디맨드 생성 정밀도 불필요.
+    let failedNums = results.filter(r => !r.success).map(r => r.level_number);
+    if (failedNums.length > 0 && !signal.aborted) {
+      setSequentialProgress(prev => ({ ...prev, status: 'testing' }));
+      addNotification('info', `2차패스(QD): 실패 ${failedNums.length}개 풀생성·배정 시작…`);
+      const recovered = await runFailedLevelSecondPass(failedNums, signal);
+      for (const ln of recovered) {
+        const r = results.find(x => x.level_number === ln);
+        if (r) r.success = true;
+      }
+      if (recovered.length > 0) {
+        addNotification('success', `2차패스 회수: ${recovered.length}/${failedNums.length}개 추가 통과`);
+      }
     }
 
     setIsSequentialProcessing(false);
@@ -2890,6 +3069,136 @@ function TestTab({
 
     loadLevels();
     onStatsUpdate();
+  };
+
+  /**
+   * [v16 QD 2차패스] 실패레벨 회수 — Quality-Diversity 아카이브식.
+   * 밴드별로 난이도 다양성 풀을 한 번에 생성(offset 스윕 × 패턴 시드)하고 RL측정 →
+   * 각 실패슬롯에 같은밴드 내 목표 클리어율 최근접·솔버블 후보를 그리디 배정.
+   * 양봉/고변동이라 슬롯별 온디맨드 적중은 어려워도, 풀 전체엔 중간값이 섞여 나옴 → 배정으로 적중.
+   * 반환: 새로 통과(회수)된 level_number 배열.
+   */
+  const runFailedLevelSecondPass = async (
+    failedLevelNumbers: number[],
+    signal: AbortSignal,
+  ): Promise<number[]> => {
+    const TOL = 0.12;
+    const recovered: number[] = [];
+    let fresh: ProductionLevel[] = [];
+    try {
+      fresh = await getProductionLevelsByBatch(batchId);
+    } catch {
+      return recovered;
+    }
+    const currentBatch = await getProductionBatch(batchId).catch(() => null);
+    const gimmickUnlocks = currentBatch?.gimmick_unlock_levels || PROFESSIONAL_GIMMICK_UNLOCK_LEVELS;
+    const metaOf = (ln: number) => fresh.find(l => l.meta.level_number === ln)?.meta;
+
+    // 밴드(100단위)별 그룹
+    const byBand = new Map<number, number[]>();
+    for (const ln of failedLevelNumbers) {
+      const band = Math.floor(ln / 100) * 100;
+      byBand.set(band, [...(byBand.get(band) || []), ln]);
+    }
+
+    // 단일 후보 생성+측정
+    const genCandidate = async (levelNumber: number, td: number, offset: number, seed: number) => {
+      const baseTileCount = Math.max(6, Math.min(8, Math.round(6 + 2.2 * Math.max(0, td - 0.15))));
+      const cnt = Math.max(4, Math.min(9, baseTileCount + offset));
+      const ml = Math.max(2, Math.min(8, Math.min(7, 3 + Math.floor(td * 4)) + Math.trunc(offset / 2)));
+      const sym = (['horizontal', 'vertical', 'both', 'none'] as const)[seed % 4];
+      const res = await generateLevel(
+        {
+          target_difficulty: td,
+          grid_size: [7, 7],
+          min_layers: 2,
+          max_layers: ml,
+          tile_types: Array.from({ length: cnt }, (_, i) => `t${i + 1}`),
+          obstacle_types: [],
+          goals: [{
+            type: (['craft', 'stack'] as const)[seed % 2],
+            direction: (['s', 'n', 'e', 'w'] as const)[seed % 4],
+            count: Math.max(2, Math.floor(3 + td * 2)),
+          }],
+          symmetry_mode: sym,
+          pattern_type: 'aesthetic',
+          pattern_index: (seed * 7 + 10) % 60,
+        },
+        {
+          auto_select_gimmicks: true,
+          available_gimmicks: ['craft', 'stack', 'chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport', 'unknown'],
+          gimmick_intensity: Math.min(td, levelNumber / 500),
+          gimmick_unlock_levels: gimmickUnlocks,
+          level_number: levelNumber,
+        }
+      );
+      const rl = await simulateLevelSkillSweep({ level_json: res.level_json, target_difficulty: td, seed });
+      return {
+        level_json: res.level_json,
+        grade: res.grade,
+        clear: rl.predicted_clear_rate,
+        solvable: rl.max_clear_rate >= 0.05 && rl.classification !== 'unclearable_suspect',
+        used: false,
+      };
+    };
+
+    for (const [, slots] of byBand) {
+      if (signal.aborted) break;
+      // 풀 생성 기준: 밴드 내 가장 낮은 실패레벨(기믹 제약 최소 → 상위 슬롯 호환). td는 슬롯 중앙값.
+      const genLn = Math.min(...slots);
+      const tds = slots.map(ln => metaOf(ln)?.target_difficulty ?? 0.5);
+      const medTd = tds.slice().sort((a, b) => a - b)[Math.floor(tds.length / 2)];
+      // offset -3..3 × 3시드 = 21후보 (난이도 촘촘히 스팬 → 양봉구멍 포착률↑). 슬롯 많으면 시드 더.
+      const seedsPer = Math.max(3, Math.ceil((slots.length * 2) / 7));
+      const jobs: Array<Promise<Awaited<ReturnType<typeof genCandidate>> | null>> = [];
+      for (let off = -3; off <= 3; off++) {
+        for (let s = 0; s < seedsPer; s++) {
+          jobs.push(genCandidate(genLn, medTd, off, off * 10 + s + 1).catch(() => null));
+        }
+      }
+      const pool = (await Promise.all(jobs)).filter(Boolean) as Array<Awaited<ReturnType<typeof genCandidate>>>;
+      const solvablePool = pool.filter(c => c.solvable);
+      if (solvablePool.length === 0) continue;
+
+      // 그리디 배정: 각 실패슬롯에 목표 최근접 미사용 후보
+      const sortedSlots = slots.slice().sort((a, b) => (metaOf(a)?.target_difficulty ?? 0.5) - (metaOf(b)?.target_difficulty ?? 0.5));
+      for (const ln of sortedSlots) {
+        if (signal.aborted) break;
+        const meta = metaOf(ln);
+        if (!meta) continue;
+        // 목표 클리어율: 백엔드 곡선과 동기화 위해 RL 1회로 target 취득(가벼움) — 대신 후보 clear와 비교
+        // 간이: 후보 중 '슬롯 target_clear' 최근접. target_clear는 백엔드가 주는 값과 동일 곡선 필요 →
+        // 후보 생성 시 같은 td로 측정했으니, 슬롯 target은 그 슬롯 td의 목표. 한 후보를 슬롯 td로 재측정해 target 취득.
+        const probe = solvablePool.find(c => !c.used);
+        if (!probe) break;
+        const tgtResp = await simulateLevelSkillSweep({ level_json: probe.level_json, target_difficulty: meta.target_difficulty, seed: 1 }).catch(() => null);
+        const targetClear = tgtResp?.target_clear_rate ?? 0.4;
+        let best: typeof solvablePool[number] | null = null;
+        let bestGap = TOL;
+        for (const c of solvablePool) {
+          if (c.used) continue;
+          const g = Math.abs(c.clear - targetClear);
+          if (g < bestGap) { bestGap = g; best = c; }
+        }
+        if (!best) continue;
+        best.used = true;
+        // 배정: 슬롯 메타에 RL검증 결과 채워 저장 (통과 처리)
+        const rlMeta = {
+          verification_method: 'rl' as const,
+          predicted_clear_rate: best.clear,
+          target_clear_rate: targetClear,
+          clear_rate_gap: best.clear - targetClear,
+          rl_classification: undefined,
+          match_score: Math.max(0, 100 - Math.abs(best.clear - targetClear) * 100 * 2),
+          grade: best.grade as DifficultyGrade,
+          verified: true,
+          verification_passed: true,
+        };
+        await saveProductionLevels(batchId, [{ meta: { ...meta, ...rlMeta }, level_json: best.level_json }]);
+        recovered.push(ln);
+      }
+    }
+    return recovered;
   };
 
   const handleStopSequentialProcess = () => {
@@ -3185,7 +3494,9 @@ function TestTab({
     levelNumber: number,
     userPatternIndex?: number,
     userSymmetryMode?: 'none' | 'horizontal' | 'vertical' | 'both',
-    options?: { forceNoTemplate?: boolean }
+    // [v16 피드백제어] difficultyOffset: 순차검증이 측정 gap으로 계산한 난이도 조정값.
+    // 양수=더 어렵게(타일종류↑/층↑), 음수=더 쉽게. 표 대신 측정→조정으로 목표 수렴.
+    options?: { forceNoTemplate?: boolean; difficultyOffset?: number }
   ) => {
     const level = levels.find(l => l.meta.level_number === levelNumber);
     if (!level) return;
@@ -3348,6 +3659,20 @@ function TestTab({
       if (isEarlyLevel) { minLayers = 2; maxLayers = Math.min(4, maxLayers); }
       else if (isBossLevel) { minLayers = Math.max(3, Math.floor(2 + targetDifficulty * 2)); maxLayers = Math.min(7, 4 + Math.floor(targetDifficulty * 3)); }
 
+      // [v16 피드백제어] 순차검증이 측정한 gap으로 난이도 조준. 난이도함수가 고차원(타일종류·배치·층·기믹)
+      // 이라 표(feed-forward)로 불가 → 측정→조정(closed-loop)으로 수렴. offset 0이면 백엔드 자동(무개입).
+      const diffOffset = options?.difficultyOffset ?? 0;
+      // 백엔드 생성기가 다중경로라 auto useTileCount가 불안정(같은 td에 8~9 들쭉) → 항상 명시적 tile_types로
+      // 타일종류를 직접 제어. 피드백 offset이 이 값을 조준한다. round(6+2.2*max(0,td-0.15)) clamp[6,8] 기준.
+      const baseTileCount = Math.max(6, Math.min(8, Math.round(6 + 2.2 * Math.max(0, targetDifficulty - 0.15))));
+      const steeredTileCount = Math.max(4, Math.min(9, baseTileCount + diffOffset));
+      const steeredTileTypes: string[] = Array.from({ length: steeredTileCount }, (_, i) => `t${i + 1}`);
+      // 층수 보조 조정(미세 레버, offset 절반)
+      if (diffOffset !== 0) {
+        maxLayers = Math.max(2, Math.min(8, maxLayers + Math.trunc(diffOffset / 2)));
+        minLayers = Math.min(minLayers, maxLayers);
+      }
+
       let bestResult: GenerationResult | null = null;
       let bestGap = Infinity;
       // [v15.42] Track best fallback (playability_warning=true) separately so we only use it
@@ -3379,7 +3704,8 @@ function TestTab({
                 grid_size: gridSize,
                 min_layers: minLayers,
                 max_layers: maxLayers,
-                tile_types: undefined, // 백엔드에서 level_number 기반 자동 선택
+                // 피드백 offset 있으면 조준한 타일종류, 없으면 백엔드 자동선택
+                tile_types: steeredTileTypes,
                 obstacle_types: [],
                 goals: [{
                   type: goalType,
@@ -4195,12 +4521,14 @@ function TestTab({
       {/* Sequential Auto Process Panel - auto_single mode */}
       {testMode === 'auto_single' && (() => {
         const untestedLevels = levels.filter(l => !l.meta.match_score || l.meta.match_score === 0);
-        // 동적 컷오프 사용 — handleSequentialProcess 와 동일 기준이어야 통과/실패 표시가 일치한다
-        const failedLevels = levels.filter(l =>
-          l.meta.match_score !== undefined &&
-          l.meta.match_score > 0 &&
-          l.meta.match_score < computeSequentialPassThreshold(l.meta.target_difficulty)
-        );
+        // 동적 컷오프 사용 — handleSequentialProcess 와 동일 기준이어야 통과/실패 표시가 일치한다.
+        // [v16] verification_passed가 true면(튜토리얼 1~10 쉬움 허용 포함) 실패로 안 잡음.
+        const failedLevels = levels.filter(l => {
+          if (l.meta.verification_passed === true) return false; // 통과(튜토리얼 예외 포함)
+          return l.meta.match_score !== undefined &&
+            l.meta.match_score > 0 &&
+            l.meta.match_score < computeSequentialPassThreshold(l.meta.target_difficulty);
+        });
         const targetLevels = [...untestedLevels, ...failedLevels].sort((a, b) => a.meta.level_number - b.meta.level_number);
         const allSelected = targetLevels.length > 0 && targetLevels.every(l => selectedSequentialLevels.has(l.meta.level_number));
 
@@ -4423,7 +4751,24 @@ function TestTab({
               );
             })()}
           </div>
-        ) : null;
+        ) : (
+          // [fix] 미검증/미달 레벨이 없어도 패널을 숨기지 않음 — 전체 재검증 진입점 제공.
+          // (이미 검증된 배치/전부 통과/levels 로딩 직후엔 targetLevels가 비어 패널이 통째로 사라지던 문제)
+          <div className="bg-gray-800 rounded-lg p-4 space-y-3">
+            <div className="text-sm text-gray-300">
+              {levels.length === 0
+                ? '레벨을 불러오는 중이거나 배치가 비어 있습니다.'
+                : '미검증/미달 레벨이 없습니다 (모든 레벨 검증·통과 상태).'}
+            </div>
+            <Button
+              onClick={() => handleSequentialProcess(levels.map(l => l.meta.level_number))}
+              disabled={isSequentialProcessing || levels.length === 0}
+              className="bg-blue-600 hover:bg-blue-500"
+            >
+              {isSequentialProcessing ? '검증 중…' : `🔁 전체 ${levels.length}개 재검증 (RL)`}
+            </Button>
+          </div>
+        );
       })()}
 
       {/* Stored Low-Match Levels Regeneration */}
@@ -5727,7 +6072,56 @@ function TestTab({
                 );
               })()}
 
-              {/* Bot Clear Rate Gauges - Horizontal compact layout */}
+              {/* [v16] RL 예측 유저 클리어율 (검증 주력 지표) */}
+              {selectedLevel.meta.predicted_clear_rate !== undefined && (() => {
+                const pred = selectedLevel.meta.predicted_clear_rate ?? 0;
+                const tgt = selectedLevel.meta.target_clear_rate;
+                const gap = selectedLevel.meta.clear_rate_gap;
+                const cls = selectedLevel.meta.rl_classification;
+                const passed = selectedLevel.meta.verification_passed;
+                const clsLabel: Record<string, string> = {
+                  very_easy: '매우쉬움', easy: '쉬움', normal: '보통',
+                  hard: '어려움', very_hard: '매우어려움', unclearable_suspect: '⚠️클리어불가의심',
+                };
+                return (
+                  <div className="mt-3 p-2 bg-gray-700/30 rounded">
+                    <div className="flex items-center gap-3 flex-wrap">
+                      <span className="text-xs text-gray-400 shrink-0">예측 유저 클리어율:</span>
+                      <div className="flex items-center gap-2 min-w-[140px] flex-1">
+                        <div className="flex-1 h-2.5 bg-gray-600 rounded-full overflow-hidden">
+                          <div className="h-full bg-emerald-500" style={{ width: `${Math.round(pred * 100)}%` }} />
+                        </div>
+                        <span className="text-sm font-bold text-emerald-300 w-10 text-right">{(pred * 100).toFixed(0)}%</span>
+                      </div>
+                      {tgt !== undefined && tgt !== null && (
+                        <span className="text-[11px] text-gray-400">
+                          목표 {(tgt * 100).toFixed(0)}%
+                          {gap !== undefined && gap !== null && (
+                            <span className={Math.abs(gap) <= 0.10 ? 'text-gray-400' : gap > 0 ? 'text-sky-400' : 'text-orange-400'}>
+                              {' '}(gap {gap >= 0 ? '+' : ''}{(gap * 100).toFixed(0)}%p{gap > 0 ? ' 쉬움' : gap < 0 ? ' 어려움' : ''})
+                            </span>
+                          )}
+                        </span>
+                      )}
+                      {cls && (
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded ${cls === 'unclearable_suspect' ? 'bg-red-900/50 text-red-400' : 'bg-gray-600/50 text-gray-300'}`}>
+                          {clsLabel[cls] ?? cls}
+                        </span>
+                      )}
+                      {selectedLevel.meta.luck_suspect && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-900/50 text-amber-400" title="실력과 무관하게 운에 좌우되는 레벨 의심">🎲 운빨의심</span>
+                      )}
+                      {passed !== undefined && (
+                        <span className={`text-xs font-bold px-2 py-0.5 rounded ${passed ? 'bg-green-900/50 text-green-400' : 'bg-red-900/50 text-red-400'}`}>
+                          {passed ? '✓ 통과' : '✗ 미달'}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Bot Clear Rate Gauges (레거시 봇 검증 — predicted 없을 때만) */}
               {selectedLevel.meta.bot_clear_rates && (
                 <div className="mt-3 p-2 bg-gray-700/30 rounded">
                   <div className="flex items-center gap-3">
@@ -6026,29 +6420,52 @@ function TestTab({
                           </div>
                         </div>
 
-                        {/* Bot Stats */}
-                        <div className="space-y-1">
-                          {autoTestResult.bot_stats.map(bot => {
-                            const gap = (bot.clear_rate - bot.target_clear_rate) * 100;
-                            const isGood = Math.abs(gap) <= 10;
-                            return (
-                              <div key={bot.profile} className="flex items-center justify-between text-sm px-2 py-1 bg-gray-700/50 rounded">
-                                <span className="text-gray-300">
-                                  {bot.profile === 'novice' ? '🌱 초보자' :
-                                   bot.profile === 'casual' ? '🎮 캐주얼' :
-                                   bot.profile === 'average' ? '👤 일반' :
-                                   bot.profile === 'expert' ? '⭐ 숙련자' : '🏆 최적'}
-                                </span>
-                                <span className="text-white font-medium">
-                                  {(bot.clear_rate * 100).toFixed(0)}%
-                                </span>
-                                <span className={`text-xs ${isGood ? 'text-green-400' : 'text-yellow-400'}`}>
-                                  ({gap >= 0 ? '+' : ''}{gap.toFixed(0)}%p)
-                                </span>
+                        {/* [v16] RL 예측 유저 클리어율 (봇 3종 → 통합 1개 게이지) */}
+                        {autoTestResult.predicted_clear_rate !== undefined ? (
+                          <div className="space-y-1">
+                            <div className="text-xs text-gray-400 text-center">예측 유저 클리어율</div>
+                            <div className="flex items-center gap-2">
+                              <div className="flex-1 h-3 bg-gray-700 rounded-full overflow-hidden">
+                                <div className="h-full bg-emerald-500 transition-all duration-300" style={{ width: `${Math.round((autoTestResult.predicted_clear_rate ?? 0) * 100)}%` }} />
                               </div>
-                            );
-                          })}
-                        </div>
+                              <span className="text-sm font-bold text-emerald-300 w-10 text-right">{((autoTestResult.predicted_clear_rate ?? 0) * 100).toFixed(0)}%</span>
+                            </div>
+                            <div className="text-[11px] text-gray-400 text-center">
+                              목표 {((autoTestResult.target_clear_rate ?? 0) * 100).toFixed(0)}%
+                              {autoTestResult.clear_rate_gap !== undefined && (
+                                <span className={Math.abs(autoTestResult.clear_rate_gap) <= 0.12 ? 'text-gray-400' : autoTestResult.clear_rate_gap > 0 ? 'text-sky-400' : 'text-orange-400'}>
+                                  {' '}(gap {autoTestResult.clear_rate_gap >= 0 ? '+' : ''}{(autoTestResult.clear_rate_gap * 100).toFixed(0)}%p)
+                                </span>
+                              )}
+                              {autoTestResult.rl_classification === 'unclearable_suspect' && (
+                                <span className="text-red-400"> · ⚠️클리어불가의심</span>
+                              )}
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="space-y-1">
+                            {autoTestResult.bot_stats.map(bot => {
+                              const gap = (bot.clear_rate - bot.target_clear_rate) * 100;
+                              const isGood = Math.abs(gap) <= 10;
+                              return (
+                                <div key={bot.profile} className="flex items-center justify-between text-sm px-2 py-1 bg-gray-700/50 rounded">
+                                  <span className="text-gray-300">
+                                    {bot.profile === 'novice' ? '🌱 초보자' :
+                                     bot.profile === 'casual' ? '🎮 캐주얼' :
+                                     bot.profile === 'average' ? '👤 일반' :
+                                     bot.profile === 'expert' ? '⭐ 숙련자' : '🏆 최적'}
+                                  </span>
+                                  <span className="text-white font-medium">
+                                    {(bot.clear_rate * 100).toFixed(0)}%
+                                  </span>
+                                  <span className={`text-xs ${isGood ? 'text-green-400' : 'text-yellow-400'}`}>
+                                    ({gap >= 0 ? '+' : ''}{gap.toFixed(0)}%p)
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
 
                         {/* Recommendations */}
                         {autoTestResult.recommendations.length > 0 && (
@@ -6124,7 +6541,26 @@ function TestTab({
                         </span>
                       </div>
                     )}
-                    {/* Bot Clear Rate Gauges */}
+                    {/* [v16] RL 예측 유저 클리어율 */}
+                    {selectedLevel?.meta.predicted_clear_rate !== undefined && (
+                      <div className="w-full max-w-xs space-y-1 mt-2">
+                        <div className="text-xs text-gray-400 text-center mb-1">예측 유저 클리어율</div>
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1 h-3 bg-gray-700 rounded-full overflow-hidden">
+                            <div className="h-full bg-emerald-500 transition-all duration-300" style={{ width: `${Math.round((selectedLevel.meta.predicted_clear_rate ?? 0) * 100)}%` }} />
+                          </div>
+                          <span className="text-sm font-bold text-emerald-300 w-10 text-right">{((selectedLevel.meta.predicted_clear_rate ?? 0) * 100).toFixed(0)}%</span>
+                        </div>
+                        {selectedLevel.meta.target_clear_rate != null && (
+                          <div className="text-[11px] text-gray-400 text-center">
+                            목표 {((selectedLevel.meta.target_clear_rate ?? 0) * 100).toFixed(0)}%
+                            {selectedLevel.meta.clear_rate_gap != null && ` (gap ${selectedLevel.meta.clear_rate_gap >= 0 ? '+' : ''}${((selectedLevel.meta.clear_rate_gap ?? 0) * 100).toFixed(0)}%p)`}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Bot Clear Rate Gauges (레거시 — predicted 없을 때만) */}
                     {/* [v15.14] 검증용 3봇만 표시 (average, expert, optimal) */}
                     {selectedLevel?.meta.bot_clear_rates && (
                       <div className="w-full max-w-xs space-y-2 mt-2">

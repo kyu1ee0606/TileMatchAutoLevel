@@ -106,9 +106,14 @@ export function checkTileDivisibility(
   }
   remainders.sort((a, b) => parseInt(a.type.slice(1)) - parseInt(b.type.slice(1)));
 
-  // 데드락 판정: 부족분을 craft/stack 내부 타일로 메울 수 있는가?
+  // 데드락 판정: 부족분(needed)을 craft/stack 내부 타일로 메울 수 있는가?
+  // [fix 2026-06-23] needed===0(모든 plain 타입이 이미 ÷3)이면 메울 잔여가 없으므로 통과.
+  //   기존엔 needed=0이어도 surplus(=internalCount)%3 을 요구 → stack 컨테이너 내부카운트가
+  //   3배수 아니면(예: stack_w 내부 5개) false-positive 데드락(빨강). stack은 쌓기 기믹이라
+  //   3매칭 대상이 아니고, 컨테이너 자체 ÷3은 생성기 _finalize_divisibility_guarantee가 별도 보장.
+  //   실제 플레이/RL 솔버블과 충돌하던 잘못된 잠금 표시를 제거한다.
   const surplus = internalCount - needed;
-  const playable = internalCount >= needed && surplus % 3 === 0;
+  const playable = needed === 0 ? true : (internalCount >= needed && surplus % 3 === 0);
 
   return {
     ok: playable,

@@ -465,7 +465,14 @@ def _convert_to_townpop_format(level_json: dict) -> dict:
         "randSeed": str(level_json.get("randSeed", level_json.get("seed", 0))),
         "shuffleLayer": str(level_json.get("shuffleLayer", 0)),
         "shuffleTile": str(level_json.get("shuffleTile", 0)),
-        "difficulty": str(level_json.get("difficulty", level_json.get("target_difficulty", 0))),
+        # [v16] difficulty 필드 = 인게임 표시용 "예측 유저 클리어율(%)".
+        # 게임 xDifficulty는 파싱만 하고 미사용(셔플 영향X) → 클리어% 운반에 재사용.
+        # predicted_clear_rate(0~1)를 round(×100) 정수로. 미검증(없음)이면 -1(게임이 숨김).
+        "difficulty": str(
+            max(0, min(100, round(level_json["predicted_clear_rate"] * 100)))
+            if isinstance(level_json.get("predicted_clear_rate"), (int, float))
+            else -1
+        ),
         "useTeleportInRandomizer": "1" if level_json.get("useTeleportInRandomizer", False) else "0",
         "teleportRandSeed": str(level_json.get("teleportRandSeed", 0)),
 

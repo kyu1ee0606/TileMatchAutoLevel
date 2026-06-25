@@ -347,6 +347,29 @@ def get_use_tile_count_for_level(level_number: int) -> int:
     config = get_gboost_style_layer_config(level_number)
     return config.get("tile_types", 5)
 
+
+def get_tile_count_for_difficulty(level_number: int, target_difficulty: Optional[float]) -> int:
+    """타일 종류수를 밴드 천장(level_number)과 target_difficulty로 스케일.
+
+    쉬운 레벨일수록 종류 적게 → 캐주얼 클리어율↑. RL 검증·재생성이 잔여 미세보정.
+    [2026-06-23] 기존 level_number-only 선택이 td를 무시해 쉬운 레벨이 과난이도되던 문제 수정.
+    실측: lvl300 td0.3에서 자동 9~10종 → 캐주얼 9% 클리어, 4종 → 39%, 목표 40%.
+    타일 종류수가 난이도 지배 레버임이 측정으로 확인됨(레이어/타일수보다 영향 큼)."""
+    # [측정] 난이도 진행은 밴드(레이어 1→10, 타일 9→120)가 이미 책임짐. 타입수까지 4→13으로
+    # 같이 올리면 고난도가 복리로 사실상 클리어불가(1% 미만)가 됨. 타입수는 좁은 범위(5~7)로
+    # 유지하고 td로 미세조정 → 밴드가 진행을, 타입수가 미세 변별을 담당. 잔여 보정은 RL 검증·재생성.
+    # [2026-06-23 v2] utc 한 단계 차이가 클리어율을 크게 흔들어(6종≈80% → 7종≈20%) easy-mid가
+    # 절벽됨. utc6을 td0.35까지 연장(easy-mid 분포가 목표를 걸치게) → utc7(hard) → utc8(extreme).
+    # 측정: utc6 분포 14~80%(easy-mid 목표 걸침), utc7 hard, utc8 극한.
+    ceiling = get_use_tile_count_for_level(level_number)
+    CAP = min(ceiling, 8)
+    if target_difficulty is None:
+        return min(CAP, 7)
+    td = max(0.0, min(1.0, target_difficulty))
+    # td0~0.35→6, 0.35~0.85→7, 0.85+→8 (완만, 절벽 제거)
+    count = round(6 + 2.2 * max(0.0, td - 0.15))
+    return max(6, min(CAP, count))
+
 from ..models.level import (
     GenerationParams,
     GenerationResult,
@@ -1915,6 +1938,19 @@ class LevelGenerator:
         else:
             # No valid tiles, use default of 15 (matches TownPop client - t1~t15 균등 분배)
             use_tile_count = 15
+
+        # [2026-06-23] td-aware 종류수 상한 — 쉬운 레벨 과난이도 방지.
+        # 기존엔 useTileCount가 level_number 밴드값으로만 정해져 td 무시 → 쉬운 레벨도 타입 9~10종 → 캐주얼 과난.
+        # 밴드 천장을 유지하되 target_difficulty로 하향 스케일. dock 클램프 앞에 적용(둘 다 하향 캡).
+        # [피드백제어] 단, tile_types를 명시적으로 준 경우(FE 난이도 조준 override)는 td-cap 건너뜀 —
+        #   안 그러면 피드백의 '더 어렵게'(타입↑) 방향이 td-cap에 도로 깎여 막힘. dock 안전캡은 아래서 여전히 적용.
+        explicit_tile_types = bool(params.tile_types)
+        td_for_tiles = getattr(params, 'target_difficulty', None)
+        if params.level_number and td_for_tiles is not None and not explicit_tile_types:
+            td_cap = get_tile_count_for_difficulty(params.level_number, td_for_tiles)
+            if use_tile_count > td_cap:
+                logger.debug(f"[TD_TILE_CAP] useTileCount {use_tile_count} → {td_cap} (td={td_for_tiles:.2f}, lvl={params.level_number})")
+                use_tile_count = td_cap
 
         # CRITICAL: Apply dock capacity limit EARLY to ensure tile_types are valid from the start
         # 독 슬롯 수 대비 타일 종류가 너무 많으면 데드락 발생

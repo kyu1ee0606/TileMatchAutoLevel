@@ -153,6 +153,14 @@ export interface ProductionLevelMeta {
   verified?: boolean;                            // 검증 완료 여부
   verification_passed?: boolean;                 // 검증 통과 여부
 
+  // [v16] RL 검증 (예측 유저 클리어율 기반 — 주력 지표)
+  verification_method?: 'bot' | 'rl';            // 검증 방식 (레거시 bot / 신규 rl)
+  predicted_clear_rate?: number;                 // 예측 유저 클리어율 0~1 (캐주얼 가중)
+  target_clear_rate?: number;                    // 목표곡선 기대 클리어율 0~1
+  clear_rate_gap?: number;                       // predicted - target
+  rl_classification?: string;                    // RL 분류 (very_easy~unclearable_suspect)
+  luck_suspect?: boolean;                        // 운빨 레벨 의심 (경고)
+
   // [v15.35] 재생성 정보
   regenerated?: boolean;                         // 재생성 여부
   regeneration_attempts?: number;                // 재생성 시도 횟수

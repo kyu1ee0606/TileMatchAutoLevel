@@ -33,6 +33,14 @@ export interface RLSimResult {
   classification: RLSimClassification;
   max_clear_rate: number;
   min_clear_rate: number;
+  /** 예측 유저 클리어율 (검증 주력 지표) — 캐주얼 실력분포 가중, 0~1 */
+  predicted_clear_rate: number;
+  /** 목표곡선 기대 클리어율 0~1 (요청에 target_difficulty 준 경우만 채워짐) */
+  target_clear_rate: number | null;
+  /** predicted - target (양수=목표보다 쉬움) */
+  clear_rate_gap: number | null;
+  /** |gap|<=tol AND not unclearable_suspect */
+  verification_passed: boolean | null;
   skill_curve: SkillCurvePoint[];
   total_rollouts: number;
   elapsed_ms: number;
@@ -68,6 +76,8 @@ export interface RLSimRequest {
   rollouts_per_point?: number;
   seed?: number;
   max_moves?: number;
+  /** 목표난이도. 지정 시 예측클리어율을 목표곡선과 비교해 통과여부 산출 */
+  target_difficulty?: number;
 }
 
 export interface RLSimBatchRequest {

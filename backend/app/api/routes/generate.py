@@ -108,18 +108,37 @@ def _generate_core_worker(request_dict: dict) -> dict:
         # [역생성] 경로 독립 후처리 — _generate_level_impl 내부 분기(고정레이아웃/폴백/특수모양)가
         # 많아 params 플래그가 모든 경로에 닿지 않는다. 단일 초크포인트에서 보장한다.
         # core(generator.generate)에서 이미 적용했으면 'reverse_generated' 키 존재 → 건너뜀.
-        if getattr(request, "use_reverse_generation", False) and hasattr(response, "level_json"):
+        #
+        # [A2 게이트, 2026-06-23] forward 생성이 데드락(언클리어러블)이면 플래그와 무관하게
+        # 자동으로 역생성 적용 → 솔버블 보장. 깰 수 있는 좋은 forward 레벨(난이도 유지)은 건드리지
+        # 않고, playability_warning(데드락 미해소=거의 언클리어러블)인 것만 구제한다.
+        # 역생성은 plain/안전기믹만 보장하므로 컨테이너 과다 레벨은 폴백 실패할 수 있음(그땐 경고 유지).
+        needs_rescue = bool(getattr(response, "playability_warning", False))
+        use_rev = bool(getattr(request, "use_reverse_generation", False))
+        if (use_rev or needs_rescue) and hasattr(response, "level_json"):
             lj = response.level_json
             if "reverse_generated" not in lj:
                 from ...core.reverse_generator import apply_reverse_generation
                 utc = lj.get("useTileCount", 5) or 5
+                # 압박-인지 구제: 어려운 레벨(td↑)은 높은 held로 역생성 → 구제해도 trivial(100%)
+                # 대신 밴드(~50%)로 떨어뜨림. best-of-5가 forward-hard 후보를 우선 선택하고,
+                # 구제는 '언클리어러블 회피' 안전망 역할. (역생성 천장 ~50%는 양자화 한계)
+                _td = getattr(request, "target_difficulty", 0.5) or 0.5
+                held_t = max(4, min(7, round(4 + 3 * _td)))
                 rev, applied, reason = apply_reverse_generation(
                     lj, use_tile_count=utc,
                     max_open=getattr(request, "reverse_generation_max_open", 2), verify=True,
+                    held_target=held_t,
                 )
                 rev["reverse_generated"] = applied
                 rev["reverse_generation_reason"] = reason
                 response.level_json = rev
+                # 구제 성공 시 솔버블 보장됨 → 경고 해제. 실패(컨테이너 등)면 경고 유지.
+                if applied and needs_rescue:
+                    try:
+                        response.playability_warning = False
+                    except Exception:  # noqa: BLE001
+                        pass
         return {"ok": True, "response": response}
     except HTTPException as he:
         return {"ok": False, "status": he.status_code, "detail": str(he.detail)}

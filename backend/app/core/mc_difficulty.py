@@ -38,6 +38,52 @@ DEFAULT_SKILL_GRID = [0.0, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 1.0]
 DEFAULT_ROLLOUTS_PER_POINT = 40
 DEFAULT_BASE_SEED = 4242
 
+# === 예측 유저 클리어율 (검증 주력 지표) ===
+# RL 스킬곡선을 "평균 캐주얼유저" 실력분포로 가중평균 → 모집단 클리어율%.
+# 앵커: Casual 봇(mistake 0.25/lookahead 1) 역매핑 → theta ≈ 0.47.
+# std 0.18: novice~숙련 캐주얼을 포괄하는 분포폭.
+# 실측(2026-06-23): 재측정 std 1.8%p(안정), td추종 Spearman -0.69~-0.80.
+CASUAL_SKILL_MEAN = 0.47
+CASUAL_SKILL_STD = 0.18
+
+# td → 목표 캐주얼 클리어율 설계곡선.
+# [2026-06-23 v2] easy-mid 완화 — 실게임(Triple Match류) 쉬운레벨은 70-90% 클리어가 정상이고,
+# 생성기도 utc6 밴드가 ~80%대라 원래 곡선(td0.2=48%)은 비현실적·도달불가였음. 측정기반 현실화:
+# utc6(easy-mid)/utc7(hard)/utc8(extreme) 밴드가 best-of-N 분포로 걸칠 수 있게 단조 완만화.
+TARGET_CLEAR_CURVE = [
+    (0.0, 0.90), (0.1, 0.80), (0.2, 0.70), (0.3, 0.55), (0.4, 0.42),
+    (0.5, 0.32), (0.6, 0.24), (0.7, 0.17), (0.8, 0.12), (0.9, 0.08), (1.0, 0.05),
+]
+CLEAR_RATE_TOLERANCE = 0.12  # ±12%p 통과밴드 (생성변동 ±20~25%p, best-of-N으로 흡수)
+
+
+def population_clear_rate(
+    curve: List[Dict[str, Any]],
+    mean: float = CASUAL_SKILL_MEAN,
+    std: float = CASUAL_SKILL_STD,
+) -> float:
+    """스킬곡선을 유저 실력분포(캐주얼 중심 정규)로 가중평균 → 예측 클리어율 0~1."""
+    if not curve:
+        return 0.0
+    weights = [math.exp(-0.5 * ((c["theta"] - mean) / std) ** 2) for c in curve]
+    sw = sum(weights)
+    if sw <= 0:
+        return 0.0
+    return sum(weights[i] * curve[i]["clear_rate"] for i in range(len(curve))) / sw
+
+
+def target_casual_clear_rate(target_difficulty: float) -> float:
+    """목표난이도(td) → 목표 캐주얼 클리어율 0~1 (설계곡선 선형보간)."""
+    td = max(0.0, min(1.0, target_difficulty))
+    pts = TARGET_CLEAR_CURVE
+    for i in range(len(pts) - 1):
+        x0, y0 = pts[i]
+        x1, y1 = pts[i + 1]
+        if td <= x1:
+            f = 0.0 if x1 == x0 else (td - x0) / (x1 - x0)
+            return y0 + (y1 - y0) * f
+    return pts[-1][1]
+
 
 def _lerp(a: float, b: float, t: float) -> float:
     return a + (b - a) * t
@@ -325,6 +371,8 @@ def assemble_sweep_result(
         "classification": classify_theta_star(theta_star, max_clear),
         "max_clear_rate": round(max_clear, 4),
         "min_clear_rate": round(min_clear, 4),
+        # 예측 유저 클리어율 (검증 주력 지표) — 캐주얼 실력분포 가중
+        "predicted_clear_rate": round(population_clear_rate(curve), 4),
         "skill_curve": curve,
         "total_rollouts": total_rollouts,
         "config": {

@@ -20,9 +20,11 @@ from ...core.mc_difficulty import (
     DEFAULT_ROLLOUTS_PER_POINT,
     DEFAULT_SKILL_GRID,
     DEFAULT_BASE_SEED,
+    CLEAR_RATE_TOLERANCE,
     assemble_sweep_result,
     normalize_skill_grid,
     sweep_point_task,
+    target_casual_clear_rate,
 )
 from ...core.mc_search import (
     ACCEPT_TOLERANCE,
@@ -133,6 +135,10 @@ class RLSimRequest(BaseModel):
     )
     seed: int = Field(default=DEFAULT_BASE_SEED, description="공통 난수 기준 시드")
     max_moves: Optional[int] = Field(default=None, description="이동 수 제한 (생략 시 레벨 값)")
+    target_difficulty: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0,
+        description="목표난이도. 지정 시 예측클리어율을 목표곡선과 비교해 통과여부 산출."
+    )
 
 
 class RLSimBatchItem(BaseModel):
@@ -168,6 +174,12 @@ class RLSimResult(BaseModel):
     classification: str
     max_clear_rate: float
     min_clear_rate: float
+    # 예측 유저 클리어율 (검증 주력 지표) — 캐주얼 실력분포 가중평균, 0~1
+    predicted_clear_rate: float = 0.0
+    # 검증 결과 (요청에 target_difficulty 준 경우만 채워짐)
+    target_clear_rate: Optional[float] = None   # 목표곡선 기대 클리어율 0~1
+    clear_rate_gap: Optional[float] = None       # predicted - target (양수=목표보다 쉬움)
+    verification_passed: Optional[bool] = None   # |gap|<=tol AND not unclearable
     skill_curve: List[SkillCurvePoint]
     total_rollouts: int
     elapsed_ms: int
@@ -204,6 +216,7 @@ _EMPTY_RESULT_FIELDS: Dict[str, Any] = {
     "classification": "unclearable_suspect",
     "max_clear_rate": 0.0,
     "min_clear_rate": 0.0,
+    "predicted_clear_rate": 0.0,
     "skill_curve": [],
     "total_rollouts": 0,
     "elapsed_ms": 0,
@@ -245,6 +258,20 @@ def simulate_level_skill_sweep(request: RLSimRequest) -> RLSimResult:
     except Exception as exc:
         logger.exception("[rl-sim] skill sweep failed")
         raise HTTPException(status_code=500, detail=f"시뮬레이션 실패: {exc}") from exc
+
+    # 목표난이도 주어지면 예측클리어율을 목표곡선과 비교해 통과여부 산출.
+    # 정책: |gap|<=tolerance 면 통과. 단 unclearable_suspect 는 무조건 거부.
+    # luck_suspect 는 경고만(거부 안함) — 별도 luck_suspect 플래그로 UI 노출.
+    if request.target_difficulty is not None:
+        target = round(target_casual_clear_rate(request.target_difficulty), 4)
+        predicted = result.get("predicted_clear_rate", 0.0)
+        gap = round(predicted - target, 4)
+        passed = (abs(gap) <= CLEAR_RATE_TOLERANCE) and (
+            result.get("classification") != "unclearable_suspect"
+        )
+        result["target_clear_rate"] = target
+        result["clear_rate_gap"] = gap
+        result["verification_passed"] = passed
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
     return RLSimResult(elapsed_ms=elapsed_ms, **result)

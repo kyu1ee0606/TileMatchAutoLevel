@@ -48,19 +48,38 @@ def has_unsupported_features(level_json: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _witness_assign(order: List[str], use_tile_count: int, max_open: int) -> Optional[Dict[str, str]]:
+def _witness_assign(
+    order: List[str],
+    use_tile_count: int,
+    max_open: int,
+    held_target: Optional[int] = None,
+) -> Optional[Dict[str, str]]:
     """peel 순서를 따라 타입 배정. 각 그룹=정확히 3개(÷3 자동), 동시 미완성 그룹은 서로 다른 타입,
-    held(=미완성 타일 수) ≤ 7 유지. 성공 시 {full_key: 'tN'}, 실패 시 None."""
-    max_open = max(1, min(max_open, use_tile_count, 3))
+    held(=미완성 타일 수) ≤ 7 유지. 성공 시 {full_key: 'tN'}, 실패 시 None.
+
+    [v2 난이도 압박] held_target 지정 시 '압박 모드': held(독 점유)를 held_target까지 끌어올려
+    유지(마감 지연) → 독이 빡빡 → 캐주얼 실수 시 오버플로 → 어렵지만 솔버블(불변식 held≤7 유지).
+    None이면 v1 동작(압박 최소화, max_open≤3 캡) 그대로 — 하위호환.
+    실측(2026-06-23): held 2→100% / 5→87% / 6→45% / 7+종류7→34% 클리어. 천장 ~34%(역생성 한계)."""
+    pressure = held_target is not None
+    hard_cap = 6 if pressure else 3  # 압박 모드는 동시그룹 상한을 6으로(held 7 도달 가능)
+    max_open = max(1, min(max_open if not pressure else hard_cap, use_tile_count, hard_cap))
     open_groups: List[Dict[str, Any]] = []  # {type, count}
     used_types: Set[str] = set()
     assign: Dict[str, str] = {}
     n = len(order)
+    # [fix 2026-06-25] 색상 round-robin 커서. 기존 fresh_type은 항상 최저 미사용 인덱스를 골라
+    # 닫힌 색을 즉시 재사용 → 동시그룹 수(max_open)만큼의 색만 쓰였다(max_open=2면 2색 붕괴).
+    # 커서로 1~use_tile_count를 순회하면 그룹마다 새 색이 배정돼 원래 종류수(use_tile_count)가 유지된다.
+    # 솔버블 불변: 동시 열린 그룹끼리만 다른 색이면 되므로(open_types 회피) 안전.
+    cursor = [0]
 
     def fresh_type() -> Optional[str]:
-        for idx in range(1, use_tile_count + 1):
-            t = f"t{idx}"
-            if t not in used_types:
+        open_types = {g["type"] for g in open_groups}
+        for _ in range(use_tile_count):
+            cursor[0] = (cursor[0] % use_tile_count) + 1
+            t = f"t{cursor[0]}"
+            if t not in open_types:
                 return t
         return None
 
@@ -79,7 +98,11 @@ def _witness_assign(order: List[str], use_tile_count: int, max_open: int) -> Opt
         # 남은 타일이 빠듯하면 무조건 마감 모드
         must_close = remaining_after < needed_to_close + (2 if not open_groups else 0)
 
-        open_new = (not open_groups) or (can_open and not must_close and len(open_groups) < max_open)
+        if pressure:
+            # 압박 모드: held가 목표 미만이고 안전하면 새 그룹 열어 독 점유↑ (마감 지연 → 난이도↑)
+            open_new = (not open_groups) or (can_open and not must_close and held < held_target)
+        else:
+            open_new = (not open_groups) or (can_open and not must_close and len(open_groups) < max_open)
 
         if open_new:
             t = fresh_type()
@@ -188,20 +211,22 @@ def apply_reverse_generation(
     use_tile_count: int,
     max_open: int = 2,
     verify: bool = True,
+    held_target: Optional[int] = None,
 ) -> Tuple[Dict[str, Any], bool, str]:
     """
     레벨의 plain 타일 타입을 witness peeling으로 재배정해 솔버블·÷3 보장.
 
     Returns: (level_json, applied, reason)
     1차: 컨테이너/key/기믹 유지한 채 시도. 실패 시 특수타일(컨테이너·key) 제거 후 재시도.
+    held_target: 지정 시 압박 모드(독 점유를 그만큼 유지 → 난이도↑). None이면 v1(쉬움) 동작.
     """
-    new_level, applied, reason = _attempt_reverse(level_json, use_tile_count, max_open, verify)
+    new_level, applied, reason = _attempt_reverse(level_json, use_tile_count, max_open, verify, held_target)
     if applied:
         return new_level, True, reason
     # 컨테이너/key가 있으면 제거하고 재시도(plain 솔버블 보장). 특수타일은 포기.
     if _has_special(level_json):
         stripped = _strip_special(level_json)
-        nl2, applied2, reason2 = _attempt_reverse(stripped, use_tile_count, max_open, verify)
+        nl2, applied2, reason2 = _attempt_reverse(stripped, use_tile_count, max_open, verify, held_target)
         if applied2:
             return nl2, True, f"적용 (특수타일 제거 후 {reason2})"
     return level_json, False, reason
@@ -212,6 +237,7 @@ def _attempt_reverse(
     use_tile_count: int,
     max_open: int = 2,
     verify: bool = True,
+    held_target: Optional[int] = None,
 ) -> Tuple[Dict[str, Any], bool, str]:
     """witness 1회 시도(컨테이너 제거 폴백 없음). apply_reverse_generation이 호출."""
     unsupported = has_unsupported_features(level_json)
@@ -264,11 +290,11 @@ def _attempt_reverse(
     if len(order) != n:
         return level_json, False, "peel 순서 불완전"
 
-    assign = _witness_assign(order, use_tile_count, max_open)
+    assign = _witness_assign(order, use_tile_count, max_open, held_target)
     if assign is None:
         return level_json, False, "witness 타입배정 실패"
 
-    eff_open = min(max_open, use_tile_count, 3)
+    eff_open = min(max_open, use_tile_count, 6 if held_target is not None else 3)
     total = sum(1 for layer in state.tiles.values() for _ in layer.values())
 
     def _build(keep_attrs: Optional[Set[str]]) -> Dict[str, Any]:

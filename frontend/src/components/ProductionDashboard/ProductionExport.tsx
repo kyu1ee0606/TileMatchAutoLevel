@@ -11,6 +11,7 @@ import { useUIStore } from '../../stores/uiStore';
 import { exportProductionLevels, getProductionLevelsByBatch, saveProductionLevel } from '../../storage/productionStorage';
 import { saveLevelSetToStorage, saveLocalLevelToStorage } from '../../storage/levelStorage';
 import { checkGBoostHealth, listFromGBoost, loadFromGBoost, saveToGBoost } from '../../api/gboost';
+import { simulateLevelSkillSweep } from '../../api/rlSim';
 
 // Migration helper: fix tile data format for Unity client compatibility
 function migrateTileData(tileData: TileData): { changed: boolean; data: TileData } {
@@ -451,6 +452,39 @@ export function ProductionExport({
         return;
       }
 
+      // [v16] 내보내기 전 RL 일괄측정 — predicted 없는 레벨은 difficulty가 -1로 나가므로,
+      // 배포 직전 미검증 레벨을 RL 측정해 predicted를 채운다(수동 클릭 불필요). 병렬 청크 처리.
+      const needRL = exportableLevels.filter(l => l.meta.predicted_clear_rate === undefined);
+      if (needRL.length > 0) {
+        addNotification('info', `RL 일괄측정: 미검증 ${needRL.length}개 측정 시작…`);
+        setGboostProgress({ current: 0, total: needRL.length });
+        const RL_CONC = 5;
+        let measured = 0;
+        for (let s = 0; s < needRL.length; s += RL_CONC) {
+          const chunk = needRL.slice(s, s + RL_CONC);
+          await Promise.all(chunk.map(async (l) => {
+            try {
+              const rl = await simulateLevelSkillSweep({
+                level_json: l.level_json,
+                target_difficulty: l.meta.target_difficulty,
+              });
+              // in-memory 메타 갱신 → 아래 배포 루프가 predicted를 payload에 주입
+              l.meta.predicted_clear_rate = rl.predicted_clear_rate;
+              l.meta.target_clear_rate = rl.target_clear_rate ?? undefined;
+              l.meta.clear_rate_gap = rl.clear_rate_gap ?? undefined;
+              l.meta.rl_classification = rl.classification;
+              l.meta.verification_method = 'rl';
+              await saveProductionLevel(batchId, l); // 영속화(다음 내보내기시 재측정 방지)
+            } catch {
+              /* 측정 실패 레벨은 difficulty -1로 나감 (스킵) */
+            }
+          }));
+          measured += chunk.length;
+          setGboostProgress({ current: measured, total: needRL.length });
+        }
+        addNotification('success', `RL 일괄측정 완료: ${needRL.length}개`);
+      }
+
       setGboostProgress({ current: 0, total: exportableLevels.length });
 
       let successCount = 0;
@@ -501,6 +535,11 @@ export function ProductionExport({
           uploadJson = { ...level.level_json };
           if (overrideCoin !== null) uploadJson.rewardCoin = overrideCoin;
           if (overrideAutoCollect !== null) uploadJson.autoCollectCount = overrideAutoCollect;
+        }
+        // [v16] 인게임 표시용 예측 클리어율 주입 → 컨버터가 difficulty=round(predicted×100)로 변환.
+        // meta에만 있는 predicted를 배포 payload(level_json)에 실어 컨버터까지 전달.
+        if (level.meta.predicted_clear_rate !== undefined) {
+          uploadJson = { ...uploadJson, predicted_clear_rate: level.meta.predicted_clear_rate } as unknown as LevelJSON;
         }
 
         try {

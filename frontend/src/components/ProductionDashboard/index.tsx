@@ -12,7 +12,8 @@ import { analyzeAutoPlay, fixCentering } from '../../api/analyze';
 import { simulateLevelSkillSweep } from '../../api/rlSim';
 import GamePlayer from '../GamePlayer';
 import GameBoard from '../GamePlayer/GameBoard';
-import { createGameEngine } from '../../engine/gameEngine';
+import { createGameEngine, resolveT0TileTypes } from '../../engine/gameEngine';
+import { zWellRandom } from '../../engine/tileDistributor';
 import type { GameStats, LevelInfo, GameTile } from '../../types/game';
 import type { GenerationParams, GenerationResult, DifficultyGrade, LevelJSON } from '../../types';
 import {
@@ -56,6 +57,117 @@ import { MetaIntegrityPanel, checkTileDivisibility, detectOOBTiles } from './Met
 import { LevelDistributionChart } from './LevelDistributionChart';
 // PatternSelector import removed - using inline grid instead
 import { getPatternByIndex, BOSS_PATTERNS, SPECIAL_PATTERNS, PATTERN_CATEGORIES } from '../../constants/patterns';
+
+/**
+ * 타일 종류 수(V) 분포 프로파일 — 백엔드 generator.py TILE_TYPE_PROFILES + LEVEL_CONFIG_TABLE 미러.
+ * ⚠️ 백엔드 변경 시 수동 동기화 필요. 형식: [최대레벨, V] 오름차순.
+ */
+const TILE_TYPE_PROFILE_CURVES: Record<string, Array<[number, number]>> = {
+  baseline: [[3, 4], [10, 5], [30, 6], [60, 8], [100, 9], [225, 9], [600, 10], [1125, 11], [1500, 12]],
+  hard_steep: [[3, 4], [10, 5], [30, 8], [60, 10], [100, 11], [225, 11], [600, 12], [1125, 12], [1500, 13]],
+};
+
+function vAtLevel(brackets: Array<[number, number]>, level: number): number {
+  for (const [cap, v] of brackets) if (level <= cap) return v;
+  return brackets[brackets.length - 1][1];
+}
+
+/**
+ * V(타일 종류 수) 분포 미리보기 그래프. baseline(회색) + 선택 프로파일(파랑) 겹쳐 표시.
+ * y=0~15, x=레벨 1~1500. 좌우 풀스트레치, 마우스오버 시 크로스헤어+값 툴팁.
+ */
+function TileTypeProfileGraph({ profile }: { profile: string }) {
+  const PADL = 30, PADR = 14, PADT = 8, PADB = 22;
+  const H = 180, MAXL = 1500, MAXV = 15;
+  // 컨테이너 실제 px 폭을 측정해 viewBox 폭으로 사용 → 1:1 비율, 텍스트 왜곡 없음
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const [vbw, setVbw] = useState(560);
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width;
+      if (w && w > 0) setVbw(Math.round(w));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const W = Math.max(120, vbw - PADL - PADR);  // 플롯 영역 폭
+  const VBW = vbw, VBH = PADT + H + PADB;
+  const xs = (l: number) => PADL + Math.min(l, MAXL) / MAXL * W;
+  const ys = (v: number) => PADT + H - (v / MAXV) * H;
+  const stepPoints = (brackets: Array<[number, number]>) => {
+    const pts: string[] = [];
+    let prev = 1;
+    for (const [cap, v] of brackets) {
+      const end = Math.min(cap, MAXL);
+      pts.push(`${xs(prev).toFixed(1)},${ys(v).toFixed(1)}`);
+      pts.push(`${xs(end).toFixed(1)},${ys(v).toFixed(1)}`);
+      prev = end;
+    }
+    return pts.join(' ');
+  };
+  const sel = TILE_TYPE_PROFILE_CURVES[profile] ?? TILE_TYPE_PROFILE_CURVES.baseline;
+  const base = TILE_TYPE_PROFILE_CURVES.baseline;
+  const showBaseline = profile !== 'baseline';
+
+  const [hover, setHover] = useState<{ level: number; vSel: number; vBase: number } | null>(null);
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const logicalX = (e.clientX - rect.left) / rect.width * VBW;  // 컨테이너→논리 좌표
+    const frac = (logicalX - PADL) / W;
+    const level = Math.max(1, Math.min(MAXL, Math.round(frac * MAXL)));
+    setHover({ level, vSel: vAtLevel(sel, level), vBase: vAtLevel(base, level) });
+  };
+
+  return (
+    <div ref={wrapRef} className="w-full mt-1">
+    <svg
+      ref={svgRef}
+      viewBox={`0 0 ${VBW} ${VBH}`}
+      width="100%"
+      height={VBH}
+      className="cursor-crosshair"
+      onMouseMove={onMove}
+      onMouseLeave={() => setHover(null)}
+    >
+      {/* y축 격자 */}
+      {[0, 3, 6, 9, 12, 15].map((v) => (
+        <g key={v}>
+          <line x1={PADL} y1={ys(v)} x2={PADL + W} y2={ys(v)} stroke="#374151" strokeWidth={0.5} />
+          <text x={PADL - 5} y={ys(v) + 3} textAnchor="end" fontSize={9} fill="#9ca3af">{v}</text>
+        </g>
+      ))}
+      {showBaseline && (
+        <polyline points={stepPoints(base)} fill="none" stroke="#6b7280" strokeWidth={1.4} strokeDasharray="4 3" vectorEffect="non-scaling-stroke" />
+      )}
+      <polyline points={stepPoints(sel)} fill="none" stroke="#3b82f6" strokeWidth={2} vectorEffect="non-scaling-stroke" />
+
+      {/* x축 라벨 */}
+      {[1, 300, 600, 900, 1200, 1500].map((l) => (
+        <text key={l} x={xs(l)} y={PADT + H + 14} textAnchor="middle" fontSize={9} fill="#9ca3af">{l}</text>
+      ))}
+
+      {/* 마우스오버 크로스헤어 + 값 */}
+      {hover && (
+        <g>
+          <line x1={xs(hover.level)} y1={PADT} x2={xs(hover.level)} y2={PADT + H} stroke="#f59e0b" strokeWidth={0.8} vectorEffect="non-scaling-stroke" />
+          {showBaseline && <circle cx={xs(hover.level)} cy={ys(hover.vBase)} r={3} fill="#6b7280" />}
+          <circle cx={xs(hover.level)} cy={ys(hover.vSel)} r={3.5} fill="#3b82f6" />
+          <g transform={`translate(${Math.min(xs(hover.level) + 6, VBW - 110)}, ${PADT + 4})`}>
+            <rect width={104} height={showBaseline ? 40 : 26} rx={3} fill="#111827" opacity={0.92} stroke="#374151" strokeWidth={0.5} />
+            <text x={6} y={13} fontSize={10} fill="#e5e7eb">Lv {hover.level}</text>
+            <text x={6} y={showBaseline ? 25 : 24} fontSize={10} fill="#60a5fa">선택 V={hover.vSel}</text>
+            {showBaseline && <text x={6} y={37} fontSize={10} fill="#9ca3af">base V={hover.vBase}</text>}
+          </g>
+        </g>
+      )}
+    </svg>
+    </div>
+  );
+}
 
 /**
  * 레벨 번호에 따른 예상 useTileCount 범위 계산
@@ -138,6 +250,203 @@ function validateUseTileCount(levelNumber: number, useTileCount: number, targetD
     range: { min, max },
     levelBased
   };
+}
+
+const VISUAL_POOL = 15; // 비주얼 스프라이트 풀 t1~t15
+
+// 🔴 게임 배포 게이트: craft/stack 명시 내부(신포맷 [count,"ids"])는 **게임 v1.10.382+** 배포 후에만 emit.
+// 구 게임에 신포맷 가면 내부 강제 t0 재분배 → relabel board와 불일치 → 매칭 붕괴.
+// 게임 빌드가 플레이어에 배포된 뒤 true로 전환. false면 현행(순수고정 relabel + 순수t0 시드) 유지.
+const ENABLE_INNER_TILE_BAKE = false;
+
+// LevelJSON은 string 인덱스 시그니처가 없어 Record<string,unknown>에 직접 대입 불가 → 완화 타입 + 내부 캐스트.
+type LevelJsonLike = { layer?: unknown; visualTileSeed?: number } | null | undefined;
+
+/**
+ * 레벨 스캔: t0 존재(top-level) + craft/stack 존재(내부 t0 = 명시와 타입 공유) + 명시 인덱스(1~15).
+ * craft/stack은 내부에 t0(런타임 랜덤)를 품어 게임에서 명시타일과 타입을 공유하므로,
+ * 명시 relabel 시 craft 방출 정렬이 깨질 수 있음 → 순수 고정 판정에서 제외해야 함.
+ */
+function scanLevelTiles(levelJson: Record<string, unknown>): { hasT0: boolean; hasCraftStack: boolean; explicitIds: Set<number> } {
+  const explicitIds = new Set<number>();
+  let hasT0 = false;
+  let hasCraftStack = false;
+  const layerCount = Number((levelJson as { layer?: unknown }).layer) || 0;
+  for (let i = 0; i < layerCount; i++) {
+    const ld = levelJson[`layer_${i}`] as { tiles?: Record<string, unknown[]> } | undefined;
+    const tiles = ld?.tiles;
+    if (!tiles) continue;
+    for (const t of Object.values(tiles)) {
+      if (!Array.isArray(t) || !t.length) continue;
+      const tt = String(t[0] ?? '');
+      if (tt === 't0') { hasT0 = true; continue; }
+      if (tt.startsWith('stack_') || tt.startsWith('craft_')) { hasCraftStack = true; continue; }
+      const m = /^t(\d+)$/.exec(tt);
+      if (m) { const id = parseInt(m[1], 10); if (id >= 1 && id <= VISUAL_POOL) explicitIds.add(id); }
+    }
+  }
+  return { hasT0, hasCraftStack, explicitIds };
+}
+
+/** seed로 pool[1..15]에서 count개 distinct 선택 → usedTypes(오름차순) 1:1 매핑. 인게임 remap과 동일 방식. */
+function buildVisualIndexMap(usedTypes: number[], seed: number): Record<number, number> {
+  const vrnd = new zWellRandom((seed + 1) >>> 0); // WELL512 seed 0(=시간기반) 회피
+  const pool: number[] = [];
+  for (let i = 0; i < VISUAL_POOL; i++) pool.push(i + 1);
+  const n = usedTypes.length;
+  for (let i = 0; i < n; i++) {
+    const j = vrnd.rand(i, VISUAL_POOL - 1); // inclusive
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  const map: Record<number, number> = {};
+  for (let k = 0; k < n; k++) map[usedTypes[k]] = pool[k];
+  return map;
+}
+
+/** "t7"→7, "key"/"t16"→16, 그 외→0. */
+function tileNum(s: string): number {
+  if (s === 'key') return 16;
+  const m = /^t(\d+)$/.exec(s);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
+/**
+ * [전체 보드 bake] craft/stack 명시 내부 지원(게임 v1.10.382+) 전제. t0/craft/stack 내부 타입을
+ * 게임 분배로 사전계산 → 보드 전체(명시+t0+내부) 논리타입을 1~15 풀 relabel(bijective) → 명시화 emit.
+ *  - top-level t0 → tiles[pos][0] = "t{visual}"
+ *  - board 명시 t1~15 → relabel
+ *  - craft/stack → tiles[pos][2] = [count, "v0_v1_..v(n-1)"] (stackIdx 0..n-1 순서 = 게임 stackCTileList[k])
+ * 결과: t0 소멸 → 전 레벨 비주얼 다양화. 매칭/난이도/÷3 불변(relabel bijective, 내부타입=게임분배결과).
+ * randSeed 구체값(>0)만. stage 1~3 제외.
+ */
+function bakeFullBoard(levelJsonIn: LevelJsonLike, levelNumber: number): void {
+  if (!levelJsonIn || typeof levelNumber !== 'number' || levelNumber <= 3) return;
+  const levelJson = levelJsonIn as unknown as Record<string, unknown>;
+  const randSeed = typeof levelJson.randSeed === 'number' ? levelJson.randSeed : 0;
+  if (!(randSeed > 0)) return; // -1/0(런타임) → bake 불가
+
+  // 1. 게임 분배 재현 (top-level t0 flat key `${i}_${pos}` + craft/stack inner `${i}_${x}_${y}_${stackIdx}`)
+  let t0Map: Map<string, string>;
+  try { t0Map = resolveT0TileTypes(levelJson); } catch { return; }
+
+  const layerCount = Number(levelJson.layer) || 0;
+
+  // 2. 전체 논리 타입 수집
+  const present = new Array(VISUAL_POOL + 1).fill(false);
+  const mark = (id: number) => { if (id >= 1 && id <= VISUAL_POOL) present[id] = true; };
+  for (let i = 0; i < layerCount; i++) {
+    const tiles = (levelJson[`layer_${i}`] as { tiles?: Record<string, unknown[]> } | undefined)?.tiles;
+    if (!tiles) continue;
+    for (const [pos, t] of Object.entries(tiles)) {
+      if (!Array.isArray(t) || !t.length) continue;
+      const tt = String(t[0] ?? '');
+      if (tt === 't0') { mark(tileNum(t0Map.get(`${i}_${pos}`) ?? '')); }
+      else if (tt.startsWith('stack_') || tt.startsWith('craft_')) {
+        const cnt = Array.isArray(t[2]) && typeof t[2][0] === 'number' ? t[2][0] as number : 0;
+        const [xs, ys] = pos.split('_');
+        for (let k = 0; k < cnt; k++) mark(tileNum(t0Map.get(`${i}_${xs}_${ys}_${k}`) ?? ''));
+      } else { mark(tileNum(tt)); }
+    }
+  }
+  const usedTypes: number[] = [];
+  for (let v = 1; v <= VISUAL_POOL; v++) if (present[v]) usedTypes.push(v);
+  if (usedTypes.length === 0) return;
+  const map = buildVisualIndexMap(usedTypes, levelNumber);
+  const rel = (id: number) => (id >= 1 && id <= VISUAL_POOL ? map[id] : id); // key(16) 등 그대로
+
+  // 3. 재기록
+  for (let i = 0; i < layerCount; i++) {
+    const tiles = (levelJson[`layer_${i}`] as { tiles?: Record<string, unknown[]> } | undefined)?.tiles;
+    if (!tiles) continue;
+    for (const [pos, t] of Object.entries(tiles)) {
+      if (!Array.isArray(t) || !t.length) continue;
+      const tt = String(t[0] ?? '');
+      if (tt === 't0') {
+        const id = tileNum(t0Map.get(`${i}_${pos}`) ?? '');
+        if (id >= 1 && id <= VISUAL_POOL) t[0] = `t${rel(id)}`;
+      } else if (tt.startsWith('stack_') || tt.startsWith('craft_')) {
+        const cnt = Array.isArray(t[2]) && typeof t[2][0] === 'number' ? t[2][0] as number : 0;
+        if (cnt <= 0) continue;
+        const [xs, ys] = pos.split('_');
+        const ids: string[] = [];
+        for (let k = 0; k < cnt; k++) {
+          const raw = t0Map.get(`${i}_${xs}_${ys}_${k}`) ?? '';
+          const id = tileNum(raw);
+          ids.push(id === 16 ? 'key' : (id >= 1 && id <= VISUAL_POOL ? `t${rel(id)}` : (raw || 't1')));
+        }
+        t[2] = [cnt, ids.join('_')];
+      } else {
+        const id = tileNum(tt);
+        if (id >= 1 && id <= VISUAL_POOL) t[0] = `t${rel(id)}`;
+      }
+    }
+  }
+}
+
+/**
+ * [고정 레벨 비주얼 랜덤화] t0 미사용 레벨의 명시 타일을 1~15 풀에서 랜덤 distinct로 재라벨(baked).
+ *
+ * 배경: 생성기가 useTileCount를 인덱스 상한으로도 해석(generator.py:3198 valid_range)해서
+ *   고정 레벨은 항상 t1..t{n} 순차만 씀 → t13~15 등 미사용. 필터/검증(다운스트림) 다 통과한
+ *   최종 JSON에서 명시 id를 일괄 relabel → 필터 함정 우회. bijective라 매칭/난이도/÷3 불변.
+ * 시드=level_number → 결정적(재현·미리보기==export). stage 1~3 제외(사용자 지정: 기존 유지).
+ * t0/혼재 레벨은 미적용(t0 런타임 remap과 충돌 방지 — scanLevelTiles.hasT0 가드).
+ */
+function remapFixedTileVisuals(levelJsonIn: LevelJsonLike, levelNumber: number): void {
+  if (!levelJsonIn || typeof levelNumber !== 'number' || levelNumber <= 3) return;
+  const levelJson = levelJsonIn as unknown as Record<string, unknown>;
+  const { hasT0, hasCraftStack, explicitIds } = scanLevelTiles(levelJson);
+  if (hasT0 || hasCraftStack) return; // t0/craft/stack(내부 t0) 레벨 제외 — 명시-t0 타입 공유로 매칭 붕괴 위험
+  if (explicitIds.size === 0) return;
+
+  const usedTypes = [...explicitIds].sort((a, b) => a - b);
+  const map = buildVisualIndexMap(usedTypes, levelNumber);
+
+  const layerCount = Number((levelJson as { layer?: unknown }).layer) || 0;
+  for (let i = 0; i < layerCount; i++) {
+    const ld = levelJson[`layer_${i}`] as { tiles?: Record<string, unknown[]> } | undefined;
+    const tiles = ld?.tiles;
+    if (!tiles) continue;
+    for (const t of Object.values(tiles)) {
+      if (!Array.isArray(t) || !t.length) continue;
+      const m = /^t(\d+)$/.exec(String(t[0] ?? ''));
+      if (m) { const id = parseInt(m[1], 10); if (id >= 1 && id <= VISUAL_POOL) t[0] = `t${map[id]}`; }
+    }
+  }
+}
+
+/**
+ * [비주얼 타일 시드] 순수 t0 레벨에만 구체 랜덤 시드 베이크 → 게임이 런타임 t0 스프라이트 재매핑.
+ *
+ * 기본값 판단: -1(런타임랜덤=미리보기≠인게임)·0(전역 고정=단조) 둘 다 부적합 → 구체 랜덤 베이크(결정적+다양성).
+ * ⚠️ 가드: **순수 t0(명시타일과 타입 공유 없음)** 만 적용. 혼재(t0+명시) 레벨은 게임 ApplyVisualTileRemap이
+ *   t0 타일만 리맵 → 명시타일과 공유하던 매칭 트리플 깨짐(클리어 불가). 그래서 명시타일 있으면 미설정.
+ */
+function bakeVisualTileSeed(levelJsonIn: LevelJsonLike): void {
+  if (!levelJsonIn) return;
+  if (typeof levelJsonIn.visualTileSeed === 'number') return; // 이미 지정됨 → 보존
+  const levelJson = levelJsonIn as unknown as Record<string, unknown>;
+  const { hasT0, explicitIds } = scanLevelTiles(levelJson);
+  if (!hasT0 || explicitIds.size > 0) return; // 순수 t0 아니면 미적용 (혼재 버그 차단)
+  (levelJsonIn as { visualTileSeed?: number }).visualTileSeed = Math.floor(Math.random() * 2_000_000_000) + 1;
+}
+
+/**
+ * 프로덕션 레벨 비주얼 확정(생성/재생성 시 1회). 상호배타:
+ *  - 고정(t0無, lvl>3) → 명시타일 1~15 랜덤 relabel
+ *  - 순수 t0 → visualTileSeed 베이크 (런타임 remap)
+ *  - 혼재/stage1~3 → 미적용(기존 유지)
+ */
+function applyProductionTileVisuals(levelJson: LevelJsonLike, levelNumber: number): void {
+  if (!levelJson) return;
+  if (ENABLE_INNER_TILE_BAKE) {
+    // 게임 v1.10.382+ 배포 후: t0/craft/stack 전부 명시화 bake → 전 레벨 다양화
+    bakeFullBoard(levelJson, levelNumber);
+  } else {
+    // 현행(구 게임 안전): 순수 고정 relabel + 순수 t0 시드
+    remapFixedTileVisuals(levelJson, levelNumber);
+    bakeVisualTileSeed(levelJson);
+  }
 }
 
 /**
@@ -307,6 +616,10 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
   // [역생성] concrete 솔버블 보장 모드. 켜면 컨테이너/순서기믹 없는 plain concrete로 생성되며
   // witness-peeling 타입배정으로 솔버블·÷3 구조적 보장. 적용 레벨은 🧩역 배지 표시.
   const [useReverseGen, setUseReverseGen] = useState(false);
+  // 타일 종류 분포(V) 프로파일. 'baseline'=기존 LEVEL_CONFIG_TABLE, 그 외=오버라이드
+  const [tileTypeProfile, setTileTypeProfile] = useState<string>('baseline');
+  // 독(트레이7) 천장 무시 → V 최대 15까지 허용 (고난이도 레버). 솔버블은 봇검증이 거름.
+  const [allowHighTileVariety, setAllowHighTileVariety] = useState<boolean>(false);
   const [generationProgress, setGenerationProgress] = useState<ProductionGenerationProgress>({
     status: 'idle',
     total_sets: 0,
@@ -752,6 +1065,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
                 template_source_difficulty: tplResp.data.template_measured_difficulty ?? undefined,
               };
               void generationTime;  // 수집 안 하지만 측정은 해둠 (future use)
+              applyProductionTileVisuals(levelJson, levelNumber);  // 고정=명시 relabel / 순수t0=시드 베이크
               return { meta, level_json: levelJson };
             } catch (tplErr) {
               const errMsg = (tplErr as Error).message || String(tplErr);
@@ -840,6 +1154,8 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
               min_layers: minLayers,
               max_layers: maxLayers,
               tile_types: undefined, // 백엔드에서 level_number 기반 자동 선택
+              tile_type_profile: tileTypeProfile === 'baseline' ? undefined : tileTypeProfile,
+              allow_high_tile_variety: allowHighTileVariety,
               obstacle_types: [],
               goals: [{ type: goalType, direction: goalDirection, count: Math.max(2, Math.floor(3 + targetDifficulty * 2)) }],
               symmetry_mode: symmetryMode,
@@ -1028,6 +1344,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
               meta.status = 'playtest_queue';
             }
 
+            applyProductionTileVisuals(result.level_json, levelNumber);  // 고정=명시 relabel / 순수t0=시드 베이크
             return { meta, level_json: result.level_json };
           } catch (err) {
             console.error(`Failed to generate level ${levelNumber}:`, err);
@@ -1559,6 +1876,10 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             onUseCoreBotsChange={setUseCoreBots}
             useReverseGen={useReverseGen}
             onUseReverseGenChange={setUseReverseGen}
+            tileTypeProfile={tileTypeProfile}
+            onTileTypeProfileChange={setTileTypeProfile}
+            allowHighTileVariety={allowHighTileVariety}
+            onAllowHighTileVarietyChange={setAllowHighTileVariety}
           />
         )}
 
@@ -1751,6 +2072,7 @@ function OverviewTab({ stats, batch, batchId }: { stats: ProductionStats; batch:
         );
 
         // Save regenerated level
+        applyProductionTileVisuals(result.level_json, levelNumber);  // 고정=명시 relabel / 순수t0=시드 베이크
         await saveProductionLevels(batchId, [{
           meta: {
             ...level.meta,
@@ -1937,6 +2259,10 @@ function GenerateTab({
   onUseCoreBotsChange,
   useReverseGen,
   onUseReverseGenChange,
+  tileTypeProfile,
+  onTileTypeProfileChange,
+  allowHighTileVariety,
+  onAllowHighTileVarietyChange,
 }: {
   batch: ProductionBatch;
   progress: ProductionGenerationProgress;
@@ -1956,6 +2282,10 @@ function GenerateTab({
   onUseCoreBotsChange: (value: boolean) => void;
   useReverseGen: boolean;
   onUseReverseGenChange: (value: boolean) => void;
+  tileTypeProfile: string;
+  onTileTypeProfileChange: (value: string) => void;
+  allowHighTileVariety: boolean;
+  onAllowHighTileVarietyChange: (value: boolean) => void;
 }) {
   const [playtestStrategy, setPlaytestStrategy] = useState<PlaytestStrategy>('sample_boss');
 
@@ -1995,6 +2325,42 @@ function GenerateTab({
               <option value="low_match">매치 점수 낮은 레벨 (~300개)</option>
               <option value="all">전체 (1500개)</option>
             </select>
+          </div>
+
+          {/* 타일 종류 분포(V) 프로파일 */}
+          <div>
+            <label className="block text-sm text-gray-400 mb-1">타일 종류 분포(V)</label>
+            <select
+              value={tileTypeProfile}
+              onChange={(e) => onTileTypeProfileChange(e.target.value)}
+              className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-white"
+            >
+              <option value="baseline">기본 (baseline)</option>
+              <option value="hard_steep">어려움 (hard_steep · 11-30=8 / 31-60=10 / 끝=13)</option>
+            </select>
+            {/* V 분포 미리보기 그래프 (y=타일종류수 0~15, x=레벨 1~1500) */}
+            <div className="mt-2 p-2 bg-gray-900/50 rounded">
+              <TileTypeProfileGraph profile={tileTypeProfile} />
+              <div className="flex gap-3 mt-1 text-[10px] text-gray-400">
+                <span className="flex items-center gap-1"><span className="inline-block w-3 h-0.5 bg-blue-500" />선택 ({tileTypeProfile})</span>
+                {tileTypeProfile !== 'baseline' && (
+                  <span className="flex items-center gap-1"><span className="inline-block w-3 h-0.5 bg-gray-500" style={{ borderTop: '1px dashed' }} />baseline</span>
+                )}
+              </div>
+            </div>
+            {/* 독 천장 무시 = V를 9 넘게(최대15) 허용. 고난이도 레버. */}
+            <label className="flex items-center gap-2 mt-2 cursor-pointer text-xs text-gray-300">
+              <input
+                type="checkbox"
+                checked={allowHighTileVariety}
+                onChange={(e) => onAllowHighTileVarietyChange(e.target.checked)}
+                className="accent-blue-500"
+              />
+              독 천장 무시 (V 최대 15까지 — 고난이도)
+            </label>
+            {allowHighTileVariety && (
+              <p className="mt-1 text-[10px] text-amber-400/90">⚠️ 트레이7 한계 초과. 일부 레벨 풀이불가 가능 → 난이도검증(봇) 켜고 clear&gt;0 확인 필수.</p>
+            )}
           </div>
 
           {/* Validation Settings */}

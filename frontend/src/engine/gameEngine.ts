@@ -249,7 +249,8 @@ export class GameEngine {
     shuffleTile: number = 0,
     typeImbalance: number = 0,
     unlockTile: number = 0,
-    existingTileCounts: Map<string, number> = new Map()
+    existingTileCounts: Map<string, number> = new Map(),
+    visualTileSeed?: number | null
   ): string[] {
     if (t0Count === 0) return [];
     // useTileCount가 0이면 기본값 6 사용 (백엔드와 동일)
@@ -274,7 +275,8 @@ export class GameEngine {
       typeImbalance,
       unlockTile,
       0,  // tileTypeOffset - 기본값 0 (t1~t{useTileCount} 사용)
-      existingTileCounts
+      existingTileCounts,
+      visualTileSeed
     );
 
     console.log(`[distributeT0Tiles] Result (first 20):`, assignments.slice(0, 20));
@@ -362,12 +364,21 @@ export class GameEngine {
             totalCount = extraData;
           }
 
-          // 모든 내부 타일은 t0으로 처리됨
-          // CRITICAL: stackIdx 0이 top (첫 번째로 pick되는 타일)이므로
-          // 인게임과 동일한 순서로 top→bottom (stackIdx: totalCount-1 → 0)으로 분배
-          for (let stackIdx = totalCount - 1; stackIdx >= 0; stackIdx--) {
-            const fullKey = `${layerIdx}_${xIdx}_${yIdx}_${stackIdx}`;
-            t0Positions.push({ layerIdx, pos, key: fullKey });
+          // [신포맷] extraData[1] = "id1_id2_.." 명시 내부 id → 분배 안 하고 직접 배정 (baked)
+          const innerIds = (Array.isArray(extraData) && typeof extraData[1] === 'string')
+            ? (extraData[1] as string).split('_') : null;
+          if (innerIds && innerIds.length === totalCount) {
+            for (let stackIdx = 0; stackIdx < totalCount; stackIdx++) {
+              this.state.t0AssignmentMap.set(`${layerIdx}_${xIdx}_${yIdx}_${stackIdx}`, innerIds[stackIdx]);
+            }
+          } else {
+            // 구포맷: 내부 t0 → 분배 대상 수집
+            // CRITICAL: stackIdx 0이 top (첫 번째로 pick되는 타일)이므로
+            // 인게임과 동일한 순서로 top→bottom (stackIdx: totalCount-1 → 0)으로 분배
+            for (let stackIdx = totalCount - 1; stackIdx >= 0; stackIdx--) {
+              const fullKey = `${layerIdx}_${xIdx}_${yIdx}_${stackIdx}`;
+              t0Positions.push({ layerIdx, pos, key: fullKey });
+            }
           }
 
           craftStackInfo.push({
@@ -479,6 +490,9 @@ export class GameEngine {
       ? levelJson.xShuffleTile : 0;
     const typeImbalance = typeof levelJson.xTypeImbalance === 'number'
       ? levelJson.xTypeImbalance : 0;
+    // 비주얼 타일 시드 (선택): 없으면 undefined → 리맵 안 함 (현행/하위호환)
+    const visualTileSeed = typeof levelJson.visualTileSeed === 'number'
+      ? levelJson.visualTileSeed : undefined;
 
     console.log(`[Init] t0 distribution params:`, {
       useTileCount,
@@ -496,7 +510,8 @@ export class GameEngine {
       shuffleTile,             // xShuffleTile
       typeImbalance,           // xTypeImbalance
       this.state.lockedSlots,  // unlockTile
-      existingTileCounts       // existingTileCounts for toAddIndexList
+      existingTileCounts,      // existingTileCounts for toAddIndexList
+      visualTileSeed           // 비주얼 타일 시드 (스프라이트 인덱스 재매핑)
     );
 
     // 할당 맵 구성
@@ -1817,6 +1832,11 @@ export class GameEngine {
   /**
    * UI용 타일 정보 변환
    */
+  /** t0 위치 → 분배된 타일 타입 맵 (비주얼 시드 반영). 키: `${layer}_${pos}`(평면) 또는 stack fullKey. */
+  getT0AssignmentMap(): Map<string, string> {
+    return this.state.t0AssignmentMap;
+  }
+
   getTilesForUI(): Array<{
     id: string;
     type: string;
@@ -1950,4 +1970,22 @@ export function getGameEngine(): GameEngine {
 
 export function createGameEngine(): GameEngine {
   return new GameEngine();
+}
+
+/**
+ * t0 셀을 인게임/플레이테스트와 동일한 비주얼 선정 방식으로 해소한 맵을 반환.
+ * 미리보기 렌더러(levelPreview 등)가 평면 t0 셀의 실제 스프라이트를 동일하게 표시하도록 공유.
+ * 키: `${layer}_${pos}` (평면 타일). visualTileSeed 반영됨.
+ */
+export function resolveT0TileTypes(levelJson: Record<string, unknown>): Map<string, string> {
+  // initializeFromLevel은 3배수 보정 시 입력 레벨을 in-place 수정 → 원본 보호 위해 deep clone 후 처리.
+  let clone: Record<string, unknown>;
+  try {
+    clone = structuredClone(levelJson);
+  } catch {
+    clone = JSON.parse(JSON.stringify(levelJson));
+  }
+  const engine = createGameEngine();
+  engine.initializeFromLevel(clone, { previewMode: true });
+  return engine.getT0AssignmentMap();
 }

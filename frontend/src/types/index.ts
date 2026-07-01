@@ -4,7 +4,8 @@
 export type DifficultyGrade = 'S' | 'A' | 'B' | 'C' | 'D';
 
 // Tile data format: [type, attribute, extra?]
-export type TileData = [string, string, number[]?];
+// [타일ID, 효과ID, (스택정보)?]. 스택정보 = [count] 또는 [count, "id1_id2_.."](명시 내부, v1.10.382+)
+export type TileData = [string, string, (number | string)[]?];
 
 // Level layer structure
 export interface LevelLayer {
@@ -20,7 +21,8 @@ export interface LevelJSON {
   timeAttack?: number;  // Time attack seconds (0 = disabled)
   autoCollectCount?: number;  // 암호화 설정 (0 = 해제)
   useTileCount?: number;  // 타일 종류 수 (1-15)
-  randSeed?: number;  // 랜덤 시드
+  randSeed?: number;  // 랜덤 시드 = 배치/그룹 시드
+  visualTileSeed?: number;  // 비주얼 타일 시드: 배치 고정 후 스프라이트 인덱스만 t1~15 풀에서 재매핑 (>=0 결정적/-1 런타임랜덤/없음=리맵 안 함)
   unlockTile?: number;  // key 기믹: 버퍼 잠금 슬롯 수 (key 타일 3개로 1칸 해제)
   timea?: number;  // time_attack 기믹: 제한 시간 (초)
   rewardCoin?: number;  // GBoost 업로드용 리워드 코인 (없으면 백엔드 기본값 10)
@@ -89,6 +91,8 @@ export interface GenerationParams {
   min_layers?: number;  // Minimum layers for easy difficulty
   max_layers?: number;  // Maximum layers for hard difficulty
   tile_types?: string[];
+  tile_type_profile?: string;  // 레벨별 타일 종류 수(V) 분포 프로파일. undefined=baseline
+  allow_high_tile_variety?: boolean;  // true면 독 천장 무시, V 최대 15까지 허용
   obstacle_types?: string[];
   goals?: GoalConfig[];
   obstacle_counts?: Record<string, ObstacleCountConfig>;

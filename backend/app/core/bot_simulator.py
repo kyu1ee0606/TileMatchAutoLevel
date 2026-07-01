@@ -1395,8 +1395,15 @@ class BotSimulator:
                 continue
 
             total_count = int(stack_info[0]) if stack_info[0] else 1
-            # All tiles are t0 (random) - sp_template GetTileIDArr() sets all to "t0"
-            tile_types = ["t0"] * total_count
+            # [신포맷 v1.10.382+] stack_info[1] = "id1_id2_.." 명시 내부 id (baked). 개수 일치 시 그대로 사용.
+            # (아래 루프가 t0가 아닌 tile_type은 map 조회 없이 직접 사용 → 별도 처리 불요)
+            inner_ids = None
+            if len(stack_info) >= 2 and isinstance(stack_info[1], str) and stack_info[1]:
+                parsed_ids = stack_info[1].split("_")
+                if len(parsed_ids) == total_count:
+                    inner_ids = parsed_ids
+            # 구포맷: 전부 t0 (런타임 분배) - sp_template GetTileIDArr()와 동일
+            tile_types = inner_ids if inner_ids is not None else (["t0"] * total_count)
 
             # Calculate spawn position offset based on direction
             # For craft: tiles spawn at adjacent position in the direction

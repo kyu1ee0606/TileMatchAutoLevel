@@ -11,6 +11,18 @@ from .pattern_templates import get_pattern_positions, get_pattern_name, PATTERN_
 logger = logging.getLogger(__name__)
 
 
+# ============ [B] Layer Size Diversity Policy ============
+# 층별 그리드 크기 다양화. 프로덕션 멀티레이어에서 모든 층이 홀짝 교대 크기로 고정돼
+# 스택 실루엣이 단조로운 문제를 해소. 각 층 채움 모양을 랜덤 s×s(min 3)로 다양화하고
+# 중앙 배치하되, 레이어 col/row(교대값)는 그대로 유지 → 게임(TileLayer.LayerSpawn은
+# rowCount 교대값으로 그리드 생성, FindAllUpperTiles는 데이터 xCol 비교로 블로킹 계산)과 정합.
+# MODE:
+#   "single"    (기본) 전 층 동일 pattern_index, 크기만 층별 다양화
+#   "per_layer" (예약) 층마다 다른 pattern_index — 추후 확장용, 현재 미사용
+SIZE_DIVERSITY_MODE = "single"
+SIZE_DIVERSITY_MIN_SIZE = 3
+
+
 # ============ Tile Distribution Uniformity by Difficulty ============
 # 난이도별 타일 분포 균등도 설정
 # 높은 균등도 = 쉬운 레벨 (모든 타입 동일 수량)
@@ -197,6 +209,35 @@ LEVEL_CONFIG_TABLE = [
 ]
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# 타일 타입 분포 프로파일 (레벨별 V = 서로 다른 타일 종류 수만 오버라이드)
+# baseline = LEVEL_CONFIG_TABLE 기본값(tile_type_profile=None). 신규 프로파일은
+# V만 교체하고 레이어/그리드/sawtooth/난이도/기믹 등 나머지 분포는 baseline과 동일.
+# 형식: (max_level, V) 오름차순. 카탈로그 최대 15종(t1~t15).
+# ─────────────────────────────────────────────────────────────────────────
+TILE_TYPE_PROFILES: Dict[str, List[Tuple[int, int]]] = {
+    # 기존보다 초반부터 가파른 버전. 11-30=8, 31-60=10, 끝(1126-1500)=13.
+    # 중간대(61~1125)는 단조증가 보간.
+    "hard_steep": [
+        (3, 4), (10, 5), (30, 8), (60, 10), (100, 11),
+        (225, 11), (600, 12), (1125, 12), (99999, 13),
+    ],
+}
+
+
+def resolve_profile_tile_count(level_number: int, tile_type_profile: Optional[str]) -> Optional[int]:
+    """프로파일 지정 시 해당 레벨의 V 반환. 미지정/미등록이면 None(=baseline 사용)."""
+    if not tile_type_profile:
+        return None
+    brackets = TILE_TYPE_PROFILES.get(tile_type_profile)
+    if not brackets:
+        return None
+    for cap, v in brackets:
+        if level_number <= cap:
+            return v
+    return brackets[-1][1]
+
+
 def get_grid_size_for_level(level_number: int) -> Tuple[int, int]:
     """
     Get recommended grid size based on level number.
@@ -217,20 +258,22 @@ def get_grid_size_for_level(level_number: int) -> Tuple[int, int]:
     return (8, 8)
 
 
-def get_gboost_style_layer_config(level_number: int) -> Dict[str, Any]:
+def get_gboost_style_layer_config(level_number: int, tile_type_profile: Optional[str] = None) -> Dict[str, Any]:
     """
     Get recommended layer configuration based on level number.
     모든 설정은 LEVEL_CONFIG_TABLE에서 가져옴.
 
     Args:
         level_number: The level number (1-based)
+        tile_type_profile: 지정 시 tile_types(V)만 프로파일 값으로 오버라이드
 
     Returns:
         Dict with layer and grid configuration including tile_types
     """
+    result = None
     for max_level, min_layers, max_layers, grid_size, tile_range, tile_types, description in LEVEL_CONFIG_TABLE:
         if level_number <= max_level:
-            return {
+            result = {
                 "min_layers": min_layers,
                 "max_layers": max_layers,
                 "cols": grid_size,
@@ -239,18 +282,26 @@ def get_gboost_style_layer_config(level_number: int) -> Dict[str, Any]:
                 "tile_types": tile_types,
                 "description": description
             }
+            break
 
-    # Fallback to last config (Master)
-    last = LEVEL_CONFIG_TABLE[-1]
-    return {
-        "min_layers": last[1],
-        "max_layers": last[2],
-        "cols": last[3],
-        "rows": last[3],
-        "total_tile_range": last[4],
-        "tile_types": last[5],
-        "description": last[6]
-    }
+    if result is None:
+        # Fallback to last config (Master)
+        last = LEVEL_CONFIG_TABLE[-1]
+        result = {
+            "min_layers": last[1],
+            "max_layers": last[2],
+            "cols": last[3],
+            "rows": last[3],
+            "total_tile_range": last[4],
+            "tile_types": last[5],
+            "description": last[6]
+        }
+
+    # 프로파일 지정 시 V(tile_types)만 오버라이드 (나머지 분포는 baseline 유지)
+    override_v = resolve_profile_tile_count(level_number, tile_type_profile)
+    if override_v is not None:
+        result["tile_types"] = override_v
+    return result
 
 
 def get_lowest_difficulty_positions(count: int = 3) -> Set[int]:
@@ -285,7 +336,7 @@ def _get_lowest_positions() -> Set[int]:
     return _LOWEST_DIFFICULTY_POSITIONS_CACHE
 
 
-def get_tile_types_for_level(level_number: int) -> List[str]:
+def get_tile_types_for_level(level_number: int, tile_type_profile: Optional[str] = None) -> List[str]:
     """
     Get recommended tile types list based on level number.
 
@@ -312,7 +363,7 @@ def get_tile_types_for_level(level_number: int) -> List[str]:
     lowest_positions = _get_lowest_positions()
     if position_in_10 in lowest_positions:
         # 레벨에 따른 타일 종류 수 결정 (난이도 스케일링)
-        config = get_gboost_style_layer_config(level_number)
+        config = get_gboost_style_layer_config(level_number, tile_type_profile)
         tile_count = config.get("tile_types", 10)
 
         # [v15.40] 색상 균등 분배: 5색상에서 골고루 선택
@@ -325,7 +376,7 @@ def get_tile_types_for_level(level_number: int) -> List[str]:
         return ["t0"]
 
 
-def get_use_tile_count_for_level(level_number: int) -> int:
+def get_use_tile_count_for_level(level_number: int, tile_type_profile: Optional[str] = None) -> int:
     """
     Get useTileCount setting for level.
 
@@ -344,7 +395,7 @@ def get_use_tile_count_for_level(level_number: int) -> int:
     Returns:
         useTileCount value (1-15)
     """
-    config = get_gboost_style_layer_config(level_number)
+    config = get_gboost_style_layer_config(level_number, tile_type_profile)
     return config.get("tile_types", 5)
 
 
@@ -1086,7 +1137,7 @@ class LevelGenerator:
         # DOCK CAPACITY VALIDATION: Ensure useTileCount is compatible with unlockTile
         # 규칙: 타일 종류 수가 너무 많으면 독이 금방 차서 데드락 발생
         # 안전 기준: useTileCount <= (7 - unlockTile) + 2
-        level = self._validate_dock_tile_compatibility(level)
+        level = self._validate_dock_tile_compatibility(level, allow_high_tile_variety=bool(getattr(params, 'allow_high_tile_variety', False)))
 
         # KEY TILE VALIDATION: Ensure key tile count matches unlockTile * 3
         # 초과 key 타일은 dock 공간만 차지하므로 클리어 불가능 야기
@@ -1442,7 +1493,7 @@ class LevelGenerator:
 
         return level
 
-    def _validate_dock_tile_compatibility(self, level: Dict[str, Any]) -> Dict[str, Any]:
+    def _validate_dock_tile_compatibility(self, level: Dict[str, Any], allow_high_tile_variety: bool = False) -> Dict[str, Any]:
         """
         Validate useTileCount is compatible with unlockTile (dock capacity).
 
@@ -1473,7 +1524,8 @@ class LevelGenerator:
 
         # 안전 기준: 독 슬롯 + 2 (여유분)
         # 이론적으로 독 슬롯 수 이하가 가장 안전하지만, +2까지는 허용
-        safe_max_tile_count = available_dock + 2
+        # [난이도레버] allow_high_tile_variety=True면 독 천장 무시 → 카탈로그 최대(15)까지.
+        safe_max_tile_count = self.MAX_USE_TILE_COUNT if allow_high_tile_variety else available_dock + 2
 
         if use_tile_count > safe_max_tile_count:
             original_tile_count = use_tile_count
@@ -1916,7 +1968,7 @@ class LevelGenerator:
         tile_types = params.tile_types
         if not tile_types and params.level_number:
             # Auto-select tile types based on level number (GBoost style)
-            tile_types = get_tile_types_for_level(params.level_number)
+            tile_types = get_tile_types_for_level(params.level_number, params.tile_type_profile)
         elif not tile_types:
             tile_types = self.DEFAULT_TILE_TYPES
 
@@ -1928,7 +1980,7 @@ class LevelGenerator:
             if uses_t0:
                 # t0 사용 시: 레벨에 맞는 useTileCount 사용 (클라이언트가 참조)
                 if params.level_number:
-                    use_tile_count = get_use_tile_count_for_level(params.level_number)
+                    use_tile_count = get_use_tile_count_for_level(params.level_number, params.tile_type_profile)
                 else:
                     use_tile_count = 5  # default for t0 mode
             else:
@@ -1945,8 +1997,9 @@ class LevelGenerator:
         # [피드백제어] 단, tile_types를 명시적으로 준 경우(FE 난이도 조준 override)는 td-cap 건너뜀 —
         #   안 그러면 피드백의 '더 어렵게'(타입↑) 방향이 td-cap에 도로 깎여 막힘. dock 안전캡은 아래서 여전히 적용.
         explicit_tile_types = bool(params.tile_types)
+        allow_high_variety = bool(getattr(params, 'allow_high_tile_variety', False))
         td_for_tiles = getattr(params, 'target_difficulty', None)
-        if params.level_number and td_for_tiles is not None and not explicit_tile_types:
+        if params.level_number and td_for_tiles is not None and not explicit_tile_types and not allow_high_variety:
             td_cap = get_tile_count_for_difficulty(params.level_number, td_for_tiles)
             if use_tile_count > td_cap:
                 logger.debug(f"[TD_TILE_CAP] useTileCount {use_tile_count} → {td_cap} (td={td_for_tiles:.2f}, lvl={params.level_number})")
@@ -1959,7 +2012,9 @@ class LevelGenerator:
         if hasattr(params, 'unlock_tile') and params.unlock_tile is not None:
             unlock_tile = params.unlock_tile
         available_dock = 7 - unlock_tile
-        safe_max_tile_count = available_dock + 2  # e.g., 9 for unlockTile=0
+        # [난이도레버] allow_high_tile_variety=True면 독 천장 무시하고 카탈로그 최대(15)까지 허용.
+        # 트레이7 데드락 위험은 _ensure_no_deadlock 실제 시뮬 + 프로덕션 봇 검증이 사후 거름.
+        safe_max_tile_count = self.MAX_USE_TILE_COUNT if allow_high_variety else available_dock + 2  # 기본 9 (unlockTile=0)
         if use_tile_count > safe_max_tile_count:
             logger.debug(f"[_create_base_structure] Limiting useTileCount from {use_tile_count} to {safe_max_tile_count} (dock capacity)")
             use_tile_count = safe_max_tile_count
@@ -2923,6 +2978,14 @@ class LevelGenerator:
                     for ov in params.layer_pattern_overrides:
                         overrides[ov.get("layer", -1)] = ov
 
+                # [B] 층별 크기 다양화 배정 (start_level 이상만; None=미적용)
+                size_div_map = self._compute_layer_size_diversity(
+                    active_layers,
+                    [(cols if (l % 2 == 1) else cols + 1, rows if (l % 2 == 1) else rows + 1) for l in active_layers],
+                    params.level_number,
+                    params.size_diversity_start_level,
+                )
+
                 for li, layer_idx in enumerate(active_layers):
                     is_odd_layer = layer_idx % 2 == 1
 
@@ -2942,6 +3005,13 @@ class LevelGenerator:
                     # 패턴 배치 크기 (그리드 이내, 최소 4)
                     layer_cols = max(4, min(layer_size, base_cols))
                     layer_rows = max(4, min(layer_size, base_rows))
+
+                    # [B] 크기 다양화 활성 시 step 기반 크기 대신 랜덤 s×s로 override
+                    #     (col/row는 아래에서 base로 세팅 → 게임 정합 유지, 오프셋은 base-s로 자동 중앙)
+                    if size_div_map is not None:
+                        s = size_div_map[layer_idx]
+                        layer_cols = s
+                        layer_rows = s
 
                     # Generate pattern for this layer's grid size
                     layer_positions = self._generate_aesthetic_positions(
@@ -2996,6 +3066,14 @@ class LevelGenerator:
                 for ov in params.layer_pattern_overrides:
                     overrides_std[ov.get("layer", -1)] = ov
 
+            # [B] 층별 크기 다양화 배정 (start_level 이상만; None=미적용)
+            size_div_map = self._compute_layer_size_diversity(
+                active_layers,
+                [(cols if (l % 2 == 1) else cols + 1, rows if (l % 2 == 1) else rows + 1) for l in active_layers],
+                params.level_number,
+                params.size_diversity_start_level,
+            )
+
             for li, layer_idx in enumerate(active_layers):
                 layer_key = f"layer_{layer_idx}"
                 is_odd_layer = layer_idx % 2 == 1
@@ -3013,6 +3091,12 @@ class LevelGenerator:
 
                 layer_cols = max(4, min(layer_size, base_cols))
                 layer_rows = max(4, min(layer_size, base_rows))
+
+                # [B] 크기 다양화 활성 시 랜덤 s×s로 override (col/row는 base 유지 → 게임 정합)
+                if size_div_map is not None:
+                    s = size_div_map[layer_idx]
+                    layer_cols = s
+                    layer_rows = s
 
                 # 중앙 정렬 오프셋
                 layer_offset_x = max(0, (base_cols - layer_cols) // 2)
@@ -3808,6 +3892,52 @@ class LevelGenerator:
             base_positions = self._generate_random_positions(cols, rows, target_count, symmetry)
 
         return base_positions
+
+    def _compute_layer_size_diversity(
+        self,
+        active_layers: List[int],
+        base_sizes: List[Tuple[int, int]],
+        level_number: Optional[int],
+        start_level: Optional[int],
+        min_size: int = SIZE_DIVERSITY_MIN_SIZE,
+    ) -> Optional[Dict[int, int]]:
+        """[B] 층별 채움 크기(정사각 s) 다양화 배정.
+
+        Args:
+            active_layers: 활성 레이어 인덱스 목록.
+            base_sizes: active_layers와 index 정렬된 (base_cols, base_rows) 목록(홀짝 교대값).
+            level_number: 현재 레벨 번호.
+            start_level: 이 값 이상부터 적용. None이면 미적용.
+            min_size: 최소 채움 크기(기본 3).
+
+        Returns:
+            layer_idx -> s 매핑(정사각 채움 크기) 또는 None(미적용).
+            s는 [min_size, min(base_cols, base_rows)] 범위 랜덤, 인접층과 같은 크기 회피.
+            호출측은 레이어 col/row를 base(교대값) 그대로 유지해야 함(게임 정합 필수).
+        """
+        if start_level is None or level_number is None or level_number < start_level:
+            return None
+
+        sizes: Dict[int, int] = {}
+        prev_s: Optional[int] = None
+        for li, layer_idx in enumerate(active_layers):
+            base_cols, base_rows = base_sizes[li]
+            max_s = min(base_cols, base_rows)
+            if max_s <= min_size:
+                s = max_s  # 그리드가 최소 이하 → 그대로(다양화 불가)
+            else:
+                choices = [v for v in range(min_size, max_s + 1) if v != prev_s]
+                if not choices:
+                    choices = list(range(min_size, max_s + 1))
+                s = random.choice(choices)
+            sizes[layer_idx] = s
+            prev_s = s
+
+        logger.info(
+            f"[SIZE_DIVERSITY] level={level_number} start={start_level} "
+            f"mode={SIZE_DIVERSITY_MODE} sizes={sizes}"
+        )
+        return sizes
 
     def _generate_aesthetic_positions(
         self, cols: int, rows: int, target_count: int,

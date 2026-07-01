@@ -8,8 +8,10 @@
 이 에디터가 생성한 레벨은 **GameBoost → sp_meowsgarden 게임**이 소비한다. 게임이 실제로 먹는 포맷의 **단일 진실 공급원(정본)** 은 게임 프로젝트 위키에 live 로 유지된다 (복사본 아님 — 항상 최신):
 
 ```
-/Users/casualdev/sp_meowsgarden/Assets/15.Docs/claudedocs/nodes/DESIGN_LEVEL_MAP_SCHEMA.md
+/Users/casualdev/sp_meowsgarden/Assets/99.Docs/claudedocs/nodes/DESIGN_LEVEL_MAP_SCHEMA.md
 ```
+
+> 비주얼 타일 시드(visualTileSeed) 등 t0 분배/렌더 동기화 작업은 위 §4-1 + `DESIGN_TILE_COLOR_BALANCE.md §4-1`(에디터 포팅) 참조. 에디터측 구현: `claudedocs/t0_tile_distribution.md`, `claudedocs/CHANGELOG_20260630_VISUAL_TILE_SEED.md`.
 
 **언제 읽나 (조건부 — 아래 작업일 때만 위 파일 Read)**:
 - 레벨/맵 **JSON 스키마**(필드명·구조) 변경/검증

@@ -14,6 +14,17 @@
 
 ---
 
+## 최근 (2026-07-01)
+
+- ✅ **[백엔드][프론트엔드][개선] 층별 그리드 크기 다양화 (B)**: 절차생성 멀티레이어에서 각 층 채움 모양을 랜덤 s×s(min 3~그리드, 인접층 회피)로 중앙배치 → 스택 실루엣 다양화. **레이어 col/row(홀짝 교대값) 유지 → 게임 무변경**(rowCount 그리드 생성, FindAllUpperTiles xCol 블로킹). `size_diversity_start_level`(기본 101, <start 미적용). generator standard/master+auto 경로 주입, ProductionDashboard UI. py_compile+tsc 0, 헬퍼 유닛 12000픽 위반0·비단조 2000/2000, API col교대·num%3·게이팅 확인, 솔버빌리티 회귀0, GameBoost 라운드트립 보존. → `DESIGN_LAYER_SIZE_DIVERSITY.md`
+  - ✅ 동봉(A): `max_layers` 캡 7→10 상향(ProductionDashboard 여러 경로)
+  - ⬜ 후속: Test/Review 탭 단일 재생성/enhance에 다양화 미배선(주 배치 생성만) → tab prop 전파 검토
+  - ⬜ 후속: Unity 실기 수동 확인(MCP 미연결). level_110/112 GameBoost 업로드 완료 → 수동 플레이
+- ✅ **레벨 템플릿 → 보스 배치**: 전 레벨 흩뿌리기 → 보스(10,20,..) 전용 순차배치(measured_difficulty 오름차순). overflow=unused, best-gap은 spill 정책으로 격리 보존. `ProductionDashboard`. tsc 0 + 로직 시뮬 4케이스 통과. → `DESIGN_BOSS_TEMPLATE_ASSIGN.md`
+  - ⬜ 후속: 실제 배치 생성 UI 검증(Playwright 부재로 수동), 템플릿 많아지면 overflow='spill' 활성 검토
+
+---
+
 ## 작업 유형 태그
 
 | 태그 | 설명 |

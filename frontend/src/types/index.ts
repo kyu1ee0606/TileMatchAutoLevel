@@ -105,6 +105,9 @@ export interface GenerationParams {
   symmetry_mode?: SymmetryMode;
   pattern_type?: PatternType;
   pattern_index?: number;  // 0-49 for specific aesthetic pattern (undefined = auto-select)
+  // [B] 층별 그리드 크기 다양화 시작 레벨. level_number >= 이 값이면 각 층 채움 크기를
+  // 랜덤 s×s(min 3, 인접층 회피)로 다양화하고 중앙 배치. undefined=미적용. col/row 교대값 유지.
+  size_diversity_start_level?: number;
 }
 
 // Level generation result

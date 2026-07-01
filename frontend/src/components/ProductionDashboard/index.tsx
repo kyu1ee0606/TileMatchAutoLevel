@@ -257,7 +257,7 @@ const VISUAL_POOL = 15; // 비주얼 스프라이트 풀 t1~t15
 // 🔴 게임 배포 게이트: craft/stack 명시 내부(신포맷 [count,"ids"])는 **게임 v1.10.382+** 배포 후에만 emit.
 // 구 게임에 신포맷 가면 내부 강제 t0 재분배 → relabel board와 불일치 → 매칭 붕괴.
 // 게임 빌드가 플레이어에 배포된 뒤 true로 전환. false면 현행(순수고정 relabel + 순수t0 시드) 유지.
-const ENABLE_INNER_TILE_BAKE = false;
+const ENABLE_INNER_TILE_BAKE = true;
 
 // LevelJSON은 string 인덱스 시그니처가 없어 Record<string,unknown>에 직접 대입 불가 → 완화 타입 + 내부 캐스트.
 type LevelJsonLike = { layer?: unknown; visualTileSeed?: number } | null | undefined;
@@ -374,6 +374,9 @@ function bakeFullBoard(levelJsonIn: LevelJsonLike, levelNumber: number): void {
           const id = tileNum(raw);
           ids.push(id === 16 ? 'key' : (id >= 1 && id <= VISUAL_POOL ? `t${rel(id)}` : (raw || 't1')));
         }
+        // 순서 규약: id_string[k] = 게임 stackCTileList[k] (k=0 바닥). 에디터 stackIdx는 face(0)=꼭대기라
+        // 게임과 물리 반대 → reverse해서 게임 물리 index 기준으로 emit. (E6 읽기도 reverse로 대칭)
+        ids.reverse();
         t[2] = [cnt, ids.join('_')];
       } else {
         const id = tileNum(tt);
@@ -620,6 +623,10 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
   const [tileTypeProfile, setTileTypeProfile] = useState<string>('baseline');
   // 독(트레이7) 천장 무시 → V 최대 15까지 허용 (고난이도 레버). 솔버블은 봇검증이 거름.
   const [allowHighTileVariety, setAllowHighTileVariety] = useState<boolean>(false);
+  // [B] 층별 그리드 크기 다양화 시작 레벨. 이 레벨 이상부터 각 층 채움 크기를 랜덤(min 3~그리드)으로
+  // 다양화(인접층 회피)하고 중앙 배치 → 스택 실루엣 다양화. 튜토리얼/초반(<start)은 단순 유지.
+  // 0/빈값이면 미적용. col/row(교대값)는 유지되어 게임과 정합.
+  const [sizeDiversityStartLevel, setSizeDiversityStartLevel] = useState<number>(101);
   const [generationProgress, setGenerationProgress] = useState<ProductionGenerationProgress>({
     status: 'idle',
     total_sets: 0,
@@ -799,27 +806,56 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
           slots.push({ level, targetDiff: targetDifficulty });
         }
 
-        // 미할당 + 측정된 템플릿만 자동 배치 대상 (난이도 낮은 것부터)
-        const toAssign = allTemplates
+        // [보스 배치 정책] 템플릿을 보스 레벨(%10==0)에 measured_difficulty 오름차순 순차 배치.
+        //   쉬운 템플릿 → 첫 보스(10), 다음 → 20 ... 보스 다 차면 overflow.
+        //   확장성: primary/overflow 정책 상수만 바꿔 (보스전용 → non-boss spill → 전 레벨) 전환.
+        const TEMPLATE_SLOT_POLICY: { primary: 'boss'; overflow: 'unused' | 'spill' } = {
+          primary: 'boss',
+          overflow: 'unused', // 미래: 'spill' → 초과 템플릿을 non-boss 슬롯에 난이도 매칭
+        };
+
+        // 미할당 + 측정된 템플릿만 대상, 난이도 오름차순
+        const sortedTpls = allTemplates
           .filter(t => t.measured_difficulty != null && !takenTemplateIds.has(t.template_id))
           .sort((a, b) => (a.measured_difficulty || 0) - (b.measured_difficulty || 0));
 
-        for (const tpl of toAssign) {
-          const diff = tpl.measured_difficulty!;
-          let bestSlot: typeof slots[number] | null = null;
-          let bestGap = Infinity;
-          for (const slot of slots) {
-            if (takenLevels.has(slot.level)) continue;
-            const gap = Math.abs(slot.targetDiff - diff);
-            if (gap < bestGap) { bestGap = gap; bestSlot = slot; }
-          }
-          if (bestSlot) {
-            effectiveAssignments[bestSlot.level] = tpl.template_id;
-            takenLevels.add(bestSlot.level);
+        // 보스 슬롯 (미점유, 레벨 오름차순)
+        const bossSlots = slots
+          .filter(s => s.level % 10 === 0 && !takenLevels.has(s.level))
+          .sort((a, b) => a.level - b.level);
+
+        // 순차 배치: 쉬운 템플릿 → 낮은 보스
+        const placedCount = Math.min(sortedTpls.length, bossSlots.length);
+        for (let i = 0; i < placedCount; i++) {
+          effectiveAssignments[bossSlots[i].level] = sortedTpls[i].template_id;
+          takenLevels.add(bossSlots[i].level);
+        }
+
+        // overflow: 보스 슬롯 초과분
+        const overflowTpls = sortedTpls.slice(placedCount);
+        if (overflowTpls.length > 0) {
+          if (TEMPLATE_SLOT_POLICY.overflow === 'spill') {
+            // [확장 격리] 기존 best-gap: 남은 템플릿을 non-boss 슬롯에 targetDiff 근접 매칭
+            for (const tpl of overflowTpls) {
+              const diff = tpl.measured_difficulty!;
+              let bestSlot: typeof slots[number] | null = null;
+              let bestGap = Infinity;
+              for (const slot of slots) {
+                if (takenLevels.has(slot.level)) continue;
+                const gap = Math.abs(slot.targetDiff - diff);
+                if (gap < bestGap) { bestGap = gap; bestSlot = slot; }
+              }
+              if (bestSlot) { effectiveAssignments[bestSlot.level] = tpl.template_id; takenLevels.add(bestSlot.level); }
+              else { autoAssignWarnings.push(`${tpl.name || tpl.template_id}: 빈 슬롯 없음`); }
+            }
           } else {
-            autoAssignWarnings.push(`${tpl.name || tpl.template_id}: 빈 슬롯 없음`);
+            // unused: 보스 부족 → 초과 템플릿 미배치 (쉬운 것부터 보스 채움)
+            for (const tpl of overflowTpls) {
+              autoAssignWarnings.push(`${tpl.name || tpl.template_id}: 보스 슬롯 부족 — 미배치 (overflow=unused)`);
+            }
           }
         }
+        // underflow(템플릿 < 보스): 남는 보스는 effectiveAssignments 미설정 → 기존 절차생성 경로 (변경 없음)
 
         // 측정 안 된 템플릿 경고
         for (const tpl of allTemplates) {
@@ -1140,9 +1176,9 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
 
             // Layers
             let minLayers = 2;
-            let maxLayers = Math.min(7, 3 + Math.floor(targetDifficulty * 4));
+            let maxLayers = Math.min(10, 3 + Math.floor(targetDifficulty * 7));
             if (isEarlyLevel) { minLayers = 2; maxLayers = Math.min(4, maxLayers); }
-            else if (isBossLevel) { minLayers = Math.max(3, Math.floor(2 + targetDifficulty * 2)); maxLayers = Math.min(7, 4 + Math.floor(targetDifficulty * 3)); }
+            else if (isBossLevel) { minLayers = Math.max(3, Math.floor(2 + targetDifficulty * 2)); maxLayers = Math.min(10, 4 + Math.floor(targetDifficulty * 6)); }
 
             // Tile types: 백엔드에서 level_number 기반 자동 선택 (톱니바퀴 패턴 + t0)
             // - 사이클 첫 레벨 (1, 11, 21...): 특정 타일 세트 (t1-t5, t6-t10, t11-t15)
@@ -1161,6 +1197,8 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
               symmetry_mode: symmetryMode,
               pattern_type: patternType,
               pattern_index: patternIndex,
+              // [B] 층별 크기 다양화 (0이면 미적용)
+              size_diversity_start_level: sizeDiversityStartLevel > 0 ? sizeDiversityStartLevel : undefined,
             };
 
             const gimmickOptions = {
@@ -1202,7 +1240,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
                 ...params,
                 // 레이어 수 변화로 다양성 증가
                 min_layers: Math.max(2, (params.min_layers ?? 2) + layerVariation),
-                max_layers: Math.min(7, (params.max_layers ?? 5) + layerVariation),
+                max_layers: Math.min(10, (params.max_layers ?? 5) + layerVariation),
                 goals: [{
                   type: candidateGoalType,
                   direction: candidateGoalDirection,
@@ -1880,6 +1918,8 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             onTileTypeProfileChange={setTileTypeProfile}
             allowHighTileVariety={allowHighTileVariety}
             onAllowHighTileVarietyChange={setAllowHighTileVariety}
+            sizeDiversityStartLevel={sizeDiversityStartLevel}
+            onSizeDiversityStartLevelChange={setSizeDiversityStartLevel}
           />
         )}
 
@@ -2030,9 +2070,9 @@ function OverviewTab({ stats, batch, batchId }: { stats: ProductionStats; batch:
 
         // Layers
         let minLayers = 2;
-        let maxLayers = Math.min(7, 3 + Math.floor(targetDifficulty * 4));
+        let maxLayers = Math.min(10, 3 + Math.floor(targetDifficulty * 7));
         if (isEarlyLevel) { minLayers = 2; maxLayers = Math.min(4, maxLayers); }
-        else if (isBossLevel) { minLayers = Math.max(3, Math.floor(2 + targetDifficulty * 2)); maxLayers = Math.min(7, 4 + Math.floor(targetDifficulty * 3)); }
+        else if (isBossLevel) { minLayers = Math.max(3, Math.floor(2 + targetDifficulty * 2)); maxLayers = Math.min(10, 4 + Math.floor(targetDifficulty * 6)); }
 
         // Goal selection
         let goalDirections: Array<'s' | 'n' | 'e' | 'w'>;
@@ -2263,6 +2303,8 @@ function GenerateTab({
   onTileTypeProfileChange,
   allowHighTileVariety,
   onAllowHighTileVarietyChange,
+  sizeDiversityStartLevel,
+  onSizeDiversityStartLevelChange,
 }: {
   batch: ProductionBatch;
   progress: ProductionGenerationProgress;
@@ -2286,6 +2328,8 @@ function GenerateTab({
   onTileTypeProfileChange: (value: string) => void;
   allowHighTileVariety: boolean;
   onAllowHighTileVarietyChange: (value: boolean) => void;
+  sizeDiversityStartLevel: number;
+  onSizeDiversityStartLevelChange: (value: number) => void;
 }) {
   const [playtestStrategy, setPlaytestStrategy] = useState<PlaytestStrategy>('sample_boss');
 
@@ -2452,6 +2496,26 @@ function GenerateTab({
                   기믹이 솔버블을 깨면 자동으로 단계적 제거(chain/link→ice/grass→plain) 후 봇클리어 확정된 것만 적용.
                 </span>
               )}
+            </p>
+          </div>
+
+          {/* [B] 층별 그리드 크기 다양화 시작 레벨 */}
+          <div className="bg-gray-700/40 rounded-lg p-3">
+            <label className="flex items-center gap-2">
+              <span className="text-sm text-white font-medium">🎚️ 층별 크기 다양화 시작 레벨</span>
+              <input
+                type="number"
+                min={0}
+                value={sizeDiversityStartLevel}
+                onChange={(e) => onSizeDiversityStartLevelChange(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                className="w-20 px-2 py-1 rounded bg-gray-800 text-white text-sm border border-gray-600"
+              />
+            </label>
+            <p className="text-xs text-gray-400 mt-1">
+              이 레벨 <span className="text-emerald-400">이상</span>부터 각 층의 채움 모양 크기를
+              <span className="text-emerald-400"> 랜덤(최소 3×3~그리드, 인접층 회피)</span>으로 다양화하고 중앙 배치 →
+              스택 실루엣 다양화. <span className="text-yellow-400">0이면 미적용</span>(튜토리얼/초반은 단순 유지 권장, 기본 101).
+              레이어 col/row(교대값)는 유지되어 게임과 정합.
             </p>
           </div>
 
@@ -3471,7 +3535,7 @@ function TestTab({
     const genCandidate = async (levelNumber: number, td: number, offset: number, seed: number) => {
       const baseTileCount = Math.max(6, Math.min(8, Math.round(6 + 2.2 * Math.max(0, td - 0.15))));
       const cnt = Math.max(4, Math.min(9, baseTileCount + offset));
-      const ml = Math.max(2, Math.min(8, Math.min(7, 3 + Math.floor(td * 4)) + Math.trunc(offset / 2)));
+      const ml = Math.max(2, Math.min(10, Math.min(10, 3 + Math.floor(td * 7)) + Math.trunc(offset / 2)));
       const sym = (['horizontal', 'vertical', 'both', 'none'] as const)[seed % 4];
       const res = await generateLevel(
         {
@@ -4021,9 +4085,9 @@ function TestTab({
 
       // Layers (프로덕션과 동일)
       let minLayers = 2;
-      let maxLayers = Math.min(7, 3 + Math.floor(targetDifficulty * 4));
+      let maxLayers = Math.min(10, 3 + Math.floor(targetDifficulty * 7));
       if (isEarlyLevel) { minLayers = 2; maxLayers = Math.min(4, maxLayers); }
-      else if (isBossLevel) { minLayers = Math.max(3, Math.floor(2 + targetDifficulty * 2)); maxLayers = Math.min(7, 4 + Math.floor(targetDifficulty * 3)); }
+      else if (isBossLevel) { minLayers = Math.max(3, Math.floor(2 + targetDifficulty * 2)); maxLayers = Math.min(10, 4 + Math.floor(targetDifficulty * 6)); }
 
       // [v16 피드백제어] 순차검증이 측정한 gap으로 난이도 조준. 난이도함수가 고차원(타일종류·배치·층·기믹)
       // 이라 표(feed-forward)로 불가 → 측정→조정(closed-loop)으로 수렴. offset 0이면 백엔드 자동(무개입).
@@ -4360,9 +4424,9 @@ function TestTab({
 
       // Layers (프로덕션과 동일)
       let minLayers = 2;
-      let maxLayers = Math.min(7, 3 + Math.floor(targetDifficulty * 4));
+      let maxLayers = Math.min(10, 3 + Math.floor(targetDifficulty * 7));
       if (isEarlyLevel) { minLayers = 2; maxLayers = Math.min(4, maxLayers); }
-      else if (isBossLevel) { minLayers = Math.max(3, Math.floor(2 + targetDifficulty * 2)); maxLayers = Math.min(7, 4 + Math.floor(targetDifficulty * 3)); }
+      else if (isBossLevel) { minLayers = Math.max(3, Math.floor(2 + targetDifficulty * 2)); maxLayers = Math.min(10, 4 + Math.floor(targetDifficulty * 6)); }
 
       let bestResult: GenerationResult | null = null;
       let bestGap = Infinity;
@@ -4379,7 +4443,7 @@ function TestTab({
           target_difficulty: targetDifficulty,
           grid_size: gridSize,
           min_layers: Math.max(2, minLayers + layerVar),
-          max_layers: Math.min(7, maxLayers + layerVar),
+          max_layers: Math.min(10, maxLayers + layerVar),
           tile_types: undefined,
           obstacle_types: [],
           goals: [{ type: goalType, direction: goalDirection, count: Math.max(2, Math.floor(3 + targetDifficulty * 2)) }],

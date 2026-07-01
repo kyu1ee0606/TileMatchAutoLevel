@@ -464,6 +464,13 @@ def _convert_to_townpop_format(level_json: dict) -> dict:
         "useInRandomizer": "1" if level_json.get("useInRandomizer", False) else "0",
         "randSeed": str(level_json.get("randSeed", level_json.get("seed", 0))),
         "shuffleLayer": str(level_json.get("shuffleLayer", 0)),
+        # visualTileSeed: 배치 고정 후 t0 스프라이트 인덱스만 재매핑하는 비주얼 시드.
+        #   필드 있으면 그대로 운반(>=0 결정적/-1 런타임랜덤). 없으면 아래에서 키 자체를 생략 → 게임은 리맵 안 함(하위호환).
+        **(
+            {"visualTileSeed": str(int(level_json["visualTileSeed"]))}
+            if level_json.get("visualTileSeed") is not None
+            else {}
+        ),
         "shuffleTile": str(level_json.get("shuffleTile", 0)),
         # [v16] difficulty 필드 = 인게임 표시용 "예측 유저 클리어율(%)".
         # 게임 xDifficulty는 파싱만 하고 미사용(셔플 영향X) → 클리어% 운반에 재사용.

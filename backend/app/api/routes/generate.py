@@ -1267,6 +1267,8 @@ def _generate_level_impl(
         grid_size=tuple(request.grid_size),
         max_layers=request.max_layers,
         tile_types=request.tile_types,
+        tile_type_profile=request.tile_type_profile,
+        allow_high_tile_variety=request.allow_high_tile_variety,
         obstacle_types=obstacle_types,
         goals=filtered_goals,
         obstacle_counts=obstacle_counts,
@@ -1284,6 +1286,8 @@ def _generate_level_impl(
         tutorial_gimmick_min_count=3,  # Ensure at least 3 tutorial gimmicks are visible
         # [연구 근거] 레벨 번호 전달 - unknown 비율 동적 계산용
         level_number=request.level_number,
+        # [B] 층별 크기 다양화 시작 레벨 (None=미적용)
+        size_diversity_start_level=request.size_diversity_start_level,
         # [역생성] concrete 레벨 솔버블 보장 (요청 플래그)
         use_reverse_generation=request.use_reverse_generation,
         reverse_generation_max_open=request.reverse_generation_max_open,
@@ -1309,6 +1313,8 @@ def _generate_level_impl(
                         grid_size=params.grid_size,
                         max_layers=min(params.max_layers, 5),  # Reduce layers
                         tile_types=None,  # Let level_number-based auto-selection work
+                        tile_type_profile=request.tile_type_profile,
+                        allow_high_tile_variety=request.allow_high_tile_variety,
                         obstacle_types=[tutorial_gimmick] if tutorial_gimmick else [],  # Keep tutorial gimmick
                         goals=params.goals,
                         symmetry_mode=params.symmetry_mode,
@@ -1317,6 +1323,7 @@ def _generate_level_impl(
                         tutorial_gimmick=tutorial_gimmick,  # PRESERVE tutorial gimmick
                         tutorial_gimmick_min_count=3,
                         level_number=request.level_number,
+                        size_diversity_start_level=request.size_diversity_start_level,  # [B]
                     )
 
                 if attempt >= 2:
@@ -1329,6 +1336,8 @@ def _generate_level_impl(
                         grid_size=(6, 6),  # Simple grid
                         max_layers=4,  # Few layers
                         tile_types=None,  # Let level_number-based auto-selection work
+                        tile_type_profile=request.tile_type_profile,
+                        allow_high_tile_variety=request.allow_high_tile_variety,
                         obstacle_types=[tutorial_gimmick] if tutorial_gimmick else [],  # Keep tutorial gimmick
                         goals=[{"type": f"{fallback_goal_type}_s", "count": 3}],
                         symmetry_mode="horizontal",
@@ -1336,6 +1345,7 @@ def _generate_level_impl(
                         tutorial_gimmick=tutorial_gimmick,  # PRESERVE tutorial gimmick
                         tutorial_gimmick_min_count=3,
                         level_number=request.level_number,
+                        size_diversity_start_level=request.size_diversity_start_level,  # [B]
                     )
 
             result = generator.generate(params)
@@ -1942,6 +1952,8 @@ def generate_validated_level(
                 tutorial_gimmick_min_count=3,  # Ensure at least 3 tutorial gimmicks are visible
                 # [연구 근거] 레벨 번호 전달 - unknown 비율 동적 계산용
                 level_number=request.level_number,
+                # [B] 층별 크기 다양화 시작 레벨 (None=미적용)
+                size_diversity_start_level=request.size_diversity_start_level,
                 # Fast generation mode - skip deadlock check (use batch verify later)
                 skip_deadlock_check=request.skip_deadlock_check,
                 # [역생성] concrete 레벨 솔버블 보장 (요청 플래그)

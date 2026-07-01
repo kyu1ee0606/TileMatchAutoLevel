@@ -368,8 +368,10 @@ export class GameEngine {
           const innerIds = (Array.isArray(extraData) && typeof extraData[1] === 'string')
             ? (extraData[1] as string).split('_') : null;
           if (innerIds && innerIds.length === totalCount) {
+            // id_string[k] = 게임 stackCTileList[k](k=0 바닥). 에디터 stackIdx는 face(0)=꼭대기라 반대 →
+            // innerIds[totalCount-1-stackIdx]로 대칭 매핑 (bake emit reverse와 짝). → 프리뷰==인게임.
             for (let stackIdx = 0; stackIdx < totalCount; stackIdx++) {
-              this.state.t0AssignmentMap.set(`${layerIdx}_${xIdx}_${yIdx}_${stackIdx}`, innerIds[stackIdx]);
+              this.state.t0AssignmentMap.set(`${layerIdx}_${xIdx}_${yIdx}_${stackIdx}`, innerIds[totalCount - 1 - stackIdx]);
             }
           } else {
             // 구포맷: 내부 t0 → 분배 대상 수집

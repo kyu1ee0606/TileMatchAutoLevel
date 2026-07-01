@@ -261,6 +261,11 @@ TileMatchAutoLevel/
 | [AUTOMATION_SUMMARY.md](AUTOMATION_SUMMARY.md) | 자동화 시스템 요약 |
 | [LOCAL_LEVELS_GUIDE.md](LOCAL_LEVELS_GUIDE.md) | 로컬 레벨 관리 가이드 |
 | [LEVEL_GENERATION_GUIDE.md](LEVEL_GENERATION_GUIDE.md) | 레벨 생성 도구 가이드 |
+| [DESIGN_LAYER_SIZE_DIVERSITY.md](DESIGN_LAYER_SIZE_DIVERSITY.md) | 층별 그리드 크기 다양화 (B): 랜덤 s×s 중앙배치, col/row 교대값 유지 → 게임 정합 |
+| [CHANGELOG_20260701_LAYER_SIZE_DIVERSITY.md](CHANGELOG_20260701_LAYER_SIZE_DIVERSITY.md) | 층별 크기 다양화 구현 + max_layers 10 상향(A) |
+| [DESIGN_BOSS_TEMPLATE_ASSIGN.md](DESIGN_BOSS_TEMPLATE_ASSIGN.md) | 레벨 템플릿 → 보스 배치 (measured_difficulty 순차, 확장 정책) |
+| [CHANGELOG_20260701_BOSS_TEMPLATE_ASSIGN.md](CHANGELOG_20260701_BOSS_TEMPLATE_ASSIGN.md) | 레벨 템플릿 보스 배치 변경 |
+| [CHANGELOG_20260630_VISUAL_TILE_SEED.md](CHANGELOG_20260630_VISUAL_TILE_SEED.md) | 비주얼 타일 시드(배치/비주얼 분리) + craft/stack 명시 내부 |
 | [BENCHMARK_API_GUIDE.md](BENCHMARK_API_GUIDE.md) | 벤치마크 API 가이드 |
 | [BENCHMARK_SYSTEM.md](BENCHMARK_SYSTEM.md) | 벤치마크 시스템 설명 |
 | [FINAL_SUMMARY.md](FINAL_SUMMARY.md) | 최종 요약 |

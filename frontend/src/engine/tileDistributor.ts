@@ -314,12 +314,75 @@ export class TileDistributor {
   }
 
   /**
+   * [비주얼 타일 시드] ApplyVisualTileRemap 포트 — 인게임 DB_Level.ApplyVisualTileRemap() 동기화.
+   *
+   * 배치(그룹)는 고정한 채 t0 출신 타일의 스프라이트 인덱스(t1~t15)만 비주얼 시드로 재매핑.
+   * 같은 로직 종류 = 같은 비주얼 인덱스(1:1 distinct) → 매칭 불변. 구체 시드면 인게임과 픽셀 일치.
+   *
+   * 알고리즘(인게임과 100% 동일해야 함):
+   *   1) assignments에서 실제 사용 인덱스(1~15) 수집 → 오름차순 distinct (key/t16 제외)
+   *   2) vSeed = seed<0 ? 0(런타임랜덤) : (seed+1)>>>0   // WELL512 seed 0(=시간기반) 회피
+   *   3) pool=[1..15], 부분 Fisher-Yates로 usedTypes.length개 distinct 선택 (rand(i,14) inclusive)
+   *   4) map[usedTypes[k]] = pool[k]
+   *   5) assignments의 "t{1..15}"만 "t{map[id]}"로 재기록 (key/스택/크래프트 무관)
+   *
+   * @param assignments - 배치 완료된 타일 타입 문자열 배열 (예: ["t3","t1","key",...])
+   * @param visualTileSeed - 비주얼 시드 (>=0 결정적 / <0 런타임랜덤)
+   * @returns 비주얼 인덱스 재매핑된 배열
+   */
+  static applyVisualTileRemap(assignments: string[], visualTileSeed: number): string[] {
+    const POOL = 15;
+    if (!assignments || assignments.length === 0) return assignments;
+
+    // 1) 사용 인덱스(1~15) → 오름차순 distinct
+    const present = new Array(POOL + 1).fill(false);
+    for (const a of assignments) {
+      const m = /^t(\d+)$/.exec(a);
+      if (m) {
+        const id = parseInt(m[1], 10);
+        if (id >= 1 && id <= POOL) present[id] = true;
+      }
+    }
+    const usedTypes: number[] = [];
+    for (let v = 1; v <= POOL; v++) if (present[v]) usedTypes.push(v);
+    if (usedTypes.length === 0) return assignments;
+
+    // 2) 비주얼 RNG (배치 rnd와 독립)
+    const vSeed = visualTileSeed < 0 ? 0 : (visualTileSeed + 1) >>> 0;
+    const vrnd = new zWellRandom(vSeed);
+
+    // 3) pool=[1..15], 부분 Fisher-Yates
+    const pool: number[] = [];
+    for (let i = 0; i < POOL; i++) pool.push(i + 1);
+    const n = usedTypes.length;
+    for (let i = 0; i < n; i++) {
+      const j = vrnd.rand(i, POOL - 1); // inclusive [i, 14]
+      [pool[i], pool[j]] = [pool[j], pool[i]];
+    }
+
+    // 4) 1:1 매핑
+    const map = new Array(POOL + 1).fill(0);
+    for (let k = 0; k < n; k++) map[usedTypes[k]] = pool[k];
+
+    // 5) 재기록
+    return assignments.map(a => {
+      const m = /^t(\d+)$/.exec(a);
+      if (m) {
+        const id = parseInt(m[1], 10);
+        if (id >= 1 && id <= POOL) return `t${map[id]}`;
+      }
+      return a;
+    });
+  }
+
+  /**
    * Complete t0 tile assignment matching in-game logic.
    *
    * This is the main entry point that combines:
    * 1. GetToAddIndexList() - Balance existing tiles to multiples of 3
    * 2. DistributeTiles() - Generate tile type index list
    * 3. ShuffleEmptyTiles() - Shuffle tile positions
+   * 4. ApplyVisualTileRemap() - 비주얼 시드 있으면 스프라이트 인덱스 재매핑
    *
    * @param t0Count - Total number of t0 tiles to assign
    * @param useTileCount - Number of tile types (useTileCount from level JSON)
@@ -339,7 +402,8 @@ export class TileDistributor {
     typeImbalance: number = 0,
     unlockTile: number = 0,
     tileTypeOffset: number = 0,
-    existingTileCounts: Map<string, number> = new Map()
+    existingTileCounts: Map<string, number> = new Map(),
+    visualTileSeed?: number | null
   ): string[] {
     if (t0Count <= 0 || useTileCount <= 0) {
       return [];
@@ -415,6 +479,11 @@ export class TileDistributor {
     // Shuffle tile positions
     const shuffleCount = t0Count + shuffleTile;
     const shuffled = TileDistributor.shuffleTileAssignments(assignments, rng, shuffleCount);
+
+    // [비주얼 타일 시드] 배치 rng 소비 완료 후 별도 RNG로 스프라이트 인덱스만 재매핑 (필드 없으면 현행)
+    if (visualTileSeed !== null && visualTileSeed !== undefined) {
+      return TileDistributor.applyVisualTileRemap(shuffled, visualTileSeed);
+    }
 
     return shuffled;
   }

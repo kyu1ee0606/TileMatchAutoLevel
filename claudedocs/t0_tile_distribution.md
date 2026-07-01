@@ -100,13 +100,49 @@ for key in tile_keys:
 stack_craft_types_map[craft_box_key] = tile_types[::-1]
 ```
 
+## 비주얼 타일 시드 (visualTileSeed) — 배치/비주얼 인덱스 분리
+
+배치(어느 위치가 같은 종류=매칭 트리플)는 `randSeed`로 고정하고, **각 종류가 쓸 스프라이트 인덱스(t1~t15)만** 별도 `visualTileSeed`로 결정. `useTileCount=6`이어도 풀이 t1~15 전체 → t13~15 비주얼 등장 가능. 구체 시드면 **에디터 미리보기 == 인게임**.
+
+> 게임측 정본: `sp_meowsgarden/.../DESIGN_LEVEL_MAP_SCHEMA.md §4-1` + `DESIGN_TILE_COLOR_BALANCE.md §4-1`.
+
+### 필드 (레벨 JSON)
+- `visualTileSeed`: `>=0` 결정적 / `-1` 런타임랜덤 / **없음 = 리맵 안 함(하위호환)**.
+
+### 알고리즘 (인게임 `ApplyVisualTileRemap`과 100% 동일)
+`assignT0Tiles`가 배치+셔플 끝낸 뒤(배치 rng 소비 완료) **별도 RNG**로 재매핑:
+1. assignments에서 사용 인덱스(1~15) 수집 → **오름차순 distinct** (key/t16 제외)
+2. `vSeed = seed<0 ? 0(런타임랜덤) : (seed+1)>>>0`  // WELL512 seed 0(=시간기반) 회피
+3. `pool=[1..15]`, 부분 Fisher-Yates로 `usedTypes.length`개 distinct 선택 (`rand(i,14)` inclusive)
+4. `map[usedTypes[k]] = pool[k]` (1:1)
+5. assignments의 `t{1..15}`만 `t{map[id]}`로 재기록 (key/스택/크래프트 무관)
+
+골든값(usedTypes=[1..6]): seed 459838 → `4,1,7,9,12,3` / seed 12345 → `9,5,3,8,2,14`. (인게임·에디터 동일 확인)
+
+### 프로덕션 기본값 판단 — **구체 랜덤 시드 베이크**
+- `-1`(런타임랜덤): 매 실행 비주얼 변동 → **미리보기≠인게임** (핵심 요구 위반) → ❌
+- `0`(전 레벨 고정 시드): 결정적이나 모든 레벨 동일 시드 → 같은 useTileCount끼리 스프라이트 단조 → 현행보다 다양성 저하 → ❌
+- **구체 랜덤 베이크(>=0)**: 결정적(미리보기==인게임) + 레벨별 다양성 → ✅ 채택. `ProductionDashboard.bakeVisualTileSeed`가 생성/재생성 시 `1~2e9` 굽고 level_json에 고정 저장.
+
+### 적용 지점
+- `frontend/src/engine/tileDistributor.ts` `applyVisualTileRemap` + `assignT0Tiles(visualTileSeed)`
+- `frontend/src/engine/gameEngine.ts` `distributeT0Tiles`/`initializeFromLevel` 패스스루 + `resolveT0TileTypes`(미리보기 공유)
+- `frontend/src/utils/levelPreview.ts` 평면 t0 셀을 분배 결과로 해소(미리보기 일치)
+- `frontend/src/components/ProductionDashboard/index.tsx` `bakeVisualTileSeed` (생성/재생성 3곳)
+- `backend/app/api/routes/gboost.py` `townpop_level`에 `visualTileSeed` 조건부 emit(있을 때만 → 레거시 하위호환)
+- **백엔드 봇/솔버는 무변경**: 리맵은 bijective(1:1) → 난이도/솔버블 동일하므로 시뮬레이션 불필요.
+
 ## 관련 파일
 
 | 파일 | 설명 |
 |------|------|
 | `backend/app/core/bot_simulator.py` | TileDistributor, zWellRandom 클래스 |
 | `backend/app/api/routes/simulate.py` | stack_craft_types_map 생성 |
-| `frontend/src/engine/tileDistributor.ts` | 프론트엔드 TileDistributor |
+| `backend/app/api/routes/gboost.py` | 게임 export(townpop_level) — visualTileSeed 운반 |
+| `frontend/src/engine/tileDistributor.ts` | 프론트엔드 TileDistributor + applyVisualTileRemap |
+| `frontend/src/engine/gameEngine.ts` | t0 분배 패스스루 + resolveT0TileTypes |
+| `frontend/src/utils/levelPreview.ts` | 미리보기 캔버스(평면 t0 해소) |
+| `frontend/src/components/ProductionDashboard/index.tsx` | bakeVisualTileSeed (프로덕션 베이크) |
 | `frontend/src/components/SimulationViewer/BotTileGrid.tsx` | 타일 표시 로직 |
 
 ## 디버깅 팁

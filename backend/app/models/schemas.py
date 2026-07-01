@@ -87,6 +87,8 @@ class GenerateRequest(BaseModel):
     grid_size: Tuple[int, int] = Field(default=(7, 7), description="Grid size (cols, rows)")
     max_layers: int = Field(default=7, ge=1, le=12, description="Maximum number of layers (1-12)")
     tile_types: Optional[List[str]] = Field(default=None, description="Tile types to use")
+    tile_type_profile: Optional[str] = Field(default=None, description="레벨별 타일 종류 수(V) 분포 프로파일. None=baseline")
+    allow_high_tile_variety: bool = Field(default=False, description="True면 독 천장 무시, V를 최대 15까지 허용(난이도 레버)")
     obstacle_types: Optional[List[str]] = Field(default=None, description="Obstacle types to use")
     goals: Optional[List[GoalConfig]] = Field(default=None, description="Goal configurations")
     obstacle_counts: Optional[Dict[str, ObstacleCountConfig]] = Field(
@@ -158,6 +160,12 @@ class GenerateRequest(BaseModel):
     )
     use_reverse_generation: bool = Field(default=False, description="[역생성] concrete(컨테이너/순서기믹 없는) 레벨에 witness-peeling 타입배정 적용 → 솔버블·÷3 보장. 적용 시 level_json.reverse_generated=true")
     reverse_generation_max_open: int = Field(default=2, ge=1, le=3, description="역생성 난이도 레버(동시 미완성 그룹 수 1~3, 클수록 어려움)")
+    # [B: 층별 그리드 크기 다양화] 이 레벨 번호 이상부터 각 층의 채움 모양 크기를 랜덤(min 3~그리드)으로
+    # 다양화(인접층 회피). None=미적용(전 층 기존 교대 크기). 레이어 col/row(교대값)는 유지 → 게임 정합.
+    size_diversity_start_level: Optional[int] = Field(
+        default=None, ge=1,
+        description="[B] 이 레벨 이상부터 층별 채움 크기 다양화 적용(min 3x3 중앙배치). None=미적용. col/row 교대값 유지."
+    )
 
 
 class GenerateResponse(BaseModel):

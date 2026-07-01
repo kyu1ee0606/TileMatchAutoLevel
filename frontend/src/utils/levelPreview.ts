@@ -7,6 +7,7 @@
  */
 import type { LevelJSON } from '../types';
 import { TILE_TYPES } from '../types';
+import { resolveT0TileTypes } from '../engine/gameEngine';
 
 // 미리보기용 타일 이미지 캐시 (경로 → 로드된 이미지, 실패 시 null)
 const previewImageCache = new Map<string, HTMLImageElement | null>();
@@ -63,6 +64,15 @@ export async function renderLevelCanvasPreview(lv: LevelJSON, size = 420): Promi
   const tiles: { layer: number; x: number; y: number; type: string; attr: string }[] = [];
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
 
+  // t0 셀을 인게임/플레이테스트와 동일한 비주얼 선정(visualTileSeed 반영)으로 해소.
+  // 실패해도 미리보기는 t0 배경으로 폴백.
+  let t0Map: Map<string, string>;
+  try {
+    t0Map = resolveT0TileTypes(lv as unknown as Record<string, unknown>);
+  } catch {
+    t0Map = new Map();
+  }
+
   for (let i = 0; i < layerCount; i++) {
     const ld = (lv as unknown as Record<string, unknown>)[`layer_${i}`] as
       | { tiles?: Record<string, [string, string?]> }
@@ -74,7 +84,10 @@ export async function renderLevelCanvasPreview(lv: LevelJSON, size = 420): Promi
       const x = parseInt(xs, 10);
       const y = parseInt(ys, 10);
       if (Number.isNaN(x) || Number.isNaN(y)) continue;
-      tiles.push({ layer: i, x, y, type: String(d[0] ?? ''), attr: String(d[1] ?? '') });
+      const rawType = String(d[0] ?? '');
+      // 평면 t0 → 분배된 실제 스프라이트 타입 (인게임 동일). craft_/stack_은 전용 경로라 그대로.
+      const resolvedType = rawType === 't0' ? (t0Map.get(`${i}_${pos}`) ?? rawType) : rawType;
+      tiles.push({ layer: i, x, y, type: resolvedType, attr: String(d[1] ?? '') });
       minX = Math.min(minX, x); maxX = Math.max(maxX, x);
       minY = Math.min(minY, y); maxY = Math.max(maxY, y);
     }

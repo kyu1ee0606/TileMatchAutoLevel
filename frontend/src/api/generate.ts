@@ -6,6 +6,8 @@ export interface GenerateRequest {
   grid_size?: [number, number];
   max_layers?: number;
   tile_types?: string[];
+  tile_type_profile?: string;  // 레벨별 타일 종류 수(V) 분포 프로파일. undefined=baseline
+  allow_high_tile_variety?: boolean;  // true면 독 천장 무시, V 최대 15까지 허용
   obstacle_types?: string[];
   goals?: Array<{ type: string; direction?: string; count: number }>;
   obstacle_counts?: Record<string, ObstacleCountConfig>;
@@ -28,6 +30,8 @@ export interface GenerateRequest {
   // 적용 시 응답 level_json.reverse_generated=true.
   use_reverse_generation?: boolean;
   reverse_generation_max_open?: number;  // 난이도 레버(1~3)
+  // [B] 층별 크기 다양화 시작 레벨 (undefined=미적용). col/row 교대값 유지 → 게임 정합.
+  size_diversity_start_level?: number;
 }
 
 export interface SimulateRequest {
@@ -56,6 +60,8 @@ export async function generateLevel(
     grid_size: params.grid_size,
     max_layers: params.max_layers,
     tile_types: params.tile_types,
+    tile_type_profile: params.tile_type_profile,
+    allow_high_tile_variety: params.allow_high_tile_variety,
     obstacle_types: params.obstacle_types,
     goals: params.goals,
     obstacle_counts: params.obstacle_counts,
@@ -64,6 +70,8 @@ export async function generateLevel(
     symmetry_mode: params.symmetry_mode,
     pattern_type: params.pattern_type,
     pattern_index: params.pattern_index,
+    // [B] 층별 크기 다양화 시작 레벨
+    size_diversity_start_level: params.size_diversity_start_level,
     // Auto gimmick selection
     auto_select_gimmicks: gimmickOptions?.auto_select_gimmicks,
     available_gimmicks: gimmickOptions?.available_gimmicks,

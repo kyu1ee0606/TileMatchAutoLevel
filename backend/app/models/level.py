@@ -135,6 +135,10 @@ class GenerationParams:
     min_layers: int = 3  # Minimum layer count (for easier levels)
     max_layers: int = 8  # Maximum layer count (for harder levels)
     tile_types: Optional[List[str]] = None
+    # [타일분포 프로파일] 레벨별 V(타일 종류 수)만 오버라이드. None=baseline(LEVEL_CONFIG_TABLE).
+    tile_type_profile: Optional[str] = None
+    # [난이도레버] True면 독(트레이7) 천장 무시, V를 카탈로그 최대(15)까지 허용. 솔버블은 데드락시뮬/봇이 검증.
+    allow_high_tile_variety: bool = False
     obstacle_types: Optional[List[str]] = None
     goals: Optional[List[Dict[str, Any]]] = None
     # Obstacle count settings (min, max for each type)
@@ -167,6 +171,10 @@ class GenerationParams:
     # 예: [{"layer":0,"pattern_index":8,"size":8},{"layer":1,"pattern_index":15,"size":7}]
     # None이면 전체 pattern_index + layer_steps 사용
     layer_pattern_overrides: Optional[List[Dict[str, Any]]] = None
+    # [B: 층별 그리드 크기 다양화] level_number >= 이 값이면 각 활성층 채움 모양을 랜덤 s×s(min 3)로
+    # 다양화(인접층 회피)하고 중앙 배치. 레이어 col/row는 짝홀 교대값 유지(게임 FindAllUpperTiles 정합).
+    # None이면 미적용(기존 step 기반 크기). 절차생성 경로(패턴/auto)만 대상, 배치·템플릿 무영향.
+    size_diversity_start_level: Optional[int] = None
     # Fast generation mode - skip internal deadlock checking
     skip_deadlock_check: bool = True  # Skip deadlock check for ultra-fast generation (use batch verify later)
     # [역생성] concrete(컨테이너/순서기믹 없는) 레벨에 witness-peeling 타입배정 적용 → 솔버블 보장.
@@ -181,7 +189,7 @@ class GenerationParams:
             if self.level_number is not None:
                 # Import here to avoid circular dependency
                 from ..core.generator import get_tile_types_for_level
-                self.tile_types = get_tile_types_for_level(self.level_number)
+                self.tile_types = get_tile_types_for_level(self.level_number, self.tile_type_profile)
             else:
                 # Default to t1~t15 (useTileCount=15, matches TownPop client)
                 # NOTE: t0 is excluded - causes issues with bot simulation

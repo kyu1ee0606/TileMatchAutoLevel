@@ -21,10 +21,13 @@ from ...core.mc_difficulty import (
     DEFAULT_SKILL_GRID,
     DEFAULT_BASE_SEED,
     CLEAR_RATE_TOLERANCE,
+    CASUAL_SKILL_MEAN,
+    CASUAL_SKILL_STD,
     assemble_sweep_result,
     normalize_skill_grid,
     sweep_point_task,
     target_casual_clear_rate,
+    population_clear_rate,
 )
 from ...core.mc_search import (
     ACCEPT_TOLERANCE,
@@ -138,6 +141,15 @@ class RLSimRequest(BaseModel):
     target_difficulty: Optional[float] = Field(
         default=None, ge=0.0, le=1.0,
         description="목표난이도. 지정 시 예측클리어율을 목표곡선과 비교해 통과여부 산출."
+    )
+    skill_mean: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0,
+        description="[난이도 기준 스킬] 예측 클리어율을 이 실력(θ, 0=최고초보~1=최고고수) 중심 "
+                    "분포로 가중. None이면 기본 캐주얼(0.47). 프로덕션 생성 시 전체 난이도 기준 조절용."
+    )
+    skill_std: Optional[float] = Field(
+        default=None, ge=0.01, le=1.0,
+        description="[난이도 기준 스킬] 실력분포 표준편차(퍼짐). None이면 기본(0.18)."
     )
 
 
@@ -258,6 +270,16 @@ def simulate_level_skill_sweep(request: RLSimRequest) -> RLSimResult:
     except Exception as exc:
         logger.exception("[rl-sim] skill sweep failed")
         raise HTTPException(status_code=500, detail=f"시뮬레이션 실패: {exc}") from exc
+
+    # [난이도 기준 스킬] skill_mean 지정 시, 이미 계산된 스킬곡선을 그 실력 중심 분포로 '재가중'해
+    # predicted_clear_rate를 다시 산출한다(롤아웃 재실행 없음 — 곡선 가중만 바뀜).
+    # mean↑ = 고수 기준 → 예측 클리어율↑ → 검증 관대(더 어려운 레벨 통과) = 게임 전체 난이도↑.
+    if request.skill_mean is not None or request.skill_std is not None:
+        _mean = request.skill_mean if request.skill_mean is not None else CASUAL_SKILL_MEAN
+        _std = request.skill_std if request.skill_std is not None else CASUAL_SKILL_STD
+        result["predicted_clear_rate"] = round(
+            population_clear_rate(result.get("skill_curve", []), mean=_mean, std=_std), 4
+        )
 
     # 목표난이도 주어지면 예측클리어율을 목표곡선과 비교해 통과여부 산출.
     # 정책: |gap|<=tolerance 면 통과. 단 unclearable_suspect 는 무조건 거부.

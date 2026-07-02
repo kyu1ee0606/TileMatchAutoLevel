@@ -62,10 +62,27 @@ def _clearability_type_counts(level_json: Dict[str, Any]) -> Dict[str, int]:
                 t0_count += 1
             elif tt.startswith("craft_") or tt.startswith("stack_"):
                 if len(td) > 2 and isinstance(td[2], list) and td[2]:
-                    try:
-                        t0_count += int(td[2][0])
-                    except (ValueError, TypeError):
-                        pass
+                    # [BAKE 정합] 내부타일이 명시 baked(td[2][1]="t3_t5_key…")면 그 타입을 '직접' 센다.
+                    # 프론트 bake(bakeFullBoard)가 게임분배로 내부색을 이미 확정해 문자열로 박아넣는데,
+                    # 여기서 개수(td[2][0])만 보고 백엔드 분배기로 재분배하면 프론트-분배와 어긋나
+                    # (top-level은 concrete로 굳고 inner만 재분배) per-type ÷3 오탐이 난다.
+                    # 명시 baked면 실제 데이터 그대로 평가 → 오탐 제거. placeholder(개수만/빈문자열/t0
+                    # 포함)면 기존대로 t0로 재분배.
+                    inner_str = td[2][1] if len(td[2]) > 1 and isinstance(td[2][1], str) else ""
+                    baked = [s for s in inner_str.split("_") if s] if inner_str else []
+                    is_baked = bool(baked) and all(
+                        s == "key" or (s.startswith("t") and s[1:].isdigit() and s != "t0")
+                        for s in baked
+                    )
+                    if is_baked:
+                        for s in baked:
+                            if s != "key":  # key는 unlockTile×3라 ÷3 무관 (게이트도 매칭타입만 검사)
+                                concrete[s] = concrete.get(s, 0) + 1
+                    else:
+                        try:
+                            t0_count += int(td[2][0])
+                        except (ValueError, TypeError):
+                            pass
             elif tt.startswith("t") and tt[1:].isdigit():
                 concrete[tt] = concrete.get(tt, 0) + 1
 

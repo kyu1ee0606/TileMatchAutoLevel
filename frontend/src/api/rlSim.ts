@@ -78,6 +78,10 @@ export interface RLSimRequest {
   max_moves?: number;
   /** 목표난이도. 지정 시 예측클리어율을 목표곡선과 비교해 통과여부 산출 */
   target_difficulty?: number;
+  /** [난이도 기준 스킬] 예측 클리어율을 이 실력(0=최고초보~1=최고고수) 중심 분포로 가중. 생략=기본 0.47 */
+  skill_mean?: number;
+  /** [난이도 기준 스킬] 실력분포 표준편차. 생략=기본 0.18 */
+  skill_std?: number;
 }
 
 export interface RLSimBatchRequest {

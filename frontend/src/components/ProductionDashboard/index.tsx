@@ -621,8 +621,11 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
   const [useReverseGen, setUseReverseGen] = useState(false);
   // 타일 종류 분포(V) 프로파일. 'baseline'=기존 LEVEL_CONFIG_TABLE, 그 외=오버라이드
   const [tileTypeProfile, setTileTypeProfile] = useState<string>('baseline');
+  // [RL 난이도 기준 스킬] 순차검증 RL 예측 클리어율을 이 실력(0=최고초보~1=최고고수) 중심으로 가중.
+  // 낮추면 검증 엄격(쉬운 레벨만 통과=게임 쉬움), 높이면 관대(어려운 레벨도 통과=게임 어려움).
+  // 기본 0.47(캐주얼). 프로덕션 전체 난이도 기준 조절 노브.
+  const [rlSkillMean, setRlSkillMean] = useState<number>(0.47);
   // 독(트레이7) 천장 무시 → V 최대 15까지 허용 (고난이도 레버). 솔버블은 봇검증이 거름.
-  const [allowHighTileVariety, setAllowHighTileVariety] = useState<boolean>(false);
   // [B] 층별 그리드 크기 다양화 시작 레벨. 이 레벨 이상부터 각 층 채움 크기를 랜덤(min 3~그리드)으로
   // 다양화(인접층 회피)하고 중앙 배치 → 스택 실루엣 다양화. 튜토리얼/초반(<start)은 단순 유지.
   // 0/빈값이면 미적용. col/row(교대값)는 유지되어 게임과 정합.
@@ -1191,7 +1194,6 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
               max_layers: maxLayers,
               tile_types: undefined, // 백엔드에서 level_number 기반 자동 선택
               tile_type_profile: tileTypeProfile === 'baseline' ? undefined : tileTypeProfile,
-              allow_high_tile_variety: allowHighTileVariety,
               obstacle_types: [],
               goals: [{ type: goalType, direction: goalDirection, count: Math.max(2, Math.floor(3 + targetDifficulty * 2)) }],
               symmetry_mode: symmetryMode,
@@ -1916,10 +1918,10 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             onUseReverseGenChange={setUseReverseGen}
             tileTypeProfile={tileTypeProfile}
             onTileTypeProfileChange={setTileTypeProfile}
-            allowHighTileVariety={allowHighTileVariety}
-            onAllowHighTileVarietyChange={setAllowHighTileVariety}
             sizeDiversityStartLevel={sizeDiversityStartLevel}
             onSizeDiversityStartLevelChange={setSizeDiversityStartLevel}
+            rlSkillMean={rlSkillMean}
+            onRlSkillMeanChange={setRlSkillMean}
           />
         )}
 
@@ -1940,6 +1942,8 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
           <TestTab
             batchId={selectedBatchId}
             isGenerating={isGenerating}
+            tileTypeProfile={tileTypeProfile}
+            rlSkillMean={rlSkillMean}
             onStatsUpdate={async () => {
               const newStats = await calculateProductionStats(selectedBatchId);
               setStats(newStats);
@@ -2301,10 +2305,10 @@ function GenerateTab({
   onUseReverseGenChange,
   tileTypeProfile,
   onTileTypeProfileChange,
-  allowHighTileVariety,
-  onAllowHighTileVarietyChange,
   sizeDiversityStartLevel,
   onSizeDiversityStartLevelChange,
+  rlSkillMean,
+  onRlSkillMeanChange,
 }: {
   batch: ProductionBatch;
   progress: ProductionGenerationProgress;
@@ -2326,10 +2330,10 @@ function GenerateTab({
   onUseReverseGenChange: (value: boolean) => void;
   tileTypeProfile: string;
   onTileTypeProfileChange: (value: string) => void;
-  allowHighTileVariety: boolean;
-  onAllowHighTileVarietyChange: (value: boolean) => void;
   sizeDiversityStartLevel: number;
   onSizeDiversityStartLevelChange: (value: number) => void;
+  rlSkillMean: number;
+  onRlSkillMeanChange: (value: number) => void;
 }) {
   const [playtestStrategy, setPlaytestStrategy] = useState<PlaytestStrategy>('sample_boss');
 
@@ -2392,19 +2396,6 @@ function GenerateTab({
                 )}
               </div>
             </div>
-            {/* 독 천장 무시 = V를 9 넘게(최대15) 허용. 고난이도 레버. */}
-            <label className="flex items-center gap-2 mt-2 cursor-pointer text-xs text-gray-300">
-              <input
-                type="checkbox"
-                checked={allowHighTileVariety}
-                onChange={(e) => onAllowHighTileVarietyChange(e.target.checked)}
-                className="accent-blue-500"
-              />
-              독 천장 무시 (V 최대 15까지 — 고난이도)
-            </label>
-            {allowHighTileVariety && (
-              <p className="mt-1 text-[10px] text-amber-400/90">⚠️ 트레이7 한계 초과. 일부 레벨 풀이불가 가능 → 난이도검증(봇) 켜고 clear&gt;0 확인 필수.</p>
-            )}
           </div>
 
           {/* Validation Settings */}
@@ -2516,6 +2507,33 @@ function GenerateTab({
               <span className="text-emerald-400"> 랜덤(최소 3×3~그리드, 인접층 회피)</span>으로 다양화하고 중앙 배치 →
               스택 실루엣 다양화. <span className="text-yellow-400">0이면 미적용</span>(튜토리얼/초반은 단순 유지 권장, 기본 101).
               레이어 col/row(교대값)는 유지되어 게임과 정합.
+            </p>
+          </div>
+
+          {/* [RL 난이도 기준 스킬] 전체 난이도 조절 슬라이더 */}
+          <div className="bg-gray-700/40 rounded-lg p-3">
+            <label className="flex items-center justify-between gap-2">
+              <span className="text-sm text-white font-medium">🎮 난이도 기준 실력 (순차검증 RL)</span>
+              <span className="text-sm text-emerald-400 font-mono tabular-nums">{rlSkillMean.toFixed(2)}</span>
+            </label>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={rlSkillMean}
+              onChange={(e) => onRlSkillMeanChange(parseFloat(e.target.value))}
+              className="w-full mt-2 accent-blue-500"
+            />
+            <div className="flex justify-between text-[10px] text-gray-400 mt-0.5">
+              <span>0 = 최고 초보봇 (게임 쉽게)</span>
+              <span>기본 0.47</span>
+              <span>고수봇 = 1 (게임 어렵게)</span>
+            </div>
+            <p className="text-xs text-gray-400 mt-1">
+              순차검증 RL이 <span className="text-emerald-400">이 실력 기준으로 클리어율 예측</span> → 통과 판정.
+              <span className="text-emerald-400"> 높이면</span> 어려운 레벨도 "고수는 깬다"고 통과(게임 전체 난이도↑),
+              <span className="text-yellow-400"> 낮추면</span> 쉬운 레벨만 통과(난이도↓). 초기 생성값은 안 바뀌고 <b>검증 기준</b>만 이동.
             </p>
           </div>
 
@@ -2816,10 +2834,14 @@ function TestTab({
   batchId,
   isGenerating,
   onStatsUpdate,
+  tileTypeProfile,
+  rlSkillMean,
 }: {
   batchId: string;
   isGenerating?: boolean;
   onStatsUpdate: () => void;
+  tileTypeProfile: string;
+  rlSkillMean: number;
 }) {
   const { addNotification } = useUIStore();
   const [levels, setLevels] = useState<ProductionLevel[]>([]);
@@ -2973,6 +2995,7 @@ function TestTab({
         const rl = await simulateLevelSkillSweep({
           level_json: lvl.level_json,
           target_difficulty: lvl.meta.target_difficulty,
+          skill_mean: rlSkillMean,
         });
         if (cancelled) return;
         const predicted = rl.predicted_clear_rate;
@@ -3111,6 +3134,7 @@ function TestTab({
       const rl = await simulateLevelSkillSweep({
         level_json: selectedLevel.level_json,
         target_difficulty: selectedLevel.meta.target_difficulty,
+        skill_mean: rlSkillMean,
       });
       const predicted = rl.predicted_clear_rate;
       const target = rl.target_clear_rate ?? 0;
@@ -3304,6 +3328,7 @@ function TestTab({
             level_json: currentLevel.level_json,
             target_difficulty: currentLevel.meta.target_difficulty,
             seed: attempts, // attempt별 시드 변경 — 재생성 재측정 독립성
+            skill_mean: rlSkillMean,
           });
 
           const predicted = rl.predicted_clear_rate;
@@ -3533,8 +3558,9 @@ function TestTab({
 
     // 단일 후보 생성+측정
     const genCandidate = async (levelNumber: number, td: number, offset: number, seed: number) => {
-      const baseTileCount = Math.max(6, Math.min(8, Math.round(6 + 2.2 * Math.max(0, td - 0.15))));
-      const cnt = Math.max(4, Math.min(9, baseTileCount + offset));
+      // [타일종류 고정] 재생성도 초기 생성과 동일한 그래프값(useTileCount) 유지 → 난이도 레버에서 타일종류 제외.
+      // 난이도 조준은 아래 층수(ml, offset)/기믹으로만. (기존: 난이도기반 baseTileCount+offset 로 종류 축소 → 그래프 붕괴)
+      const cnt = Math.max(4, Math.min(15, vAtLevel(TILE_TYPE_PROFILE_CURVES[tileTypeProfile] ?? TILE_TYPE_PROFILE_CURVES.baseline, levelNumber)));
       const ml = Math.max(2, Math.min(10, Math.min(10, 3 + Math.floor(td * 7)) + Math.trunc(offset / 2)));
       const sym = (['horizontal', 'vertical', 'both', 'none'] as const)[seed % 4];
       const res = await generateLevel(
@@ -3562,7 +3588,7 @@ function TestTab({
           level_number: levelNumber,
         }
       );
-      const rl = await simulateLevelSkillSweep({ level_json: res.level_json, target_difficulty: td, seed });
+      const rl = await simulateLevelSkillSweep({ level_json: res.level_json, target_difficulty: td, seed, skill_mean: rlSkillMean });
       return {
         level_json: res.level_json,
         grade: res.grade,
@@ -3601,7 +3627,7 @@ function TestTab({
         // 후보 생성 시 같은 td로 측정했으니, 슬롯 target은 그 슬롯 td의 목표. 한 후보를 슬롯 td로 재측정해 target 취득.
         const probe = solvablePool.find(c => !c.used);
         if (!probe) break;
-        const tgtResp = await simulateLevelSkillSweep({ level_json: probe.level_json, target_difficulty: meta.target_difficulty, seed: 1 }).catch(() => null);
+        const tgtResp = await simulateLevelSkillSweep({ level_json: probe.level_json, target_difficulty: meta.target_difficulty, seed: 1, skill_mean: rlSkillMean }).catch(() => null);
         const targetClear = tgtResp?.target_clear_rate ?? 0.4;
         let best: typeof solvablePool[number] | null = null;
         let bestGap = TOL;
@@ -4094,8 +4120,9 @@ function TestTab({
       const diffOffset = options?.difficultyOffset ?? 0;
       // 백엔드 생성기가 다중경로라 auto useTileCount가 불안정(같은 td에 8~9 들쭉) → 항상 명시적 tile_types로
       // 타일종류를 직접 제어. 피드백 offset이 이 값을 조준한다. round(6+2.2*max(0,td-0.15)) clamp[6,8] 기준.
-      const baseTileCount = Math.max(6, Math.min(8, Math.round(6 + 2.2 * Math.max(0, targetDifficulty - 0.15))));
-      const steeredTileCount = Math.max(4, Math.min(9, baseTileCount + diffOffset));
+      // [타일종류 고정] 재생성도 초기 생성과 동일한 그래프값(useTileCount) 유지 → 난이도 레버에서 타일종류 제외.
+      // 난이도 조준은 diffOffset→층수(아래)/기믹으로만. (기존: 난이도기반 baseTileCount+diffOffset 로 종류 축소 → 그래프 붕괴)
+      const steeredTileCount = Math.max(4, Math.min(15, vAtLevel(TILE_TYPE_PROFILE_CURVES[tileTypeProfile] ?? TILE_TYPE_PROFILE_CURVES.baseline, levelNumber)));
       const steeredTileTypes: string[] = Array.from({ length: steeredTileCount }, (_, i) => `t${i + 1}`);
       // 층수 보조 조정(미세 레버, offset 절반)
       if (diffOffset !== 0) {

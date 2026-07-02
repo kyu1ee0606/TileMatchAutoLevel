@@ -399,28 +399,6 @@ def get_use_tile_count_for_level(level_number: int, tile_type_profile: Optional[
     return config.get("tile_types", 5)
 
 
-def get_tile_count_for_difficulty(level_number: int, target_difficulty: Optional[float]) -> int:
-    """타일 종류수를 밴드 천장(level_number)과 target_difficulty로 스케일.
-
-    쉬운 레벨일수록 종류 적게 → 캐주얼 클리어율↑. RL 검증·재생성이 잔여 미세보정.
-    [2026-06-23] 기존 level_number-only 선택이 td를 무시해 쉬운 레벨이 과난이도되던 문제 수정.
-    실측: lvl300 td0.3에서 자동 9~10종 → 캐주얼 9% 클리어, 4종 → 39%, 목표 40%.
-    타일 종류수가 난이도 지배 레버임이 측정으로 확인됨(레이어/타일수보다 영향 큼)."""
-    # [측정] 난이도 진행은 밴드(레이어 1→10, 타일 9→120)가 이미 책임짐. 타입수까지 4→13으로
-    # 같이 올리면 고난도가 복리로 사실상 클리어불가(1% 미만)가 됨. 타입수는 좁은 범위(5~7)로
-    # 유지하고 td로 미세조정 → 밴드가 진행을, 타입수가 미세 변별을 담당. 잔여 보정은 RL 검증·재생성.
-    # [2026-06-23 v2] utc 한 단계 차이가 클리어율을 크게 흔들어(6종≈80% → 7종≈20%) easy-mid가
-    # 절벽됨. utc6을 td0.35까지 연장(easy-mid 분포가 목표를 걸치게) → utc7(hard) → utc8(extreme).
-    # 측정: utc6 분포 14~80%(easy-mid 목표 걸침), utc7 hard, utc8 극한.
-    ceiling = get_use_tile_count_for_level(level_number)
-    CAP = min(ceiling, 8)
-    if target_difficulty is None:
-        return min(CAP, 7)
-    td = max(0.0, min(1.0, target_difficulty))
-    # td0~0.35→6, 0.35~0.85→7, 0.85+→8 (완만, 절벽 제거)
-    count = round(6 + 2.2 * max(0.0, td - 0.15))
-    return max(6, min(CAP, count))
-
 from ..models.level import (
     GenerationParams,
     GenerationResult,
@@ -1137,7 +1115,7 @@ class LevelGenerator:
         # DOCK CAPACITY VALIDATION: Ensure useTileCount is compatible with unlockTile
         # 규칙: 타일 종류 수가 너무 많으면 독이 금방 차서 데드락 발생
         # 안전 기준: useTileCount <= (7 - unlockTile) + 2
-        level = self._validate_dock_tile_compatibility(level, allow_high_tile_variety=bool(getattr(params, 'allow_high_tile_variety', False)))
+        level = self._validate_dock_tile_compatibility(level)
 
         # KEY TILE VALIDATION: Ensure key tile count matches unlockTile * 3
         # 초과 key 타일은 dock 공간만 차지하므로 클리어 불가능 야기
@@ -1221,6 +1199,14 @@ class LevelGenerator:
         # [v15.40] 최종 피라미드 구조 강제 + 시각적 중앙정렬 보정
         level = self._enforce_pyramid_structure(level)
         level = self._fix_visual_centering(level)
+
+        # [OOB_REPAIR] 레이어 선언 col/row 밖 타일 제거 (클리어 불가 회귀 차단).
+        # 게임은 rowCount(=선언 col/row)로 그리드를 생성 → 범위 밖(x<0/x>=col/y<0/y>=row)
+        # 타일은 디바이스에서 컬링되어 픽 불가 → 해당 타입 3배수가 깨져 클리어 불가.
+        # 원인: 후속 변형 단계(_fix_visual_centering 위치 시프트, _enforce_pyramid_structure,
+        # boundary trim 등)가 타일을 그리드 경계 밖으로 밀 수 있음(윗줄 주석의 "can violate").
+        # 여기서 무조건 잘라내고, 아래 _finalize_divisibility_guarantee + FINAL_REPAIR가 ÷3 재보장.
+        level = self._remove_out_of_bounds_tiles(level)
 
         # CRITICAL: Final sync of layer num fields before returning
         # This ensures t0 distribution calculations are based on correct tile counts
@@ -1340,6 +1326,10 @@ class LevelGenerator:
                 logger.warning(f"[REVERSE_GEN] failed: {e}")
                 level["reverse_generated"] = False
                 level["reverse_generation_reason"] = f"오류: {e}"
+
+        # [LINK_SANITIZE] 모든 변형 단계(centering/÷3 삭제/OOB 제거/역생성) 이후 최종 실행.
+        # 대상이 사라진 고아 link 속성을 제거 → 인게임 FindLinkTile null[0] NRE(스폰 크래시) 차단.
+        level = self._strip_orphaned_link_tiles(level)
 
         generation_time_ms = int((time.time() - start_time) * 1000)
 
@@ -1493,7 +1483,7 @@ class LevelGenerator:
 
         return level
 
-    def _validate_dock_tile_compatibility(self, level: Dict[str, Any], allow_high_tile_variety: bool = False) -> Dict[str, Any]:
+    def _validate_dock_tile_compatibility(self, level: Dict[str, Any]) -> Dict[str, Any]:
         """
         Validate useTileCount is compatible with unlockTile (dock capacity).
 
@@ -1522,10 +1512,9 @@ class LevelGenerator:
         # 사용 가능 독 슬롯
         available_dock = 7 - unlock_tile
 
-        # 안전 기준: 독 슬롯 + 2 (여유분)
-        # 이론적으로 독 슬롯 수 이하가 가장 안전하지만, +2까지는 허용
-        # [난이도레버] allow_high_tile_variety=True면 독 천장 무시 → 카탈로그 최대(15)까지.
-        safe_max_tile_count = self.MAX_USE_TILE_COUNT if allow_high_tile_variety else available_dock + 2
+        # [독 천장 제거 2026-07-01] 캡 상한을 카탈로그 최대(15)로 고정 → 사실상 무캡.
+        # useTileCount는 그래프값 그대로. 데드락은 _ensure_no_deadlock + 봇검증이 사후 거름.
+        safe_max_tile_count = self.MAX_USE_TILE_COUNT
 
         if use_tile_count > safe_max_tile_count:
             original_tile_count = use_tile_count
@@ -1991,33 +1980,10 @@ class LevelGenerator:
             # No valid tiles, use default of 15 (matches TownPop client - t1~t15 균등 분배)
             use_tile_count = 15
 
-        # [2026-06-23] td-aware 종류수 상한 — 쉬운 레벨 과난이도 방지.
-        # 기존엔 useTileCount가 level_number 밴드값으로만 정해져 td 무시 → 쉬운 레벨도 타입 9~10종 → 캐주얼 과난.
-        # 밴드 천장을 유지하되 target_difficulty로 하향 스케일. dock 클램프 앞에 적용(둘 다 하향 캡).
-        # [피드백제어] 단, tile_types를 명시적으로 준 경우(FE 난이도 조준 override)는 td-cap 건너뜀 —
-        #   안 그러면 피드백의 '더 어렵게'(타입↑) 방향이 td-cap에 도로 깎여 막힘. dock 안전캡은 아래서 여전히 적용.
-        explicit_tile_types = bool(params.tile_types)
-        allow_high_variety = bool(getattr(params, 'allow_high_tile_variety', False))
-        td_for_tiles = getattr(params, 'target_difficulty', None)
-        if params.level_number and td_for_tiles is not None and not explicit_tile_types and not allow_high_variety:
-            td_cap = get_tile_count_for_difficulty(params.level_number, td_for_tiles)
-            if use_tile_count > td_cap:
-                logger.debug(f"[TD_TILE_CAP] useTileCount {use_tile_count} → {td_cap} (td={td_for_tiles:.2f}, lvl={params.level_number})")
-                use_tile_count = td_cap
-
-        # CRITICAL: Apply dock capacity limit EARLY to ensure tile_types are valid from the start
-        # 독 슬롯 수 대비 타일 종류가 너무 많으면 데드락 발생
-        # 안전 기준: useTileCount <= (7 - unlockTile) + 2
-        unlock_tile = 0
-        if hasattr(params, 'unlock_tile') and params.unlock_tile is not None:
-            unlock_tile = params.unlock_tile
-        available_dock = 7 - unlock_tile
-        # [난이도레버] allow_high_tile_variety=True면 독 천장 무시하고 카탈로그 최대(15)까지 허용.
-        # 트레이7 데드락 위험은 _ensure_no_deadlock 실제 시뮬 + 프로덕션 봇 검증이 사후 거름.
-        safe_max_tile_count = self.MAX_USE_TILE_COUNT if allow_high_variety else available_dock + 2  # 기본 9 (unlockTile=0)
-        if use_tile_count > safe_max_tile_count:
-            logger.debug(f"[_create_base_structure] Limiting useTileCount from {use_tile_count} to {safe_max_tile_count} (dock capacity)")
-            use_tile_count = safe_max_tile_count
+        # [독 천장 제거 2026-07-01] dock 캡(available_dock+2) 및 td-aware 캡 폐지.
+        # useTileCount는 그래프값(레벨/프로파일)을 그대로 사용 — 카탈로그 상한(15)으로만 클램프.
+        # 트레이7 데드락 위험은 _ensure_no_deadlock 실제 시뮬 + 프로덕션 봇 검증이 사후 거른다.
+        use_tile_count = min(use_tile_count, self.MAX_USE_TILE_COUNT)
 
         level = {
             "layer": params.max_layers,
@@ -11754,6 +11720,97 @@ class LevelGenerator:
                 layer_counts[i] = len(tiles)
                 logger.debug(f"[PYRAMID_ENFORCE] Layer {i}: removed {removed} tiles, now {layer_counts[i]}")
 
+        return level
+
+    def _strip_orphaned_link_tiles(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """[LINK_SANITIZE] 대상 이웃이 없는 link_* 속성 제거(plain화).
+
+        게임 FindLinkTile은 방향에 따라 GetTile(layer, x±1 / y±1)[0]로 대상 타일에 접근한다
+        (E=x+1, W=x-1, S=y+1, N=y-1; 홀짝 보정 없음, 키="x_y"). 대상이 OOB(y<0 등)면 GetTile이
+        null → null[0] → NullReferenceException으로 타일 스폰 크래시(TileEffect.FindLinkTile).
+        링크는 배치 시 대상 존재를 검증하지만, 이후 변형 단계(_fix_visual_centering 위치 시프트,
+        ÷3 삭제, 피라미드, OOB 제거)가 링크의 '대상 타일'을 옮기거나 지워 고아 링크가 남는다.
+        마지막에 각 link 소스의 대상 존재를 재검증하고, 없으면 속성만 제거한다(타일 자체는 보존
+        → ÷3/타입 무영향). 링크 개수는 소폭 줄 수 있으나 크래시보다 안전.
+        """
+        DELTA = {"link_e": (1, 0), "link_w": (-1, 0), "link_s": (0, 1), "link_n": (0, -1)}
+        num_layers = int(level.get("layer", 0) or 0)
+        stripped = 0
+        for i in range(num_layers):
+            layer = level.get(f"layer_{i}")
+            if not layer:
+                continue
+            tiles = layer.get("tiles")
+            if not tiles:
+                continue
+            for pos, data in tiles.items():
+                if not (isinstance(data, list) and len(data) > 1):
+                    continue
+                attr = data[1]
+                if not (isinstance(attr, str) and attr.startswith("link_")):
+                    continue
+                d = DELTA.get(attr)
+                if d is None:
+                    data[1] = ""  # 알 수 없는 link 변형 → 안전하게 제거
+                    stripped += 1
+                    continue
+                try:
+                    x, y = pos.split("_"); x = int(x); y = int(y)
+                except ValueError:
+                    continue
+                if f"{x + d[0]}_{y + d[1]}" not in tiles:
+                    data[1] = ""  # 고아 링크 → plain 타일로 강등
+                    stripped += 1
+        if stripped:
+            logger.warning(
+                f"[LINK_SANITIZE] stripped {stripped} orphaned link attr(s) "
+                f"(target tile missing → would NRE in TileEffect.FindLinkTile)"
+            )
+        return level
+
+    def _remove_out_of_bounds_tiles(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """[OOB_REPAIR] 레이어 선언 col/row 밖 타일 제거.
+
+        타일 키는 "x_y"(x=col축, y=row축). 게임은 선언 col/row로 그리드를 만들고
+        범위 밖 타일은 렌더/픽 불가 → 매칭 3배수가 깨져 클리어 불가가 된다.
+        후속 변형 단계(위치 시프트/피라미드/경계 트림)가 경계를 넘길 수 있어, 반환 직전
+        단일 초크포인트에서 무조건 잘라낸다. 제거로 깨진 ÷3은 호출측 후속 단계가 재보장.
+        """
+        num_layers = level.get("layer", 0)
+        removed = 0
+        for i in range(num_layers):
+            layer_key = f"layer_{i}"
+            layer = level.get(layer_key)
+            if not layer:
+                continue
+            tiles = layer.get("tiles")
+            if not tiles:
+                continue
+            try:
+                lc = int(layer.get("col")); lr = int(layer.get("row"))
+            except (TypeError, ValueError):
+                continue
+            kept = {}
+            for pos, data in tiles.items():
+                if "_" not in pos:
+                    kept[pos] = data
+                    continue
+                try:
+                    x, y = pos.split("_"); x = int(x); y = int(y)
+                except ValueError:
+                    kept[pos] = data
+                    continue
+                if 0 <= x < lc and 0 <= y < lr:
+                    kept[pos] = data
+                else:
+                    removed += 1
+            if len(kept) != len(tiles):
+                level[layer_key]["tiles"] = kept
+        if removed:
+            logger.warning(
+                f"[OOB_REPAIR] removed {removed} out-of-bounds tile(s) "
+                f"(would be grid-culled → unclearable); ÷3 re-guaranteed downstream"
+            )
         return level
 
     def _fix_visual_centering(self, level: Dict[str, Any]) -> Dict[str, Any]:

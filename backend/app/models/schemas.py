@@ -88,7 +88,6 @@ class GenerateRequest(BaseModel):
     max_layers: int = Field(default=7, ge=1, le=12, description="Maximum number of layers (1-12)")
     tile_types: Optional[List[str]] = Field(default=None, description="Tile types to use")
     tile_type_profile: Optional[str] = Field(default=None, description="레벨별 타일 종류 수(V) 분포 프로파일. None=baseline")
-    allow_high_tile_variety: bool = Field(default=False, description="True면 독 천장 무시, V를 최대 15까지 허용(난이도 레버)")
     obstacle_types: Optional[List[str]] = Field(default=None, description="Obstacle types to use")
     goals: Optional[List[GoalConfig]] = Field(default=None, description="Goal configurations")
     obstacle_counts: Optional[Dict[str, ObstacleCountConfig]] = Field(

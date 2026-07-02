@@ -137,8 +137,6 @@ class GenerationParams:
     tile_types: Optional[List[str]] = None
     # [타일분포 프로파일] 레벨별 V(타일 종류 수)만 오버라이드. None=baseline(LEVEL_CONFIG_TABLE).
     tile_type_profile: Optional[str] = None
-    # [난이도레버] True면 독(트레이7) 천장 무시, V를 카탈로그 최대(15)까지 허용. 솔버블은 데드락시뮬/봇이 검증.
-    allow_high_tile_variety: bool = False
     obstacle_types: Optional[List[str]] = None
     goals: Optional[List[Dict[str, Any]]] = None
     # Obstacle count settings (min, max for each type)

@@ -261,6 +261,8 @@ TileMatchAutoLevel/
 | [AUTOMATION_SUMMARY.md](AUTOMATION_SUMMARY.md) | 자동화 시스템 요약 |
 | [LOCAL_LEVELS_GUIDE.md](LOCAL_LEVELS_GUIDE.md) | 로컬 레벨 관리 가이드 |
 | [LEVEL_GENERATION_GUIDE.md](LEVEL_GENERATION_GUIDE.md) | 레벨 생성 도구 가이드 |
+| [CHANGELOG_20260701_OOB_TILE_REPAIR.md](CHANGELOG_20260701_OOB_TILE_REPAIR.md) | 반환 직전 초크포인트 정화: OOB 타일 제거(컬링→클리어불가) + 고아 link 제거(FindLinkTile NRE 스폰크래시) |
+| [CHANGELOG_20260701_TILE_VARIETY_AND_RL_SKILL.md](CHANGELOG_20260701_TILE_VARIETY_AND_RL_SKILL.md) | 재생성 타일종류 그래프고정 + 독천장(allow_high) 제거 + RL 난이도 기준 실력 슬라이더(전체 난이도 조절) |
 | [DESIGN_LAYER_SIZE_DIVERSITY.md](DESIGN_LAYER_SIZE_DIVERSITY.md) | 층별 그리드 크기 다양화 (B): 랜덤 s×s 중앙배치, col/row 교대값 유지 → 게임 정합 |
 | [CHANGELOG_20260701_LAYER_SIZE_DIVERSITY.md](CHANGELOG_20260701_LAYER_SIZE_DIVERSITY.md) | 층별 크기 다양화 구현 + max_layers 10 상향(A) |
 | [DESIGN_BOSS_TEMPLATE_ASSIGN.md](DESIGN_BOSS_TEMPLATE_ASSIGN.md) | 레벨 템플릿 → 보스 배치 (measured_difficulty 순차, 확장 정책) |

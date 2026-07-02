@@ -7,7 +7,6 @@ export interface GenerateRequest {
   max_layers?: number;
   tile_types?: string[];
   tile_type_profile?: string;  // 레벨별 타일 종류 수(V) 분포 프로파일. undefined=baseline
-  allow_high_tile_variety?: boolean;  // true면 독 천장 무시, V 최대 15까지 허용
   obstacle_types?: string[];
   goals?: Array<{ type: string; direction?: string; count: number }>;
   obstacle_counts?: Record<string, ObstacleCountConfig>;
@@ -61,7 +60,6 @@ export async function generateLevel(
     max_layers: params.max_layers,
     tile_types: params.tile_types,
     tile_type_profile: params.tile_type_profile,
-    allow_high_tile_variety: params.allow_high_tile_variety,
     obstacle_types: params.obstacle_types,
     goals: params.goals,
     obstacle_counts: params.obstacle_counts,

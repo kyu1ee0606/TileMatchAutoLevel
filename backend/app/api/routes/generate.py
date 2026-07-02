@@ -1268,7 +1268,6 @@ def _generate_level_impl(
         max_layers=request.max_layers,
         tile_types=request.tile_types,
         tile_type_profile=request.tile_type_profile,
-        allow_high_tile_variety=request.allow_high_tile_variety,
         obstacle_types=obstacle_types,
         goals=filtered_goals,
         obstacle_counts=obstacle_counts,
@@ -1314,7 +1313,6 @@ def _generate_level_impl(
                         max_layers=min(params.max_layers, 5),  # Reduce layers
                         tile_types=None,  # Let level_number-based auto-selection work
                         tile_type_profile=request.tile_type_profile,
-                        allow_high_tile_variety=request.allow_high_tile_variety,
                         obstacle_types=[tutorial_gimmick] if tutorial_gimmick else [],  # Keep tutorial gimmick
                         goals=params.goals,
                         symmetry_mode=params.symmetry_mode,
@@ -1337,7 +1335,6 @@ def _generate_level_impl(
                         max_layers=4,  # Few layers
                         tile_types=None,  # Let level_number-based auto-selection work
                         tile_type_profile=request.tile_type_profile,
-                        allow_high_tile_variety=request.allow_high_tile_variety,
                         obstacle_types=[tutorial_gimmick] if tutorial_gimmick else [],  # Keep tutorial gimmick
                         goals=[{"type": f"{fallback_goal_type}_s", "count": 3}],
                         symmetry_mode="horizontal",

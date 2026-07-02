@@ -92,7 +92,6 @@ export interface GenerationParams {
   max_layers?: number;  // Maximum layers for hard difficulty
   tile_types?: string[];
   tile_type_profile?: string;  // 레벨별 타일 종류 수(V) 분포 프로파일. undefined=baseline
-  allow_high_tile_variety?: boolean;  // true면 독 천장 무시, V 최대 15까지 허용
   obstacle_types?: string[];
   goals?: GoalConfig[];
   obstacle_counts?: Record<string, ObstacleCountConfig>;

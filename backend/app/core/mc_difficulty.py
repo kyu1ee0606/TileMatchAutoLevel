@@ -25,7 +25,12 @@ logger = logging.getLogger(__name__)
 # expert 쪽 lookahead는 FAST_VERIFICATION 기준(2)으로 캡 — 스윕 속도 확보
 _ANCHORS = {
     "mistake_rate": (0.45, 0.02),
-    "lookahead_depth": (0, 2),
+    # [봇 강화 2026-07-01] θ↔선읽기 깊이를 실제 유저 수준으로 확대.
+    # 기존 (0,2): 최고고수봇(θ1.0)도 2수만 → 고종류(8+)에서 독(7칸) 오버플로 회피 못해 데드락 →
+    #   솔버는 깨는 solvable 레벨을 봇이 과소예측(순차검증 오탐 실패)하던 직접 원인.
+    # (0,5): θ0=0(초보 즉흥) … θ0.5≈2(평균) … θ1.0=5(숙련, autoplay EXPERT와 정합).
+    # 실효 깊이 = min(_get_adaptive_depth[독위험시 상향, 상한~6], 이 값) → 안전하면 얕게, 위험하면 깊게.
+    "lookahead_depth": (0, 5),
     "goal_priority": (0.2, 0.92),
     "blocking_awareness": (0.1, 0.92),
     "chain_preference": (0.05, 0.85),
@@ -35,7 +40,9 @@ _ANCHORS = {
 }
 
 DEFAULT_SKILL_GRID = [0.0, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 1.0]
-DEFAULT_ROLLOUTS_PER_POINT = 40
+# [P3-C 분산축소 2026-07-01] 40→64: 고종류(8+) 경계선 레벨서 θ별 클리어율 변동(같은 레벨 0%/100%
+# 진동, θ1.0<θ0.9 비단조)을 완화. 추정치 신뢰구간 좁혀 measured 난이도 안정. 대가: RL ~60% 느려짐.
+DEFAULT_ROLLOUTS_PER_POINT = 64
 DEFAULT_BASE_SEED = 4242
 
 # === 예측 유저 클리어율 (검증 주력 지표) ===

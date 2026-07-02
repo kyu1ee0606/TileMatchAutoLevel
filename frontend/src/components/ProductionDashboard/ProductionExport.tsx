@@ -146,8 +146,9 @@ export function ProductionExport({
   // mode 'fixed':    apply the same coin value to every uploaded level
   // mode 'tiered':   apply different values for boss (level%10===0) / special (level%10===9) / normal
   type RewardCoinMode = 'preserve' | 'fixed' | 'tiered';
-  const [rewardCoinMode, setRewardCoinMode] = useState<RewardCoinMode>('preserve');
-  const [rewardCoinFixed, setRewardCoinFixed] = useState(10);
+  // [기본값] 획득 골드 일괄 5골드 (fixed 5). 필요 시 UI에서 변경.
+  const [rewardCoinMode, setRewardCoinMode] = useState<RewardCoinMode>('fixed');
+  const [rewardCoinFixed, setRewardCoinFixed] = useState(5);
   const [rewardCoinBoss, setRewardCoinBoss] = useState(50);
   const [rewardCoinSpecial, setRewardCoinSpecial] = useState(30);
   const [rewardCoinNormal, setRewardCoinNormal] = useState(10);
@@ -156,8 +157,9 @@ export function ProductionExport({
   // mode 'preserve':     use existing level_json.autoCollectCount (or 0)
   // mode 'multiples10':  set the given value on levels where level_number % 10 === 0, 0 (해제) on others
   type AutoCollectMode = 'preserve' | 'multiples10';
-  const [autoCollectMode, setAutoCollectMode] = useState<AutoCollectMode>('preserve');
-  const [autoCollectValue, setAutoCollectValue] = useState(1);
+  // [기본값] autoTileCollect 레벨(level%10===0, 보스)에 autoCollectCount=3. 필요 시 UI에서 변경.
+  const [autoCollectMode, setAutoCollectMode] = useState<AutoCollectMode>('multiples10');
+  const [autoCollectValue, setAutoCollectValue] = useState(3);
 
   // Upload state
   const [gboostPhase, setGboostPhase] = useState<GBoostPhase>('config');

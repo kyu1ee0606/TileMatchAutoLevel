@@ -11758,13 +11758,27 @@ class LevelGenerator:
                     x, y = pos.split("_"); x = int(x); y = int(y)
                 except ValueError:
                     continue
-                if f"{x + d[0]}_{y + d[1]}" not in tiles:
-                    data[1] = ""  # 고아 링크 → plain 타일로 강등
+                tgt = tiles.get(f"{x + d[0]}_{y + d[1]}")
+                # (a) 대상 없음/OOB → 고아 링크 (FindLinkTile null[0] NRE)
+                if not (isinstance(tgt, list) and tgt):
+                    data[1] = ""
                     stripped += 1
+                    continue
+                ttype = tgt[0] if isinstance(tgt[0], str) else ""
+                tattr = tgt[1] if len(tgt) > 1 and isinstance(tgt[1], str) else ""
+                # (b) 대상이 goal 컨테이너(craft/stack) → 링크 불가
+                # (c) 대상이 비어있지 않은 속성 보유 = 다른 기믹(ice/chain/grass/frog/bomb/curtain/
+                #     teleport/unknown) 또는 또다른 link → 링크 불가. 게임 링크는 'plain 타일 1:1'만
+                #     유효하며, 다른 기믹이 얹힌 타일에 연결하면 동작이 깨진다(배치 후 기믹배치가
+                #     링크 대상 위에 얹히는 케이스). 이 경우 링크 속성만 제거(대상 기믹은 보존).
+                if ttype.startswith("craft_") or ttype.startswith("stack_") or tattr != "":
+                    data[1] = ""
+                    stripped += 1
+                    continue
         if stripped:
             logger.warning(
-                f"[LINK_SANITIZE] stripped {stripped} orphaned link attr(s) "
-                f"(target tile missing → would NRE in TileEffect.FindLinkTile)"
+                f"[LINK_SANITIZE] stripped {stripped} invalid link attr(s) "
+                f"(target missing/OOB, or target is goal/gimmick/link — link needs plain 1:1 target)"
             )
         return level
 

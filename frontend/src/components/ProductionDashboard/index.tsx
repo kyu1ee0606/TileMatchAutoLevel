@@ -8,7 +8,7 @@ import { Button } from '../ui';
 import { useUIStore } from '../../stores/uiStore';
 import { generateLevel, enhanceLevel } from '../../api/generate';
 import apiClient from '../../api/client';
-import { analyzeAutoPlay, fixCentering } from '../../api/analyze';
+import { analyzeAutoPlay, fixCentering, analyzeSolvability } from '../../api/analyze';
 import { simulateLevelSkillSweep } from '../../api/rlSim';
 import GamePlayer from '../GamePlayer';
 import GameBoard from '../GamePlayer/GameBoard';
@@ -623,8 +623,17 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
   const [tileTypeProfile, setTileTypeProfile] = useState<string>('baseline');
   // [RL 난이도 기준 스킬] 순차검증 RL 예측 클리어율을 이 실력(0=최고초보~1=최고고수) 중심으로 가중.
   // 낮추면 검증 엄격(쉬운 레벨만 통과=게임 쉬움), 높이면 관대(어려운 레벨도 통과=게임 어려움).
-  // 기본 0.47(캐주얼). 프로덕션 전체 난이도 기준 조절 노브.
-  const [rlSkillMean, setRlSkillMean] = useState<number>(0.47);
+  // 기본 0.47(캐주얼). 프로덕션 전체 난이도 기준 조절 노브. localStorage 저장(리로드 유지).
+  const RL_SKILL_MEAN_KEY = 'prod_rl_skill_mean_v1';
+  const [rlSkillMean, setRlSkillMean] = useState<number>(() => {
+    try {
+      const v = parseFloat(localStorage.getItem(RL_SKILL_MEAN_KEY) ?? '');
+      return (Number.isFinite(v) && v >= 0 && v <= 1) ? v : 0.47;
+    } catch { return 0.47; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(RL_SKILL_MEAN_KEY, String(rlSkillMean)); } catch { /* ignore */ }
+  }, [rlSkillMean]);
   // 독(트레이7) 천장 무시 → V 최대 15까지 허용 (고난이도 레버). 솔버블은 봇검증이 거름.
   // [B] 층별 그리드 크기 다양화 시작 레벨. 이 레벨 이상부터 각 층 채움 크기를 랜덤(min 3~그리드)으로
   // 다양화(인접층 회피)하고 중앙 배치 → 스택 실루엣 다양화. 튜토리얼/초반(<start)은 단순 유지.
@@ -3159,6 +3168,7 @@ function TestTab({
       });
 
       // Save to production storage — RL 메타 (봇 대신 예측 클리어율)
+      // [P1] actual_difficulty = 실측(difficulty_score). 정적 추정 덮어씀.
       const updatedMeta = {
         ...selectedLevel.meta,
         verification_method: 'rl' as const,
@@ -3170,6 +3180,7 @@ function TestTab({
         match_score: matchScore,
         verified: true,
         verification_passed: rlVerificationPassed(selectedLevel.meta.level_number, rl),
+        actual_difficulty: (typeof rl.difficulty_score === 'number') ? rl.difficulty_score : Math.max(0, Math.min(1, 1 - predicted)),
       };
 
       await saveProductionLevels(batchId, [{
@@ -3337,6 +3348,21 @@ function TestTab({
           // 레거시 UI/필터 호환용 match_score (0~100): 갭 작을수록 높음. 통과(±10%p)→80+
           matchScore = Math.max(0, 100 - Math.abs(gapPp) * 2);
 
+          // [P3-D 솔버 앵커] RL이 unclearable_suspect(봇이 못 깸)라도, A* 완전탐색이 클리어 가능
+          //   확정(PROVEN_SOLVABLE)하면 "불가능" 낙인 해제 — 봇 약점(고종류 독관리 등)으로 인한
+          //   오탐 구제. 게이팅: unclearable_suspect일 때만 A* 호출(드묾 → 비용 적음).
+          //   난이도 gap(too_hard/easy) 판정은 RL 유지 — D는 '클리어 가능성'만 담당.
+          let solverClearable = false;
+          if (rl.classification === 'unclearable_suspect') {
+            try {
+              const sv = await analyzeSolvability(currentLevel.level_json, { nodeBudget: 200000, timeBudgetS: 6 });
+              if (sv.verdict === 'PROVEN_SOLVABLE') {
+                solverClearable = true;
+                console.info(`[solver-anchor] Lv.${levelNumber} RL=unclearable_suspect이나 A* PROVEN_SOLVABLE(${sv.moves_to_clear}수) → 클리어가능 인정`);
+              }
+            } catch { /* 솔버 실패시 구제 안 함(그대로) */ }
+          }
+
           // 실패 분류: gap 부호 (too_easy/too_hard). unclearable은 too_hard로.
           lastWorstBot = undefined; // RL은 봇별 분해 없음
           lastWorstGapPp = gapPp;
@@ -3364,6 +3390,12 @@ function TestTab({
           const isPassed = rlVerificationPassed(levelNumber, rl);
 
           // RL 검증 메타 (봇 대신 예측 클리어율)
+          // [P1] actual_difficulty = 실플레이 시뮬 측정값(difficulty_score=1-AUC). 정적 analyzer 추정 폐기.
+          //   생성 시 넣던 정적 난이도를 검증 측정값으로 '덮어씀'(...currentLevel.meta 뒤에 spread).
+          //   difficulty_score 없으면 1-predicted로 폴백.
+          const measuredDifficulty = (typeof rl.difficulty_score === 'number')
+            ? rl.difficulty_score
+            : Math.max(0, Math.min(1, 1 - predicted));
           const rlMeta = {
             verification_method: 'rl' as const,
             predicted_clear_rate: predicted,
@@ -3374,12 +3406,14 @@ function TestTab({
             match_score: matchScore,
             verified: true,
             verification_passed: isPassed,
+            actual_difficulty: measuredDifficulty,  // [P1] 실측 난이도
           };
 
           // [v16 Phase2+A2] best-of-N: 솔버블 우선 → 그 안에서 목표 최근접(gap 최소).
           // 언클리어러블(0% 클리어)은 gap이 작아도 절대 선택 안 함 (솔버블 후보 있으면).
           const absGap = Math.abs(rl.clear_rate_gap ?? 1);
-          const isClearable = rl.classification !== 'unclearable_suspect' && rl.max_clear_rate >= 0.05;
+          // [P3-D] 솔버가 클리어 가능 확정하면 봇 판정(unclearable)보다 우선 → clearable 인정
+          const isClearable = solverClearable || (rl.classification !== 'unclearable_suspect' && rl.max_clear_rate >= 0.05);
           const better =
             bestSnapshot === null
             || (isClearable && !bestIsClearable)                       // 솔버블이 비솔버블을 항상 이김
@@ -3426,7 +3460,8 @@ function TestTab({
             const hasTemplate = !!(currentLevel?.meta as { template_id?: string } | undefined)?.template_id;
             // RL: 최고실력(max_clear_rate)으로도 못 깨면 언클리어러블. classification도 병행 확인.
             const maxClearRate = rl.max_clear_rate;
-            const unclearableTemplate = hasTemplate
+            // [P3-D] 솔버가 클리어 가능 확정이면 템플릿 언클리어러블 탈출 강제 안 함(봇 오탐 구제)
+            const unclearableTemplate = hasTemplate && !solverClearable
               && (maxClearRate < 0.05 || rl.classification === 'unclearable_suspect');
             if (unclearableTemplate) {
               addNotification(
@@ -3650,6 +3685,8 @@ function TestTab({
           verified: true,
           verification_passed: true,
         };
+        // [비주얼 시드 bake] 밴드 rework 채택분도 다양색 relabel (누락 방지)
+        applyProductionTileVisuals(best.level_json, ln);
         await saveProductionLevels(batchId, [{ meta: { ...meta, ...rlMeta }, level_json: best.level_json }]);
         recovered.push(ln);
       }
@@ -4243,6 +4280,9 @@ function TestTab({
             return m as unknown as ProductionLevelMeta;
           })()
         : level.meta;
+      // [비주얼 시드 bake] 재생성분도 1~15 중 useTileCount개 랜덤 다양색 relabel (첫생성과 동일).
+      // 누락 시 재생성 레벨만 순차색(t1..tN)으로 남아 비주얼 다양성 손실 → 여기서 보정.
+      applyProductionTileVisuals(result.level_json, levelNumber);
       await saveProductionLevels(batchId, [{
         meta: {
           ...baseMetaForSave,
@@ -4269,7 +4309,7 @@ function TestTab({
       }));
 
       setRegenProgressMap(prev => new Map(prev).set(levelNumber, { status: 'done' }));
-      addNotification('success', `레벨 ${levelNumber} 재생성 완료 (정적 난이도: ${result.actual_difficulty.toFixed(1)})`);
+      addNotification('success', `레벨 ${levelNumber} 재생성 완료 (정적 추정 ${result.actual_difficulty.toFixed(1)} — 실제 난이도는 순차검증 RL 측정값)`);
       loadLevels();
       onStatsUpdate();
     } catch (err) {
@@ -4307,6 +4347,8 @@ function TestTab({
       // Save enhanced level
       // [v15.14] novice/casual은 optional
       const botRates = result.bot_clear_rates as { novice?: number; casual?: number; average: number; expert: number; optimal: number };
+      // [비주얼 시드 bake] enhance 결과도 다양색 relabel (누락 방지)
+      applyProductionTileVisuals(result.level_json, levelNumber);
       await saveProductionLevels(batchId, [{
         meta: {
           ...level.meta,
@@ -4551,6 +4593,8 @@ function TestTab({
 
       // Save - match_score/bot_clear_rates는 비워둠 (일괄 테스트에서 측정)
       setRegenProgressMap(prev => new Map(prev).set(levelNumber, { status: 'saving' }));
+      // [비주얼 시드 bake] 재생성분 다양색 relabel (누락 방지)
+      applyProductionTileVisuals(bestResult.level_json, levelNumber);
       await saveProductionLevels(batchId, [{
         meta: {
           ...level.meta,
@@ -6253,6 +6297,9 @@ function TestTab({
                         </div>
                         <div className={`text-xs ${isTemplateBased ? 'text-violet-400' : 'text-gray-400'}`}>
                           난이도: {level.meta.actual_difficulty.toFixed(3)} ({(level.meta.actual_difficulty * 100).toFixed(0)}%)
+                          <span className={level.meta.verification_method === 'rl' ? 'text-emerald-400' : 'text-yellow-600'}>
+                            {level.meta.verification_method === 'rl' ? ' ✓RL' : ' ~추정'}
+                          </span>
                         </div>
                         {level.meta.generated_at && (
                           <div className="text-[10px] text-gray-500">
@@ -6494,6 +6541,10 @@ function TestTab({
                 <div>
                   <span className="text-gray-400">실제 난이도:</span>
                   <span className="text-white ml-2">{selectedLevel.meta.actual_difficulty.toFixed(3)} ({(selectedLevel.meta.actual_difficulty * 100).toFixed(0)}%)</span>
+                  {/* [P2] 측정(RL 실플레이) vs 추정(정적, 검증 전) 구분 */}
+                  <span className={`ml-2 text-xs ${selectedLevel.meta.verification_method === 'rl' ? 'text-emerald-400' : 'text-yellow-500'}`}>
+                    {selectedLevel.meta.verification_method === 'rl' ? '(RL 실측)' : '(정적 추정·미검증)'}
+                  </span>
                 </div>
                 <div>
                   <span className="text-gray-400">타일:</span>

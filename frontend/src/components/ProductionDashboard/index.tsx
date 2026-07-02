@@ -369,15 +369,23 @@ function bakeFullBoard(levelJsonIn: LevelJsonLike, levelNumber: number): void {
         if (cnt <= 0) continue;
         const [xs, ys] = pos.split('_');
         const ids: string[] = [];
+        let anyUnresolved = false;
         for (let k = 0; k < cnt; k++) {
           const raw = t0Map.get(`${i}_${xs}_${ys}_${k}`) ?? '';
           const id = tileNum(raw);
-          ids.push(id === 16 ? 'key' : (id >= 1 && id <= VISUAL_POOL ? `t${rel(id)}` : (raw || 't1')));
+          if (id === 16) { ids.push('key'); }
+          else if (id >= 1 && id <= VISUAL_POOL) { ids.push(`t${rel(id)}`); }
+          else { anyUnresolved = true; break; } // 미해결 inner: t1 폴백 금지 → 개수만 유지, 게임이 일반 타일과 동일 재분배
         }
-        // 순서 규약: id_string[k] = 게임 stackCTileList[k] (k=0 바닥). 에디터 stackIdx는 face(0)=꼭대기라
-        // 게임과 물리 반대 → reverse해서 게임 물리 index 기준으로 emit. (E6 읽기도 reverse로 대칭)
-        ids.reverse();
-        t[2] = [cnt, ids.join('_')];
+        if (anyUnresolved) {
+          // 명시 bake 스킵 → td[2]=[cnt] 개수만 → 게임 런타임이 필드 일반 타일과 동일 종류 분배(÷3 보장)
+          t[2] = [cnt];
+        } else {
+          // 순서 규약: id_string[k] = 게임 stackCTileList[k] (k=0 바닥). 에디터 stackIdx는 face(0)=꼭대기라
+          // 게임과 물리 반대 → reverse해서 게임 물리 index 기준으로 emit. (E6 읽기도 reverse로 대칭)
+          ids.reverse();
+          t[2] = [cnt, ids.join('_')];
+        }
       } else {
         const id = tileNum(tt);
         if (id >= 1 && id <= VISUAL_POOL) t[0] = `t${rel(id)}`;

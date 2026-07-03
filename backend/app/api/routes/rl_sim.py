@@ -151,6 +151,11 @@ class RLSimRequest(BaseModel):
         default=None, ge=0.01, le=1.0,
         description="[난이도 기준 스킬] 실력분포 표준편차(퍼짐). None이면 기본(0.18)."
     )
+    target_clear_rate_scale: float = Field(
+        default=1.0, gt=0.0, le=1.0,
+        description="[보스 난이도] 목표 클리어율 배율. 보스 레벨=0.5(목표 절반 → 더 어려워야 통과). "
+                    "target_difficulty 지정 시에만 유효."
+    )
 
 
 class RLSimBatchItem(BaseModel):
@@ -285,7 +290,11 @@ def simulate_level_skill_sweep(request: RLSimRequest) -> RLSimResult:
     # 정책: |gap|<=tolerance 면 통과. 단 unclearable_suspect 는 무조건 거부.
     # luck_suspect 는 경고만(거부 안함) — 별도 luck_suspect 플래그로 UI 노출.
     if request.target_difficulty is not None:
-        target = round(target_casual_clear_rate(request.target_difficulty), 4)
+        # [보스 난이도] scale<1 → 목표 클리어율 하향(보스=0.5, 목표 절반) = 같은 목표난이도에서
+        # 더 어려운 레벨이어야 통과. 일반 레벨은 scale=1.0(무영향).
+        target = round(
+            target_casual_clear_rate(request.target_difficulty)
+            * (request.target_clear_rate_scale or 1.0), 4)
         predicted = result.get("predicted_clear_rate", 0.0)
         gap = round(predicted - target, 4)
         passed = (abs(gap) <= CLEAR_RATE_TOLERANCE) and (

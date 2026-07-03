@@ -210,6 +210,98 @@ LEVEL_CONFIG_TABLE = [
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# [BOSS_MODE] 보스 레벨 레시피 — 레이어별(위→아래) 화려한 대칭 템플릿 스택.
+# 값 = pattern_templates.PATTERN_TEMPLATES 인덱스. level_number 기반 결정적 로테이션
+# ((level//10 - 1) % len) → 보스 150개가 서로 다른 조합 순환, 재시도에도 동일 레시피 유지.
+# 상단 = 임팩트(별/꽃/나비/선버스트…), 하단 = 구조 베이스(프레임/채움).
+# ─────────────────────────────────────────────────────────────────────────
+BOSS_RECIPES: List[List[int]] = [
+    [15, 4, 5, 40, 0, 40],    # star_five → donut → concentric_diamond → frame
+    [46, 7, 4, 41, 0, 40],    # flower → hexagon → donut → double_frame
+    [45, 33, 32, 40, 0, 40],  # butterfly → bowtie → hourglass → frame
+    [18, 16, 43, 0, 40, 0],   # sun_burst → star_six → center_hollow
+    [19, 44, 1, 40, 0, 40],   # spiral → window_panes → diamond → frame
+    [8, 46, 4, 41, 0, 40],    # heart → flower → donut → double_frame
+    [64, 43, 41, 40, 0, 0],   # nested_frames → center_hollow → double_frame
+    [55, 3, 1, 40, 0, 40],    # hub_and_spokes → cross → diamond → frame
+    [57, 4, 5, 43, 0, 40],    # octagon_ring → donut → concentric → center_hollow
+    [36, 37, 36, 37, 0, 40],  # pyramid ↔ inverted_pyramid 교대
+    [17, 15, 2, 40, 0, 40],   # crescent_moon → star_five → oval → frame
+    [49, 7, 3, 43, 0, 40],    # honeycomb → hexagon → cross → center_hollow
+]
+
+
+def crop_level_to_max_dim(level_json: Dict[str, Any], max_dim: int = 8) -> Tuple[bool, int]:
+    """레벨의 빈 가장자리를 균일 크롭해 선언 그리드 최대변을 축소(in-place).
+
+    전 레이어에서 공통으로 비어있는 여백(좌/우/상/하)만큼 col/row를 줄이고 모든 타일 키를
+    동일량 시프트한다. 홀짝 교대 크기차(짝수층=홀수층+1)는 동일 여백 제거로 보존되고, 레이어간
+    월드 정렬·블로킹 상대크기·상대위치 기믹(link 등)도 보존된다(게임 무변경, 순수 좌표 변환).
+
+    Args:
+        level_json: 대상 레벨(수정됨)
+        max_dim: 목표 최대변(이하). 크롭 후에도 이 값 초과면 미적용(D타입 = 크롭 불가).
+
+    Returns:
+        (applied, new_max_dim): applied=크롭 실제 적용 여부, new_max_dim=크롭 후(또는 현재) 최대변.
+    """
+    n_layers = int(level_json.get("layer", 0) or 0)
+    layers = []  # (idx, col, row, minx, maxx, miny, maxy or None if empty)
+    for i in range(n_layers):
+        ld = level_json.get(f"layer_{i}")
+        if not isinstance(ld, dict):
+            continue
+        col = int(ld.get("col") or 0)
+        row = int(ld.get("row") or 0)
+        tiles = ld.get("tiles") or {}
+        if tiles:
+            xs = [int(p.split("_")[0]) for p in tiles]
+            ys = [int(p.split("_")[1]) for p in tiles]
+            layers.append((i, col, row, min(xs), max(xs), min(ys), max(ys)))
+        else:
+            layers.append((i, col, row, None, None, None, None))
+    filled = [l for l in layers if l[3] is not None]
+    if not filled:
+        return (False, 0)
+    lx = min(l[3] for l in filled)
+    rx = min(l[1] - 1 - l[4] for l in filled)
+    ty = min(l[5] for l in filled)
+    by = min(l[2] - 1 - l[6] for l in filled)
+    cur_max = max(max(l[1], l[2]) for l in layers if l[1] > 0)
+    new_max = max(max(l[1] - lx - rx, l[2] - ty - by) for l in layers if l[1] > 0)
+    if lx + rx + ty + by == 0 or new_max > max_dim:
+        return (False, cur_max)
+    for i, col, row, *_ in layers:
+        ld = level_json[f"layer_{i}"]
+        was_str = isinstance(ld.get("col"), str)
+        nc, nr = col - lx - rx, row - ty - by
+        ld["col"] = str(nc) if was_str else nc
+        ld["row"] = str(nr) if was_str else nr
+        tiles = ld.get("tiles") or {}
+        if tiles:
+            ld["tiles"] = {
+                f"{int(p.split('_')[0]) - lx}_{int(p.split('_')[1]) - ty}": v
+                for p, v in tiles.items()
+            }
+    # 에디터 메타(패턴 위치/그리드) 시프트 — 존재 시에만
+    lp = level_json.get("_pattern_locked_positions")
+    if isinstance(lp, (list, set)):
+        shifted = []
+        for p in lp:
+            try:
+                x, y = p.split("_")
+                shifted.append(f"{int(x) - lx}_{int(y) - ty}")
+            except Exception:  # noqa: BLE001
+                shifted.append(p)
+        level_json["_pattern_locked_positions"] = shifted if isinstance(lp, list) else set(shifted)
+    if isinstance(level_json.get("_pattern_grid_cols"), int):
+        level_json["_pattern_grid_cols"] -= (lx + rx)
+    if isinstance(level_json.get("_pattern_grid_rows"), int):
+        level_json["_pattern_grid_rows"] -= (ty + by)
+    return (True, new_max)
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # 타일 타입 분포 프로파일 (레벨별 V = 서로 다른 타일 종류 수만 오버라이드)
 # baseline = LEVEL_CONFIG_TABLE 기본값(tile_type_profile=None). 신규 프로파일은
 # V만 교체하고 레이어/그리드/sawtooth/난이도/기믹 등 나머지 분포는 baseline과 동일.
@@ -886,6 +978,11 @@ class LevelGenerator:
             ValueError: If layer_tile_configs total is not divisible by 3.
         """
         start_time = time.time()
+
+        # [BOSS_MODE] 보스 전용 파라미터 오버라이드 — 그리드 상한 8(선언), 층수 5~6,
+        # 대칭/화려 템플릿 레시피(auto-mix에서 level_number 결정적 적용), 기믹 강도 상향.
+        if getattr(params, "boss_mode", False):
+            self._apply_boss_overrides(params)
 
         # [역생성 v3-2단계] 모든 속성 기믹 + 컨테이너(craft/stack) goal 허용.
         # witness는 plain 타일만 배정(컨테이너 내부는 t0 분배·÷3 보장), 봇클리어 검증 + degrade로
@@ -1950,8 +2047,10 @@ class LevelGenerator:
         # Auto-select grid size based on level number if level_number is provided
         # This ensures early levels (1-10) use smaller grids (4x4 ~ 5x5)
         # Check for common default grid sizes: (7, 7) from request schema, (8, 8) from old defaults
+        # [BOSS_MODE] 보스는 _apply_boss_overrides의 (7,7)을 그대로 사용(테이블 축소 우회)
         DEFAULT_GRID_SIZES = {(7, 7), (8, 8)}
-        if params.level_number and params.grid_size in DEFAULT_GRID_SIZES:
+        if (params.level_number and params.grid_size in DEFAULT_GRID_SIZES
+                and not getattr(params, "boss_mode", False)):
             # Override default grid size with level-appropriate size
             cols, rows = get_grid_size_for_level(params.level_number)
         else:
@@ -2151,12 +2250,36 @@ class LevelGenerator:
 
         return layer_patterns
 
+    def _apply_boss_overrides(self, params: GenerationParams) -> None:
+        """[BOSS_MODE] 보스 전용 파라미터 오버라이드 (in-place).
+
+        - 그리드: cols=7 → 짝수층 선언 8 (디바이스 가독성 한계 '9x9 이상 불가' 준수).
+          기존 보스는 10x10 템플릿 배정이라 타일이 너무 작게 표시되던 문제의 근본 대체.
+        - 층수 5~6 (보스 인덱스 교대): 그리드 폭 대신 깊이(블로킹)로 물량·난이도 확보.
+        - pattern_index=None + layer_pattern_configs=None → auto-mix 활성화 →
+          _generate_auto_layer_pattern_configs가 BOSS_RECIPES를 level_number 결정적으로 적용.
+        - symmetry both, gimmick_intensity ≥1.5 (화려함/난이도).
+        난이도 목표(클리어율 절반)는 프론트 검증 파이프라인에서 적용.
+        """
+        ln = params.level_number or 10
+        params.grid_size = (7, 7)
+        params.min_layers = 5
+        params.max_layers = 6
+        if params.active_layer_count is None:
+            params.active_layer_count = 5 + ((ln // 10) % 2)  # 5/6층 교대
+        params.symmetry_mode = "both"
+        params.pattern_type = "aesthetic"
+        params.pattern_index = None
+        params.layer_pattern_configs = None
+        params.gimmick_intensity = max(params.gimmick_intensity or 1.0, 1.5)
+
     def _generate_auto_layer_pattern_configs(
         self,
         active_layers: List[int],
         target_difficulty: float,
         total_tile_count: int,
         is_boss_level: bool = False,
+        boss_level_number: Optional[int] = None,
     ) -> List["LayerPatternConfig"]:
         """Generate intelligent layer pattern configurations for aesthetic variety.
 
@@ -2239,6 +2362,18 @@ class LevelGenerator:
             middle_patterns = middle_patterns + synth_indices
 
         # ===== PATTERN ASSIGNMENT LOGIC =====
+
+        if is_boss_level and boss_level_number:
+            # [BOSS_MODE] 결정적 레시피: 레이어별 화려한 대칭 템플릿 스택.
+            # (level//10 - 1) % len 로테이션 → 보스마다 다른 조합, 재시도에도 동일 유지.
+            recipe = BOSS_RECIPES[((boss_level_number // 10) - 1) % len(BOSS_RECIPES)]
+            for i, layer_idx in enumerate(sorted_layers):
+                configs.append(LayerPatternConfig(
+                    layer=layer_idx,
+                    pattern_type="aesthetic",
+                    pattern_index=recipe[i % len(recipe)],
+                ))
+            return configs
 
         if is_boss_level:
             # Boss levels: Maximum visual impact on top
@@ -2544,8 +2679,10 @@ class LevelGenerator:
 
         target = params.target_difficulty
         # Auto-select grid size based on level number if using default
+        # [BOSS_MODE] 보스는 _apply_boss_overrides의 (7,7) 유지(테이블 축소 우회)
         DEFAULT_GRID_SIZES = {(7, 7), (8, 8)}
-        if params.level_number and params.grid_size in DEFAULT_GRID_SIZES:
+        if (params.level_number and params.grid_size in DEFAULT_GRID_SIZES
+                and not getattr(params, "boss_mode", False)):
             cols, rows = get_grid_size_for_level(params.level_number)
         else:
             cols, rows = params.grid_size
@@ -2809,8 +2946,9 @@ class LevelGenerator:
         if enable_auto_mixing:
             # Calculate total tile count for auto-mixing strategy
             total_tiles = sum(layer_tile_counts.values())
-            # Detect boss level: high tile count (>100) or multiple goals
-            is_boss_level = total_tiles > 100 or (
+            # Detect boss level: explicit boss_mode > heuristic(high tile count/multi goals)
+            explicit_boss = bool(getattr(params, "boss_mode", False))
+            is_boss_level = explicit_boss or total_tiles > 100 or (
                 params.goals and len(params.goals) > 1
             )
             effective_layer_pattern_configs = self._generate_auto_layer_pattern_configs(
@@ -2818,6 +2956,7 @@ class LevelGenerator:
                 target_difficulty=params.target_difficulty,
                 total_tile_count=total_tiles,
                 is_boss_level=is_boss_level,
+                boss_level_number=params.level_number if explicit_boss else None,
             )
             _logger.info(f"[GENERATOR_DEBUG] Auto-mixing enabled: {len(effective_layer_pattern_configs)} layer configs generated, is_boss={is_boss_level}")
         elif params.layer_pattern_configs:

@@ -107,6 +107,9 @@ export interface GenerationParams {
   // [B] 층별 그리드 크기 다양화 시작 레벨. level_number >= 이 값이면 각 층 채움 크기를
   // 랜덤 s×s(min 3, 인접층 회피)로 다양화하고 중앙 배치. undefined=미적용. col/row 교대값 유지.
   size_diversity_start_level?: number;
+  // [보스 생성기] 10의 배수 보스 전용: 그리드 선언 최대 8, 5~6층, 레이어별 화려한 대칭
+  // 템플릿 레시피(level_number 결정적 로테이션). 목표 클리어율 절반은 RL 검증에서 별도 적용.
+  boss_mode?: boolean;
 }
 
 // Level generation result

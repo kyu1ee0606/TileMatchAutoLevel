@@ -1290,6 +1290,8 @@ def _generate_level_impl(
         # [역생성] concrete 레벨 솔버블 보장 (요청 플래그)
         use_reverse_generation=request.use_reverse_generation,
         reverse_generation_max_open=request.reverse_generation_max_open,
+        # [보스 생성기] 10의 배수 보스 전용 모드 (그리드≤8, 5~6층, 레시피 로테이션)
+        boss_mode=getattr(request, "boss_mode", False),
     )
 
     # Try generation with up to 3 fallback attempts
@@ -1956,6 +1958,8 @@ def generate_validated_level(
                 # [역생성] concrete 레벨 솔버블 보장 (요청 플래그)
                 use_reverse_generation=request.use_reverse_generation,
                 reverse_generation_max_open=request.reverse_generation_max_open,
+                # [보스 생성기] 10의 배수 보스 전용 모드 (그리드≤8, 5~6층, 레시피 로테이션)
+                boss_mode=getattr(request, "boss_mode", False),
             )
 
             result = generator.generate(params)

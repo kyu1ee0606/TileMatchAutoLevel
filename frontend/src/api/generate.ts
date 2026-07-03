@@ -31,6 +31,8 @@ export interface GenerateRequest {
   reverse_generation_max_open?: number;  // 난이도 레버(1~3)
   // [B] 층별 크기 다양화 시작 레벨 (undefined=미적용). col/row 교대값 유지 → 게임 정합.
   size_diversity_start_level?: number;
+  // [보스 생성기] 그리드≤8·5~6층·레시피 로테이션 (백엔드 boss_mode)
+  boss_mode?: boolean;
 }
 
 export interface SimulateRequest {
@@ -81,6 +83,8 @@ export async function generateLevel(
     // [역생성]
     use_reverse_generation: gimmickOptions?.use_reverse_generation,
     reverse_generation_max_open: gimmickOptions?.reverse_generation_max_open,
+    // [보스 생성기]
+    boss_mode: params.boss_mode,
   };
 
   // Increase timeout when using auto gimmick selection (requires additional processing)

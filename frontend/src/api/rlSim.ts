@@ -82,6 +82,8 @@ export interface RLSimRequest {
   skill_mean?: number;
   /** [난이도 기준 스킬] 실력분포 표준편차. 생략=기본 0.18 */
   skill_std?: number;
+  /** [보스 난이도] 목표 클리어율 배율. 보스=0.5(목표 절반 → 더 어려워야 통과). 생략=1.0 */
+  target_clear_rate_scale?: number;
 }
 
 export interface RLSimBatchRequest {

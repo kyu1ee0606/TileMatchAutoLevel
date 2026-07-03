@@ -1890,6 +1890,9 @@ class LevelTemplateFromTemplateRequest(_BaseModel):
     use_tile_count: Optional[int] = 6           # 몇 종류 타일 쓸지
     randomize_tiles: bool = True                # 일반 t0 타일을 t1~t6로 재할당
     random_seed: Optional[int] = None
+    # [보스 크롭] 지정 시 빈 가장자리를 균일 크롭해 선언 그리드 최대변을 이 값 이하로 축소.
+    # 크롭 후에도 초과하면 미적용(응답 cropped=false). 보스 레벨 10x10 → 8 축소용(디바이스 가독성).
+    crop_max_dim: Optional[int] = None
 
 
 @router.post("/generate/from-template")
@@ -1982,6 +1985,14 @@ async def generate_from_template(request: LevelTemplateFromTemplateRequest):
     # _preserve_pattern 플래그 추가 (프로덕션 후처리에서 구조 보호)
     level_json["_preserve_pattern"] = True
 
+    # [보스 크롭] 빈 가장자리 균일 크롭으로 선언 그리드 최대변 축소(디바이스 가독성 ≤ crop_max_dim).
+    # 순수 좌표 시프트(타일 수·타입·÷3 불변, 게임 무변경). 크롭 불가(D타입)면 미적용 → 응답 cropped 플래그.
+    cropped_applied = False
+    cropped_max_dim = None
+    if request.crop_max_dim is not None:
+        from ...core.generator import crop_level_to_max_dim
+        cropped_applied, cropped_max_dim = crop_level_to_max_dim(level_json, int(request.crop_max_dim))
+
     # [÷3 게이트] from-template 은 generator.generate() 를 우회하므로 v16 권위 게이트를
     # 여기서 직접 호출(멱등). 템플릿이 비-÷3 타일 분배를 가지면 클리어 불가 레벨이 되는데,
     # 게이트가 잉여 t0/타일 r(1~2)개 제거로 총합 ÷3 → 클리어가능 보장. (root: 우회 경로 차단)
@@ -2009,6 +2020,8 @@ async def generate_from_template(request: LevelTemplateFromTemplateRequest):
         "grade": grade,
         "generation_time_ms": 0,
         "from_template": True,
+        "cropped": cropped_applied,
+        "cropped_max_dim": cropped_max_dim,
         "template_id": request.template_id,
         "template_name": entry.get("name"),
         "template_measured_difficulty": entry.get("measured_difficulty"),

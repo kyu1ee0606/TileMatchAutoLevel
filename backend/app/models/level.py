@@ -179,6 +179,13 @@ class GenerationParams:
     # 적용된 레벨은 level_json["reverse_generated"]=True로 표시. 미지원 레벨은 자동 스킵(False).
     use_reverse_generation: bool = False
     reverse_generation_max_open: int = 2  # 난이도 레버(동시 미완성 그룹 수, 1~3). 클수록 어려움.
+    # [보스 생성기] 10의 배수 보스 레벨 전용 모드. 효과:
+    # - 그리드 상한: 선언 최대 8 (cols=7 → 짝수층 8, 디바이스 가독성 한계 9x9 미만 준수)
+    # - 층수 5~6 (그리드 폭 대신 깊이로 물량/난이도 확보)
+    # - 레이어별 화려한 대칭 템플릿 스택(BOSS_RECIPES)을 level_number 기반 결정적 로테이션
+    # - symmetry both 강제, gimmick_intensity 상향
+    # 난이도(목표 클리어율 절반)는 프론트 검증 파이프라인에서 별도 적용.
+    boss_mode: bool = False
 
     def __post_init__(self):
         """Set default values after initialization."""

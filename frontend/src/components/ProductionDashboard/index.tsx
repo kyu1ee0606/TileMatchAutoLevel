@@ -254,6 +254,27 @@ function validateUseTileCount(levelNumber: number, useTileCount: number, targetD
 
 const VISUAL_POOL = 15; // 비주얼 스프라이트 풀 t1~t15
 
+// [보스 난이도] 보스(10의 배수) 레벨의 목표 클리어율 배율 — 일반 목표의 절반(더 어려워야 통과).
+// RL 검증(초기/순차/재생성) 전 경로에서 target_clear_rate_scale로 백엔드에 전달.
+const BOSS_TARGET_CLEAR_SCALE = 0.5;
+const bossTargetScale = (levelNumber: number | undefined): number | undefined =>
+  levelNumber && levelNumber > 0 && levelNumber % 10 === 0 ? BOSS_TARGET_CLEAR_SCALE : undefined;
+
+// [보스 생성기/디바이스 제약] 선언 그리드 최대변 상한 — 9x9 이상은 타일이 작아 플레이 불가.
+const MAX_PLAYABLE_GRID = 8;
+const maxDeclaredGridDim = (levelJson: LevelJsonLike | undefined): number => {
+  const lj = levelJson as unknown as Record<string, unknown> | undefined;
+  if (!lj) return 0;
+  let mx = 0;
+  const layerCount = Number(lj.layer) || 0;
+  for (let i = 0; i < layerCount; i++) {
+    const ld = lj[`layer_${i}`] as { col?: string | number; row?: string | number; tiles?: Record<string, unknown> } | undefined;
+    if (!ld || !ld.tiles || Object.keys(ld.tiles).length === 0) continue;
+    mx = Math.max(mx, Number(ld.col) || 0, Number(ld.row) || 0);
+  }
+  return mx;
+};
+
 // 🔴 게임 배포 게이트: craft/stack 명시 내부(신포맷 [count,"ids"])는 **게임 v1.10.382+** 배포 후에만 emit.
 // 구 게임에 신포맷 가면 내부 강제 t0 재분배 → relabel board와 불일치 → 매칭 붕괴.
 // 게임 빌드가 플레이어에 배포된 뒤 true로 전환. false면 현행(순수고정 relabel + 순수t0 시드) 유지.
@@ -844,7 +865,9 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
           .filter(s => s.level % 10 === 0 && !takenLevels.has(s.level))
           .sort((a, b) => a.level - b.level);
 
-        // 순차 배치: 쉬운 템플릿 → 낮은 보스
+        // [보스 템플릿 차용+크롭] 보스 슬롯에 기존 템플릿 모양을 배정하되, 생성 시 crop_max_dim=8로
+        // 빈 가장자리 크롭(A타입=원래≤8 그대로, B타입=크롭시≤8). 크롭 불가(D타입)면 생성 단계에서
+        // boss_mode 레시피 생성기로 자동 폴백(그리드 게이트). 순차 배치: 쉬운 템플릿 → 낮은 보스.
         const placedCount = Math.min(sortedTpls.length, bossSlots.length);
         for (let i = 0; i < placedCount; i++) {
           effectiveAssignments[bossSlots[i].level] = sortedTpls[i].template_id;
@@ -1053,6 +1076,9 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
           const { localIdx, levelNumber, targetDifficulty, patternIndex, templateId } = task;
 
           // [v15.55] 레벨 템플릿 할당됨 → from-template 엔드포인트 분기
+          // [보스 크롭] 보스(10의 배수)는 crop_max_dim=8로 빈 가장자리 크롭(A/B타입). 크롭 후에도
+          // >8(D타입)이면 템플릿 폐기하고 아래 절차생성(boss_mode 레시피)으로 폴백.
+          const isBossTemplate = levelNumber % 10 === 0 && levelNumber > 0;
           if (templateId) {
             try {
               const tplStartTime = Date.now();
@@ -1062,8 +1088,13 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
                 use_tile_count: 6,
                 randomize_tiles: true,
                 random_seed: levelNumber,
+                crop_max_dim: isBossTemplate ? MAX_PLAYABLE_GRID : undefined,
               });
               const levelJson = tplResp.data.level_json;
+              // 보스인데 크롭해도 >8(D타입) → 템플릿 폐기, 절차생성 폴백
+              if (isBossTemplate && maxDeclaredGridDim(levelJson) > MAX_PLAYABLE_GRID) {
+                throw new Error(`boss template ${templateId} uncroppable (>${MAX_PLAYABLE_GRID}) → 절차생성 폴백`);
+              }
               const generationTime = Date.now() - tplStartTime;
 
               // 봇 검증 (기존 파이프라인과 동일하게 autoplay 실행)
@@ -1206,18 +1237,21 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
 
             const params: GenerationParams = {
               target_difficulty: targetDifficulty,
-              grid_size: gridSize,
-              min_layers: minLayers,
-              max_layers: maxLayers,
+              grid_size: isBossLevel ? [7, 7] : gridSize, // 보스: 백엔드가 (7,7)→선언 최대 8 사용
+              min_layers: isBossLevel ? 5 : minLayers,
+              max_layers: isBossLevel ? 6 : maxLayers,
               tile_types: undefined, // 백엔드에서 level_number 기반 자동 선택
               tile_type_profile: tileTypeProfile === 'baseline' ? undefined : tileTypeProfile,
               obstacle_types: [],
               goals: [{ type: goalType, direction: goalDirection, count: Math.max(2, Math.floor(3 + targetDifficulty * 2)) }],
               symmetry_mode: symmetryMode,
               pattern_type: patternType,
-              pattern_index: patternIndex,
+              // 보스: pattern_index 미지정 → 백엔드 auto-mix가 BOSS_RECIPES(레벨번호 결정적) 적용
+              pattern_index: isBossLevel ? undefined : patternIndex,
               // [B] 층별 크기 다양화 (0이면 미적용)
               size_diversity_start_level: sizeDiversityStartLevel > 0 ? sizeDiversityStartLevel : undefined,
+              // [보스 생성기] 그리드≤8·5~6층·화려한 레시피. 목표 클리어율 절반은 RL 검증에서 적용.
+              boss_mode: isBossLevel || undefined,
             };
 
             const gimmickOptions = {
@@ -2110,9 +2144,9 @@ function OverviewTab({ stats, batch, batchId }: { stats: ProductionStats; batch:
         const result = await generateLevel(
           {
             target_difficulty: targetDifficulty,
-            grid_size: gridSize,
-            min_layers: minLayers,
-            max_layers: maxLayers,
+            grid_size: isBossLevel ? [7, 7] : gridSize, // 보스: 선언 최대 8 (디바이스 제약)
+            min_layers: isBossLevel ? 5 : minLayers,
+            max_layers: isBossLevel ? 6 : maxLayers,
             tile_types: undefined, // 백엔드에서 level_number 기반 자동 선택
             obstacle_types: [],
             goals: [{
@@ -2122,6 +2156,8 @@ function OverviewTab({ stats, batch, batchId }: { stats: ProductionStats; batch:
             }],
             symmetry_mode: symmetryMode,
             pattern_type: patternType,
+            // [보스 생성기] 레시피 로테이션 + 그리드 캡 (재생성도 동일 적용)
+            boss_mode: isBossLevel || undefined,
           },
           {
             auto_select_gimmicks: true,
@@ -3013,6 +3049,7 @@ function TestTab({
           level_json: lvl.level_json,
           target_difficulty: lvl.meta.target_difficulty,
           skill_mean: rlSkillMean,
+          target_clear_rate_scale: bossTargetScale(ln),
         });
         if (cancelled) return;
         const predicted = rl.predicted_clear_rate;
@@ -3024,7 +3061,7 @@ function TestTab({
           rl_classification: rl.classification,
           luck_suspect: rl.luck_suspect,
           verified: true,
-          verification_passed: rlVerificationPassed(ln, rl),
+          verification_passed: rlVerificationPassed(ln, rl) && maxDeclaredGridDim(lvl.level_json) <= MAX_PLAYABLE_GRID,
         };
         await saveProductionLevels(batchId, [{ meta: { ...lvl.meta, ...patch }, level_json: lvl.level_json }]);
         setLevels(prev => prev.map(l => l.meta.level_number === ln ? { ...l, meta: { ...l.meta, ...patch } } : l));
@@ -3152,6 +3189,7 @@ function TestTab({
         level_json: selectedLevel.level_json,
         target_difficulty: selectedLevel.meta.target_difficulty,
         skill_mean: rlSkillMean,
+        target_clear_rate_scale: bossTargetScale(selectedLevel.meta.level_number),
       });
       const predicted = rl.predicted_clear_rate;
       const target = rl.target_clear_rate ?? 0;
@@ -3187,7 +3225,7 @@ function TestTab({
         luck_suspect: rl.luck_suspect,
         match_score: matchScore,
         verified: true,
-        verification_passed: rlVerificationPassed(selectedLevel.meta.level_number, rl),
+        verification_passed: rlVerificationPassed(selectedLevel.meta.level_number, rl) && maxDeclaredGridDim(selectedLevel.level_json) <= MAX_PLAYABLE_GRID,
         actual_difficulty: (typeof rl.difficulty_score === 'number') ? rl.difficulty_score : Math.max(0, Math.min(1, 1 - predicted)),
       };
 
@@ -3348,6 +3386,7 @@ function TestTab({
             target_difficulty: currentLevel.meta.target_difficulty,
             seed: attempts, // attempt별 시드 변경 — 재생성 재측정 독립성
             skill_mean: rlSkillMean,
+            target_clear_rate_scale: bossTargetScale(currentLevel.meta.level_number),
           });
 
           const predicted = rl.predicted_clear_rate;
@@ -3395,7 +3434,13 @@ function TestTab({
           difficultyOffset = Math.max(-3, Math.min(3, difficultyOffset));
 
           // 통과 판정: 튜토리얼(1~10) 예외 포함 (쉬움 허용). 일반은 백엔드 기준.
-          const isPassed = rlVerificationPassed(levelNumber, rl);
+          // [디바이스 제약] 선언 그리드 최대변 > 8 → 실기에서 타일이 너무 작아 플레이 불가 →
+          // RL 통과와 무관하게 실패 처리(재생성 유도, 보스 10x10 템플릿 잔재 정리).
+          const gridDim = maxDeclaredGridDim(currentLevel.level_json);
+          if (gridDim > MAX_PLAYABLE_GRID) {
+            console.warn(`[seq] Lv.${levelNumber} 선언 그리드 ${gridDim} > ${MAX_PLAYABLE_GRID} → 실패 처리(재생성)`);
+          }
+          const isPassed = rlVerificationPassed(levelNumber, rl) && gridDim <= MAX_PLAYABLE_GRID;
 
           // RL 검증 메타 (봇 대신 예측 클리어율)
           // [P1] actual_difficulty = 실플레이 시뮬 측정값(difficulty_score=1-AUC). 정적 analyzer 추정 폐기.
@@ -3631,7 +3676,7 @@ function TestTab({
           level_number: levelNumber,
         }
       );
-      const rl = await simulateLevelSkillSweep({ level_json: res.level_json, target_difficulty: td, seed, skill_mean: rlSkillMean });
+      const rl = await simulateLevelSkillSweep({ level_json: res.level_json, target_difficulty: td, seed, skill_mean: rlSkillMean, target_clear_rate_scale: bossTargetScale(levelNumber) });
       return {
         level_json: res.level_json,
         grade: res.grade,
@@ -3670,7 +3715,7 @@ function TestTab({
         // 후보 생성 시 같은 td로 측정했으니, 슬롯 target은 그 슬롯 td의 목표. 한 후보를 슬롯 td로 재측정해 target 취득.
         const probe = solvablePool.find(c => !c.used);
         if (!probe) break;
-        const tgtResp = await simulateLevelSkillSweep({ level_json: probe.level_json, target_difficulty: meta.target_difficulty, seed: 1, skill_mean: rlSkillMean }).catch(() => null);
+        const tgtResp = await simulateLevelSkillSweep({ level_json: probe.level_json, target_difficulty: meta.target_difficulty, seed: 1, skill_mean: rlSkillMean, target_clear_rate_scale: bossTargetScale(meta.level_number) }).catch(() => null);
         const targetClear = tgtResp?.target_clear_rate ?? 0.4;
         let best: typeof solvablePool[number] | null = null;
         let bestGap = TOL;
@@ -4032,6 +4077,9 @@ function TestTab({
       const templateId = (level.meta as { template_id?: string }).template_id;
       const userOverridingPattern = userPatternIndex !== undefined || userSymmetryMode !== undefined;
       const forceNoTemplate = options?.forceNoTemplate === true;
+      // [보스 크롭] 보스(10의 배수)는 from-template을 crop_max_dim=8로 호출(A/B타입 템플릿 차용).
+      // 크롭 후에도 >8(D타입)이면 템플릿 폐기하고 절차생성(boss_mode 레시피)으로 폴백.
+      const isBossRegen = levelNumber % 10 === 0 && levelNumber > 0;
       // [v15.x+] 템플릿 레이아웃이 언클리어러블한 경우(모든 봇 클리어율 0%) 호출자가
       // forceNoTemplate=true 로 우회 요청. 같은 모양만 유지하는 /generate/from-template 로는
       // 데드락 모양에서 탈출 불가하므로 일반 generate 경로로 전환하고 meta.template_id 도 제거한다.
@@ -4043,11 +4091,16 @@ function TestTab({
           use_tile_count: 6,
           randomize_tiles: true,
           random_seed: seed,
+          crop_max_dim: isBossRegen ? MAX_PLAYABLE_GRID : undefined,
         });
         const tplLevelJson = tplResp.data?.level_json;
         if (!tplLevelJson) {
           throw new Error('템플릿 응답에 level_json 없음');
         }
+        // 보스인데 크롭해도 >8(D타입) → 템플릿 폐기, 아래 절차생성(boss_mode)으로 폴백
+        if (isBossRegen && maxDeclaredGridDim(tplLevelJson) > MAX_PLAYABLE_GRID) {
+          console.warn(`[regen] Lv.${levelNumber} 보스 템플릿 ${templateId} 크롭 불가(>8) → boss_mode 절차생성 폴백`);
+        } else {
         const tplActualDifficulty = Number(tplResp.data?.actual_difficulty ?? 0);
         const tplGrade = String(tplResp.data?.grade ?? 'C');
         setRegenProgressMap(prev => new Map(prev).set(levelNumber, { status: 'saving' }));
@@ -4071,10 +4124,11 @@ function TestTab({
           level_json: tplLevelJson,
         }]);
         setRegenProgressMap(prev => new Map(prev).set(levelNumber, { status: 'done' }));
-        addNotification('success', `레벨 ${levelNumber} 템플릿 재생성 완료 (template=${templateId})`);
+        addNotification('success', `레벨 ${levelNumber} 템플릿 재생성 완료 (template=${templateId}${isBossRegen ? ', 크롭≤8' : ''})`);
         loadLevels();
         onStatsUpdate();
         return;
+        }  // else (보스 크롭 가능) 끝 — D타입이면 아래 절차생성으로 폴백
       }
 
       // 기믹 강도를 목표 난이도로 제한 (과도한 기믹으로 난이도 초과 방지)
@@ -4203,9 +4257,9 @@ function TestTab({
             return generateLevel(
               {
                 target_difficulty: targetDifficulty,
-                grid_size: gridSize,
-                min_layers: minLayers,
-                max_layers: maxLayers,
+                grid_size: isBossLevel ? [7, 7] : gridSize, // 보스: 선언 최대 8 (디바이스 제약)
+                min_layers: isBossLevel ? 5 : minLayers,
+                max_layers: isBossLevel ? 6 : maxLayers,
                 // 피드백 offset 있으면 조준한 타일종류, 없으면 백엔드 자동선택
                 tile_types: steeredTileTypes,
                 obstacle_types: [],
@@ -4216,7 +4270,10 @@ function TestTab({
                 }],
                 symmetry_mode: symmetryMode,
                 pattern_type: patternType,
-                pattern_index: patternIndex,
+                // 보스: pattern_index 미지정 → 백엔드 BOSS_RECIPES(레벨번호 결정적) 적용
+                pattern_index: isBossLevel ? undefined : patternIndex,
+                // [보스 생성기]
+                boss_mode: isBossLevel || undefined,
               },
               {
                 auto_select_gimmicks: true,
@@ -4279,9 +4336,9 @@ function TestTab({
 
       // Save regenerated level - match_score/bot_clear_rates는 비워둠 (일괄 테스트에서 측정)
       setRegenProgressMap(prev => new Map(prev).set(levelNumber, { status: 'saving' }));
-      // forceNoTemplate 으로 진입한 경우 향후 재생성에서 다시 템플릿 경로로 빠지지 않도록
+      // forceNoTemplate/보스 재생성으로 진입한 경우 향후 재생성에서 다시 템플릿 경로로 빠지지 않도록
       // template_id 를 명시적으로 제거하고, 일반 generate 의 verified 패턴 정보를 기록한다.
-      const baseMetaForSave: ProductionLevelMeta = forceNoTemplate
+      const baseMetaForSave: ProductionLevelMeta = (forceNoTemplate || isBossRegen)
         ? (() => {
             const m: Record<string, unknown> = { ...(level.meta as unknown as Record<string, unknown>) };
             delete m.template_id;
@@ -4518,15 +4575,18 @@ function TestTab({
       ): Promise<GenerationResult | null> => {
         const params = {
           target_difficulty: targetDifficulty,
-          grid_size: gridSize,
-          min_layers: Math.max(2, minLayers + layerVar),
-          max_layers: Math.min(10, maxLayers + layerVar),
+          grid_size: (isBossLevel ? [7, 7] : gridSize) as [number, number], // 보스: 선언 최대 8
+          min_layers: isBossLevel ? 5 : Math.max(2, minLayers + layerVar),
+          max_layers: isBossLevel ? 6 : Math.min(10, maxLayers + layerVar),
           tile_types: undefined,
           obstacle_types: [],
           goals: [{ type: goalType, direction: goalDirection, count: Math.max(2, Math.floor(3 + targetDifficulty * 2)) }],
           symmetry_mode: symmetryMode,
           pattern_type: patternType,
-          pattern_index: patternIndex,
+          // 보스: pattern_index 미지정 → BOSS_RECIPES 적용
+          pattern_index: isBossLevel ? undefined : patternIndex,
+          // [보스 생성기]
+          boss_mode: isBossLevel || undefined,
         };
         const gimmickOpts = {
           auto_select_gimmicks: true,
@@ -5027,6 +5087,22 @@ function TestTab({
         </button>
       </div>
 
+      {/* [RL 검증 기준 실력 표시] 이 배치 자동/순차 검증 RL이 쓰는 skill_mean. 값이 낮으면(약한
+          유저 가정) 예측 클리어율↓ → 통과 어려움. 조절은 생성 탭의 '난이도 기준 실력' 슬라이더. */}
+      <div className="flex items-center justify-between bg-gray-800/70 border border-gray-700 rounded-lg px-4 py-2">
+        <span className="text-xs text-gray-400">
+          🎮 검증 기준 실력 <span className="text-gray-500">(skill_mean · RL 난이도 기준)</span>
+        </span>
+        <span className="text-sm font-mono flex items-center gap-1.5">
+          <span className={rlSkillMean >= 0.6 ? 'text-emerald-400 font-bold' : rlSkillMean >= 0.5 ? 'text-yellow-400 font-bold' : 'text-orange-400 font-bold'}>
+            {rlSkillMean.toFixed(2)}
+          </span>
+          <span className="text-[11px] text-gray-500">
+            {rlSkillMean >= 0.7 ? '고수' : rlSkillMean >= 0.55 ? '중상급' : rlSkillMean >= 0.45 ? '캐주얼' : '초보'} 기준
+          </span>
+        </span>
+      </div>
+
       {/* Sequential Auto Process Panel - auto_single mode */}
       {testMode === 'auto_single' && (() => {
         const untestedLevels = levels.filter(l => !l.meta.match_score || l.meta.match_score === 0);
@@ -5048,6 +5124,20 @@ function TestTab({
               <span className="text-xs text-gray-400">
                 미측정: <span className="text-blue-400 font-medium">{untestedLevels.length}개</span>
                 {' / '}미달: <span className="text-orange-400 font-medium">{failedLevels.length}개</span>
+              </span>
+            </div>
+
+            {/* [RL 실력 기준 표시] 순차검증 RL이 사용하는 skill_mean(난이도 기준 실력). 생성/검증
+                난이도 기준값 — GenerateTab 슬라이더에서 조절. 낮으면(약한 유저 가정) 통과 어려움. */}
+            <div className="flex items-center justify-between bg-gray-900/50 border border-gray-700 rounded px-3 py-2">
+              <span className="text-xs text-gray-400">🎮 검증 기준 실력 (skill_mean)</span>
+              <span className="text-xs font-mono">
+                <span className={rlSkillMean >= 0.6 ? 'text-emerald-400 font-semibold' : rlSkillMean >= 0.5 ? 'text-yellow-400 font-semibold' : 'text-orange-400 font-semibold'}>
+                  {rlSkillMean.toFixed(2)}
+                </span>
+                <span className="text-gray-500">
+                  {' '}({rlSkillMean >= 0.7 ? '고수' : rlSkillMean >= 0.55 ? '중상급' : rlSkillMean >= 0.45 ? '캐주얼' : '초보'} 기준)
+                </span>
               </span>
             </div>
 

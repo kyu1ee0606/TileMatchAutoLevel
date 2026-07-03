@@ -244,6 +244,10 @@ export interface ProductionBatch {
 
   // 기믹 설정
   gimmick_unlock_levels: Record<string, number>;
+
+  // [서버 동기화] 이 로컬 사본이 마지막으로 반영한 서버 버전. push 성공/pull 시 갱신.
+  // 마운트 sync에서 서버 버전과 비교해 '서버가 더 최신'(다른 브라우저/서버측 수정)이면 자동 pull.
+  __server_version?: number;
 }
 
 /**

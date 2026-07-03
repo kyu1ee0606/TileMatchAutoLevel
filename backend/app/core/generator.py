@@ -1331,6 +1331,11 @@ class LevelGenerator:
         # 대상이 사라진 고아 link 속성을 제거 → 인게임 FindLinkTile null[0] NRE(스폰 크래시) 차단.
         level = self._strip_orphaned_link_tiles(level)
 
+        # [INNER_DIVERSIFY] craft/stack 내부 명시 다양화 bake — 필드 전량 명시 레벨에서
+        # 내부가 단색 3뭉치로 확정되는 게임 세트분배 문제 해소. 타입 카운트는 순열 불변(÷3 보존)
+        # 이므로 위 ÷3 보정/검증 결과에 영향 없음. 반드시 모든 타일 변형 단계 이후 마지막에 실행.
+        level = self._diversify_container_inner_tiles(level)
+
         generation_time_ms = int((time.time() - start_time) * 1000)
 
         return GenerationResult(
@@ -11780,6 +11785,141 @@ class LevelGenerator:
                 f"[LINK_SANITIZE] stripped {stripped} invalid link attr(s) "
                 f"(target missing/OOB, or target is goal/gimmick/link — link needs plain 1:1 target)"
             )
+        return level
+
+    def _diversify_container_inner_tiles(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """[INNER_DIVERSIFY] craft/stack 내부 타일 명시 다양화 bake.
+
+        문제: 패턴 기반 프로덕션 레벨은 필드 타일이 전부 명시(t0 없음) → 컨테이너 내부만
+        t0 분배 대상. 게임 분배(DB_Level.ShuffleEmptyTiles)는 '같은 타입 3개 = 1세트' 단위
+        배정이라 내부 3슬롯이 단색 뭉치로 확정된다(예: craft 내부 = t8,t8,t8). 의도 동작은
+        내부도 필드 일반 타일처럼 골고루 배출.
+
+        수정: 게임 분배 포트(assign_t0_tiles)로 내부 타입을 먼저 확정한 뒤, 컨테이너 내
+        중복 타입 슬롯을 필드의 '다른 타입' 일반 타일과 라벨 스왑(순수 순열)하고 명시
+        신포맷(td[2]=[cnt,"tX_tY_.."], v1.10.382+, 게임 리터럴 스폰)으로 출고한다.
+        순열이므로 전역 타입별 카운트 불변 → ÷3 완전 보존. 게임 코드 무변경.
+
+        적용 조건: 필드 t0 == 0 일 때만. 필드 t0가 있으면 게임 분배가 자연스럽게 섞어주는
+        원래 동작이므로 건드리지 않음(명시 bake 시 남은 t0 재분배와 어긋날 위험도 회피).
+        'key' 슬롯은 고정 — unlockTile 키는 t0 슬롯에만 스폰 가능하므로 내부에 보존 필수.
+        """
+        import random as _random
+
+        num_layers = int(level.get("layer", 0) or 0)
+        containers: List[Tuple[int, str, List]] = []  # (layer_idx, pos, td)
+        field_swappable: List[Tuple[int, str, List]] = []  # 명시 t1~t15 일반 타일
+        concrete: Dict[str, int] = {}
+        field_t0 = 0
+
+        for i in range(num_layers):
+            layer = level.get(f"layer_{i}")
+            tiles = layer.get("tiles") if isinstance(layer, dict) else None
+            if not isinstance(tiles, dict):
+                continue
+            for pos, td in tiles.items():
+                if not (isinstance(td, list) and td and isinstance(td[0], str)):
+                    continue
+                tt = td[0]
+                if tt == "t0":
+                    field_t0 += 1
+                elif tt.startswith("craft_") or tt.startswith("stack_"):
+                    # count-only(구포맷)만 대상. 이미 명시 inner면 보존.
+                    if (len(td) > 2 and isinstance(td[2], list) and td[2]
+                            and isinstance(td[2][0], (int, float)) and int(td[2][0]) > 0
+                            and not (len(td[2]) > 1 and isinstance(td[2][1], str) and td[2][1])):
+                        containers.append((i, pos, td))
+                elif tt.startswith("t") and tt[1:].isdigit():
+                    concrete[tt] = concrete.get(tt, 0) + 1
+                    if 1 <= int(tt[1:]) <= 15:
+                        field_swappable.append((i, pos, td))
+
+        if not containers or field_t0 > 0:
+            return level
+
+        total_inner = sum(int(td[2][0]) for _, _, td in containers)
+        if total_inner <= 0:
+            return level
+
+        # 게임 분배 재현 (solver._clearability_type_counts와 동일 파라미터)
+        from .bot_simulator import TileDistributor
+        use_tile_count = min(int(level.get("useTileCount", 6) or 6), 15)
+        existing = [t for t in concrete if t[1:].isdigit()]
+        offset = 0
+        if existing:
+            mn = min(int(t[1:]) for t in existing)
+            offset = mn - 1 if mn > use_tile_count else 0
+        rand_seed = int(level.get("randSeed", 0) or 0)
+        try:
+            assigns = TileDistributor.assign_t0_tiles(
+                t0_count=total_inner, use_tile_count=use_tile_count,
+                rand_seed=rand_seed,
+                shuffle_tile=level.get("xShuffleTile", 0),
+                type_imbalance=level.get("xTypeImbalance", 0),
+                unlock_tile=level.get("unlockTile", level.get("xUnlockTile", 0)),
+                tile_type_offset=offset, existing_tile_counts=concrete,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[INNER_DIVERSIFY] 분배 재현 실패, 스킵: {e}")
+            return level
+        if len(assigns) != total_inner:
+            logger.warning(f"[INNER_DIVERSIFY] 분배 수 불일치({len(assigns)}!={total_inner}), 스킵")
+            return level
+
+        # 안전 검증용 전역 멀티셋 (필드 + 내부) — 스왑은 순열이므로 불변이어야 함
+        def _global_counts() -> Dict[str, int]:
+            c: Dict[str, int] = dict(concrete)
+            for s in assigns:
+                c[s] = c.get(s, 0) + 1
+            return c
+
+        before_counts = _global_counts()
+
+        # 컨테이너별 슬롯 배정 (결정적 순서) + 중복 슬롯 ↔ 필드 라벨 스왑
+        rng = _random.Random(rand_seed * 1000003 + 8161)
+        containers.sort(key=lambda c: (c[0], c[1]))
+        swapped = 0
+        cursor = 0
+        for _, _, td in containers:
+            cnt = int(td[2][0])
+            slots = assigns[cursor:cursor + cnt]
+            for k in range(cnt):
+                if slots[k] == "key" or slots[k] not in slots[:k]:
+                    continue  # key 고정 / 중복 아님
+                cur_types = set(s for s in slots if s != "key")
+                # 1순위: 컨테이너에 없는 타입 필드 / 2순위: 현재 슬롯과 다른 타입
+                strict = [f for f in field_swappable if f[2][0] not in cur_types]
+                relaxed = [f for f in field_swappable if f[2][0] != slots[k]]
+                pool = strict or relaxed
+                if not pool:
+                    continue  # 스왑 불가 → 부분 다양화 폴백
+                pick = rng.choice(pool)
+                slots[k], pick[2][0] = pick[2][0], slots[k]  # 라벨 스왑 (순열)
+                swapped += 1
+            assigns[cursor:cursor + cnt] = slots
+            # 명시 신포맷 출고. id_string[k]=게임 stackCTileList[k] — 다양화 목적상 순서 무관,
+            # 분배 슬롯 순서 그대로 기록 (프론트 bake/E6는 자체 reverse 대칭으로 처리).
+            td[2] = [cnt, "_".join(slots)]
+            cursor += cnt
+
+        # 순열 불변 검증 — 필드 concrete 재집계 + 내부 합산이 before와 동일해야 함
+        after_field: Dict[str, int] = {}
+        for f in field_swappable:
+            after_field[f[2][0]] = after_field.get(f[2][0], 0) + 1
+        # field_swappable 외 concrete(t16 등)도 합산
+        for t, c in concrete.items():
+            if not (1 <= int(t[1:]) <= 15):
+                after_field[t] = after_field.get(t, 0) + c
+        after_counts = dict(after_field)
+        for s in assigns:
+            after_counts[s] = after_counts.get(s, 0) + 1
+        if after_counts != before_counts:
+            logger.error(f"[INNER_DIVERSIFY] 순열 불변 위반! before={before_counts} after={after_counts}")
+
+        logger.info(
+            f"[INNER_DIVERSIFY] 컨테이너 {len(containers)}개 내부 {total_inner}슬롯 명시 bake "
+            f"(스왑 {swapped}회, seed={rand_seed})"
+        )
         return level
 
     def _remove_out_of_bounds_tiles(self, level: Dict[str, Any]) -> Dict[str, Any]:

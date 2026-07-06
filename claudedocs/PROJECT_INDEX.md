@@ -264,7 +264,8 @@ TileMatchAutoLevel/
 | [CHANGELOG_20260703_AUTO_QUEUE.md](CHANGELOG_20260703_AUTO_QUEUE.md) | 프로덕션 자동 연속생성 큐(야간 자리비움, N배치 순차 자동생성 or 무한) |
 | [CHANGELOG_20260703_BOSS_GENERATOR_AND_CROP.md](CHANGELOG_20260703_BOSS_GENERATOR_AND_CROP.md) | 보스 전용 생성기(그리드≤8·5~6층·레시피12종·목표절반) + 템플릿 크롭 차용 + 디바이스 그리드 게이트 |
 | [CHANGELOG_20260703_CONTAINER_INNER_DIVERSIFY.md](CHANGELOG_20260703_CONTAINER_INNER_DIVERSIFY.md) | craft/stack 내부 단색 뭉치 해소(명시 다양화 bake·순열÷3보존) + bake t1폴백 제거 + 서버 버전비교 pull |
-| [INVESTIGATION_20260703_CRAFT_TILE_SORT.md](INVESTIGATION_20260703_CRAFT_TILE_SORT.md) | craft 배출 타일 sort 이상 조사 — 게임 `TileCraft.SetOrder`(covered=init-10) 원인, 에디터 데이터 정상 → 인게임 이관 |
+| [INVESTIGATION_20260703_CRAFT_TILE_SORT.md](INVESTIGATION_20260703_CRAFT_TILE_SORT.md) | craft 뚜껑/배출타일 sort 조사 — 생성기 파츠가 자기셀(init) 기준이라 이웃셀 그리드 sort와 불일치. 인게임 sort 전면감사(실이슈=craft만) 포함. 에디터 데이터 정상 |
+| [HANDOFF_INGAME_CRAFT_SORT.md](HANDOFF_INGAME_CRAFT_SORT.md) | 인게임 세션 이관 프롬프트 — craft 뚜껑/배출 sort 재설계 요청(설계의도+레이어링 계산+수정방향 A/B) |
 | [PLAN_GENERATION_PROGRESS_UI.md](PLAN_GENERATION_PROGRESS_UI.md) | 생성 진행 UI 개선 계획(현재 생성중 레벨/목표 표시, 자동큐 배치 진행 통합) — 미적용 |
 | [CHANGELOG_20260701_OOB_TILE_REPAIR.md](CHANGELOG_20260701_OOB_TILE_REPAIR.md) | 반환 직전 초크포인트 정화: OOB 타일 제거(컬링→클리어불가) + 고아 link 제거(FindLinkTile NRE 스폰크래시) |
 | [CHANGELOG_20260701_TILE_VARIETY_AND_RL_SKILL.md](CHANGELOG_20260701_TILE_VARIETY_AND_RL_SKILL.md) | 재생성 타일종류 그래프고정 + 독천장(allow_high) 제거 + RL 난이도 기준 실력 슬라이더(전체 난이도 조절) |

@@ -1685,8 +1685,8 @@ class BossTemplateGenerateRequest(_BaseModel):
     # [보스 난이도] 타일 종류(useTileCount) 하한/보너스 — 보스는 주변 일반레벨보다 어렵게.
     # 종류 수 = 난이도 지배 레버라 그래프값 그대로면 저레벨 보스가 트리비얼(클리어율↑).
     tile_type_bonus: int = 1        # 그래프값 + N
-    tile_type_floor: int = 6        # 최소 하한(종류)
-    tile_type_cap: int = 9          # 최대 상한(종류)
+    tile_type_floor: int = 9        # 최소 하한(종류) — 보스는 최소 9종
+    tile_type_cap: int = 15         # 상한 = 스프라이트 풀 최대(t1~t15). 사실상 무제한
 
 
 @router.post("/generate/from-boss-template")
@@ -1733,6 +1733,49 @@ async def generate_from_boss_template(req: BossTemplateGenerateRequest):
             for p in l.get("positions", []) if isinstance(p, str)
         }
         level[f"layer_{i}"] = {"col": str(col), "row": str(row), "tiles": tiles, "num": str(len(tiles))}
+
+    # [보스 컨테이너 기믹] craft/stack 골 배치 — 저레벨(11~30) 언락 기믹이 craft/stack뿐이라
+    # 속성기믹만으론 기믹 0. 상위층 t0 셀 일부를 컨테이너로 변환(내부 t0×3, 게임 분배). craft는
+    # 출력방향 빈 칸 확보. goalCount 누적. ÷3은 finalize가 보정.
+    if req.apply_gimmicks:
+        import random as _r2
+        from .generate import DEFAULT_GIMMICK_UNLOCK_LEVELS as _UNLOCK
+        unlock2 = req.gimmick_unlock_levels or _UNLOCK
+        containers = []
+        if ln >= int(unlock2.get("craft", 11)):
+            containers.append("craft")
+        if ln >= int(unlock2.get("stack", 21)):
+            containers.append("stack")
+        if containers:
+            rng2 = _r2.Random(int(seed) * 31 + 7)
+            td2 = float(req.target_difficulty) if req.target_difficulty is not None else 0.3
+            n_want = max(1, min(4, round(1 + td2 * 3)))  # 1~4개
+            top_i = len(tpl_layers) - 1  # 상위층(픽 가능)
+            ld = level.get(f"layer_{top_i}", {})
+            tmap = ld.get("tiles", {})
+            col_t = int(ld.get("col", 8)); row_t = int(ld.get("row", 8))
+            gcnt = level.setdefault("goalCount", {})
+            DIRS = {"e": (1, 0), "w": (-1, 0), "s": (0, 1), "n": (0, -1)}
+            cells = [p for p, t in tmap.items() if isinstance(t, list) and t and t[0] == "t0"]
+            rng2.shuffle(cells)
+            placed = 0
+            for pos in cells:
+                if placed >= n_want:
+                    break
+                x, y = map(int, pos.split("_"))
+                ctype = rng2.choice(containers)
+                if ctype == "stack":
+                    full = f"stack_{rng2.choice(list(DIRS))}"  # 스택=제자리 누적(방향=시각 오프셋)
+                else:
+                    valid = [d for d, (dc, dr) in DIRS.items()
+                             if 0 <= x + dc < col_t and 0 <= y + dr < row_t and f"{x+dc}_{y+dr}" not in tmap]
+                    if not valid:
+                        continue  # 출력칸 없음 → 스킵
+                    full = f"craft_{rng2.choice(valid)}"
+                tmap[pos] = [full, "", [3]]
+                gcnt[full] = gcnt.get(full, 0) + 3
+                placed += 1
+            ld["num"] = str(len(tmap))
 
     gen = LevelGenerator()
 

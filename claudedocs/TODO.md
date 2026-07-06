@@ -16,6 +16,7 @@
 
 ## 최근 (2026-07-03)
 
+- 🔎 **[조사][게임측] craft(생성기) 타일 렌더 sort 이상 — 게임 원인, 에디터 무관**: 24레벨 craft_w@layer2 "1_2" 배출타일이 아래행 일반타일보다 뒤에 렌더. 원인=게임 `TileCraft.SetOrder`(covered=init-10, emitted=init-1)가 row-major(`TileGroup.SetOrder` count+=5)에서 벗어나 낮게 깔림. 실계산: craft박스=10/배출=9/내부=0 vs 아래행(row3)=25+. **에디터 데이터 정상**(좌표/방향/배출칸 검증). → 인게임 수정 세션 이관(프롬프트 작성 완료). → `INVESTIGATION_20260703_CRAFT_TILE_SORT.md`
 - 🧪 **[프론트][기능] 프로덕션 자동 연속생성 큐**: 자리비움(야간) 운용 — 1500레벨 배치를 목표 개수(0=무한)까지 순차 자동 생성. `handleStartGeneration`에 `overrideBatchId` 추가(명시 batchId → 상태 비의존) + `Promise<boolean>` 반환. `handleAutoQueueStart` 루프(create→await 생성 완료→다음), `autoQueueStopRef`로 즉시 중단. 생성 탭 최상단 패널(프리셋+목표수+시작/정지+진행표시, localStorage 유지). 로컬 CPU 상한이라 순차(back-to-back), 배치당 ~20~40분 → 야간 8h ≈ 12~19배치. **주의**: 절전 해제(`caffeinate -dis`)+탭 열어두기. tsc 0. **사용자 E2E 테스트 중**. → `CHANGELOG_20260703_AUTO_QUEUE.md`
   - 💡 온라인 위임 대안(기각): 백엔드 무상태라 Cloud Run에 올리고 `VITE_API_URL` 하나로 교체 시 동시 다수 배치 진짜 병렬(오토스케일). 무료티어 월 180k vCPU-초(결제계정당·매월리셋)≈20배치. 이번엔 로컬 자동화 채택.
 - ✅ **[백엔드][프론트][기능] 보스 레벨 전용 생성기 + 템플릿 크롭 + 디바이스 그리드 제약** (커밋 `dd457ba`): 10x10 보스 실기 가독성 문제(타일 과소) 해결. `boss_mode` 파라미터 → 그리드 선언 최대 8·5~6층·`BOSS_RECIPES` 12종 결정적 로테이션·목표 클리어율 절반. `crop_level_to_max_dim`(순수 좌표 시프트, 타일수·÷3 불변)로 기존 템플릿 A(원래≤8)/B(크롭→≤8) 차용, D(불가)는 레시피 폴백. 순차검증 그리드 게이트(>8 실패)로 무한루프 차단. Test탭 skill_mean 표시 UI. 크롭 12템플릿 검증(B5→8, D7 유지, 무결), 보스 스모크 8층·÷3 0. 데이터: B보스 30개 크롭(v38). → `CHANGELOG_20260703_BOSS_GENERATOR_AND_CROP.md`

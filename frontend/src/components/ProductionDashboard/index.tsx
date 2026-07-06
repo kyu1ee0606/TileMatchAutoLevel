@@ -617,6 +617,13 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
   const [isGenerating, setIsGenerating] = useState(false);
   const [useValidatedGeneration, setUseValidatedGeneration] = useState(false); // 검증 기반 생성 (기본 OFF - 빠른 생성)
 
+  // [자동 연속생성 큐] 자리비움시 여러 1500배치를 연속(순차) 자동 생성. 로컬 CPU가 상한이라
+  // 병렬 아닌 back-to-back. targetCount=0 → 정지 누를 때까지 무한.
+  const [autoQueueRunning, setAutoQueueRunning] = useState(false);
+  const [autoQueueMade, setAutoQueueMade] = useState(0);         // 지금까지 완성 배치 수
+  const [autoQueueTarget, setAutoQueueTarget] = useState(0);      // 목표 배치 수(0=무한)
+  const autoQueueStopRef = useRef(false);                         // 즉시 중단 신호
+
   // [v15.55] 레벨 템플릿 할당 (프로덕션 생성 시 특정 레벨을 템플릿으로 대체)
   //  - 수동 할당: templateAssignments[레벨번호] = templateId
   //  - 자동 배치: autoAssignTemplates=ON 이면 미할당 템플릿을 measured_difficulty 가까운 슬롯에 배치
@@ -804,13 +811,17 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
 
   // Generate levels for batch
   const handleStartGeneration = useCallback(async (
-    playtestConfig: PlaytestQueueConfig
-  ) => {
-    if (!selectedBatchId) return;
+    playtestConfig: PlaytestQueueConfig,
+    overrideBatchId?: string,  // [자동큐] 지정 시 이 배치로 생성(selectedBatchId 상태 비의존)
+  ): Promise<boolean> => {
+    // [자동큐] 명시 batchId 우선 — 루프에서 setSelectedBatchId 비동기 반영을 기다리지 않고 즉시 생성.
+    const activeBatchId = overrideBatchId ?? selectedBatchId;
+    if (!activeBatchId) return false;
 
-    const batch = await getProductionBatch(selectedBatchId);
-    if (!batch) return;
+    const batch = await getProductionBatch(activeBatchId);
+    if (!batch) return false;
 
+    let completedOk = false;  // [자동큐] 전체 성공 완료 여부 반환 → 큐가 다음 배치 진행 판단
     setIsGenerating(true);
     abortControllerRef.current = new AbortController();
     const signal = abortControllerRef.current.signal;
@@ -1503,7 +1514,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
           if (pendingLevels.length >= 50 || signal.aborted) {
             const levelsToSave = [...pendingLevels];
             pendingLevels.length = 0;
-            saveProductionLevels(selectedBatchId, levelsToSave).catch(err => {
+            saveProductionLevels(activeBatchId, levelsToSave).catch(err => {
               console.error('[Checkpoint] Save failed, will retry:', err);
               pendingLevels.push(...levelsToSave);
             });
@@ -1523,11 +1534,11 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
 
       // Save remaining levels
       if (pendingLevels.length > 0) {
-        await saveProductionLevels(selectedBatchId, pendingLevels);
+        await saveProductionLevels(activeBatchId, pendingLevels);
       }
 
       // Update batch counts using in-memory counters (avoids full IndexedDB scan)
-      await updateProductionBatch(selectedBatchId, statusCounts);
+      await updateProductionBatch(activeBatchId, statusCounts);
 
       // Flush throttled progress, then set final state immediately
       flushProgressImmediate();
@@ -1581,20 +1592,21 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
       setBatches(updatedBatches);
 
       // 서버(로컬 파일)에 자동 저장 → 같은 컴퓨터의 다른 브라우저에서도 접근 가능
-      pushBatchToServer(selectedBatchId).catch(() => { /* 서버 미가동 시 무시 */ });
+      pushBatchToServer(activeBatchId).catch(() => { /* 서버 미가동 시 무시 */ });
 
       addNotification(
         'success',
         `${completedCount}개 레벨 생성 완료! (실패: ${failedLevels.length}개)`
       );
+      completedOk = true;  // [자동큐] 정상 완료 표시
     } catch (err) {
       if ((err as Error).message === 'cancelled') {
         // Save any pending levels before cancelling
         if (pendingLevels.length > 0) {
-          await saveProductionLevels(selectedBatchId, pendingLevels);
+          await saveProductionLevels(activeBatchId, pendingLevels);
         }
         // Update batch counts after pause
-        await recalculateBatchCounts(selectedBatchId);
+        await recalculateBatchCounts(activeBatchId);
         flushProgressImmediate();
         setGenerationProgress(prev => ({
           ...prev,
@@ -1614,6 +1626,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
     } finally {
       setIsGenerating(false);
     }
+    return completedOk;  // [자동큐] true=정상완료, false=중단/오류
   }, [selectedBatchId, addNotification, useValidatedGeneration, validationConfig, useCoreBots, updateProgressThrottled, flushProgressImmediate, templateAssignments, autoAssignTemplates]);
 
   // 진행 상태를 idle로 리셋 (UI에서 프로그레스 바 사라짐)
@@ -1643,6 +1656,66 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
     resetGenerationProgress();
     addNotification('info', '생성 중지됨');
   }, [addNotification, resetGenerationProgress]);
+
+  // [자동 연속생성 큐] preset 배치를 target개(0=무한)까지 순차 자동 생성. 각 배치 완료 후 다음 생성.
+  // 자리비움 야간 운용용. 로컬 CPU 상한이라 병렬 아닌 back-to-back.
+  const handleAutoQueueStart = useCallback(async (
+    preset: keyof typeof PRODUCTION_1500_PRESETS,
+    targetCount: number,
+    playtestConfig: PlaytestQueueConfig,
+  ) => {
+    if (autoQueueRunning || isGenerating) return;
+    autoQueueStopRef.current = false;
+    setAutoQueueRunning(true);
+    setAutoQueueMade(0);
+    setAutoQueueTarget(targetCount);
+    const presetConfig = PRODUCTION_1500_PRESETS[preset];
+    let made = 0;
+    try {
+      while (!autoQueueStopRef.current && (targetCount === 0 || made < targetCount)) {
+        // 1) 새 배치 생성(메타)
+        const batch = await createProductionBatch({
+          name: `${presetConfig.name} [자동 ${made + 1}] - ${new Date().toLocaleString()}`,
+          total_levels: 1500,
+          levels_per_set: 10,
+          total_sets: 150,
+          generated_count: 0,
+          playtest_count: 0,
+          approved_count: 0,
+          rejected_count: 0,
+          exported_count: 0,
+          difficulty_start: presetConfig.difficulty_start,
+          difficulty_end: presetConfig.difficulty_end,
+          use_sawtooth: presetConfig.use_sawtooth,
+          gimmick_unlock_levels: PROFESSIONAL_GIMMICK_UNLOCK_LEVELS,
+        });
+        setBatches(prev => [batch, ...prev]);
+        setSelectedBatchId(batch.id);
+        if (autoQueueStopRef.current) break;
+        // 2) 이 배치 1500레벨 생성+검증 완료까지 대기 (명시 batchId → 상태 비의존)
+        const ok = await handleStartGeneration(playtestConfig, batch.id);
+        if (!ok || autoQueueStopRef.current) {
+          // 중단/오류 → 큐 종료 (미완성 배치는 그대로 보존)
+          break;
+        }
+        made += 1;
+        setAutoQueueMade(made);
+      }
+    } catch (e) {
+      addNotification('error', `자동 큐 오류: ${(e as Error).message}`);
+    } finally {
+      setAutoQueueRunning(false);
+      autoQueueStopRef.current = false;
+      addNotification('success', `🌙 자동 연속생성 종료 — 완성 배치 ${made}개`);
+    }
+  }, [autoQueueRunning, isGenerating, handleStartGeneration, addNotification]);
+
+  // [자동 큐] 중단 — 진행중 배치도 즉시 abort. 완성분은 보존.
+  const handleAutoQueueStop = useCallback(() => {
+    autoQueueStopRef.current = true;
+    abortControllerRef.current?.abort();
+    addNotification('info', '자동 연속생성 중단 요청 — 현재 배치 정리 후 종료');
+  }, [addNotification]);
 
   // Delete batch
   const handleDeleteBatch = useCallback(async (batchId: string) => {
@@ -1973,6 +2046,11 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             onSizeDiversityStartLevelChange={setSizeDiversityStartLevel}
             rlSkillMean={rlSkillMean}
             onRlSkillMeanChange={setRlSkillMean}
+            autoQueueRunning={autoQueueRunning}
+            autoQueueMade={autoQueueMade}
+            autoQueueTarget={autoQueueTarget}
+            onAutoQueueStart={handleAutoQueueStart}
+            onAutoQueueStop={handleAutoQueueStop}
           />
         )}
 
@@ -2362,6 +2440,11 @@ function GenerateTab({
   onSizeDiversityStartLevelChange,
   rlSkillMean,
   onRlSkillMeanChange,
+  autoQueueRunning,
+  autoQueueMade,
+  autoQueueTarget,
+  onAutoQueueStart,
+  onAutoQueueStop,
 }: {
   batch: ProductionBatch;
   progress: ProductionGenerationProgress;
@@ -2387,8 +2470,22 @@ function GenerateTab({
   onSizeDiversityStartLevelChange: (value: number) => void;
   rlSkillMean: number;
   onRlSkillMeanChange: (value: number) => void;
+  autoQueueRunning: boolean;
+  autoQueueMade: number;
+  autoQueueTarget: number;
+  onAutoQueueStart: (preset: keyof typeof PRODUCTION_1500_PRESETS, targetCount: number, config: PlaytestQueueConfig) => void;
+  onAutoQueueStop: () => void;
 }) {
   const [playtestStrategy, setPlaytestStrategy] = useState<PlaytestStrategy>('sample_boss');
+  // [자동 연속생성] 프리셋 + 목표 배치수(0/빈=무한). localStorage 유지.
+  const [autoQueuePreset, setAutoQueuePreset] = useState<keyof typeof PRODUCTION_1500_PRESETS>(() => {
+    const v = (typeof localStorage !== 'undefined' && localStorage.getItem('prod_autoqueue_preset_v1')) as keyof typeof PRODUCTION_1500_PRESETS | null;
+    return v && v in PRODUCTION_1500_PRESETS ? v : 'sawtooth';
+  });
+  const [autoQueueCountInput, setAutoQueueCountInput] = useState<string>(() =>
+    (typeof localStorage !== 'undefined' && localStorage.getItem('prod_autoqueue_count_v1')) || '');
+  useEffect(() => { try { localStorage.setItem('prod_autoqueue_preset_v1', autoQueuePreset); } catch { /* ignore */ } }, [autoQueuePreset]);
+  useEffect(() => { try { localStorage.setItem('prod_autoqueue_count_v1', autoQueueCountInput); } catch { /* ignore */ } }, [autoQueueCountInput]);
 
   const progressPercent = progress.total_levels > 0
     ? (progress.completed_levels / progress.total_levels) * 100
@@ -2406,6 +2503,64 @@ function GenerateTab({
 
   return (
     <div className="space-y-4">
+      {/* [자동 연속생성 큐] 자리비움시 여러 1500배치를 순차 자동 생성 */}
+      <div className="p-4 bg-gradient-to-r from-indigo-900/40 to-purple-900/40 border border-indigo-700/50 rounded-lg space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-white">🌙 자동 연속생성 (자리비움 야간 운용)</h3>
+          {autoQueueRunning && (
+            <span className="text-xs font-mono text-emerald-400">
+              배치 {autoQueueMade}{autoQueueTarget > 0 ? ` / ${autoQueueTarget}` : ' (무한)'} 완료
+            </span>
+          )}
+        </div>
+        <p className="text-xs text-gray-400 leading-relaxed">
+          1500레벨 배치를 <span className="text-indigo-300">연속으로 자동 생성</span>. 목표 개수만큼 만들거나(0/빈칸=정지까지 무한).
+          로컬 CPU 상한이라 순차(back-to-back) 진행 — 배치당 ~20~40분. <span className="text-yellow-400">컴퓨터 절전 해제 필수</span>(Mac: <code className="bg-gray-800 px-1 rounded">caffeinate -dis</code>), 탭 열어두기.
+        </p>
+        {!autoQueueRunning ? (
+          <div className="flex items-end gap-2">
+            <div className="flex-1">
+              <label className="block text-[11px] text-gray-400 mb-1">프리셋</label>
+              <select
+                value={autoQueuePreset}
+                onChange={(e) => setAutoQueuePreset(e.target.value as keyof typeof PRODUCTION_1500_PRESETS)}
+                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-white"
+              >
+                {Object.entries(PRODUCTION_1500_PRESETS).map(([k, v]) => (
+                  <option key={k} value={k}>{v.name}</option>
+                ))}
+              </select>
+            </div>
+            <div className="w-28">
+              <label className="block text-[11px] text-gray-400 mb-1">목표 배치수</label>
+              <input
+                type="number" min={0} placeholder="0=무한"
+                value={autoQueueCountInput}
+                onChange={(e) => setAutoQueueCountInput(e.target.value)}
+                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-white"
+              />
+            </div>
+            <Button
+              onClick={() => onAutoQueueStart(autoQueuePreset, Math.max(0, parseInt(autoQueueCountInput || '0', 10) || 0), { strategy: playtestStrategy })}
+              disabled={isGenerating}
+              className="bg-indigo-600 hover:bg-indigo-500"
+            >
+              ▶ 자동생성 시작
+            </Button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-3">
+            <div className="flex-1 text-xs text-gray-300">
+              진행 중… 현재 배치 {progress.completed_levels}/{progress.total_levels || 1500} 레벨
+              {autoQueueTarget > 0 && ` · 남은 배치 ${Math.max(0, autoQueueTarget - autoQueueMade)}`}
+            </div>
+            <Button onClick={onAutoQueueStop} variant="danger" size="sm">
+              ⏹ 자동생성 정지
+            </Button>
+          </div>
+        )}
+      </div>
+
       {/* Configuration */}
       {!isGenerating && progress.status !== 'generating' && (
         <div className="p-4 bg-gray-800 rounded-lg space-y-4">

@@ -14,6 +14,12 @@
 
 ---
 
+## 최근 (2026-07-06)
+
+- 🧪 **[프론트][백엔드][기능] 보스 템플릿 반자동 제작 시스템**: 프로덕션 보스(10의배수)를 모양=수동그림/타입·기믹·검증=자동으로 제작. 🏰 탭(다층 t0 그리기·홀짝8/7·인게임충실 프리뷰·수동기믹 팔레트·스토리 컨셉노트·난이도파악 3레버[목표난이도 자동/skill_mean 슬라이더/타일종류 슬라이더]). 백엔드 boss_templates·boss_concepts 스토어 + /generate/from-boss-template(인라인 layers 미리보기·useTileCount override). 기믹 자동배치(속성 _add_obstacles + craft/stack 골, 수동기믹 보존). 순차검증 _boss_template_id 재생성 정합. **레벨대별 완화**: 10~30(floor없음·목표×0.75)/40~100(floor8·×0.65)/110+(floor9·×0.5) — 초반 튜토리얼 보호. 스토리=할아버지정원 1~5챕터 실데이터 연계. tsc/문법0, RL파이프·수동기믹보존·craft골·완화 검증. **사용자 테스트 중**. → `CHANGELOG_20260706_BOSS_TEMPLATE_SYSTEM.md`
+  - 🔎 주의: 챕터별 실 star cost = GameBoost 서버 런타임(repo에 없음). 설계문서 star값(테마1=14)은 실데이터(20)와 불일치(stale).
+  - ⬜ 후속: 보스 기믹 craft sort는 게임측 수정 대기(HANDOFF_INGAME_CRAFT_SORT). 작은 보스=쉬움(타일수 부족)→셀/층 늘려야.
+
 ## 최근 (2026-07-03)
 
 - 🔎 **[조사][게임측] craft 뚜껑/배출 sort 불일치 + 인게임 sort 전면감사 — 인게임 이관**: 24레벨 craft_w@layer2 "1_2" 뚜껑/배출타일이 아래행 일반타일에 덮여 부자연. 설계의도(바닥=내부가림, 뚜껑=회전개방하며 배출타일이 바닥<배출<뚜껑)는 정상 구현되나, 생성기 파츠 sort가 전부 자기셀(init) 기준인데 스프라이트는 여러셀 걸침 → 아래행(init+5)이 뚜껑(init)보다 앞. `SetCraftPartsOrder`(TileCraft.cs:582): 뚜껑=init, 바닥=init-3, 배출=init-1, 내부=init-10. 인게임 sort 전면감사 결과 **실 sort 버그=craft 하나뿐**(teleport/shuffle=제자리 타입교환 sort정상, frog=의도된 max오버레이 → 오탐). 수정방향 A(걸치는셀 최대 grid sort+α)/B(착지셀 기준) 제시. → `INVESTIGATION_20260703_CRAFT_TILE_SORT.md`, 이관 프롬프트 `HANDOFF_INGAME_CRAFT_SORT.md`

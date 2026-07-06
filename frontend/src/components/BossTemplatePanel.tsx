@@ -69,8 +69,7 @@ export function BossTemplatePanel() {
   const { addNotification } = useUIStore();
 
   const [name, setName] = useState('');
-  const [levelMin, setLevelMin] = useState(10);
-  const [levelMax, setLevelMax] = useState(1500);
+  const [bossLevel, setBossLevel] = useState(10); // 이 템플릿이 배정될 단일 보스 레벨(10의 배수)
   const emptyLayer = (): BossLayer => ({ positions: new Set(), gimmicks: new Map() });
   const [layers, setLayers] = useState<BossLayer[]>([emptyLayer(), emptyLayer(), emptyLayer()]);
   const [activeLayer, setActiveLayer] = useState(0);
@@ -126,6 +125,66 @@ export function BossTemplatePanel() {
   };
   const resetConceptsToDefault = () => { setConcepts({ ...DEFAULT_CONCEPTS }); setConceptsDirty(true); };
 
+  // [난이도 파악] 현재 편집중 템플릿을 특정 레벨로 생성 → RL 예측/목표 클리어율.
+  // 목표난이도는 해당 레벨의 프로덕션 난이도곡선에서 자동 산출(슬라이더 아님).
+  const [estimating, setEstimating] = useState(false);
+  const [estResult, setEstResult] = useState<{ predicted: number; target: number; cls: string; td: number; useTileCount: number; tiles: number } | null>(null);
+  // skill_mean = 난이도 기준 실력(0 초보~1 고수). 기본=프로덕션 슬라이더값(localStorage), 조절 가능.
+  const [estSkillMean, setEstSkillMean] = useState<number>(() => {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem('prod_rl_skill_mean_v1') : null;
+    const v = parseFloat(raw ?? '');
+    return isNaN(v) ? 0.47 : v;
+  });
+
+  // hard_steep 타일종류 그래프 (백엔드 TILE_TYPE_PROFILES.hard_steep 미러): (maxLevel, V)
+  const hardSteepTileCount = (level: number) => {
+    const brackets: [number, number][] = [[3, 4], [10, 5], [30, 8], [60, 10], [100, 11], [225, 11], [600, 12], [1125, 12], [99999, 13]];
+    for (const [cap, v] of brackets) if (level <= cap) return v;
+    return 13;
+  };
+  // 타일 종류 (슬라이더). 기본 = 그 보스 레벨의 hard_steep 그래프값.
+  const [estTileCount, setEstTileCount] = useState<number>(() => hardSteepTileCount(10));
+  useEffect(() => { setEstTileCount(hardSteepTileCount(bossLevel)); }, [bossLevel]);
+
+  // 보스 목표 클리어율 스케일 (레벨대별 완화 — ProductionDashboard와 동일)
+  const bossScale = (level: number) => (level <= 30 ? 0.75 : level <= 100 ? 0.65 : 0.5);
+
+  // 프로덕션 난이도곡선 (톱니바퀴 1500 기본: start0.1 end0.95, 150세트, 10/세트). 보스=localIdx10 +0.1.
+  const productionDifficulty = (level: number) => {
+    const start = 0.1, end = 0.95, totalSets = 150, perSet = 10;
+    const setIdx = Math.floor((level - 1) / perSet);
+    const localIdx = ((level - 1) % perSet) + 1;
+    const base = start + (end - start) * setIdx / Math.max(1, totalSets - 1);
+    const bonus = localIdx === 10 ? 0.1 : ((localIdx - 1) / (perSet - 1)) * 0.05;
+    return Math.min(0.95, base + bonus);
+  };
+
+  const estimateDifficulty = async () => {
+    if (layers.every(l => l.positions.size === 0)) { addNotification('warning', '빈 템플릿 — 셀을 찍으세요'); return; }
+    setEstimating(true); setEstResult(null);
+    try {
+      const td = productionDifficulty(bossLevel);
+      const inlineLayers = layers.map((l, i) => ({
+        layer: i, col: layerSize(i), row: layerSize(i), positions: [...l.positions],
+        gimmicks: Object.fromEntries(l.gimmicks),
+      }));
+      const gen = await apiClient.post('/generate/from-boss-template', {
+        level_number: bossLevel, target_difficulty: td, layers: inlineLayers, apply_gimmicks: true,
+        use_tile_count_override: estTileCount, // 슬라이더 종류수 직접 적용
+      });
+      const rl = await apiClient.post('/rl-sim/level', {
+        level_json: gen.data.level_json, target_difficulty: td, skill_mean: estSkillMean,
+        target_clear_rate_scale: bossScale(bossLevel), // 레벨대별 완화(초반 ×0.75)
+      });
+      setEstResult({
+        predicted: rl.data.predicted_clear_rate, target: rl.data.target_clear_rate, cls: rl.data.classification, td,
+        useTileCount: gen.data.level_json?.useTileCount ?? 0, tiles: gen.data.tile_count ?? 0,
+      });
+    } catch (e) {
+      addNotification('error', `난이도 파악 실패: ${(e as Error).message}`);
+    } finally { setEstimating(false); }
+  };
+
   const cols = layerSize(activeLayer);
   const rows = layerSize(activeLayer);
 
@@ -169,7 +228,7 @@ export function BossTemplatePanel() {
   }));
 
   const resetEditor = () => {
-    setName(''); setLevelMin(10); setLevelMax(1500);
+    setName(''); setBossLevel(10);
     setLayers([emptyLayer(), emptyLayer(), emptyLayer()]);
     setActiveLayer(0); setEditingId(null); setPaintMode('');
   };
@@ -179,12 +238,12 @@ export function BossTemplatePanel() {
   const save = async () => {
     if (totalCells === 0) { addNotification('warning', '빈 템플릿 — 셀을 찍으세요'); return; }
     // ÷3 안내(경고만): 총 t0가 3의 배수여야 클리어 가능(생성기가 최종 보정하나 근접 권장)
-    const id = editingId || `boss_${levelMin}_${levelMax}_${totalCells}_${layers.length}L`;
+    const id = editingId || `boss_L${bossLevel}_${totalCells}c_${layers.length}L`;
     const body = {
       id,
       name: name || id,
-      level_min: levelMin,
-      level_max: levelMax,
+      level_min: bossLevel,  // 단일 레벨 = min==max
+      level_max: bossLevel,
       layers: layers.map((l, i) => ({
         layer: i, col: layerSize(i), row: layerSize(i), positions: [...l.positions],
         gimmicks: Object.fromEntries(l.gimmicks),
@@ -201,7 +260,7 @@ export function BossTemplatePanel() {
   };
 
   const loadTemplate = (t: SavedBossTemplate) => {
-    setName(t.name); setLevelMin(t.level_min); setLevelMax(t.level_max);
+    setName(t.name); setBossLevel(t.level_min);
     const ls: BossLayer[] = t.layers
       .sort((a, b) => a.layer - b.layer)
       .map(l => ({
@@ -232,25 +291,19 @@ export function BossTemplatePanel() {
 
       <div className="bg-blue-900/20 border border-blue-700/40 rounded p-3 text-xs text-gray-300 leading-relaxed">
         각 층을 <b className="text-blue-300">t0(모양만)</b>로 그리세요. 크기는 <b>짝수층 8 · 홀수층 7</b> 자동(게임 홀짝 규칙).
-        층마다 다른 모양 가능. 저장 시 <b>level_min~max 구간</b>의 보스(10의 배수)에 배정됨 —
-        후반 보스일수록 깊은(층 많은) 템플릿을 만들어 구간을 나누세요.
+        층마다 다른 모양 가능. 저장 시 <b>지정한 보스 레벨(10의 배수)</b>에 배정됨.
       </div>
 
       {/* 메타 */}
-      <div className="grid grid-cols-4 gap-3 bg-gray-800 rounded p-3">
+      <div className="grid grid-cols-3 gap-3 bg-gray-800 rounded p-3">
         <div className="col-span-2">
           <label className="block text-[11px] text-gray-400 mb-1">이름</label>
-          <input value={name} onChange={e => setName(e.target.value)} placeholder="예: 왕관형"
+          <input value={name} onChange={e => setName(e.target.value)} placeholder="예: 고양이얼굴"
             className="w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded text-sm text-white" />
         </div>
         <div>
-          <label className="block text-[11px] text-gray-400 mb-1">배정 레벨 최소</label>
-          <input type="number" value={levelMin} min={10} step={10} onChange={e => setLevelMin(parseInt(e.target.value) || 10)}
-            className="w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded text-sm text-white" />
-        </div>
-        <div>
-          <label className="block text-[11px] text-gray-400 mb-1">배정 레벨 최대</label>
-          <input type="number" value={levelMax} min={10} step={10} onChange={e => setLevelMax(parseInt(e.target.value) || 1500)}
+          <label className="block text-[11px] text-gray-400 mb-1">보스 레벨 (10의 배수)</label>
+          <input type="number" value={bossLevel} min={10} step={10} onChange={e => setBossLevel(parseInt(e.target.value) || 10)}
             className="w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded text-sm text-white" />
         </div>
       </div>
@@ -368,6 +421,52 @@ export function BossTemplatePanel() {
         {editingId && <button onClick={resetEditor} className="px-4 py-2 rounded bg-gray-700 hover:bg-gray-600 text-white text-sm">＋ 새로 만들기</button>}
       </div>
 
+      {/* 난이도 파악 — 특정 레벨로 생성 시 예상/목표 클리어율 (레벨 목표난이도 자동) */}
+      <div className="p-3 bg-gray-800 rounded-lg space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-medium text-white">🎯 난이도 파악 (레벨별 예상 클리어율)</span>
+          <span className="text-[11px] text-gray-500">skill_mean = 프로덕션 슬라이더값 사용</span>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-gray-400 whitespace-nowrap">보스 레벨 <b className="text-white">{bossLevel}</b> → 프로덕션 목표난이도 = <b className="text-indigo-300">{productionDifficulty(bossLevel).toFixed(2)}</b> 자동</span>
+          <button onClick={estimateDifficulty} disabled={estimating}
+            className="ml-auto px-3 py-1.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white text-sm disabled:opacity-50">
+            {estimating ? '측정중…' : '▶ 파악'}
+          </button>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-gray-400 whitespace-nowrap">🎮 기준 실력 (skill_mean)</span>
+          <input type="range" min={0} max={1} step={0.01} value={estSkillMean}
+            onChange={e => setEstSkillMean(parseFloat(e.target.value))} className="flex-1" />
+          <span className="text-xs font-mono text-white w-10">{estSkillMean.toFixed(2)}</span>
+          <span className="text-[11px] text-gray-500 w-16">
+            {estSkillMean >= 0.7 ? '고수' : estSkillMean >= 0.55 ? '중상급' : estSkillMean >= 0.45 ? '캐주얼' : '초보'}
+          </span>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-gray-400 whitespace-nowrap">🎨 타일 종류 수</span>
+          <input type="range" min={4} max={15} step={1} value={estTileCount}
+            onChange={e => setEstTileCount(parseInt(e.target.value))} className="flex-1" />
+          <span className="text-xs font-mono text-white w-10">{estTileCount}종</span>
+          <span className="text-[11px] text-gray-500 w-24">기본 hard {hardSteepTileCount(bossLevel)}종</span>
+        </div>
+        {estResult && (
+          <div className="flex items-center gap-4 bg-gray-900/50 rounded px-3 py-2 text-sm flex-wrap">
+            <span>예상 클리어율 <b className={Math.abs(estResult.predicted - estResult.target) <= 0.12 ? 'text-emerald-400' : 'text-yellow-400'}>{(estResult.predicted * 100).toFixed(0)}%</b></span>
+            <span className="text-gray-400">목표(보스 절반) {(estResult.target * 100).toFixed(0)}%</span>
+            <span className="text-[11px] text-gray-500">난이도 {estResult.td.toFixed(2)} · {estResult.cls}</span>
+            <span className="text-[11px] text-cyan-400">타일종류 {estResult.useTileCount} · 타일 {estResult.tiles}개
+              {estResult.tiles < estResult.useTileCount * 3 && <span className="text-yellow-400"> (타일부족→종류 다 못씀)</span>}
+              {estResult.tiles < 60 && <span className="text-yellow-400"> (작음→쉬움, 셀/층↑)</span>}
+            </span>
+            <span className="text-[11px] text-gray-500">
+              {estResult.predicted > estResult.target + 0.12 ? '→ 너무 쉬움(종류/기믹↑)' : estResult.predicted < estResult.target - 0.12 ? '→ 너무 어려움' : '→ 적정'}
+            </span>
+          </div>
+        )}
+        <div className="text-[10px] text-gray-500">레벨번호 → 그 레벨 프로덕션 목표난이도(톱니바퀴곡선) 자동 → 현재 모양+기믹으로 생성 후 RL 예측. 저장 안 함. (배치 프리셋이 다르면 실제와 소폭 차이)</div>
+      </div>
+
       {/* 스토리 컨셉 노트 */}
       <div className="bg-gray-800 rounded p-3">
         <div className="flex items-center justify-between mb-2">
@@ -414,7 +513,7 @@ export function BossTemplatePanel() {
                       <td className="px-1 py-1">{inp('shape')}</td>
                       <td className="px-1 py-1">{inp('note')}</td>
                       <td className="px-1 py-1 text-right">
-                        <button onClick={() => { setLevelMin(n); setLevelMax(n); addNotification('info', `배정구간 ${n}로 설정 — 이 컨셉용 템플릿 그리세요`); }}
+                        <button onClick={() => { setBossLevel(n); addNotification('info', `보스 레벨 ${n}로 설정 — 이 컨셉용 템플릿 그리세요`); }}
                           className="px-1.5 py-0.5 rounded bg-gray-600 hover:bg-gray-500 text-white text-[10px]" title="이 레벨용 템플릿 그리기(배정구간 설정)">그리기</button>
                         <button onClick={() => removeConceptRow(lv)} className="px-1 py-0.5 rounded bg-red-800 hover:bg-red-700 text-white text-[10px] ml-1">×</button>
                       </td>
@@ -439,7 +538,7 @@ export function BossTemplatePanel() {
               <div key={t.id} className={`flex items-center justify-between px-3 py-2 rounded text-xs ${editingId === t.id ? 'bg-indigo-900/30' : 'bg-gray-700/40'}`}>
                 <div className="flex-1">
                   <span className="text-white font-medium">{t.name}</span>
-                  <span className="text-gray-400 ml-2">Lv {t.level_min}~{t.level_max} · {t.layer_count}층</span>
+                  <span className="text-gray-400 ml-2">Lv {t.level_min} · {t.layer_count}층</span>
                 </div>
                 <div className="flex gap-1">
                   <button onClick={() => loadTemplate(t)} className="px-2 py-0.5 rounded bg-gray-600 hover:bg-gray-500 text-white">로드</button>

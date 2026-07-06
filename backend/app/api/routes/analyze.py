@@ -1685,8 +1685,10 @@ class BossTemplateGenerateRequest(_BaseModel):
     # [보스 난이도] 타일 종류(useTileCount) 하한/보너스 — 보스는 주변 일반레벨보다 어렵게.
     # 종류 수 = 난이도 지배 레버라 그래프값 그대로면 저레벨 보스가 트리비얼(클리어율↑).
     tile_type_bonus: int = 1        # 그래프값 + N
-    tile_type_floor: int = 9        # 최소 하한(종류) — 보스는 최소 9종
+    tile_type_floor: Optional[int] = None  # 최소 하한(종류). None=레벨대별 자동(초반 완화).
     tile_type_cap: int = 15         # 상한 = 스프라이트 풀 최대(t1~t15). 사실상 무제한
+    use_tile_count_override: Optional[int] = None  # 지정 시 그래프/floor 무시하고 이 종류수 직접 사용(난이도 파악 슬라이더).
+    layers: Optional[List[BossTemplateLayer]] = None  # 인라인 레이어(난이도 파악 미리보기). 있으면 저장분 조회 대신 사용.
 
 
 @router.post("/generate/from-boss-template")
@@ -1704,17 +1706,37 @@ async def generate_from_boss_template(req: BossTemplateGenerateRequest):
     from ...core.analyzer import LevelAnalyzer
 
     ln = int(req.level_number)
-    templates = list(_load_boss_templates().values())
-    cand = [t for t in templates if int(t.get("level_min", 0)) <= ln <= int(t.get("level_max", 999999))]
-    if not cand:
-        raise HTTPException(status_code=404, detail=f"no_boss_template_for_level_{ln}")
-    cand.sort(key=lambda t: t.get("id", ""))
-    tpl = cand[((ln // 10) - 1) % len(cand)]  # 구간 내 결정적 로테이션
+    # 인라인 layers(미리보기) 우선 — 저장 안 하고 현재 편집중 템플릿으로 난이도 파악.
+    if req.layers is not None:
+        tpl = {"id": "__preview__", "layers": [
+            {"layer": l.layer, "col": l.col, "row": l.row, "positions": l.positions,
+             "gimmicks": l.gimmicks or {}}
+            for l in req.layers
+        ]}
+    else:
+        templates = list(_load_boss_templates().values())
+        cand = [t for t in templates if int(t.get("level_min", 0)) <= ln <= int(t.get("level_max", 999999))]
+        if not cand:
+            raise HTTPException(status_code=404, detail=f"no_boss_template_for_level_{ln}")
+        cand.sort(key=lambda t: t.get("id", ""))
+        tpl = cand[((ln // 10) - 1) % len(cand)]  # 구간 내 결정적 로테이션
 
     seed = req.random_seed if req.random_seed is not None else ((ln * 7919 + 13) % 900000 + 1000)
-    graph_v = get_use_tile_count_for_level(ln, req.tile_type_profile)
-    # [보스 난이도] 그래프값 + 보너스, [floor, cap] 클램프. 저레벨 트리비얼 방지 + 상한 제한.
-    use_tile_count = min(int(req.tile_type_cap), max(int(graph_v) + int(req.tile_type_bonus), int(req.tile_type_floor)))
+    if req.use_tile_count_override is not None:
+        use_tile_count = max(1, min(15, int(req.use_tile_count_override)))  # 직접 지정(슬라이더)
+    else:
+        graph_v = get_use_tile_count_for_level(ln, req.tile_type_profile)
+        # [보스 난이도 완화] 초반(10~30)은 언락 기믹 부족+튜토리얼이라 하한 없음(그래프값 그대로).
+        # 40~100 floor 8, 110+ floor 9. 그래프값 + 보너스, [floor, cap] 클램프.
+        if req.tile_type_floor is not None:
+            floor = int(req.tile_type_floor)
+        elif ln <= 30:
+            floor = 0
+        elif ln <= 100:
+            floor = 8
+        else:
+            floor = 9
+        use_tile_count = min(int(req.tile_type_cap), max(int(graph_v) + int(req.tile_type_bonus), floor))
 
     # 다층 t0 레벨 조립
     tpl_layers = sorted(tpl.get("layers", []), key=lambda l: l.get("layer", 0))

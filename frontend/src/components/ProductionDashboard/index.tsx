@@ -256,9 +256,14 @@ const VISUAL_POOL = 15; // 비주얼 스프라이트 풀 t1~t15
 
 // [보스 난이도] 보스(10의 배수) 레벨의 목표 클리어율 배율 — 일반 목표의 절반(더 어려워야 통과).
 // RL 검증(초기/순차/재생성) 전 경로에서 target_clear_rate_scale로 백엔드에 전달.
-const BOSS_TARGET_CLEAR_SCALE = 0.5;
-const bossTargetScale = (levelNumber: number | undefined): number | undefined =>
-  levelNumber && levelNumber > 0 && levelNumber % 10 === 0 ? BOSS_TARGET_CLEAR_SCALE : undefined;
+// [보스 목표 클리어율 스케일] 레벨대별 완화. 초반(10~30)은 언락 기믹 부족+튜토리얼이라
+// 살짝만 어렵게(×0.75). 40~100 ×0.65. 110+ 본격 보스 ×0.5.
+const bossTargetScale = (levelNumber: number | undefined): number | undefined => {
+  if (!levelNumber || levelNumber <= 0 || levelNumber % 10 !== 0) return undefined;
+  if (levelNumber <= 30) return 0.75;
+  if (levelNumber <= 100) return 0.65;
+  return 0.5;
+};
 
 // [보스 생성기/디바이스 제약] 선언 그리드 최대변 상한 — 9x9 이상은 타일이 작아 플레이 불가.
 const MAX_PLAYABLE_GRID = 8;

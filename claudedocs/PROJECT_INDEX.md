@@ -261,6 +261,7 @@ TileMatchAutoLevel/
 | [AUTOMATION_SUMMARY.md](AUTOMATION_SUMMARY.md) | 자동화 시스템 요약 |
 | [LOCAL_LEVELS_GUIDE.md](LOCAL_LEVELS_GUIDE.md) | 로컬 레벨 관리 가이드 |
 | [LEVEL_GENERATION_GUIDE.md](LEVEL_GENERATION_GUIDE.md) | 레벨 생성 도구 가이드 |
+| [CHANGELOG_20260706_BOSS_TEMPLATE_SYSTEM.md](CHANGELOG_20260706_BOSS_TEMPLATE_SYSTEM.md) | 보스 템플릿 반자동 제작(🏰 탭 다층t0 그리기·수동기믹·컨셉노트·난이도파악 3레버) + craft/stack 골 + 레벨대별 완화(초반 튜토리얼) + 순차검증 정합 |
 | [CHANGELOG_20260703_AUTO_QUEUE.md](CHANGELOG_20260703_AUTO_QUEUE.md) | 프로덕션 자동 연속생성 큐(야간 자리비움, N배치 순차 자동생성 or 무한) |
 | [CHANGELOG_20260703_BOSS_GENERATOR_AND_CROP.md](CHANGELOG_20260703_BOSS_GENERATOR_AND_CROP.md) | 보스 전용 생성기(그리드≤8·5~6층·레시피12종·목표절반) + 템플릿 크롭 차용 + 디바이스 그리드 게이트 |
 | [CHANGELOG_20260703_CONTAINER_INNER_DIVERSIFY.md](CHANGELOG_20260703_CONTAINER_INNER_DIVERSIFY.md) | craft/stack 내부 단색 뭉치 해소(명시 다양화 bake·순열÷3보존) + bake t1폴백 제거 + 서버 버전비교 pull |

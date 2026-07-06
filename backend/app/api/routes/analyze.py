@@ -1563,6 +1563,197 @@ def _save_custom_patterns(data: Dict[str, Any]):
         json_module.dump(data, f, indent=2)
 
 
+# ===== [보스 템플릿] 다층 t0 모양 손그림 저장 — 프로덕션 보스(10의 배수) 생성용 =====
+# 사용자가 각 층을 t0로 직접 그려 모양만 잡고(홀짝 8/7 교대), 생성기가 useTileCount(난이도
+# 그래프)+기믹+검증을 오버레이. level_min/max = 이 템플릿이 배정될 레벨 구간(깊이별 분류).
+BOSS_TEMPLATES_PATH = os.path.join(os.path.dirname(CUSTOM_PATTERNS_PATH), "boss_templates.json")
+
+
+def _load_boss_templates() -> Dict[str, Any]:
+    try:
+        with open(BOSS_TEMPLATES_PATH, "r") as f:
+            return json_module.load(f)
+    except (FileNotFoundError, json_module.JSONDecodeError):
+        return {}
+
+
+def _save_boss_templates(data: Dict[str, Any]):
+    os.makedirs(os.path.dirname(BOSS_TEMPLATES_PATH), exist_ok=True)
+    with open(BOSS_TEMPLATES_PATH, "w") as f:
+        json_module.dump(data, f, indent=2)
+
+
+class BossTemplateLayer(_BaseModel):
+    layer: int
+    col: int
+    row: int
+    positions: List[str]  # "col_row" 키 목록 (t0로 채울 셀)
+
+
+class BossTemplateSaveRequest(_BaseModel):
+    id: str
+    name: str = ""
+    level_min: int = 10           # 배정 구간(포함)
+    level_max: int = 1500
+    layers: List[BossTemplateLayer]
+    created_at: Optional[float] = None  # 클라 타임스탬프(서버 시간 비의존)
+
+
+@router.post("/debug/boss-template-save")
+async def boss_template_save(req: BossTemplateSaveRequest):
+    """보스 템플릿 저장/갱신 (id 기준 upsert)."""
+    data = _load_boss_templates()
+    data[req.id] = {
+        "id": req.id,
+        "name": req.name or req.id,
+        "level_min": int(req.level_min),
+        "level_max": int(req.level_max),
+        "layers": [
+            {"layer": l.layer, "col": l.col, "row": l.row, "positions": l.positions}
+            for l in req.layers
+        ],
+        "layer_count": len(req.layers),
+        "created_at": req.created_at,
+    }
+    _save_boss_templates(data)
+    return {"ok": True, "id": req.id, "count": len(data)}
+
+
+@router.get("/debug/boss-templates")
+async def boss_templates_list():
+    """저장된 보스 템플릿 전체."""
+    return {"boss_templates": _load_boss_templates()}
+
+
+@router.delete("/debug/boss-template/{template_id}")
+async def boss_template_delete(template_id: str):
+    """보스 템플릿 삭제."""
+    data = _load_boss_templates()
+    if template_id in data:
+        del data[template_id]
+        _save_boss_templates(data)
+        return {"ok": True, "deleted": template_id}
+    return {"ok": False, "detail": "not_found"}
+
+
+# ===== [보스 컨셉 노트] 보스 레벨별 스토리 비트/모양 컨셉 (기획 참조) =====
+BOSS_CONCEPTS_PATH = os.path.join(os.path.dirname(CUSTOM_PATTERNS_PATH), "boss_concepts.json")
+
+
+def _load_boss_concepts() -> Dict[str, Any]:
+    try:
+        with open(BOSS_CONCEPTS_PATH, "r") as f:
+            return json_module.load(f)
+    except (FileNotFoundError, json_module.JSONDecodeError):
+        return {}
+
+
+def _save_boss_concepts(data: Dict[str, Any]):
+    os.makedirs(os.path.dirname(BOSS_CONCEPTS_PATH), exist_ok=True)
+    with open(BOSS_CONCEPTS_PATH, "w") as f:
+        json_module.dump(data, f, indent=2, ensure_ascii=False)
+
+
+class BossConceptsSaveRequest(_BaseModel):
+    # { "10": {chapter, beat, deco, shape, note}, ... } — 레벨번호(str) 키
+    concepts: Dict[str, Dict[str, Any]]
+
+
+@router.get("/debug/boss-concepts")
+async def boss_concepts_list():
+    """보스 레벨별 스토리 컨셉 노트 전체."""
+    return {"boss_concepts": _load_boss_concepts()}
+
+
+@router.post("/debug/boss-concepts-save")
+async def boss_concepts_save(req: BossConceptsSaveRequest):
+    """보스 컨셉 노트 전체 저장(덮어쓰기)."""
+    _save_boss_concepts(req.concepts)
+    return {"ok": True, "count": len(req.concepts)}
+
+
+class BossTemplateGenerateRequest(_BaseModel):
+    level_number: int
+    target_difficulty: Optional[float] = None
+    tile_type_profile: Optional[str] = None
+    random_seed: Optional[int] = None
+
+
+@router.post("/generate/from-boss-template")
+async def generate_from_boss_template(req: BossTemplateGenerateRequest):
+    """보스 템플릿(다층 t0 모양)으로 레벨 생성.
+
+    반자동: 템플릿 = 모양(t0)만. 여기서 useTileCount(레벨 그래프)+randSeed 세팅 후
+    ÷3 보정/OOB/link 정화 오버레이. 타입은 t0라 게임이 런타임 분배. (기믹은 후속.)
+    level_number 로 배정 구간(level_min~max) 맞는 템플릿 선택(복수면 결정적 로테이션).
+    """
+    import random as _random
+    from ...core.generator import (
+        LevelGenerator, get_use_tile_count_for_level,
+    )
+    from ...core.analyzer import LevelAnalyzer
+
+    ln = int(req.level_number)
+    templates = list(_load_boss_templates().values())
+    cand = [t for t in templates if int(t.get("level_min", 0)) <= ln <= int(t.get("level_max", 999999))]
+    if not cand:
+        raise HTTPException(status_code=404, detail=f"no_boss_template_for_level_{ln}")
+    cand.sort(key=lambda t: t.get("id", ""))
+    tpl = cand[((ln // 10) - 1) % len(cand)]  # 구간 내 결정적 로테이션
+
+    seed = req.random_seed if req.random_seed is not None else ((ln * 7919 + 13) % 900000 + 1000)
+    use_tile_count = get_use_tile_count_for_level(ln, req.tile_type_profile)
+
+    # 다층 t0 레벨 조립
+    tpl_layers = sorted(tpl.get("layers", []), key=lambda l: l.get("layer", 0))
+    level: Dict[str, Any] = {
+        "layer": len(tpl_layers),
+        "useTileCount": int(use_tile_count),
+        "randSeed": int(seed),
+        "autoCollectCount": 0,
+    }
+    for l in tpl_layers:
+        i = int(l.get("layer", 0))
+        col = int(l.get("col", 8)); row = int(l.get("row", 8))
+        tiles = {str(p): ["t0", ""] for p in l.get("positions", []) if isinstance(p, str)}
+        level[f"layer_{i}"] = {"col": str(col), "row": str(row), "tiles": tiles, "num": str(len(tiles))}
+
+    gen = LevelGenerator()
+    # 생성 tail 정화 재사용 (÷3 보정 → OOB → 고아 link → 컨테이너 내부 다양화[해당없음 안전])
+    try:
+        level = gen._remove_out_of_bounds_tiles(level)
+        level = gen._finalize_divisibility_guarantee(level)
+        level = gen._strip_orphaned_link_tiles(level)
+        level = gen._diversify_container_inner_tiles(level)
+    except Exception as ex:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"boss_overlay_failed: {ex}")
+
+    total = sum(len((level.get(f"layer_{i}", {}) or {}).get("tiles", {}) or {}) for i in range(level["layer"]))
+    level["max_moves"] = total + 50
+    if req.target_difficulty is not None:
+        level["target_difficulty"] = float(req.target_difficulty)
+    level["_boss_template_id"] = tpl.get("id")
+
+    analyzer = LevelAnalyzer()
+    try:
+        static = analyzer.analyze(level)
+        actual = float(static.score) / 100.0
+        grade = static.grade.value if hasattr(static.grade, "value") else str(static.grade)
+    except Exception:  # noqa: BLE001
+        actual, grade = float(req.target_difficulty or 0.5), "C"
+
+    return {
+        "level_json": level,
+        "actual_difficulty": actual,
+        "grade": grade,
+        "from_boss_template": True,
+        "template_id": tpl.get("id"),
+        "template_name": tpl.get("name"),
+        "layer_count": len(tpl_layers),
+        "tile_count": total,
+    }
+
+
 PATTERN_CONFIG_PATH = os.path.join(os.path.dirname(CUSTOM_PATTERNS_PATH), "pattern_config.json")
 
 from pydantic import BaseModel as _BaseModel  # noqa: E402 — 아래 섹션들에서 공통 사용

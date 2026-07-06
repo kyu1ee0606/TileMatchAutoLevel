@@ -2,7 +2,7 @@ import { create } from 'zustand';
 
 type Tool = 'paint' | 'erase' | 'fill' | 'inspect';
 type Panel = 'editor' | 'generator' | 'gboost' | 'production';
-export type TabId = 'editor' | 'simulation' | 'generator' | 'gboost' | 'local' | 'play' | 'production' | 'benchmark' | 'pattern-debug' | 'color-balance' | 'pattern-import' | 'rl-sim' | 'solvability';
+export type TabId = 'editor' | 'simulation' | 'generator' | 'gboost' | 'local' | 'play' | 'production' | 'benchmark' | 'pattern-debug' | 'color-balance' | 'pattern-import' | 'rl-sim' | 'solvability' | 'boss-template';
 
 // Generation result for display in result card
 interface GenerationResultInfo {

@@ -3103,6 +3103,59 @@ function TestTab({
   const [lastClickedSequentialLevel, setLastClickedSequentialLevel] = useState<number | null>(null);
   const sequentialAbortRef = useRef<AbortController | null>(null);
 
+  // [보스 템플릿 재생성] 보스 레벨(10의 배수)을 저장된 보스 템플릿으로 재생성
+  const [bossRegen, setBossRegen] = useState<{ running: boolean; done: number; total: number; skipped: number }>(
+    { running: false, done: 0, total: 0, skipped: 0 });
+  const bossRegenStopRef = useRef(false);
+  const handleRegenerateBossLevels = useCallback(async () => {
+    const bossLevels = levels.filter(l => (l.meta.level_number % 10 === 0) && l.meta.level_number > 0)
+      .sort((a, b) => a.meta.level_number - b.meta.level_number);
+    if (bossLevels.length === 0) { addNotification('warning', '보스 레벨(10의 배수) 없음'); return; }
+    bossRegenStopRef.current = false;
+    setBossRegen({ running: true, done: 0, total: bossLevels.length, skipped: 0 });
+    let done = 0, skipped = 0;
+    for (const lv of bossLevels) {
+      if (bossRegenStopRef.current) break;
+      const ln = lv.meta.level_number;
+      try {
+        const resp = await apiClient.post('/generate/from-boss-template', {
+          level_number: ln,
+          target_difficulty: lv.meta.target_difficulty,
+        }).catch((e: { response?: { status?: number } }) => {
+          if (e.response?.status === 404) return null; // 구간 맞는 템플릿 없음 → 스킵
+          throw e;
+        });
+        if (!resp) { skipped++; setBossRegen(p => ({ ...p, skipped })); continue; }
+        const levelJson = resp.data.level_json;
+        applyProductionTileVisuals(levelJson, ln); // 비주얼 시드 bake (다양색)
+        await saveProductionLevels(batchId, [{
+          meta: {
+            ...lv.meta,
+            generated_at: new Date().toISOString(),
+            actual_difficulty: resp.data.actual_difficulty ?? lv.meta.actual_difficulty,
+            grade: (resp.data.grade || lv.meta.grade) as DifficultyGrade,
+            status_updated_at: new Date().toISOString(),
+            // 재검증 필요 표시(RL 순차검증에서 측정)
+            verified: false,
+            verification_passed: undefined,
+            match_score: undefined,
+            template_id: undefined, // 보스 템플릿 출처는 level_json._boss_template_id 로 보존
+            regen_attempts: (lv.meta.regen_attempts || 0) + 1,
+          },
+          level_json: levelJson,
+        }]);
+        done++;
+        setBossRegen(p => ({ ...p, done }));
+      } catch (e) {
+        addNotification('error', `Lv.${ln} 보스 재생성 실패: ${(e as Error).message}`);
+      }
+    }
+    setBossRegen(p => ({ ...p, running: false }));
+    addNotification('success', `🏰 보스 재생성 완료: ${done}개 (템플릿없음 스킵 ${skipped}개)`);
+    loadLevels();
+    onStatsUpdate();
+  }, [levels, batchId, addNotification, onStatsUpdate]);
+
   // Batch auto test state
   const [batchTestProgress, setBatchTestProgress] = useState<{
     status: 'idle' | 'running' | 'paused' | 'completed' | 'error';
@@ -5354,6 +5407,24 @@ function TestTab({
                 </>
               )}
             </div>
+            {/* [보스 템플릿] 보스 레벨만 재생성 */}
+            <div className="flex items-center gap-2">
+              {bossRegen.running ? (
+                <Button onClick={() => { bossRegenStopRef.current = true; }} variant="danger" size="sm" className="flex-1">
+                  ⏹ 보스 재생성 정지 ({bossRegen.done}/{bossRegen.total})
+                </Button>
+              ) : (
+                <Button
+                  onClick={handleRegenerateBossLevels}
+                  disabled={isSequentialProcessing || levels.length === 0}
+                  size="sm"
+                  className="flex-1 bg-purple-700 hover:bg-purple-600"
+                  title="보스 레벨(10의 배수)을 저장된 보스 템플릿으로 재생성. 구간 맞는 템플릿 없으면 스킵."
+                >
+                  🏰 보스레벨만 재생성 (템플릿)
+                </Button>
+              )}
+            </div>
 
             {/* Level Selection List */}
             {!isSequentialProcessing && targetLevels.length > 0 && (
@@ -5514,13 +5585,29 @@ function TestTab({
                 ? '레벨을 불러오는 중이거나 배치가 비어 있습니다.'
                 : '미검증/미달 레벨이 없습니다 (모든 레벨 검증·통과 상태).'}
             </div>
-            <Button
-              onClick={() => handleSequentialProcess(levels.map(l => l.meta.level_number))}
-              disabled={isSequentialProcessing || levels.length === 0}
-              className="bg-blue-600 hover:bg-blue-500"
-            >
-              {isSequentialProcessing ? '검증 중…' : `🔁 전체 ${levels.length}개 재검증 (RL)`}
-            </Button>
+            <div className="flex gap-2 flex-wrap">
+              <Button
+                onClick={() => handleSequentialProcess(levels.map(l => l.meta.level_number))}
+                disabled={isSequentialProcessing || levels.length === 0}
+                className="bg-blue-600 hover:bg-blue-500"
+              >
+                {isSequentialProcessing ? '검증 중…' : `🔁 전체 ${levels.length}개 재검증 (RL)`}
+              </Button>
+              {bossRegen.running ? (
+                <Button onClick={() => { bossRegenStopRef.current = true; }} variant="danger">
+                  ⏹ 보스 재생성 정지 ({bossRegen.done}/{bossRegen.total})
+                </Button>
+              ) : (
+                <Button
+                  onClick={handleRegenerateBossLevels}
+                  disabled={isSequentialProcessing || levels.length === 0}
+                  className="bg-purple-700 hover:bg-purple-600"
+                  title="보스 레벨(10의 배수)을 저장된 보스 템플릿으로 재생성. 구간 맞는 템플릿 없으면 스킵."
+                >
+                  🏰 보스레벨만 재생성 (템플릿)
+                </Button>
+              )}
+            </div>
           </div>
         );
       })()}

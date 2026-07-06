@@ -13,6 +13,7 @@ import { BenchmarkDashboard } from './components/BenchmarkDashboard';
 import { PatternDebugPanel } from './components/PatternDebugPanel';
 import { ColorBalancePanel } from './components/ColorBalancePanel';
 import { PatternImportPanel } from './components/PatternImportPanel';
+import { BossTemplatePanel } from './components/BossTemplatePanel';
 import { RLSimulationPanel } from './components/RLSimulationPanel';
 import { SolvabilityPanel } from './components/SolvabilityPanel';
 import { useLevelStore } from './stores/levelStore';
@@ -267,6 +268,7 @@ function AppContent() {
     { id: 'pattern-debug', label: '패턴 디버그', icon: '🔧' },
     { id: 'color-balance', label: '색상 테스트', icon: '🎨' },
     { id: 'pattern-import', label: '패턴 임포트', icon: '📁' },
+    { id: 'boss-template', label: '보스 템플릿', icon: '🏰' },
     { id: 'benchmark', label: '벤치마크', icon: '📊' },
     { id: 'gboost', label: '게임부스트', icon: '☁️' },
     { id: 'play', label: '플레이', icon: '▶️' },
@@ -450,6 +452,11 @@ function AppContent() {
         {activeTab === 'pattern-import' && (
           <div className="max-w-5xl mx-auto">
             <PatternImportPanel />
+          </div>
+        )}
+        {activeTab === 'boss-template' && (
+          <div className="max-w-6xl mx-auto">
+            <BossTemplatePanel />
           </div>
         )}
         {activeTab === 'rl-sim' && (

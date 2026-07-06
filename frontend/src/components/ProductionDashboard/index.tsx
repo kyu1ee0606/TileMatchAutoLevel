@@ -3121,6 +3121,9 @@ function TestTab({
         const resp = await apiClient.post('/generate/from-boss-template', {
           level_number: ln,
           target_difficulty: lv.meta.target_difficulty,
+          tile_type_profile: tileTypeProfile === 'baseline' ? undefined : tileTypeProfile, // 배치 그래프 프로파일 정합
+          apply_gimmicks: true,
+          gimmick_unlock_levels: PROFESSIONAL_GIMMICK_UNLOCK_LEVELS, // 프로덕션 언락 정합
         }).catch((e: { response?: { status?: number } }) => {
           if (e.response?.status === 404) return null; // 구간 맞는 템플릿 없음 → 스킵
           throw e;
@@ -4276,6 +4279,43 @@ function TestTab({
         console.warn(`[regen] Lv.${levelNumber}: target_difficulty=${rawTargetDifficulty}을 [0.01, 0.99] 범위로 클램프 (백엔드 ge=0.0/le=1.0 보호).`);
       }
       const targetScore = targetDifficulty * 100;
+
+      // [보스 템플릿] level_json._boss_template_id 있으면(보스 템플릿 생성분) from-boss-template로
+      // 재생성 — 모양+useTileCount(그래프)+기믹 자동. 순차검증 실패시 프로시저 경로로 빠져
+      // 모양·타일종류 어긋나던 문제 차단. userOverride/forceNoTemplate 없을 때만.
+      const bossTplId = (level.level_json as { _boss_template_id?: string } | undefined)?._boss_template_id;
+      if (bossTplId && userPatternIndex === undefined && userSymmetryMode === undefined && !options?.forceNoTemplate) {
+        const resp = await apiClient.post('/generate/from-boss-template', {
+          level_number: levelNumber,
+          target_difficulty: targetDifficulty,
+          tile_type_profile: tileTypeProfile === 'baseline' ? undefined : tileTypeProfile, // 배치 그래프 프로파일 정합
+          apply_gimmicks: true,
+          gimmick_unlock_levels: PROFESSIONAL_GIMMICK_UNLOCK_LEVELS,
+        }).catch((e: { response?: { status?: number } }) => (e.response?.status === 404 ? null : Promise.reject(e)));
+        if (resp) {
+          const levelJson = resp.data.level_json;
+          applyProductionTileVisuals(levelJson, levelNumber);
+          setRegenProgressMap(prev => new Map(prev).set(levelNumber, { status: 'saving' }));
+          await saveProductionLevels(batchId, [{
+            meta: {
+              ...level.meta,
+              generated_at: new Date().toISOString(),
+              actual_difficulty: resp.data.actual_difficulty ?? level.meta.actual_difficulty,
+              grade: (resp.data.grade || level.meta.grade) as DifficultyGrade,
+              status_updated_at: new Date().toISOString(),
+              regen_attempts: (level.meta.regen_attempts || 0) + 1,
+              match_score: undefined, verified: false, verification_passed: undefined,
+            },
+            level_json: levelJson,
+          }]);
+          setRegenProgressMap(prev => new Map(prev).set(levelNumber, { status: 'done' }));
+          addNotification('success', `Lv.${levelNumber} 보스 템플릿 재생성 (모양/그래프 유지)`);
+          loadLevels();
+          onStatsUpdate();
+          return;
+        }
+        // 404(템플릿 없음) → 아래 일반 경로로 폴백
+      }
 
       // [v15.55+] 템플릿 기반 레벨(import한 패턴 사용 중)은 별도 경로로 재생성.
       // 메타에 template_id가 있고 사용자가 패턴/대칭을 강제 지정하지 않았다면,

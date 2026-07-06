@@ -17,8 +17,21 @@ const layerSize = (layerIdx: number) => (layerIdx % 2 === 0 ? BOSS_BASE + 1 : BO
 const MAX_LAYERS = 10;
 
 interface BossLayer {
-  positions: Set<string>; // "x_y" (col_row)
+  positions: Set<string>;          // "x_y" (col_row) — t0로 채울 셀
+  gimmicks: Map<string, string>;   // pos → 기믹(속성). 수동 지정, 자동배치가 보존.
 }
+
+// 수동 기믹 팔레트 — 단일 셀 안전 속성만(link/teleport/craft/stack 제외 = 자동 전용).
+const GIMMICK_PALETTE: { id: string; label: string; color: string }[] = [
+  { id: '', label: '모양(t0)', color: '#6366f1' },
+  { id: 'ice', label: '🧊 얼음', color: '#7dd3fc' },
+  { id: 'chain', label: '⛓ 체인', color: '#a8a29e' },
+  { id: 'grass', label: '🌿 잔디', color: '#86efac' },
+  { id: 'frog', label: '🐸 개구리', color: '#4ade80' },
+  { id: 'bomb', label: '💣 폭탄', color: '#f87171' },
+  { id: 'curtain_close', label: '🎭 커튼', color: '#c084fc' },
+  { id: '__erase', label: '🗑 기믹지움', color: '#4b5563' },
+];
 
 interface SavedBossTemplate {
   id: string;
@@ -26,7 +39,7 @@ interface SavedBossTemplate {
   level_min: number;
   level_max: number;
   layer_count: number;
-  layers: { layer: number; col: number; row: number; positions: string[] }[];
+  layers: { layer: number; col: number; row: number; positions: string[]; gimmicks?: Record<string, string> }[];
 }
 
 interface BossConcept {
@@ -58,8 +71,10 @@ export function BossTemplatePanel() {
   const [name, setName] = useState('');
   const [levelMin, setLevelMin] = useState(10);
   const [levelMax, setLevelMax] = useState(1500);
-  const [layers, setLayers] = useState<BossLayer[]>([{ positions: new Set() }, { positions: new Set() }, { positions: new Set() }]);
+  const emptyLayer = (): BossLayer => ({ positions: new Set(), gimmicks: new Map() });
+  const [layers, setLayers] = useState<BossLayer[]>([emptyLayer(), emptyLayer(), emptyLayer()]);
   const [activeLayer, setActiveLayer] = useState(0);
+  const [paintMode, setPaintMode] = useState<string>(''); // '' = 모양, 'ice'.. = 기믹, '__erase' = 기믹지움
   const [saved, setSaved] = useState<SavedBossTemplate[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [painting, setPainting] = useState<boolean | null>(null); // 드래그 페인트: true=칠, false=지움
@@ -114,19 +129,29 @@ export function BossTemplatePanel() {
   const cols = layerSize(activeLayer);
   const rows = layerSize(activeLayer);
 
-  const toggleCell = useCallback((x: number, y: number, forceVal?: boolean) => {
+  // 셀 클릭/드래그 처리 — paintMode에 따라 모양 토글 or 기믹 지정/지움.
+  const applyCell = useCallback((x: number, y: number, forceVal?: boolean) => {
     setLayers(prev => {
-      const next = prev.map(l => ({ positions: new Set(l.positions) }));
+      const next = prev.map(l => ({ positions: new Set(l.positions), gimmicks: new Map(l.gimmicks) }));
+      const L = next[activeLayer];
       const key = `${x}_${y}`;
-      const cur = next[activeLayer].positions.has(key);
-      const target = forceVal !== undefined ? forceVal : !cur;
-      if (target) next[activeLayer].positions.add(key);
-      else next[activeLayer].positions.delete(key);
+      if (paintMode === '') {
+        // 모양 토글 (지우면 그 셀 기믹도 제거)
+        const cur = L.positions.has(key);
+        const target = forceVal !== undefined ? forceVal : !cur;
+        if (target) L.positions.add(key);
+        else { L.positions.delete(key); L.gimmicks.delete(key); }
+      } else if (paintMode === '__erase') {
+        L.gimmicks.delete(key);
+      } else {
+        // 기믹 지정 — 셀이 켜져있어야(t0) 함
+        if (L.positions.has(key)) L.gimmicks.set(key, paintMode);
+      }
       return next;
     });
-  }, [activeLayer]);
+  }, [activeLayer, paintMode]);
 
-  const addLayer = () => setLayers(prev => (prev.length >= MAX_LAYERS ? prev : [...prev, { positions: new Set() }]));
+  const addLayer = () => setLayers(prev => (prev.length >= MAX_LAYERS ? prev : [...prev, emptyLayer()]));
   const removeLayer = () => setLayers(prev => {
     if (prev.length <= 1) return prev;
     const next = prev.slice(0, -1);
@@ -134,19 +159,19 @@ export function BossTemplatePanel() {
     return next;
   });
 
-  const clearActive = () => setLayers(prev => prev.map((l, i) => (i === activeLayer ? { positions: new Set() } : l)));
+  const clearActive = () => setLayers(prev => prev.map((l, i) => (i === activeLayer ? emptyLayer() : l)));
   const fillActive = () => setLayers(prev => prev.map((l, i) => {
     if (i !== activeLayer) return l;
     const s = new Set<string>();
     const c = layerSize(i);
     for (let y = 0; y < c; y++) for (let x = 0; x < c; x++) s.add(`${x}_${y}`);
-    return { positions: s };
+    return { positions: s, gimmicks: new Map(l.gimmicks) };
   }));
 
   const resetEditor = () => {
     setName(''); setLevelMin(10); setLevelMax(1500);
-    setLayers([{ positions: new Set() }, { positions: new Set() }, { positions: new Set() }]);
-    setActiveLayer(0); setEditingId(null);
+    setLayers([emptyLayer(), emptyLayer(), emptyLayer()]);
+    setActiveLayer(0); setEditingId(null); setPaintMode('');
   };
 
   const totalCells = layers.reduce((a, l) => a + l.positions.size, 0);
@@ -162,6 +187,7 @@ export function BossTemplatePanel() {
       level_max: levelMax,
       layers: layers.map((l, i) => ({
         layer: i, col: layerSize(i), row: layerSize(i), positions: [...l.positions],
+        gimmicks: Object.fromEntries(l.gimmicks),
       })),
     };
     try {
@@ -178,8 +204,11 @@ export function BossTemplatePanel() {
     setName(t.name); setLevelMin(t.level_min); setLevelMax(t.level_max);
     const ls: BossLayer[] = t.layers
       .sort((a, b) => a.layer - b.layer)
-      .map(l => ({ positions: new Set(l.positions) }));
-    setLayers(ls.length ? ls : [{ positions: new Set() }]);
+      .map(l => ({
+        positions: new Set(l.positions),
+        gimmicks: new Map(Object.entries((l as { gimmicks?: Record<string, string> }).gimmicks || {})),
+      }));
+    setLayers(ls.length ? ls : [emptyLayer()]);
     setActiveLayer(0); setEditingId(t.id);
     addNotification('info', `로드: ${t.id}`);
   };
@@ -244,21 +273,43 @@ export function BossTemplatePanel() {
 
       {/* 그리기 그리드 */}
       <div className="flex gap-4">
-        <div className="bg-gray-800 rounded p-3 inline-block select-none">
-          <div className="text-[11px] text-gray-400 mb-2">L{activeLayer} · {cols}×{rows} (클릭/드래그로 t0 칠·지움)</div>
-          <div className="grid gap-0.5" style={{ gridTemplateColumns: `repeat(${cols}, 28px)` }}>
+        <div className="bg-gray-800 rounded p-3 select-none">
+          <div className="text-[11px] text-gray-400 mb-2">
+            L{activeLayer} · {cols}×{rows} · 모드: <b className="text-white">{GIMMICK_PALETTE.find(g => g.id === paintMode)?.label}</b>
+            {paintMode !== '' && paintMode !== '__erase' && <span className="text-yellow-400"> (t0 셀에만 지정됨)</span>}
+          </div>
+          <div className="flex gap-3">
+          <div className="grid gap-0.5 flex-shrink-0" style={{ gridTemplateColumns: `repeat(${cols}, 28px)`, height: 'fit-content' }}>
             {Array.from({ length: rows }, (_, y) =>
               Array.from({ length: cols }, (_, x) => {
-                const on = layers[activeLayer].positions.has(`${x}_${y}`);
+                const key = `${x}_${y}`;
+                const on = layers[activeLayer].positions.has(key);
+                const gim = layers[activeLayer].gimmicks.get(key);
+                const gcolor = gim ? GIMMICK_PALETTE.find(g => g.id === gim)?.color : undefined;
                 return (
-                  <div key={`${x}_${y}`}
-                    onMouseDown={() => { const nv = !on; setPainting(nv); toggleCell(x, y, nv); }}
-                    onMouseEnter={() => { if (painting !== null) toggleCell(x, y, painting); }}
-                    className={`w-7 h-7 rounded-sm cursor-pointer border ${on ? 'bg-indigo-500 border-indigo-300' : 'bg-gray-700 border-gray-600 hover:bg-gray-600'}`}
-                    title={`${x}_${y}`} />
+                  <div key={key}
+                    onMouseDown={() => { const sv = paintMode === '' ? !on : true; setPainting(sv); applyCell(x, y, sv); }}
+                    onMouseEnter={() => { if (painting !== null) applyCell(x, y, painting); }}
+                    className={`w-7 h-7 rounded-sm cursor-pointer border flex items-center justify-center text-[13px] ${on ? 'border-indigo-300' : 'bg-gray-700 border-gray-600 hover:bg-gray-600'}`}
+                    style={on ? { background: gcolor || '#6366f1' } : undefined}
+                    title={`${key}${gim ? ' · ' + gim : ''}`}>
+                    {gim ? (GIMMICK_PALETTE.find(g => g.id === gim)?.label.split(' ')[0] || '') : ''}
+                  </div>
                 );
               })
             )}
+          </div>
+          {/* 기믹 팔레트 (세로) */}
+          <div className="flex flex-col gap-1">
+            <div className="text-[10px] text-gray-500 mb-0.5">기믹 팔레트</div>
+            {GIMMICK_PALETTE.map(g => (
+              <button key={g.id} onClick={() => setPaintMode(g.id)}
+                className={`px-2 py-1.5 rounded text-[11px] border text-left whitespace-nowrap ${paintMode === g.id ? 'ring-2 ring-white font-semibold' : 'opacity-80 hover:opacity-100'}`}
+                style={{ background: g.id === '__erase' ? '#374151' : g.color, color: g.id === '' || g.id === '__erase' ? '#fff' : '#1f2937', borderColor: 'rgba(255,255,255,0.2)' }}>
+                {g.label}
+              </button>
+            ))}
+          </div>
           </div>
           <div className="flex gap-2 mt-2">
             <button onClick={fillActive} className="px-2 py-1 rounded text-[11px] bg-gray-600 hover:bg-gray-500 text-white">전체 채움</button>

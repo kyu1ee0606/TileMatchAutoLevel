@@ -1588,6 +1588,7 @@ class BossTemplateLayer(_BaseModel):
     col: int
     row: int
     positions: List[str]  # "col_row" 키 목록 (t0로 채울 셀)
+    gimmicks: Optional[Dict[str, str]] = None  # {pos: gimmick} 수동 지정 기믹(속성). 자동배치가 보존.
 
 
 class BossTemplateSaveRequest(_BaseModel):
@@ -1609,7 +1610,8 @@ async def boss_template_save(req: BossTemplateSaveRequest):
         "level_min": int(req.level_min),
         "level_max": int(req.level_max),
         "layers": [
-            {"layer": l.layer, "col": l.col, "row": l.row, "positions": l.positions}
+            {"layer": l.layer, "col": l.col, "row": l.row, "positions": l.positions,
+             "gimmicks": l.gimmicks or {}}
             for l in req.layers
         ],
         "layer_count": len(req.layers),
@@ -1677,6 +1679,14 @@ class BossTemplateGenerateRequest(_BaseModel):
     target_difficulty: Optional[float] = None
     tile_type_profile: Optional[str] = None
     random_seed: Optional[int] = None
+    apply_gimmicks: bool = True                        # 언락/난이도 기반 기믹 자동배치
+    gimmick_intensity: Optional[float] = None          # None=난이도 기반 기본
+    gimmick_unlock_levels: Optional[Dict[str, int]] = None  # 없으면 DEFAULT 사용
+    # [보스 난이도] 타일 종류(useTileCount) 하한/보너스 — 보스는 주변 일반레벨보다 어렵게.
+    # 종류 수 = 난이도 지배 레버라 그래프값 그대로면 저레벨 보스가 트리비얼(클리어율↑).
+    tile_type_bonus: int = 1        # 그래프값 + N
+    tile_type_floor: int = 6        # 최소 하한(종류)
+    tile_type_cap: int = 9          # 최대 상한(종류)
 
 
 @router.post("/generate/from-boss-template")
@@ -1702,7 +1712,9 @@ async def generate_from_boss_template(req: BossTemplateGenerateRequest):
     tpl = cand[((ln // 10) - 1) % len(cand)]  # 구간 내 결정적 로테이션
 
     seed = req.random_seed if req.random_seed is not None else ((ln * 7919 + 13) % 900000 + 1000)
-    use_tile_count = get_use_tile_count_for_level(ln, req.tile_type_profile)
+    graph_v = get_use_tile_count_for_level(ln, req.tile_type_profile)
+    # [보스 난이도] 그래프값 + 보너스, [floor, cap] 클램프. 저레벨 트리비얼 방지 + 상한 제한.
+    use_tile_count = min(int(req.tile_type_cap), max(int(graph_v) + int(req.tile_type_bonus), int(req.tile_type_floor)))
 
     # 다층 t0 레벨 조립
     tpl_layers = sorted(tpl.get("layers", []), key=lambda l: l.get("layer", 0))
@@ -1715,10 +1727,40 @@ async def generate_from_boss_template(req: BossTemplateGenerateRequest):
     for l in tpl_layers:
         i = int(l.get("layer", 0))
         col = int(l.get("col", 8)); row = int(l.get("row", 8))
-        tiles = {str(p): ["t0", ""] for p in l.get("positions", []) if isinstance(p, str)}
+        gm = l.get("gimmicks") or {}  # {pos: gimmick} 수동 지정 — 속성으로 bake(자동배치가 보존)
+        tiles = {
+            str(p): ["t0", str(gm.get(str(p), ""))]
+            for p in l.get("positions", []) if isinstance(p, str)
+        }
         level[f"layer_{i}"] = {"col": str(col), "row": str(row), "tiles": tiles, "num": str(len(tiles))}
 
     gen = LevelGenerator()
+
+    # [기믹 자동배치] 언락/난이도 기반 — 고정 모양 위에 속성 기믹 얹음(craft/stack 제외:
+    # 보스는 순수 매치, craft sort 이슈·모양 훼손 회피). ÷3/정화 전에 실행.
+    if req.apply_gimmicks:
+        try:
+            from .generate import select_gimmicks_with_unlock_probability, DEFAULT_GIMMICK_UNLOCK_LEVELS
+            from ...models.level import GenerationParams
+            td = float(req.target_difficulty) if req.target_difficulty is not None else 0.5
+            unlock = req.gimmick_unlock_levels or DEFAULT_GIMMICK_UNLOCK_LEVELS
+            # 속성 기믹만(컨테이너/키 제외)
+            attr_pool = ["ice", "chain", "link", "grass", "frog", "bomb", "curtain", "teleport", "unknown"]
+            selected = select_gimmicks_with_unlock_probability(
+                level_number=ln, target_difficulty=td,
+                unlock_levels=unlock, available_gimmicks=attr_pool,
+            )
+            gi = float(req.gimmick_intensity) if req.gimmick_intensity is not None else min(1.0, 0.4 + td)
+            if selected and gi > 0:
+                gparams = GenerationParams(
+                    target_difficulty=td, level_number=ln,
+                    obstacle_types=selected, gimmick_intensity=gi,
+                )
+                level = gen._add_obstacles(level, gparams)
+        except Exception as ex:  # noqa: BLE001
+            import logging as _logging
+            _logging.getLogger(__name__).warning(f"[boss-template] 기믹 배치 스킵: {ex}")
+
     # 생성 tail 정화 재사용 (÷3 보정 → OOB → 고아 link → 컨테이너 내부 다양화[해당없음 안전])
     try:
         level = gen._remove_out_of_bounds_tiles(level)

@@ -1,7 +1,29 @@
 # TileMatchAutoLevel - TODO 리스트
 
-**최종 업데이트**: 2026-07-03
-**프로젝트 버전**: MVP + 레벨 생성 자동화 + UX 개선 + 봇 시뮬레이터 v15.7
+**최종 업데이트**: 2026-07-16
+**프로젝트 버전**: MVP + 레벨 생성 자동화 + UX 개선 + 봇 시뮬레이터 v15.7 + 난이도 3단 다이얼 + 자동튜너 + 좁고깊은(동심)
+
+---
+
+## ✅ 완료 (2026-07-16)
+- **튜토리얼 기믹 보장**: 언락 첫 스테이지 기믹 100%(생성 종료 재보장+컨테이너+역생성 rescue 후 재보장). 180/180. [문서](CHANGELOG_20260716_TUTORIAL_GIMMICK_GUARANTEE.md)
+- **난이도 3단 다이얼**(모양→기믹→색): `/tune/gimmick`, 즉시 프리뷰·캐스케이드·🎲다른모양. [문서](CHANGELOG_20260716_DIFFICULTY_3DIAL.md)
+- **색 분산 Potts–Ising**: `/tune/color`, Kawasaki 스왑(÷3보존)+join-count 지표. [문서](CHANGELOG_20260716_COLOR_POTTS_ISING.md)
+- **자동 튜너 연동**: `/tune/auto`(색→기믹 target) 순차검증 재생성 대체. A/B 구 대비 3~4배·구제율↑. [문서](CHANGELOG_20260716_AUTO_TUNE_INTEGRATION.md)
+- **봇 정확도**: ice 불가판정 게임규칙 완화 + 컨테이너 배출 임팩트 우선 → 보스 거짓실패 해소(L60 0→0.73). RL 자동반영. [문서](CHANGELOG_20260716_BOT_ICE_STACK_FIX.md)
+- **좁고깊은(중간보스) 실현성**: `layer_steps`·`concentric_deep` 동심 침식+역생성. 에디터 전체층 표시. [문서](CHANGELOG_20260716_NARROW_DEEP_CONCENTRIC.md)
+
+### 후속(선택)
+- 중간보스(×5,¬×10) 정식 슬롯 UI + 난이도스케일. 동심 클리어 패턴 화이트리스트. 봇 탐색 강화(근본).
+
+---
+
+## ✅ 완료 (2026-07-15) — 난이도 미세조절 색 재배치 튜너
+- 재생성 없이 타일 색(t1~15)만 재배치해 목표 클리어율 근접(모양·÷3·기믹 보존).
+- 백엔드 `POST /api/tune/arrangement` (신규 독립 파일 `tune.py`) + 레벨행 🎚️미세 버튼 + 순차검증 실패시 색조절 우선 폴백.
+- 검증: L100/L120 목표 명중(gap≤0.02), 모양·÷3·기믹 보존 확인. 양극화 지형(L50)은 재생성 폴백.
+- 문서: [CHANGELOG_20260715_ARRANGEMENT_TUNER.md](CHANGELOG_20260715_ARRANGEMENT_TUNER.md)
+- 향후(선택): 달성범위 프로브, 후보 refinement, 생성 파이프라인 2단계화(t0→난이도최적 색베이크).
 
 ---
 

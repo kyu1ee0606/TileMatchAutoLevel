@@ -148,6 +148,11 @@ TileMatchAutoLevel/
 |--------|----------|------|
 | POST | `/api/generate` | 단일 레벨 생성 |
 | POST | `/api/generate/multiple` | 다중 레벨 생성 |
+| POST | `/api/tune/arrangement` | **난이도 미세조절** — 재생성 없이 색 재배치로 목표 클리어율 근접(모양·÷3·기믹 보존). [문서](CHANGELOG_20260715_ARRANGEMENT_TUNER.md) |
+| POST | `/api/tune/gimmick` | 기믹 강도 다이얼(속성기믹 밀도, ÷3보존, 튜토리얼 보장). [문서](CHANGELOG_20260716_DIFFICULTY_3DIAL.md) |
+| POST | `/api/tune/color` | 색 분산 다이얼(Potts–Ising, join-count 지표, 뭉침↔흩어짐). [문서](CHANGELOG_20260716_COLOR_POTTS_ISING.md) |
+| POST | `/api/tune/auto` | 자동 튜너(색+기믹 target 추종, 순차검증 재생성 대체). [문서](CHANGELOG_20260716_AUTO_TUNE_INTEGRATION.md) |
+| (param) | `layer_steps`·`min_layers`·`concentric_deep` | 좁고깊은/동심 스택(중간보스). [문서](CHANGELOG_20260716_NARROW_DEEP_CONCENTRIC.md) |
 
 ### 봇 시뮬레이션
 | Method | Endpoint | 설명 |
@@ -261,6 +266,13 @@ TileMatchAutoLevel/
 | [AUTOMATION_SUMMARY.md](AUTOMATION_SUMMARY.md) | 자동화 시스템 요약 |
 | [LOCAL_LEVELS_GUIDE.md](LOCAL_LEVELS_GUIDE.md) | 로컬 레벨 관리 가이드 |
 | [LEVEL_GENERATION_GUIDE.md](LEVEL_GENERATION_GUIDE.md) | 레벨 생성 도구 가이드 |
+| [CHANGELOG_20260715_ARRANGEMENT_TUNER.md](CHANGELOG_20260715_ARRANGEMENT_TUNER.md) | 난이도 미세조절 색 재배치 튜너(재생성 없이 색 순열로 목표 클리어율 근접, 모양·÷3·기믹 보존). 독립 엔드포인트 `/api/tune/arrangement` + 레벨행 🎚️미세 버튼 + 순차검증 실패시 색조절 우선 폴백 |
+| [CHANGELOG_20260716_TUTORIAL_GIMMICK_GUARANTEE.md](CHANGELOG_20260716_TUTORIAL_GIMMICK_GUARANTEE.md) | 언락 첫 스테이지 기믹 100% 보장(생성 종료 재보장·컨테이너·역생성 rescue 후 재보장). 180/180 검증 |
+| [CHANGELOG_20260716_DIFFICULTY_3DIAL.md](CHANGELOG_20260716_DIFFICULTY_3DIAL.md) | 난이도 3단 다이얼(모양→기믹→색), 즉시 프리뷰·캐스케이드·🎲다른모양. `/tune/gimmick` |
+| [CHANGELOG_20260716_COLOR_POTTS_ISING.md](CHANGELOG_20260716_COLOR_POTTS_ISING.md) | 색 분산 Potts–Metropolis(Kawasaki) 엔진 + join-count 지표, 슬라이더 균등화. `/tune/color` |
+| [CHANGELOG_20260716_AUTO_TUNE_INTEGRATION.md](CHANGELOG_20260716_AUTO_TUNE_INTEGRATION.md) | 자동 튜너 `/tune/auto`(색→기믹 target 추종) 순차검증 연동. A/B 실측 구·신 3~4배 빠름·구제율↑ |
+| [CHANGELOG_20260716_BOT_ICE_STACK_FIX.md](CHANGELOG_20260716_BOT_ICE_STACK_FIX.md) | 봇 거짓실패 수정: ice 불가판정 게임규칙 완화 + 컨테이너(stack/craft) 배출 임팩트 비례 우선. L60 0→0.73. RL 자동반영 |
+| [CHANGELOG_20260716_NARROW_DEEP_CONCENTRIC.md](CHANGELOG_20260716_NARROW_DEEP_CONCENTRIC.md) | 좁고깊은(중간보스) — `layer_steps`·`min_layers`·`concentric_deep` 동심 침식 스택 + 역생성 병용. 에디터 전체층 표시 |
 | [CHANGELOG_20260706_BOSS_TEMPLATE_SYSTEM.md](CHANGELOG_20260706_BOSS_TEMPLATE_SYSTEM.md) | 보스 템플릿 반자동 제작(🏰 탭 다층t0 그리기·수동기믹·컨셉노트·난이도파악 3레버) + craft/stack 골 + 레벨대별 완화(초반 튜토리얼) + 순차검증 정합 |
 | [CHANGELOG_20260703_AUTO_QUEUE.md](CHANGELOG_20260703_AUTO_QUEUE.md) | 프로덕션 자동 연속생성 큐(야간 자리비움, N배치 순차 자동생성 or 무한) |
 | [CHANGELOG_20260703_BOSS_GENERATOR_AND_CROP.md](CHANGELOG_20260703_BOSS_GENERATOR_AND_CROP.md) | 보스 전용 생성기(그리드≤8·5~6층·레시피12종·목표절반) + 템플릿 크롭 차용 + 디바이스 그리드 게이트 |

@@ -1661,6 +1661,68 @@ class BossConceptsSaveRequest(_BaseModel):
     concepts: Dict[str, Dict[str, Any]]
 
 
+class BossShapeLLMRequest(_BaseModel):
+    description: str
+    sizes: List[int] = [8, 7]     # 생성할 그리드 크기(홀짝 8/7). 각 크기별 1회 호출.
+    symmetric: bool = True
+
+
+def _parse_grid(text: str, n: int) -> List[str]:
+    """LLM 출력에서 n×n 0/1 그리드 파싱 → 'col_row' positions."""
+    rows = []
+    for line in text.splitlines():
+        s = "".join(ch for ch in line.strip() if ch in "01")
+        if len(s) >= n:
+            rows.append(s[:n])
+        if len(rows) >= n:
+            break
+    # 부족하면 0행 패딩
+    while len(rows) < n:
+        rows.append("0" * n)
+    pos = []
+    for y, row in enumerate(rows[:n]):
+        for x, ch in enumerate(row[:n]):
+            if ch == "1":
+                pos.append(f"{x}_{y}")
+    return pos
+
+
+@router.post("/debug/boss-shape-llm")
+async def boss_shape_llm(req: BossShapeLLMRequest):
+    """모양 설명 → LLM이 n×n 0/1 그리드 생성 → t0 positions. (C안: 임의 모양 자동생성.)
+
+    인증 = Claude Code CLI(`claude -p`) 이미 로그인된 세션 사용. API 키 불필요.
+    CLI 미설치/미인증 시 에러. 모델 = 세션 기본(또는 CLAUDE_CLI_BIN env로 경로 지정).
+    """
+    import os as _os
+    import asyncio as _asyncio
+    cli = _os.environ.get("CLAUDE_CLI_BIN", "claude")
+    sym = "좌우 대칭(left-right symmetric)으로. " if req.symmetric else ""
+    grids: Dict[str, List[str]] = {}
+    for n in sorted(set(int(s) for s in req.sizes)):
+        prompt = (
+            f"{n}x{n} 크기의 0/1 그리드만 출력해. 설명/여분텍스트 없이 {n}줄, 각 줄 {n}자.\n"
+            f"1=채운 타일, 0=빈칸. '{req.description}'의 알아볼 수 있는 실루엣을 그려.\n"
+            f"{sym}게임 보드용이라 전체의 35~70% 정도 채워. 오직 0과 1로 된 {n}줄만 출력."
+        )
+        try:
+            proc = await _asyncio.create_subprocess_exec(
+                cli, "-p", prompt,
+                stdout=_asyncio.subprocess.PIPE, stderr=_asyncio.subprocess.PIPE,
+            )
+            out, err = await _asyncio.wait_for(proc.communicate(), timeout=90)
+            if proc.returncode != 0:
+                raise RuntimeError((err or b"").decode()[:200] or f"exit {proc.returncode}")
+            grids[str(n)] = _parse_grid(out.decode(), n)
+        except FileNotFoundError:
+            raise HTTPException(status_code=400, detail=f"claude CLI 없음('{cli}') — Claude Code 설치/인증 필요")
+        except _asyncio.TimeoutError:
+            raise HTTPException(status_code=504, detail="LLM 타임아웃(90s)")
+        except Exception as ex:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"LLM 오류: {ex}")
+    return {"grids": grids, "via": "claude-cli"}
+
+
 @router.get("/debug/boss-concepts")
 async def boss_concepts_list():
     """보스 레벨별 스토리 컨셉 노트 전체."""
@@ -1738,6 +1800,11 @@ async def generate_from_boss_template(req: BossTemplateGenerateRequest):
             floor = 9
         use_tile_count = min(int(req.tile_type_cap), max(int(graph_v) + int(req.tile_type_bonus), floor))
 
+    # [결정성] 기믹 선택(select_gimmicks_*)·_add_obstacles·÷3 보정은 전역 random 사용 →
+    # seed 안 고정하면 매 호출 기믹배치/패딩 달라져 tile_count 흔들림(난이도 파악 92 vs 실제 93).
+    # 여기서 전역 random을 seed로 고정 → 같은 (레벨·seed·종류수)면 추정==실제.
+    _random.seed(seed)
+
     # 다층 t0 레벨 조립
     tpl_layers = sorted(tpl.get("layers", []), key=lambda l: l.get("layer", 0))
     level: Dict[str, Any] = {
@@ -1746,20 +1813,91 @@ async def generate_from_boss_template(req: BossTemplateGenerateRequest):
         "randSeed": int(seed),
         "autoCollectCount": 0,
     }
+    # 배치만으로 언클리어러블(0%) 되는 무효 기믹 제거 카운터. (게임 CheckEffectTileCanUncover 정합)
+    # chain: 좌/우(수평) 이웃 픽 시 언락 → 좌우 둘다 없으면(수평 이웃 0) 영원히 잠김.
+    # grass: 게임 grassEffectRemainCount=2 고정, 4방 남은이웃 < 2 이면 못 벗김 → 4방 이웃 ≥2 필요.
+    chain_stripped = 0
+    grass_stripped = 0
     for l in tpl_layers:
         i = int(l.get("layer", 0))
         col = int(l.get("col", 8)); row = int(l.get("row", 8))
         gm = l.get("gimmicks") or {}  # {pos: gimmick} 수동 지정 — 속성으로 bake(자동배치가 보존)
-        tiles = {
-            str(p): ["t0", str(gm.get(str(p), ""))]
-            for p in l.get("positions", []) if isinstance(p, str)
-        }
+        pos_set = {str(p) for p in l.get("positions", []) if isinstance(p, str)}
+        tiles: Dict[str, Any] = {}
+        for p in pos_set:
+            eff = str(gm.get(p, ""))
+            try:
+                px, py = map(int, p.split("_"))
+            except ValueError:
+                tiles[p] = ["t0", eff]
+                continue
+            if eff == "chain":  # 좌/우(수평) 이웃 ≥1 필요
+                if f"{px-1}_{py}" not in pos_set and f"{px+1}_{py}" not in pos_set:
+                    eff = ""; chain_stripped += 1
+            elif eff == "grass":  # 4방(상하좌우) 이웃 ≥2 필요 (게임 remaining=2)
+                _n4 = sum(1 for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)) if f"{px+dx}_{py+dy}" in pos_set)
+                if _n4 < 2:
+                    eff = ""; grass_stripped += 1
+            elif eff == "bomb":  # 게임 bomb는 xEffect=숫자(카운트다운). "bomb"만 쓰면 Parse→0→즉시 게임오버.
+                eff = f"bomb_{_random.randint(5, 10)}"  # 생성기와 동일 카운트다운 범위
+            tiles[p] = ["t0", eff]
         level[f"layer_{i}"] = {"col": str(col), "row": str(row), "tiles": tiles, "num": str(len(tiles))}
+
+    # [수동 컨테이너] 사용자가 craft/stack을 직접 그린 셀(`["t0","craft"|"stack"]`)을 실제 컨테이너로 변환.
+    # 수동 배치 = 위치·개수 고정 → 타일수 결정적(자동배치 무작위성 제거). craft는 같은 층 빈 출력칸 필요,
+    # 없으면 stack으로 폴백(컨테이너 유지). goalCount 누적. 변환된 셀은 아래 자동 컨테이너 대상서 제외됨.
+    manual_containers = 0
+    _DIRS = {"e": (1, 0), "w": (-1, 0), "s": (0, 1), "n": (0, -1)}
+    _gcnt = level.setdefault("goalCount", {})
+    for i in range(len(tpl_layers)):
+        ld = level.get(f"layer_{i}", {})
+        tmap = ld.get("tiles", {})
+        col_t = int(ld.get("col", 8)); row_t = int(ld.get("row", 8))
+        for pos, t in list(tmap.items()):
+            if not (isinstance(t, list) and len(t) >= 2 and t[0] == "t0"):
+                continue
+            parts = str(t[1]).split("_")  # "craft_e_3" → [craft,e,3] / "craft" → [craft]
+            if parts[0] not in ("craft", "stack"):
+                continue
+            ctype = parts[0]
+            cdir = parts[1] if len(parts) >= 3 and parts[1] in _DIRS else "e"
+            inner = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() and int(parts[2]) > 0 else 3
+            # [일반레벨 동일 파이프라인] 컨테이너 내부는 ÷3 (일반레벨=3). 비-÷3이면 field t0가 ÷3 못돼
+            # 게임 분배서 외톨이 타입 발생. → 내부를 3의 배수로 클램프(최소 3) → field·내부 모두 ÷3.
+            inner = max(3, round(inner / 3) * 3)
+            # [오프셋 방향 클리어 — stack 전용] stack은 내부타일이 방향으로 시각 오프셋되며 쌓여
+            # 그 방향 일반타일을 '시각적으로 덮지만 선택 가능'하게 만들어 착각 유발(게임 확인).
+            # craft는 InitHighestTileAtSpawn이 배출위치 기존타일 처리(대기/위에 쌓기)해 문제없음 → 방향 그대로.
+            # stack만: 지정 방향 막혔으면 '오프셋 셀 빈' 방향으로 회전, 없으면 지정 유지(최선).
+            if ctype == "stack":
+                x0, y0 = map(int, pos.split("_"))
+                steps = max(1, int((inner - 1) * 0.1) + 1)  # 내부≤10→1칸, 11~20→2칸
+
+                def _offset_clear(d: str) -> bool:
+                    dc, dr = _DIRS[d]
+                    for s in range(1, steps + 1):
+                        nx, ny = x0 + dc * s, y0 + dr * s
+                        if not (0 <= nx < col_t and 0 <= ny < row_t):
+                            return False
+                        if f"{nx}_{ny}" in tmap:
+                            return False
+                    return True
+
+                if not _offset_clear(cdir):
+                    alts = [d for d in _DIRS if _offset_clear(d)]
+                    if alts:
+                        cdir = alts[0]  # 빈 방향으로 회전
+            full = f"{ctype}_{cdir}"
+            tmap[pos] = [full, "", [inner]]
+            _gcnt[full] = _gcnt.get(full, 0) + inner
+            manual_containers += 1
+        ld["num"] = str(len(tmap))
 
     # [보스 컨테이너 기믹] craft/stack 골 배치 — 저레벨(11~30) 언락 기믹이 craft/stack뿐이라
     # 속성기믹만으론 기믹 0. 상위층 t0 셀 일부를 컨테이너로 변환(내부 t0×3, 게임 분배). craft는
     # 출력방향 빈 칸 확보. goalCount 누적. ÷3은 finalize가 보정.
-    if req.apply_gimmicks:
+    # [수동 우선] 사용자가 craft/stack 직접 그렸으면(manual_containers>0) 자동배치 스킵 → 타일수 고정.
+    if req.apply_gimmicks and manual_containers == 0:
         import random as _r2
         from .generate import DEFAULT_GIMMICK_UNLOCK_LEVELS as _UNLOCK
         unlock2 = req.gimmick_unlock_levels or _UNLOCK
@@ -1778,7 +1916,9 @@ async def generate_from_boss_template(req: BossTemplateGenerateRequest):
             col_t = int(ld.get("col", 8)); row_t = int(ld.get("row", 8))
             gcnt = level.setdefault("goalCount", {})
             DIRS = {"e": (1, 0), "w": (-1, 0), "s": (0, 1), "n": (0, -1)}
-            cells = [p for p, t in tmap.items() if isinstance(t, list) and t and t[0] == "t0"]
+            # 수동 기믹(속성) 지정된 셀은 제외 → 컨테이너가 수동 chain/ice 등 덮어쓰지 않음(보존).
+            cells = [p for p, t in tmap.items()
+                     if isinstance(t, list) and len(t) >= 2 and t[0] == "t0" and not t[1]]
             rng2.shuffle(cells)
             placed = 0
             for pos in cells:
@@ -1829,14 +1969,56 @@ async def generate_from_boss_template(req: BossTemplateGenerateRequest):
     # 생성 tail 정화 재사용 (÷3 보정 → OOB → 고아 link → 컨테이너 내부 다양화[해당없음 안전])
     try:
         level = gen._remove_out_of_bounds_tiles(level)
+        # [무효 기믹 일괄제거] OOB 후 이웃 사라진 chain/grass(수동+자동배치 모두) 속성 제거.
+        # chain: 좌우 이웃 없음 / grass: 4방 이웃 없음 → 영원히 못 풀림(0%). 전 레이어 스캔.
+        for _li in range(int(level.get("layer", 0))):
+            _lt = (level.get(f"layer_{_li}", {}) or {}).get("tiles", {}) or {}
+            for _p, _t in _lt.items():
+                if not (isinstance(_t, list) and len(_t) >= 2):
+                    continue
+                _eff = _t[1]
+                if _eff not in ("chain", "grass"):
+                    continue
+                try:
+                    _px, _py = map(int, _p.split("_"))
+                except ValueError:
+                    continue
+                if _eff == "chain":
+                    if f"{_px-1}_{_py}" not in _lt and f"{_px+1}_{_py}" not in _lt:
+                        _t[1] = ""; chain_stripped += 1
+                else:  # grass — 4방 이웃 ≥2 필요(게임 remaining=2)
+                    if sum(1 for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)) if f"{_px+dx}_{_py+dy}" in _lt) < 2:
+                        _t[1] = ""; grass_stripped += 1
         level = gen._finalize_divisibility_guarantee(level)
         level = gen._strip_orphaned_link_tiles(level)
         level = gen._diversify_container_inner_tiles(level)
+        # [grass 홀짝착각방지] 짝수 층차 0오프셋 겹침 grass 일괄 제거(생성기와 동일 규칙).
+        _before_g = grass_stripped
+        level = gen._strip_confusing_grass(level)
+        # (grass_stripped 카운트는 위 4방검사분만 반영 — 홀짝 제거분은 로그로 확인)
+        del _before_g
     except Exception as ex:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"boss_overlay_failed: {ex}")
 
     total = sum(len((level.get(f"layer_{i}", {}) or {}).get("tiles", {}) or {}) for i in range(level["layer"]))
-    level["max_moves"] = total + 50
+    # [내역] t0(런타임 분배 대상 — ÷3 보정은 이 풀에 적용) vs 컨테이너(craft/stack — 셀1개+내부÷3 별도).
+    # 총합(total)은 t0+컨테이너라 ÷3 아닐 수 있음(정상). 프론트 표시 오해 방지용.
+    t0_count = 0
+    container_count = 0
+    for i in range(level["layer"]):
+        for _t in ((level.get(f"layer_{i}", {}) or {}).get("tiles", {}) or {}).values():
+            if not isinstance(_t, list) or not _t:
+                continue
+            b = str(_t[0])
+            if b == "t0":
+                t0_count += 1
+            elif b.startswith("craft") or b.startswith("stack"):
+                container_count += 1
+    # [실제 매치 타일 총수] 컨테이너 셀(craft/stack)은 배출기라 매치 대상 아님 → 총계 제외.
+    # 실제 타일 = field t0 + 컨테이너 내부(배출) = 매치/수집 대상. max_moves·난이도 기준.
+    inner_count = sum(int(v) for v in (level.get("goalCount", {}) or {}).values())
+    actual_total = t0_count + inner_count
+    level["max_moves"] = actual_total + 50
     if req.target_difficulty is not None:
         level["target_difficulty"] = float(req.target_difficulty)
     level["_boss_template_id"] = tpl.get("id")
@@ -1857,7 +2039,13 @@ async def generate_from_boss_template(req: BossTemplateGenerateRequest):
         "template_id": tpl.get("id"),
         "template_name": tpl.get("name"),
         "layer_count": len(tpl_layers),
-        "tile_count": total,
+        "tile_count": actual_total,        # 실제 플레이 총수(visual + 컨테이너 내부). 내부 반영.
+        "visual_count": total,             # 화면 셀 수(컨테이너=1). 참고용
+        "inner_count": inner_count,        # 컨테이너 내부 타일 합(런타임 배출)
+        "t0_count": t0_count,              # 런타임 분배 대상 field t0(÷3 보정 적용 풀)
+        "container_count": container_count,  # craft/stack 컨테이너 셀 수
+        "chain_stripped": chain_stripped,  # 좌우 이웃없어 제거된 무효 체인 수(있으면 프론트 경고)
+        "grass_stripped": grass_stripped,  # 4방 이웃없어 제거된 무효 잔디 수
     }
 
 

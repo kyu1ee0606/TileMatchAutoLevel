@@ -587,6 +587,14 @@ class LevelGenerator:
         "stack_s", "stack_n", "stack_e", "stack_w"
     ]
 
+    # 기믹 언락 첫 스테이지(튜토리얼) 정본 맵 — routes/generate.py DEFAULT_GIMMICK_UNLOCK_LEVELS와 동기화.
+    # generate() 종료 직전 재보장에 사용: 어떤 호출 경로(신규/재생성)든 level_number만 있으면
+    # 해당 기믹이 반드시 존재하도록 자기교정. (craft/stack은 goal 타입이라 별도 처리.)
+    TUTORIAL_UNLOCK_LEVELS = {
+        11: "craft", 21: "stack", 31: "ice", 51: "link", 81: "chain", 111: "key",
+        151: "grass", 191: "unknown", 241: "curtain", 291: "bomb", 391: "frog", 441: "teleport",
+    }
+
     # Generation parameters
     MAX_ADJUSTMENT_ITERATIONS = 50
     DIFFICULTY_TOLERANCE = 3.0  # ±3 points (tighter tolerance for better accuracy)
@@ -1085,12 +1093,19 @@ class LevelGenerator:
 
         # CRITICAL: Ensure tutorial gimmicks are maintained after all validations
         # Tutorial gimmick count may have been reduced by obstacle validation
-        tutorial_gimmick = getattr(params, 'tutorial_gimmick', None)
+        # level_number 정본맵 fallback: 재생성 등 일부 경로가 params.tutorial_gimmick을 비워
+        # 튜토리얼 검출을 놓치는 회귀(Category A) 차단 — 언락 첫 스테이지면 무조건 보장.
+        tutorial_gimmick = getattr(params, 'tutorial_gimmick', None) \
+            or self.TUTORIAL_UNLOCK_LEVELS.get(getattr(params, 'level_number', None))
         tutorial_gimmick_min_count = getattr(params, 'tutorial_gimmick_min_count', 3)
         if tutorial_gimmick:
             if tutorial_gimmick == "unknown":
                 # Unknown gimmicks need special handling - must be covered by upper layers
                 level = self._ensure_unknown_tutorial_count(level, tutorial_gimmick_min_count)
+            elif tutorial_gimmick in ("craft", "stack"):
+                # craft/stack은 goal(컨테이너) 타입 — _add_goals가 배치에 실패해 0개가 되면
+                # 튜토리얼 자체가 성립 안 함. 최소 1개 컨테이너 보장. (÷3은 후속 finalize가 정리.)
+                level = self._ensure_container_goal_tutorial(level, tutorial_gimmick)
             else:
                 level = self._ensure_tutorial_gimmick_count(level, tutorial_gimmick, tutorial_gimmick_min_count)
 
@@ -1318,6 +1333,14 @@ class LevelGenerator:
         # 여기서는 정상 경로 속도 회복.
         # 이전(v15.43): 매 generate마다 _quick_deadlock_check 5 iter 추가 호출 → 누적 비용 큼.
 
+        # [튜토리얼 컨테이너 생존 보장] craft/stack 튜토리얼에서 초기 배치 컨테이너가 후속
+        # 변형(리셔플/경계·피라미드 트림/OOB 제거)에 사라질 수 있으므로, 모든 좌표 변형이 끝난
+        # 지금(÷3 finalize 직전) 한번 더 보장 → finalize/FINAL_REPAIR가 ÷3을 마무리한다.
+        _final_tut = getattr(params, 'tutorial_gimmick', None) \
+            or self.TUTORIAL_UNLOCK_LEVELS.get(getattr(params, 'level_number', None))
+        if _final_tut in ("craft", "stack"):
+            level = self._ensure_container_goal_tutorial(level, _final_tut)
+
         # [v16] 최종 ÷3 클리어가능성 보장 (모든 변형 단계 이후, FINAL_REPAIR 직전).
         # 총합 (concrete + t0)을 ÷3으로 맞춘다 → t0 레벨은 분배기가 per-type을 보장,
         # concrete 레벨은 바로 아래 FINAL_REPAIR가 per-type relabel로 마무리.
@@ -1433,6 +1456,24 @@ class LevelGenerator:
         # 이므로 위 ÷3 보정/검증 결과에 영향 없음. 반드시 모든 타일 변형 단계 이후 마지막에 실행.
         level = self._diversify_container_inner_tiles(level)
 
+        # [grass 홀짝착각방지] 모든 좌표/타일 변형 단계 '이후' 최종 실행 — 짝수 층차(같은 홀짝) 0오프셋으로
+        # 다른 층 타일이 grass 이웃 자리에 겹쳐보여 착각 유발하는 grass 속성 일괄 제거. (모든 배치경로 공통.)
+        level = self._strip_confusing_grass(level)
+
+        # [튜토리얼 기믹 최종 보장] 모든 파괴적 변형 단계(데드락 리셔플/÷3 재분배/경계·피라미드 트림/
+        # 역생성/grass strip) 이후 최종 재보장. 초기(line~1095) 보장이 후속 단계에 지워질 수 있고,
+        # 재생성 등 일부 경로는 params.tutorial_gimmick이 비어 검출을 놓친다 → level_number 정본맵으로
+        # 자기교정하여 언락 첫 스테이지에 해당 기믹이 반드시 존재하도록 한다. (attribute 기믹은 td[1]만
+        # 추가 → 타입 카운트 불변 = ÷3 보존. craft/stack goal·key는 별도 보장 로직이 앞단에서 처리.)
+        final_tut = getattr(params, 'tutorial_gimmick', None) \
+            or self.TUTORIAL_UNLOCK_LEVELS.get(params.level_number)
+        if final_tut:
+            min_ct = getattr(params, 'tutorial_gimmick_min_count', 3) or 3
+            if final_tut == "unknown":
+                level = self._ensure_unknown_tutorial_count(level, min_ct)
+            elif final_tut not in ("craft", "stack", "key"):
+                level = self._ensure_tutorial_gimmick_count(level, final_tut, min_ct)
+
         generation_time_ms = int((time.time() - start_time) * 1000)
 
         return GenerationResult(
@@ -1443,6 +1484,87 @@ class LevelGenerator:
             playability_warning=getattr(self, "_last_playability_warning", False),
             estimated_clear_rate=getattr(self, "_last_estimated_clear_rate", 1.0),
         )
+
+    def _build_concentric_layers(self, level: Dict[str, Any], active_layers: List[int],
+                                 cols: int, rows: int, params: "GenerationParams") -> List[Tuple[int, str]]:
+        """동심 침식 스택. layer_0 = 실제 패턴 모양(다양) → 위로 갈수록 테두리 벗겨(erode) 중앙 축소
+        = 거북등껍질 코히어런트 스택. 바닥에 모양 다양성 유지(사각섬 고정 아님). 2층마다 한 겹 완만 침식.
+        각 층 = 그 층 그리드 중앙 정렬. 타입 t0(파이프라인/역생성 배정). 상위 무작위 흩어짐 제거."""
+        import random as _r
+        base = cols + 1
+
+        def _erode(cells):
+            nb = ((1, 0), (-1, 0), (0, 1), (0, -1))
+            return {(x, y) for (x, y) in cells if all((x + dx, y + dy) in cells for dx, dy in nb)}
+
+        def _fill_holes(cells):
+            out = set(cells)
+            for (x, y) in list(cells):
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nx, ny = x + dx, y + dy
+                    if (nx, ny) not in cells:
+                        cnt = sum(1 for ddx, ddy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                                  if (nx + ddx, ny + ddy) in cells)
+                        if cnt >= 3:
+                            out.add((nx, ny))
+            return out
+
+        # 마스터 모양: 패턴 지정 시 그것, 아니면 랜덤(채움 좋은 패턴 위주) → 레벨마다 다양.
+        pidx = params.pattern_index if params.pattern_index is not None else _r.choice([0, 1, 2, 3, 8, 13, 16, 20])
+        try:
+            master_pos = self._generate_aesthetic_positions(
+                base, base, target_count=1000, pattern_index=pidx,
+                target_difficulty=params.target_difficulty)
+            master = set()
+            for p in master_pos:
+                x, y = map(int, p.split("_"))
+                master.add((x, y))
+            master = _fill_holes(master)
+        except Exception:
+            master = set()
+        # 너무 성기면 채운 다이아몬드로 폴백
+        if len(master) < base * 2:
+            c = base // 2
+            master = {(x, y) for x in range(base) for y in range(base) if abs(x - c) + abs(y - c) <= c}
+
+        # 침식 스택(완만: 2층마다 한 겹). 층수만큼 확보(더 침식 안 되면 마지막 유지).
+        stack = []
+        cur = set(master)
+        for i in range(len(active_layers)):
+            stack.append(set(cur))
+            if i % 2 == 1:
+                nxt = _erode(cur)
+                if len(nxt) >= 3:
+                    cur = nxt
+
+        all_positions: List[Tuple[int, str]] = []
+        for i, layer_idx in enumerate(active_layers):
+            odd = (layer_idx % 2 == 1)
+            gcol = cols if odd else cols + 1
+            grow = rows if odd else rows + 1
+            cells = stack[i] if i < len(stack) else stack[-1]
+            # 이 층 그리드 중앙으로 이동
+            xs = [x for x, y in cells]; ys = [y for x, y in cells]
+            if not xs:
+                continue
+            bx = (min(xs) + max(xs)) / 2.0; by = (min(ys) + max(ys)) / 2.0
+            ox = int(round(gcol / 2.0 - 0.5 - bx)); oy = int(round(grow / 2.0 - 0.5 - by))
+            tiles: Dict[str, Any] = {}
+            for (x, y) in cells:
+                nx, ny = x + ox, y + oy
+                if 0 <= nx < gcol and 0 <= ny < grow:
+                    pos = f"{nx}_{ny}"
+                    tiles[pos] = ["t0", ""]
+                    all_positions.append((layer_idx, pos))
+            lk = f"layer_{layer_idx}"
+            if lk not in level or not isinstance(level.get(lk), dict):
+                level[lk] = {}
+            level[lk]["col"] = str(gcol)
+            level[lk]["row"] = str(grow)
+            level[lk]["tiles"] = tiles
+            level[lk]["num"] = str(len(tiles))
+        logger.info(f"[CONCENTRIC] pattern={pidx} {len(active_layers)}층, 총 {len(all_positions)} 위치")
+        return all_positions
 
     def _place_key_tiles(self, level: Dict[str, Any], count: int) -> None:
         """
@@ -2971,10 +3093,16 @@ class LevelGenerator:
                         return (config.pattern_type, config.pattern_index)
             return None
 
+        # [좁고깊은/중간보스] 동심 침식 스택: layer_0 채운 모양 → 위로 erode(중앙 축소).
+        # 상위층 무작위 흩어짐 제거. 나머지 패턴 블록 스킵. (타입 솔버블화는 use_reverse_generation.)
+        if getattr(params, "concentric_deep", False):
+            all_layer_positions = self._build_concentric_layers(level, active_layers, cols, rows, params)
+            level["_preserve_pattern"] = True  # 피라미드 클램프/재생성 스킵(동심 모양 보존)
+            level["_pattern_locked_positions"] = {p for _, p in all_layer_positions}
         # CRITICAL: When pattern_index is specified (special shape levels like Heart, Star),
         # generate a MASTER pattern first and ALL layers share the SAME positions.
         # This ensures the visual shape is maintained when layers are stacked.
-        if params.pattern_index is not None:
+        elif params.pattern_index is not None:
             # Check if this is a LAYERED pattern (different shape per layer)
             use_layered_pattern = is_layered_pattern(params.pattern_index)
 
@@ -6779,13 +6907,26 @@ class LevelGenerator:
                         if (isinstance(ndata, list) and len(ndata) >= 1 and
                             not (isinstance(ndata[0], str) and (ndata[0].startswith("craft_") or ndata[0].startswith("stack_")))):
                             clearable_count += 1
-                if clearable_count >= 2:
+                # [홀짝 착각방지] 짝수 층차 0오프셋 겹침 없는 위치만 선호(최종 strip과 동일 규칙).
+                if clearable_count >= 2 and self._grass_position_valid(level, top_layer_idx, col, row):
                     grass_eligible.append(pos)
 
             if not grass_eligible:
-                logger.warning(f"Tutorial gimmick 'grass' - no positions with 2+ clearable neighbors found")
-                # Fallback: use any eligible position
-                grass_eligible = eligible_positions
+                logger.warning(f"Tutorial gimmick 'grass' - 홀짝안전 위치 없음, 2+이웃 위치로 폴백")
+                # 1차 폴백: 홀짝검증 없이 2+이웃 위치
+                for pos in eligible_positions:
+                    try:
+                        col, row = map(int, pos.split('_'))
+                    except (ValueError, AttributeError):
+                        continue
+                    neighbors = [(col, row - 1), (col, row + 1), (col - 1, row), (col + 1, row)]
+                    cc = sum(1 for nc, nr in neighbors if f"{nc}_{nr}" in tiles
+                             and isinstance(tiles[f"{nc}_{nr}"], list) and tiles[f"{nc}_{nr}"]
+                             and not str(tiles[f"{nc}_{nr}"][0]).startswith(("craft_", "stack_")))
+                    if cc >= 2:
+                        grass_eligible.append(pos)
+            if not grass_eligible:
+                grass_eligible = eligible_positions  # 최종 폴백
 
             eligible_positions = grass_eligible
             logger.info(f"Tutorial gimmick 'grass' - {len(eligible_positions)} positions with valid neighbors")
@@ -6951,6 +7092,54 @@ class LevelGenerator:
 
         logger.info(f"Tutorial gimmick '{gimmick_type}' placed: {placed_count} tiles (top layer: {top_layer_idx})")
 
+        return level
+
+    def _ensure_container_goal_tutorial(
+        self, level: Dict[str, Any], base_type: str
+    ) -> Dict[str, Any]:
+        """craft/stack 튜토리얼 레벨에 해당 컨테이너 goal이 최소 1개 존재하도록 보장.
+
+        _add_goals가 소형 레이아웃에서 배치에 실패해 컨테이너 0개가 되면 튜토리얼 성립 불가.
+        최상단(비커버) 레이어의 일반 타일 1개를 컨테이너 [f'{base}_s','',[3]]로 변환한다.
+        타입 카운트 -1은 후속 _finalize_divisibility_guarantee/FINAL_REPAIR가 ÷3 재보장하고,
+        내부 t0 3개는 세트분배로 처리된다. 이미 컨테이너가 있으면 무변경.
+        """
+        num_layers = int(level.get("layer", 0) or 0)
+        # 이미 해당 base 컨테이너가 있으면 skip
+        for i in range(num_layers):
+            for pos, td in (level.get(f"layer_{i}", {}) or {}).get("tiles", {}).items():
+                if isinstance(td, list) and td and str(td[0]).startswith(base_type + "_"):
+                    return level
+
+        # 최상단 레이어부터 아래로: 비커버(윗층 없음) 일반 타일 후보 탐색
+        for i in range(num_layers - 1, -1, -1):
+            tiles = (level.get(f"layer_{i}", {}) or {}).get("tiles", {})
+            if not tiles:
+                continue
+            candidates = []
+            for pos, td in tiles.items():
+                if not (isinstance(td, list) and td):
+                    continue
+                t0 = str(td[0])
+                # 일반 타일(t1~t15)만, 기믹/goal/key 제외
+                if not (t0.startswith("t") and t0[1:].isdigit() and t0 != "t0"):
+                    continue
+                if len(td) >= 2 and td[1]:
+                    continue
+                try:
+                    col, row = map(int, pos.split("_"))
+                except Exception:
+                    continue
+                if not self._is_position_covered_by_upper(level, i, col, row):
+                    candidates.append(pos)
+            if candidates:
+                import random as _r
+                pos = _r.choice(candidates)
+                self._place_goal_tile(tiles, pos, f"{base_type}_s", self.MIN_GOAL_COUNT)
+                logger.info(f"[TUTORIAL_CONTAINER] '{base_type}' 컨테이너 없음 → layer {i} pos {pos}에 {base_type}_s 배치")
+                return level
+
+        logger.warning(f"[TUTORIAL_CONTAINER] '{base_type}' 컨테이너 배치 실패 — 후보 없음")
         return level
 
     def _ensure_tutorial_gimmick_count(
@@ -7181,7 +7370,9 @@ class LevelGenerator:
                             ndata = tiles[npos]
                             if isinstance(ndata, list) and len(ndata) >= 1:
                                 clearable += 1
-                    if clearable >= 2:
+                    # 홀짝착각 방지: _strip_confusing_grass가 나중에 제거하지 않도록
+                    # parity-valid 위치에만 grass 배치.
+                    if clearable >= 2 and self._grass_position_valid(level, layer_idx, col, row):
                         candidates.append(pos)
 
                 if candidates:
@@ -13055,6 +13246,98 @@ class LevelGenerator:
 
         # Use best seed found
         level["randSeed"] = best_seed
+        return level
+
+    def _grass_position_valid(self, level: Dict[str, Any], layer_idx: int, x: int, y: int) -> bool:
+        """[홀짝 착각 방지] grass 감소는 '같은 층 4방 이웃' 픽으로만 일어남(게임 IsNearTile).
+        근데 게임 홀짝 렌더에서 **짝수 층차(같은 홀짝)=0오프셋**이라 다른 층 타일이 grass 이웃 자리에
+        정확히 겹쳐 보임 → 유저가 그걸 이웃으로 착각해 픽 → 무반응. (홀수 층차=0.5오프셋이라 구분됨.)
+
+        유효 조건:
+        - grass 자기 위치 (x,y): 같은 홀짝 최상위 층이 자기 층 = grass가 보임(안 덮임).
+        - 각 격자내부 4방 이웃: 같은 홀짝 최상위 층이 (a)자기 층=진짜 클리어 이웃 or (b)없음(빈칸/홀수차만).
+          다른 같은 홀짝 층 타일이 최상위면 → 착각 유발 → 무효.
+        - 진짜 클리어 이웃 ≥2 (게임 grass remaining=2).
+        """
+        nlayers = int(level.get("layer", 0) or 0)
+        parity = layer_idx % 2
+
+        def top_same_parity(cx: int, cy: int) -> int:
+            top = -1
+            key = f"{cx}_{cy}"
+            for m in range(nlayers):
+                if m % 2 == parity and key in (level.get(f"layer_{m}", {}) or {}).get("tiles", {}):
+                    top = m
+            return top
+
+        # grass 자기 위치가 같은 홀짝 최상위여야 보임(다른 짝수차 층이 덮으면 착각/미표시)
+        if top_same_parity(x, y) != layer_idx:
+            return False
+        ld = level.get(f"layer_{layer_idx}", {}) or {}
+        cols = int(ld.get("col", 8)); rows = int(ld.get("row", 8))
+        clearable = 0
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nx, ny = x + dx, y + dy
+            if nx < 0 or nx >= cols or ny < 0 or ny >= rows:
+                continue  # 격자 밖 = 이웃 없음(엣지, 착각 없음)
+            top = top_same_parity(nx, ny)
+            if top == -1:
+                continue  # 같은 홀짝 타일 없음(빈칸/홀수차만) → 착각 없음, 클리어 이웃도 아님
+            if top != layer_idx:
+                return False  # 다른 같은 홀짝 층 타일이 이웃 자리에 겹쳐보임 → 착각
+            clearable += 1  # top == layer_idx → 진짜 같은 층 클리어 이웃
+        return clearable >= 2
+
+    def _strip_confusing_grass(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """[일괄 안전망] 홀짝 0오프셋 착각 유발 grass → 같은 층 유효 위치로 이동(relocate), 없으면 제거.
+        최종 좌표(피라미드/OOB 정리 후) 기준 판정 → 어느 배치 단계가 만들었든 공통 커버. 이동은 grass 개수 보존
+        (튜토리얼 grass 소실 방지). 이동 대상 = 같은 층의 일반 타일(컨테이너/속성 없는) 중 규칙 유효 위치."""
+        nlayers = int(level.get("layer", 0) or 0)
+        relocated = 0
+        removed = 0
+        for li in range(nlayers):
+            tiles = (level.get(f"layer_{li}", {}) or {}).get("tiles", {})
+            for pos, td in list(tiles.items()):
+                if not (isinstance(td, list) and len(td) >= 2):
+                    continue
+                eff = str(td[1])
+                if eff != "grass" and not eff.startswith("grass_"):
+                    continue
+                try:
+                    x, y = map(int, pos.split("_"))
+                except ValueError:
+                    continue
+                if self._grass_position_valid(level, li, x, y):
+                    continue
+                # 착각유발 → 같은 층 유효 위치로 이동 시도(일반 타일: 속성없음 + 컨테이너 아님)
+                moved = False
+                for cand, ctd in tiles.items():
+                    if cand == pos:
+                        continue
+                    if not (isinstance(ctd, list) and len(ctd) >= 1):
+                        continue
+                    base = str(ctd[0])
+                    if base.startswith("craft") or base.startswith("stack") or base == "t0":
+                        continue  # 컨테이너/미분배 t0 회피
+                    if len(ctd) >= 2 and ctd[1]:
+                        continue  # 이미 속성 있는 타일 회피
+                    try:
+                        cx, cy = map(int, cand.split("_"))
+                    except ValueError:
+                        continue
+                    if self._grass_position_valid(level, li, cx, cy):
+                        td[1] = ""                       # 원 위치 grass 해제
+                        while len(ctd) < 2:
+                            ctd.append("")
+                        ctd[1] = "grass"                 # 유효 위치로 이동
+                        moved = True
+                        relocated += 1
+                        break
+                if not moved:
+                    td[1] = ""
+                    removed += 1
+        if relocated or removed:
+            logger.info(f"[grass 홀짝착각방지] 이동 {relocated}개 · 제거 {removed}개(유효위치 없음)")
         return level
 
     def _finalize_divisibility_guarantee(self, level: Dict[str, Any]) -> Dict[str, Any]:

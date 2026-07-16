@@ -863,58 +863,28 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
           slots.push({ level, targetDiff: targetDifficulty });
         }
 
-        // [보스 배치 정책] 템플릿을 보스 레벨(%10==0)에 measured_difficulty 오름차순 순차 배치.
-        //   쉬운 템플릿 → 첫 보스(10), 다음 → 20 ... 보스 다 차면 overflow.
-        //   확장성: primary/overflow 정책 상수만 바꿔 (보스전용 → non-boss spill → 전 레벨) 전환.
-        const TEMPLATE_SLOT_POLICY: { primary: 'boss'; overflow: 'unused' | 'spill' } = {
-          primary: 'boss',
-          overflow: 'unused', // 미래: 'spill' → 초과 템플릿을 non-boss 슬롯에 난이도 매칭
-        };
-
-        // 미할당 + 측정된 템플릿만 대상, 난이도 오름차순
+        // [보스 슬롯 제외 — 포맷 정합] 일반 레벨 템플릿(level_templates.json)은 7/7 그리드라 보스
+        // 슬롯(%10==0, 홀짝 8/7 필요)에 배정하면 크롭해도 7/7 유지 → 보스 포맷 위반. 따라서 보스 슬롯엔
+        // 절대 배정하지 않는다. 보스는 (1) 전용 보스 템플릿(from-boss-template, 8/7) (2) boss_mode
+        // 절차생성(BOSS_RECIPES, 8/7)만 사용. 일반 템플릿은 non-boss 슬롯에 난이도 근접 매칭.
         const sortedTpls = allTemplates
           .filter(t => t.measured_difficulty != null && !takenTemplateIds.has(t.template_id))
           .sort((a, b) => (a.measured_difficulty || 0) - (b.measured_difficulty || 0));
 
-        // 보스 슬롯 (미점유, 레벨 오름차순)
-        const bossSlots = slots
-          .filter(s => s.level % 10 === 0 && !takenLevels.has(s.level))
-          .sort((a, b) => a.level - b.level);
-
-        // [보스 템플릿 차용+크롭] 보스 슬롯에 기존 템플릿 모양을 배정하되, 생성 시 crop_max_dim=8로
-        // 빈 가장자리 크롭(A타입=원래≤8 그대로, B타입=크롭시≤8). 크롭 불가(D타입)면 생성 단계에서
-        // boss_mode 레시피 생성기로 자동 폴백(그리드 게이트). 순차 배치: 쉬운 템플릿 → 낮은 보스.
-        const placedCount = Math.min(sortedTpls.length, bossSlots.length);
-        for (let i = 0; i < placedCount; i++) {
-          effectiveAssignments[bossSlots[i].level] = sortedTpls[i].template_id;
-          takenLevels.add(bossSlots[i].level);
-        }
-
-        // overflow: 보스 슬롯 초과분
-        const overflowTpls = sortedTpls.slice(placedCount);
-        if (overflowTpls.length > 0) {
-          if (TEMPLATE_SLOT_POLICY.overflow === 'spill') {
-            // [확장 격리] 기존 best-gap: 남은 템플릿을 non-boss 슬롯에 targetDiff 근접 매칭
-            for (const tpl of overflowTpls) {
-              const diff = tpl.measured_difficulty!;
-              let bestSlot: typeof slots[number] | null = null;
-              let bestGap = Infinity;
-              for (const slot of slots) {
-                if (takenLevels.has(slot.level)) continue;
-                const gap = Math.abs(slot.targetDiff - diff);
-                if (gap < bestGap) { bestGap = gap; bestSlot = slot; }
-              }
-              if (bestSlot) { effectiveAssignments[bestSlot.level] = tpl.template_id; takenLevels.add(bestSlot.level); }
-              else { autoAssignWarnings.push(`${tpl.name || tpl.template_id}: 빈 슬롯 없음`); }
-            }
-          } else {
-            // unused: 보스 부족 → 초과 템플릿 미배치 (쉬운 것부터 보스 채움)
-            for (const tpl of overflowTpls) {
-              autoAssignWarnings.push(`${tpl.name || tpl.template_id}: 보스 슬롯 부족 — 미배치 (overflow=unused)`);
-            }
+        for (const tpl of sortedTpls) {
+          const diff = tpl.measured_difficulty!;
+          let bestSlot: typeof slots[number] | null = null;
+          let bestGap = Infinity;
+          for (const slot of slots) {
+            if (slot.level % 10 === 0) continue;         // 보스 슬롯 제외 (핵심)
+            if (takenLevels.has(slot.level)) continue;
+            const gap = Math.abs(slot.targetDiff - diff);
+            if (gap < bestGap) { bestGap = gap; bestSlot = slot; }
           }
+          if (bestSlot) { effectiveAssignments[bestSlot.level] = tpl.template_id; takenLevels.add(bestSlot.level); }
+          else { autoAssignWarnings.push(`${tpl.name || tpl.template_id}: 빈 non-boss 슬롯 없음 — 미배치`); }
         }
-        // underflow(템플릿 < 보스): 남는 보스는 effectiveAssignments 미설정 → 기존 절차생성 경로 (변경 없음)
+        // 보스 슬롯: effectiveAssignments 미설정 → 전용 보스 템플릿(regen) 또는 boss_mode 절차생성(8/7)
 
         // 측정 안 된 템플릿 경고
         for (const tpl of allTemplates) {
@@ -1092,10 +1062,10 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
           const { localIdx, levelNumber, targetDifficulty, patternIndex, templateId } = task;
 
           // [v15.55] 레벨 템플릿 할당됨 → from-template 엔드포인트 분기
-          // [보스 크롭] 보스(10의 배수)는 crop_max_dim=8로 빈 가장자리 크롭(A/B타입). 크롭 후에도
-          // >8(D타입)이면 템플릿 폐기하고 아래 절차생성(boss_mode 레시피)으로 폴백.
+          // [보스 포맷 정합] 보스(10의 배수)는 일반 레벨템플릿(7/7) 차용 금지 → 아래 boss_mode 절차생성(8/7).
+          // (전용 보스 템플릿은 regen의 from-boss-template로 적용. 여기선 일반 템플릿만 차단.)
           const isBossTemplate = levelNumber % 10 === 0 && levelNumber > 0;
-          if (templateId) {
+          if (templateId && !isBossTemplate) {
             try {
               const tplStartTime = Date.now();
               const tplResp = await apiClient.post('/generate/from-template', {
@@ -1452,6 +1422,14 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             }
 
             applyProductionTileVisuals(result.level_json, levelNumber);  // 고정=명시 relabel / 순수t0=시드 베이크
+            // [C1 포맷 게이트] 보스 레벨은 홀짝 8/7 이어야 함(layer_0 col=8). boss_mode가 보장하나
+            // 방어적으로 검출 — 위반 시 경고(A 수정으로 발생 안 해야 정상).
+            if (isBossTemplate) {
+              const c0 = (result.level_json as { layer_0?: { col?: string } })?.layer_0?.col;
+              if (String(c0) !== '8') {
+                console.warn(`[boss-format] Lv.${levelNumber} 보스 포맷 위반: layer_0 col=${c0} (8 기대) — boss_mode 미적용 의심`);
+              }
+            }
             return { meta, level_json: result.level_json };
           } catch (err) {
             console.error(`Failed to generate level ${levelNumber}:`, err);
@@ -3112,10 +3090,28 @@ function TestTab({
   const [bossRegen, setBossRegen] = useState<{ running: boolean; done: number; total: number; skipped: number }>(
     { running: false, done: 0, total: 0, skipped: 0 });
   const bossRegenStopRef = useRef(false);
-  const handleRegenerateBossLevels = useCallback(async () => {
-    const bossLevels = levels.filter(l => (l.meta.level_number % 10 === 0) && l.meta.level_number > 0)
+  // [보스 템플릿 커버리지] 저장된 보스 템플릿 배정 구간(level_min~max). 준비된 레벨 판정용.
+  const [bossTplRanges, setBossTplRanges] = useState<{ min: number; max: number }[]>([]);
+  useEffect(() => {
+    apiClient.get('/debug/boss-templates')
+      .then(res => {
+        const map = res.data.boss_templates || {};
+        setBossTplRanges(Object.values(map).map((t) => {
+          const tt = t as { level_min: number; level_max: number };
+          return { min: tt.level_min, max: tt.level_max };
+        }));
+      })
+      .catch(() => { /* 서버 미가동 무시 */ });
+  }, [levels.length]);
+  const isBossTplReady = useCallback((ln: number) =>
+    ln > 0 && ln % 10 === 0 && bossTplRanges.some(r => r.min <= ln && ln <= r.max),
+    [bossTplRanges]);
+  // onlyTemplateReady=true 면 템플릿 커버된 보스만 대상(준비된 레벨). false=전 보스(404 스킵).
+  const handleRegenerateBossLevels = useCallback(async (onlyTemplateReady = false) => {
+    const bossLevels = levels.filter(l => (l.meta.level_number % 10 === 0) && l.meta.level_number > 0
+      && (!onlyTemplateReady || isBossTplReady(l.meta.level_number)))
       .sort((a, b) => a.meta.level_number - b.meta.level_number);
-    if (bossLevels.length === 0) { addNotification('warning', '보스 레벨(10의 배수) 없음'); return; }
+    if (bossLevels.length === 0) { addNotification('warning', onlyTemplateReady ? '템플릿 준비된 보스 레벨 없음' : '보스 레벨(10의 배수) 없음'); return; }
     bossRegenStopRef.current = false;
     setBossRegen({ running: true, done: 0, total: bossLevels.length, skipped: 0 });
     let done = 0, skipped = 0;
@@ -3162,7 +3158,149 @@ function TestTab({
     addNotification('success', `🏰 보스 재생성 완료: ${done}개 (템플릿없음 스킵 ${skipped}개)`);
     loadLevels();
     onStatsUpdate();
-  }, [levels, batchId, addNotification, onStatsUpdate]);
+  }, [levels, batchId, addNotification, onStatsUpdate, isBossTplReady]);
+
+  // [난이도 미세조절] 재생성 없이 색만 재배치해 목표 클리어율 근접. 모양·÷3·기믹 불변.
+  // 백엔드 /tune/arrangement (독립 도구). 검증은 순차검증과 동일 RL(skill_mean·scale) 사용.
+  const [tuningLevels, setTuningLevels] = useState<Set<number>>(new Set());
+  const handleTuneLevel = useCallback(async (levelNumber: number) => {
+    const level = levels.find(l => l.meta.level_number === levelNumber);
+    if (!level) return;
+    const td = level.meta.target_difficulty;
+    if (typeof td !== 'number' || !Number.isFinite(td)) {
+      addNotification('error', `Lv.${levelNumber} target_difficulty 없음 — 미세조절 불가`);
+      return;
+    }
+    setTuningLevels(prev => new Set([...prev, levelNumber]));
+    try {
+      const resp = await apiClient.post('/tune/arrangement', {
+        level_json: level.level_json,
+        target_difficulty: td,
+        target_clear_rate_scale: bossTargetScale(levelNumber) ?? 1.0,
+        skill_mean: rlSkillMean,
+      });
+      const r = resp.data as {
+        tuned: boolean; best_level_json: LevelJsonLike; predicted_clear_rate: number;
+        original_predicted: number; target_clear_rate: number;
+      };
+      if (!r.tuned) {
+        addNotification('info', `Lv.${levelNumber} 미세조절 불가 (색 종류 부족 or 현 배치가 이미 최적)`);
+        return;
+      }
+      // 튜너 출력은 이미 명시색(재배치) → 비주얼 재베이크 금지(색 덮어씀). 그대로 저장.
+      await saveProductionLevels(batchId, [{
+        meta: {
+          ...level.meta,
+          generated_at: new Date().toISOString(),
+          status_updated_at: new Date().toISOString(),
+          // 색배치 조정분 → 재검증 대상(순차검증이 확정). 모양/난이도목표는 유지.
+          verified: false, verification_passed: undefined, match_score: undefined,
+          regen_attempts: (level.meta.regen_attempts || 0) + 1,
+        },
+        level_json: r.best_level_json as ProductionLevel['level_json'],
+      }]);
+      addNotification('success',
+        `Lv.${levelNumber} 미세조절: ${(r.original_predicted * 100).toFixed(0)}% → ${(r.predicted_clear_rate * 100).toFixed(0)}% (목표 ${(r.target_clear_rate * 100).toFixed(0)}%, 모양 동일)`);
+      loadLevels();
+      onStatsUpdate();
+    } catch (e) {
+      addNotification('error', `Lv.${levelNumber} 미세조절 실패: ${(e as Error).message}`);
+    } finally {
+      setTuningLevels(prev => { const n = new Set(prev); n.delete(levelNumber); return n; });
+    }
+  }, [levels, batchId, addNotification, onStatsUpdate, rlSkillMean]);
+
+  // ── 3단 다이얼: 기믹 강도(중간폭) — 모양·색 고정, 속성기믹 밀도만 조정 ──
+  // 다이얼 조정 시 in-memory로 selectedLevel.level_json 교체 → 보드 즉시 재렌더(저장은 [적용]).
+  const [gimmickIntensity, setGimmickIntensity] = useState<number>(50); // 0~100: 기믹 밀도
+  const [colorSpread, setColorSpread] = useState<number>(50);           // 0~100: 색 뭉침(0)↔흩어짐(100)
+  const [gimmickPred, setGimmickPred] = useState<number | null>(null);  // 조정본 예측 클리어율
+  const [clusterIndex, setClusterIndex] = useState<number | null>(null); // 색 뭉침 지표 −1~+1 (join-count)
+  const [gimmickBusy, setGimmickBusy] = useState(false);
+  const [dialDirty, setDialDirty] = useState(false);     // 미저장 조정 존재
+  const gimmickBaseRef = useRef<{ level: number; json: LevelJsonLike } | null>(null);
+
+  // 다이얼 base·상태 초기화 트리거: 레벨 선택 변경 OR 디스크 레벨 변경(재생성/저장 후 loadLevels).
+  // base는 항상 '디스크 원본'에서 잡는다 → 슬라이더 in-memory 프리뷰(setSelectedLevel)로는 리셋 안 됨
+  // (그래야 base 고정 = 강도 적용이 원본 기준 결정적, 캐스케이드는 모양 재생성/저장 때만).
+  useEffect(() => {
+    if (!selectedLevel) { gimmickBaseRef.current = null; return; }
+    const disk = levels.find(l => l.meta.level_number === selectedLevel.meta.level_number);
+    gimmickBaseRef.current = {
+      level: selectedLevel.meta.level_number,
+      json: ((disk ?? selectedLevel).level_json) as LevelJsonLike,
+    };
+    setGimmickIntensity(50);
+    setColorSpread(50);
+    setGimmickPred(null);
+    setClusterIndex(null);
+    setDialDirty(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedLevel?.meta.level_number, levels]);
+
+  // 통합 다이얼 재계산: 항상 디스크 base에서 기믹(td1)→색(td0) 순 파이프라인 적용 → 두 다이얼 합성(손실 없음).
+  // 기믹은 td[1]만, 색은 td[0]만 바꿔 직교하지만, 한 파이프라인으로 재계산해 순서·상태 꼬임 방지.
+  // evaluate=false: 배치만(즉시 보드) / true: 최종 예측까지.
+  const recomputeDials = useCallback(async (intensityPct: number, spreadPct: number, evaluate: boolean) => {
+    const base = gimmickBaseRef.current;
+    if (!selectedLevel || !base || base.level !== selectedLevel.meta.level_number) return;
+    setGimmickBusy(true);
+    try {
+      // 1) 기믹 강도 (disk base 기준, 결정적)
+      const g = await apiClient.post('/tune/gimmick', {
+        level_json: base.json,
+        level_number: selectedLevel.meta.level_number,
+        intensity: Math.max(0, Math.min(1, intensityPct / 100)),
+        skill_mean: rlSkillMean,
+        evaluate: false,
+      });
+      let lj = (g.data as { best_level_json: LevelJsonLike }).best_level_json;
+      // 2) 색 스프레드 (기믹 결과 위에; 색은 td0만 → 기믹과 직교, ÷3 보존)
+      const c = await apiClient.post('/tune/color', {
+        level_json: lj,
+        spread: Math.max(0, Math.min(1, spreadPct / 100)),
+        skill_mean: rlSkillMean,
+        evaluate,
+      });
+      const cd = c.data as { best_level_json: LevelJsonLike; predicted_clear_rate: number; cluster_index: number };
+      lj = cd.best_level_json;
+      setSelectedLevel(prev => prev ? { ...prev, level_json: lj as ProductionLevel['level_json'] } : prev);
+      setDialDirty(true);
+      setClusterIndex(typeof cd.cluster_index === 'number' ? cd.cluster_index : null);
+      if (evaluate) setGimmickPred(cd.predicted_clear_rate);
+    } catch (e) {
+      addNotification('error', `다이얼 조정 실패: ${(e as Error).message}`);
+    } finally {
+      setGimmickBusy(false);
+    }
+  }, [selectedLevel, rlSkillMean, addNotification]);
+
+  // 다이얼 조정본 저장 (재검증 대상)
+  const applyDialToDisk = useCallback(async () => {
+    if (!selectedLevel || !dialDirty) return;
+    setGimmickBusy(true);
+    try {
+      await saveProductionLevels(batchId, [{
+        meta: {
+          ...selectedLevel.meta,
+          generated_at: new Date().toISOString(),
+          status_updated_at: new Date().toISOString(),
+          verified: false, verification_passed: undefined, match_score: undefined,
+          regen_attempts: (selectedLevel.meta.regen_attempts || 0) + 1,
+        },
+        level_json: selectedLevel.level_json,
+      }]);
+      addNotification('success', `Lv.${selectedLevel.meta.level_number} 다이얼 조정 저장 (재검증 대상)`);
+      setDialDirty(false);
+      loadLevels();
+      onStatsUpdate();
+    } catch (e) {
+      addNotification('error', `저장 실패: ${(e as Error).message}`);
+    } finally {
+      setGimmickBusy(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedLevel, dialDirty, batchId, addNotification, onStatsUpdate]);
 
   // Batch auto test state
   const [batchTestProgress, setBatchTestProgress] = useState<{
@@ -3554,8 +3692,10 @@ function TestTab({
     }[] = [];
 
     // [v16] 레벨 단위 병렬 처리. 각 레벨은 독립(생성·측정·재생성)이고 저장은 IndexedDB 레벨별 put이라
-    // 동시 쓰기 안전. SEQ_CONCURRENCY개 워커가 큐에서 꺼내 동시 처리 → 4~6배 빠름.
-    const SEQ_CONCURRENCY = 4;
+    // 동시 쓰기 안전. SEQ_CONCURRENCY개 워커가 큐에서 꺼내 동시 처리.
+    // 백엔드 RL은 이미 point-granularity ProcessPool(워커 8) → 이 값을 8로 올려 pool을 항상 포화
+    // (레벨 전환 사이 idle 제거). 8워커 pool 기준 최적. (품질=롤아웃 수 불변.)
+    const SEQ_CONCURRENCY = 8;
     let _completed = 0;
     const _queue = [...targetLevelNumbers];
     const processOneLevel = async (levelNumber: number): Promise<void> => {
@@ -3720,6 +3860,37 @@ function TestTab({
             // [v16 자가개선] 통과한 레벨을 만든 offset(genOffset)을 학습 기록 → 다음 검증의 출발점 개선.
             recordPassedOffset(levelNumber, currentLevel.meta.target_difficulty, genOffset);
           } else if (attempts < MAX_ATTEMPTS && !signal.aborted) {
+            // [미세조절 우선] 재생성 전에 색+기믹 자동튜닝으로 목표 도달 시도(매 시도, 재생성보다 쌈·정확).
+            // /tune/auto: 색 스윕(안전)→부족시 기믹 스윕(넓은폭) → 목표 최근접 배치. 모양·÷3 보존.
+            // 클리어 가능(언클X)일 때만. attempts<=3까지 튜닝 우선(스크리닝 노이즈 대비 여러 샷) → 이후 재생성.
+            // (보스 등 이상치가 재생성만으론 수렴 못하던 문제: 튜너가 색배치로 목표 도달 → 재생성 루프 탈출.)
+            if (attempts <= 3 && (rl.max_clear_rate ?? 0) >= 0.05 && !signal.aborted) {
+              try {
+                setSequentialProgress(prev => ({ ...prev, status: 'regenerating' }));
+                const tr = await apiClient.post('/tune/auto', {
+                  level_json: currentLevel.level_json,
+                  level_number: levelNumber,
+                  target_difficulty: currentLevel.meta.target_difficulty,
+                  target_clear_rate_scale: bossTargetScale(levelNumber) ?? 1.0,
+                  skill_mean: rlSkillMean,
+                  tolerance: 0.12,
+                });
+                // close=목표 tolerance 내 도달(엔진이 스크리닝 RL로 판정). 근접 못하면 재생성 직행.
+                if (tr.data?.tuned && tr.data?.close) {
+                  await saveProductionLevels(batchId, [{
+                    meta: { ...currentLevel.meta, verified: false, verification_passed: undefined, match_score: undefined },
+                    level_json: tr.data.best_level_json as ProductionLevel['level_json'],
+                  }]);
+                  const rlt = await getProductionLevelsByBatch(batchId);
+                  const t = rlt.find((l: ProductionLevel) => l.meta.level_number === levelNumber);
+                  if (t) {
+                    currentLevel = t;
+                    addNotification('info', `Lv.${levelNumber} 자동튜닝(${tr.data.lever}) 적용 → 재측정`);
+                    continue;  // 다음 iteration이 튜닝된 배치를 정밀 재측정 → 통과 시 재생성 회피
+                  }
+                }
+              } catch { /* 튜닝 실패 → 아래 재생성 폴백 */ }
+            }
             // Regenerate if not passed
             setSequentialProgress(prev => ({ ...prev, status: 'regenerating' }));
 
@@ -4000,7 +4171,8 @@ function TestTab({
         filteredLevels = filteredLevels.filter(l => l.meta.level_number % 10 === 0);
         break;
       case 'tutorial':
-        const tutorialLevels = [11, 21, 36, 51, 66, 81, 96, 111, 126, 141, 156];
+        // 기믹 첫 언락(튜토리얼) 레벨 — 백엔드 DEFAULT_GIMMICK_UNLOCK_LEVELS 정본과 동기화.
+        const tutorialLevels = [11, 21, 31, 51, 81, 111, 151, 191, 241, 291, 341, 391, 441];
         filteredLevels = filteredLevels.filter(l => tutorialLevels.includes(l.meta.level_number));
         break;
       case 'low_match':
@@ -4258,7 +4430,8 @@ function TestTab({
     userSymmetryMode?: 'none' | 'horizontal' | 'vertical' | 'both',
     // [v16 피드백제어] difficultyOffset: 순차검증이 측정 gap으로 계산한 난이도 조정값.
     // 양수=더 어렵게(타일종류↑/층↑), 음수=더 쉽게. 표 대신 측정→조정으로 목표 수렴.
-    options?: { forceNoTemplate?: boolean; difficultyOffset?: number }
+    // newShape: 저장된 pattern_index·템플릿 무시하고 '다른 랜덤 모양'으로 재생성 (모양 다이얼 변주).
+    options?: { forceNoTemplate?: boolean; difficultyOffset?: number; newShape?: boolean }
   ) => {
     const level = levels.find(l => l.meta.level_number === levelNumber);
     if (!level) return;
@@ -4286,10 +4459,11 @@ function TestTab({
       const targetScore = targetDifficulty * 100;
 
       // [보스 템플릿] level_json._boss_template_id 있으면(보스 템플릿 생성분) from-boss-template로
-      // 재생성 — 모양+useTileCount(그래프)+기믹 자동. 순차검증 실패시 프로시저 경로로 빠져
-      // 모양·타일종류 어긋나던 문제 차단. userOverride/forceNoTemplate 없을 때만.
+      // 재생성 — 기존 적용 모양+useTileCount(그래프)+기믹 자동. 보스는 패턴/대칭(자동 모양) 선택을
+      // 무시하고 항상 기존 템플릿 모양 유지(임의 모양 방지). 언클리어러블 폴백(forceNoTemplate)만 예외.
+      // (_boss_template_id는 보스 전용 필드라 이 분기는 보스 레벨에만 걸림.)
       const bossTplId = (level.level_json as { _boss_template_id?: string } | undefined)?._boss_template_id;
-      if (bossTplId && userPatternIndex === undefined && userSymmetryMode === undefined && !options?.forceNoTemplate) {
+      if (bossTplId && !options?.forceNoTemplate && !options?.newShape) {
         const resp = await apiClient.post('/generate/from-boss-template', {
           level_number: levelNumber,
           target_difficulty: targetDifficulty,
@@ -4336,7 +4510,9 @@ function TestTab({
       // [v15.x+] 템플릿 레이아웃이 언클리어러블한 경우(모든 봇 클리어율 0%) 호출자가
       // forceNoTemplate=true 로 우회 요청. 같은 모양만 유지하는 /generate/from-template 로는
       // 데드락 모양에서 탈출 불가하므로 일반 generate 경로로 전환하고 meta.template_id 도 제거한다.
-      if (templateId && !userOverridingPattern && !forceNoTemplate) {
+      // [보스 포맷 정합] 보스는 일반 레벨템플릿(7/7) 차용 재생성 금지 → 아래 boss_mode 절차생성(8/7).
+      // (전용 보스 템플릿은 위 _boss_template_id 분기서 이미 from-boss-template로 처리됨.)
+      if (templateId && !userOverridingPattern && !forceNoTemplate && !isBossRegen && !options?.newShape) {
         const seed = Math.floor(Date.now() % 1_000_000);
         const tplResp = await apiClient.post('/generate/from-template', {
           template_id: templateId,
@@ -4422,9 +4598,9 @@ function TestTab({
         typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 99;
 
       let patternIndex: number | undefined = isValidPatternIndex(userPatternIndex) ? userPatternIndex : undefined;
+      // 다른 모양(newShape): 저장된 pattern_index 재사용 금지 → 항상 새 랜덤 패턴(현재 것 제외).
       if (patternIndex === undefined) {
-        // 기존 레벨에 유효한 패턴이 있으면 그걸 우선 사용. -1 등 잘못된 값은 무시하고 자동 재선택.
-        if (isValidPatternIndex(level.meta.pattern_index)) {
+        if (isValidPatternIndex(level.meta.pattern_index) && !options?.newShape) {
           patternIndex = level.meta.pattern_index;
         } else {
           if (level.meta.pattern_index !== undefined && !isValidPatternIndex(level.meta.pattern_index)) {
@@ -4442,7 +4618,10 @@ function TestTab({
               const r = await apiClient.get('/debug/pattern-config?grid_size=7');
               excl = new Set(r.data.disabled_patterns || []);
             } catch { excl = new Set([5, 22, 25, 29, 39, 40, 42, 47, 54, 57, 60]); }
-            const pool = Array.from({ length: 64 }, (_, i) => i).filter(i => !excl.has(i));
+            // newShape면 현재 패턴 제외 → 반드시 다른 모양
+            const cur = isValidPatternIndex(level.meta.pattern_index) ? level.meta.pattern_index : -1;
+            let pool = Array.from({ length: 64 }, (_, i) => i).filter(i => !excl.has(i));
+            if (options?.newShape && pool.length > 1) pool = pool.filter(i => i !== cur);
             patternIndex = pool[Math.floor(Math.random() * pool.length)];
           }
         }
@@ -5452,23 +5631,55 @@ function TestTab({
                 </>
               )}
             </div>
-            {/* [보스 템플릿] 보스 레벨만 재생성 */}
+            {/* [보스 템플릿] 보스 레벨 재생성 (전체 / 템플릿 준비된 것만) */}
             <div className="flex items-center gap-2">
               {bossRegen.running ? (
                 <Button onClick={() => { bossRegenStopRef.current = true; }} variant="danger" size="sm" className="flex-1">
                   ⏹ 보스 재생성 정지 ({bossRegen.done}/{bossRegen.total})
                 </Button>
               ) : (
-                <Button
-                  onClick={handleRegenerateBossLevels}
-                  disabled={isSequentialProcessing || levels.length === 0}
-                  size="sm"
-                  className="flex-1 bg-purple-700 hover:bg-purple-600"
-                  title="보스 레벨(10의 배수)을 저장된 보스 템플릿으로 재생성. 구간 맞는 템플릿 없으면 스킵."
-                >
-                  🏰 보스레벨만 재생성 (템플릿)
-                </Button>
+                <>
+                  <Button
+                    onClick={() => handleRegenerateBossLevels(false)}
+                    disabled={isSequentialProcessing || levels.length === 0}
+                    size="sm"
+                    className="flex-1 bg-purple-700 hover:bg-purple-600"
+                    title="모든 보스 레벨(10의 배수)을 보스 템플릿으로 재생성. 구간 맞는 템플릿 없으면 스킵."
+                  >
+                    🏰 보스 재생성 (전체)
+                  </Button>
+                  <Button
+                    onClick={() => handleRegenerateBossLevels(true)}
+                    disabled={isSequentialProcessing || levels.filter(l => isBossTplReady(l.meta.level_number)).length === 0}
+                    size="sm"
+                    className="flex-1 bg-purple-800 hover:bg-purple-700"
+                    title="보스 템플릿이 준비된(구간 커버) 보스 레벨만 재생성."
+                  >
+                    🏰 템플릿 준비분만 재생성 ({levels.filter(l => isBossTplReady(l.meta.level_number)).length})
+                  </Button>
+                </>
               )}
+            </div>
+            {/* [보스 순차검증] 전체 보스 / 템플릿 준비된 보스만 RL 재검증 */}
+            <div className="flex items-center gap-2">
+              <Button
+                onClick={() => handleSequentialProcess(levels.filter(l => l.meta.level_number % 10 === 0).map(l => l.meta.level_number))}
+                disabled={isSequentialProcessing || bossRegen.running || levels.filter(l => l.meta.level_number % 10 === 0).length === 0}
+                size="sm"
+                className="flex-1 bg-indigo-700 hover:bg-indigo-600"
+                title="모든 보스 레벨(10의 배수)만 RL 순차검증."
+              >
+                🏰 보스 재검증 (전체 {levels.filter(l => l.meta.level_number % 10 === 0).length})
+              </Button>
+              <Button
+                onClick={() => handleSequentialProcess(levels.filter(l => isBossTplReady(l.meta.level_number)).map(l => l.meta.level_number))}
+                disabled={isSequentialProcessing || bossRegen.running || levels.filter(l => isBossTplReady(l.meta.level_number)).length === 0}
+                size="sm"
+                className="flex-1 bg-indigo-800 hover:bg-indigo-700"
+                title="보스 템플릿이 준비된 보스 레벨만 RL 순차검증."
+              >
+                🏰 템플릿 준비분만 재검증 ({levels.filter(l => isBossTplReady(l.meta.level_number)).length})
+              </Button>
             </div>
 
             {/* Level Selection List */}
@@ -5643,15 +5854,41 @@ function TestTab({
                   ⏹ 보스 재생성 정지 ({bossRegen.done}/{bossRegen.total})
                 </Button>
               ) : (
-                <Button
-                  onClick={handleRegenerateBossLevels}
-                  disabled={isSequentialProcessing || levels.length === 0}
-                  className="bg-purple-700 hover:bg-purple-600"
-                  title="보스 레벨(10의 배수)을 저장된 보스 템플릿으로 재생성. 구간 맞는 템플릿 없으면 스킵."
-                >
-                  🏰 보스레벨만 재생성 (템플릿)
-                </Button>
+                <>
+                  <Button
+                    onClick={() => handleRegenerateBossLevels(false)}
+                    disabled={isSequentialProcessing || levels.length === 0}
+                    className="bg-purple-700 hover:bg-purple-600"
+                    title="모든 보스 레벨(10의 배수)을 보스 템플릿으로 재생성. 구간 맞는 템플릿 없으면 스킵."
+                  >
+                    🏰 보스 재생성 (전체)
+                  </Button>
+                  <Button
+                    onClick={() => handleRegenerateBossLevels(true)}
+                    disabled={isSequentialProcessing || levels.filter(l => isBossTplReady(l.meta.level_number)).length === 0}
+                    className="bg-purple-800 hover:bg-purple-700"
+                    title="보스 템플릿이 준비된 보스 레벨만 재생성."
+                  >
+                    🏰 템플릿 준비분만 재생성 ({levels.filter(l => isBossTplReady(l.meta.level_number)).length})
+                  </Button>
+                </>
               )}
+              <Button
+                onClick={() => handleSequentialProcess(levels.filter(l => l.meta.level_number % 10 === 0).map(l => l.meta.level_number))}
+                disabled={isSequentialProcessing || bossRegen.running || levels.filter(l => l.meta.level_number % 10 === 0).length === 0}
+                className="bg-indigo-700 hover:bg-indigo-600"
+                title="모든 보스 레벨(10의 배수)만 RL 순차검증."
+              >
+                🏰 보스 재검증 (전체 {levels.filter(l => l.meta.level_number % 10 === 0).length})
+              </Button>
+              <Button
+                onClick={() => handleSequentialProcess(levels.filter(l => isBossTplReady(l.meta.level_number)).map(l => l.meta.level_number))}
+                disabled={isSequentialProcessing || bossRegen.running || levels.filter(l => isBossTplReady(l.meta.level_number)).length === 0}
+                className="bg-indigo-800 hover:bg-indigo-700"
+                title="보스 템플릿이 준비된 보스 레벨만 RL 순차검증."
+              >
+                🏰 템플릿 준비분만 재검증 ({levels.filter(l => isBossTplReady(l.meta.level_number)).length})
+              </Button>
             </div>
           </div>
         );
@@ -6315,10 +6552,10 @@ function TestTab({
                              r.status === 'too_easy' ? '📉' :
                              r.status === 'too_hard' ? '📈' : '⚠️'}
                           </span>
-                          <span className="w-16 text-center">
+                          <span className="w-28 text-center flex gap-1 justify-center">
                             <button
                               onClick={() => handleRegenerateLevel(r.level_number)}
-                              disabled={isRegenerating || isBatchRegenerating}
+                              disabled={isRegenerating || isBatchRegenerating || tuningLevels.has(r.level_number)}
                               className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${
                                 isRegenerating
                                   ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
@@ -6328,6 +6565,18 @@ function TestTab({
                               }`}
                             >
                               {isRegenerating ? '⟳' : '🔄 재생성'}
+                            </button>
+                            <button
+                              onClick={() => handleTuneLevel(r.level_number)}
+                              disabled={isRegenerating || isBatchRegenerating || tuningLevels.has(r.level_number)}
+                              title="색 재배치로 난이도 미세조절 (모양 동일, 재생성 없음)"
+                              className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${
+                                tuningLevels.has(r.level_number)
+                                  ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
+                                  : 'bg-teal-700 hover:bg-teal-600 text-white'
+                              }`}
+                            >
+                              {tuningLevels.has(r.level_number) ? '⟳' : '🎚️ 미세'}
                             </button>
                           </span>
                         </div>
@@ -6940,6 +7189,87 @@ function TestTab({
                   <span className="text-gray-400">상태:</span>
                   <span className={`ml-2 px-2 py-0.5 rounded text-xs ${getStatusColor(selectedLevel.meta.status)}`}>
                     {getStatusLabel(selectedLevel.meta.status)}
+                  </span>
+                </div>
+              </div>
+
+              {/* 🎛️ 난이도 3단 다이얼: 모양(재생성) → 기믹(강도) → 색(미세) */}
+              <div className="mt-2 p-2 rounded-lg bg-gray-800/60 border border-gray-700 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-medium text-white">🎛️ 난이도 다이얼</span>
+                  {dialDirty && (
+                    <button
+                      onClick={applyDialToDisk}
+                      disabled={gimmickBusy}
+                      className="px-2 py-0.5 rounded text-[10px] bg-emerald-700 hover:bg-emerald-600 text-white disabled:opacity-50"
+                    >💾 적용(저장)</button>
+                  )}
+                </div>
+
+                {/* 1) 모양 — 재생성 (하위 다이얼 리셋) */}
+                <div className="flex items-center gap-2">
+                  <span className="w-14 text-[10px] text-gray-400">모양</span>
+                  <button
+                    onClick={() => handleRegenerateLevel(selectedLevel.meta.level_number)}
+                    disabled={gimmickBusy || regeneratingLevels.has(selectedLevel.meta.level_number)}
+                    title="같은 모양 유지, 색만 새 시드 (템플릿/패턴 동일)"
+                    className="px-2 py-0.5 rounded text-[10px] bg-gray-600 hover:bg-gray-500 text-white disabled:opacity-50"
+                  >
+                    {regeneratingLevels.has(selectedLevel.meta.level_number) ? '⟳' : '🔄 재생성'}
+                  </button>
+                  <button
+                    onClick={() => handleRegenerateLevel(selectedLevel.meta.level_number, undefined, undefined, { newShape: true })}
+                    disabled={gimmickBusy || regeneratingLevels.has(selectedLevel.meta.level_number)}
+                    title="저장된 패턴·템플릿 무시하고 다른 랜덤 모양으로 생성"
+                    className="px-2 py-0.5 rounded text-[10px] bg-orange-600 hover:bg-orange-500 text-white disabled:opacity-50"
+                  >
+                    {regeneratingLevels.has(selectedLevel.meta.level_number) ? '⟳' : '🎲 다른모양'}
+                  </button>
+                  <span className="text-[9px] text-gray-500">기믹·색 리셋</span>
+                </div>
+
+                {/* 2) 기믹 — 강도 슬라이더 (놓으면 배치+예측) */}
+                <div className="flex items-center gap-2">
+                  <span className="w-14 text-[10px] text-gray-400">기믹 강도</span>
+                  <input
+                    type="range" min={0} max={100} step={5}
+                    value={gimmickIntensity}
+                    disabled={gimmickBusy}
+                    onChange={(e) => setGimmickIntensity(Number(e.target.value))}
+                    onPointerUp={() => recomputeDials(gimmickIntensity, colorSpread, true)}
+                    onKeyUp={() => recomputeDials(gimmickIntensity, colorSpread, true)}
+                    className="flex-1 accent-purple-500"
+                  />
+                  <span className="w-16 text-right text-[9px] text-purple-300">약 {gimmickIntensity}% 강</span>
+                </div>
+
+                {/* 3) 색 — 스프레드 슬라이더 (0=뭉침/쉬움 ~ 100=흩어짐/어려움) */}
+                <div className="flex items-center gap-2">
+                  <span className="w-14 text-[10px] text-gray-400">색 분산</span>
+                  <input
+                    type="range" min={0} max={100} step={5}
+                    value={colorSpread}
+                    disabled={gimmickBusy}
+                    onChange={(e) => setColorSpread(Number(e.target.value))}
+                    onPointerUp={() => recomputeDials(gimmickIntensity, colorSpread, true)}
+                    onKeyUp={() => recomputeDials(gimmickIntensity, colorSpread, true)}
+                    className="flex-1 accent-teal-500"
+                  />
+                  <span className="w-20 text-right text-[9px] text-teal-300">
+                    {clusterIndex != null
+                      ? `뭉침 ${clusterIndex >= 0 ? '+' : ''}${clusterIndex.toFixed(2)}`
+                      : `뭉침 ${colorSpread}% 흩`}
+                  </span>
+                </div>
+
+                {/* 상태 표시 */}
+                <div className="flex items-center justify-between text-[9px]">
+                  <span className="text-gray-500">모양(찰흙) → 기믹(형태) → 색(사포). 쉬움↔어려움 직접 조절.</span>
+                  <span className="flex items-center gap-1">
+                    {gimmickBusy && <span className="animate-spin text-gray-400">⟳ 계산</span>}
+                    {gimmickPred != null && !gimmickBusy && (
+                      <span className="text-teal-300">예측 클리어율 {(gimmickPred * 100).toFixed(0)}%</span>
+                    )}
                   </span>
                 </div>
               </div>

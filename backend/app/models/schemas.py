@@ -103,6 +103,18 @@ class GenerateRequest(BaseModel):
         default=None, ge=1, le=12,
         description="Number of active layers to use"
     )
+    min_layers: Optional[int] = Field(
+        default=None, ge=1, le=12,
+        description="Minimum active layers (deep-stack 프리셋용)"
+    )
+    layer_steps: Optional[List[int]] = Field(
+        default=None,
+        description="층별 패턴 크기 스텝(누적). 기본 None=−1(피라미드 축소). [0,0,...]=수직 스택(좁고깊은 프리셋). 길이=활성층−1."
+    )
+    concentric_deep: bool = Field(
+        default=False,
+        description="동심 침식 스택(좁고깊은/중간보스). 각 층=중앙 정사각, 위로 완만 축소 → 코히어런트 거북등껍질. use_reverse_generation과 병용 권장."
+    )
     layer_tile_configs: Optional[List[LayerTileConfig]] = Field(
         default=None,
         description="Per-layer tile count settings. Unspecified layers auto-distribute remaining tiles."

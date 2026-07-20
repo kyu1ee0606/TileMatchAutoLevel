@@ -139,6 +139,19 @@ def _generate_core_worker(request_dict: dict) -> dict:
                         response.playability_warning = False
                     except Exception:  # noqa: BLE001
                         pass
+                # [튜토리얼 보장] 역생성 rescue는 witness 폴백에서 컨테이너/속성을 strip할 수 있어
+                # 언락 첫 스테이지의 튜토리얼 기믹이 사라진다. rescue 직후 재보장 + ÷3 재확정.
+                _tut = generator.TUTORIAL_UNLOCK_LEVELS.get(getattr(request, "level_number", None))
+                if _tut and hasattr(response, "level_json"):
+                    _lj = response.level_json
+                    if _tut == "unknown":
+                        _lj = generator._ensure_unknown_tutorial_count(_lj, 3)
+                    elif _tut in ("craft", "stack"):
+                        _lj = generator._ensure_container_goal_tutorial(_lj, _tut)
+                    else:
+                        _lj = generator._ensure_tutorial_gimmick_count(_lj, _tut, 3)
+                    _lj = generator._finalize_divisibility_guarantee(_lj)
+                    response.level_json = _lj
         return {"ok": True, "response": response}
     except HTTPException as he:
         return {"ok": False, "status": he.status_code, "detail": str(he.detail)}
@@ -1273,6 +1286,10 @@ def _generate_level_impl(
         obstacle_counts=obstacle_counts,
         total_tile_count=request.total_tile_count,
         active_layer_count=request.active_layer_count,
+        # [좁고깊은 프리셋] 최소층수 강제 + 층 스텝(수직 스택). None이면 기존 난이도기반 로직.
+        min_layers=request.min_layers if getattr(request, "min_layers", None) else 3,
+        layer_steps=getattr(request, "layer_steps", None),
+        concentric_deep=getattr(request, "concentric_deep", False),
         layer_tile_configs=layer_tile_configs,
         layer_obstacle_configs=layer_obstacle_configs,
         layer_pattern_configs=layer_pattern_configs,

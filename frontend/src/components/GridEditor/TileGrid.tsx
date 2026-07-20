@@ -206,14 +206,15 @@ export function TileGrid({ className }: TileGridProps) {
 
     const layers: { layer: number; data: LevelLayer; brightness: number }[] = [];
 
-    // Show only layers BELOW current layer (lower index = below)
-    // Maximum 2 layers below (same as townpop editor)
-    for (let i = selectedLayer - 1; i >= Math.max(0, selectedLayer - 2); i--) {
+    // Show ALL layers BELOW current layer (lower index = below) — 깊은층 레벨서 최하단까지 보이게.
+    // (기존 townpop 방식은 하위 2층만 → 8층 스택서 최상단 선택 시 밑이 안 보이는 문제.)
+    for (let i = selectedLayer - 1; i >= 0; i--) {
       const key = `layer_${i}` as `layer_${number}`;
       const data = level[key];
       if (data && data.tiles && Object.keys(data.tiles).length > 0) {
         const layerDiff = selectedLayer - i;
-        const brightness = Math.max(50, 255 - layerDiff * 50) / 255;
+        // 깊이 fade: 멀수록 흐리게(바닥 0.18) — 많은 층도 겹쳐 구분되게.
+        const brightness = Math.max(0.18, 1 - layerDiff * 0.14);
         layers.push({ layer: i, data, brightness });
       }
     }

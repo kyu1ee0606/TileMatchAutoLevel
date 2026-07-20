@@ -1204,13 +1204,9 @@ class BotSimulator:
                             elif effect_type == TileEffectType.CHAIN:
                                 effect_data["unlocked"] = False
                             elif effect_type == TileEffectType.GRASS:
-                                # Priority: extra_data > parsed from attribute > default
-                                if "grass_layer" in extra_data:
-                                    effect_data["remaining"] = int(extra_data["grass_layer"])
-                                elif parsed_level is not None:
-                                    effect_data["remaining"] = parsed_level
-                                else:
-                                    effect_data["remaining"] = 1
+                                # [게임 정합] 게임 TileEffect.cs 는 grassEffectRemainCount=2 로 하드코딩
+                                # (레벨 데이터 무시). 봇도 항상 2 → 4방 인접 ≥2 있어야 제거 가능.
+                                effect_data["remaining"] = 2
                             elif effect_type in (TileEffectType.LINK_EAST, TileEffectType.LINK_WEST,
                                                   TileEffectType.LINK_SOUTH, TileEffectType.LINK_NORTH):
                                 effect_data["can_pick"] = False
@@ -1913,49 +1909,29 @@ class BotSimulator:
 
         Returns True if game is in impossible state.
         """
-        # Count total remaining non-ice tiles (these provide "pick opportunities")
+        # [게임 정합 v2] 인게임 규칙(TileGroup.CheckIceTileCanUncover): ice는 '다른 타일 선택마다'
+        # 최소 remain ice 하나가 한 겹 벗겨진다(커버 여부·blocking 무관). 따라서 불가 조건은
+        # "가장 쉬운(min remain) ice의 remain > 남은 비-ice 활성타일 수" 하나뿐.
+        # (기존 봇: blocked ice마다 blocking_count+remain 합산 → 게임보다 과도하게 '불가' 판정 →
+        #  깊은/다수 ice 레벨서 거짓 실패(0%) 유발. L60 등. 게임 규칙으로 완화.)
         total_remaining_non_ice = 0
-        blocked_ice_tiles = []
-
+        min_ice_remaining = None
         for layer_idx, layer_tiles in state.tiles.items():
             for pos_key, tile in layer_tiles.items():
                 if tile.picked:
                     continue
-
                 if tile.effect_type == TileEffectType.ICE:
                     ice_remaining = tile.effect_data.get("remaining", 0)
-                    if ice_remaining > 0 and self._is_blocked_by_upper(state, tile):
-                        blocked_ice_tiles.append((layer_idx, pos_key, tile, ice_remaining))
+                    if ice_remaining > 0:
+                        if min_ice_remaining is None or ice_remaining < min_ice_remaining:
+                            min_ice_remaining = ice_remaining
                 else:
                     total_remaining_non_ice += 1
 
-        if not blocked_ice_tiles:
+        if min_ice_remaining is None:
             return False
-
-        # For each blocked ice tile, check if it can be cleared
-        for layer_idx, pos_key, ice_tile, ice_remaining in blocked_ice_tiles:
-            # Count tiles blocking this ice tile (upper layer tiles at same position)
-            blocking_count = 0
-            for upper_layer_idx in range(layer_idx + 1, max(state.tiles.keys()) + 1):
-                upper_layer = state.tiles.get(upper_layer_idx, {})
-                if pos_key in upper_layer:
-                    upper_tile = upper_layer[pos_key]
-                    if not upper_tile.picked:
-                        blocking_count += 1
-
-            # Total picks needed for this ice:
-            # 1. Pick all blocking tiles to unblock (blocking_count picks)
-            # 2. Then ice_remaining more picks to fully melt the ice
-            # Note: While picking blocking tiles, other unblocked ice may melt,
-            # but this blocked ice won't melt until unblocked
-            total_picks_needed = blocking_count + ice_remaining
-
-            # Available picks = total remaining non-ice tiles
-            # (Each pick clears 3 tiles from dock, but we only count non-ice as pick sources)
-            if total_picks_needed > total_remaining_non_ice:
-                return True
-
-        return False
+        # 게임: minRemain > (활성 - ice수) = 비-ice 픽 기회. 그보다 크면만 진짜 불가.
+        return min_ice_remaining > total_remaining_non_ice
 
     def _check_chain_impossible(self, state: GameState) -> bool:
         """Check if any locked chain tile cannot be unlocked due to no horizontal adjacent tiles.
@@ -3120,6 +3096,41 @@ class BotSimulator:
         if state.goals_remaining:
             goal_bonus = profile.goal_priority * 2.0
             base_score += goal_bonus
+            # [stack/craft 배출 — 임팩트 비례] 컨테이너를 빼면 내부 타일이 배출되고 그것이 덮던·
+            # 부족하던 타일들을 '확인가능'하게 만든다. 무조건 우선이 아니라, 실제로 풀리는 타일이
+            # 많을수록 강하게 가중(유저 제보). 임팩트 = ①배출 타입을 기다리는 필드타일 수
+            # + ②이 컨테이너가 덮고있는(제거시 노출) 타일 수. dock 여유(≥2)일 때만(가득차면 clog).
+            ts = move.tile_state
+            if ts is not None and (getattr(ts, "is_stack_tile", False)
+                                   or getattr(ts, "is_craft_tile", False)
+                                   or getattr(ts, "origin_goal_type", "")):
+                empty_dock = sum(1 for s in state.dock if s.tile is None and not s.is_locked)
+                if empty_dock >= 2:
+                    # ① 배출 타입(move.tile_type)을 기다리는 필드타일 수
+                    dispensed = move.tile_type
+                    waiting = 0
+                    for _li, _lt in state.tiles.items():
+                        for _p, _t in _lt.items():
+                            if (not _t.picked and _t.tile_type == dispensed
+                                    and not getattr(_t, "is_stack_tile", False)
+                                    and not getattr(_t, "is_craft_tile", False)):
+                                waiting += 1
+                    # ② 이 컨테이너 잔여 내부 타일 수(tall stack일수록 ↑; 끝까지 배출 유지)
+                    box_key = f"{move.layer_idx}_{ts.position_key}"
+                    remaining_inner = len(state.craft_boxes.get(box_key, []))
+                    # ③ 이 컨테이너가 덮고있는(제거시 노출) 타일 수
+                    covered = 0
+                    bmap = getattr(self, "_blocking_map", None)
+                    if bmap:
+                        tkey = (move.layer_idx, ts.position_key)
+                        for (_bl, _bp), _blockers in bmap.items():
+                            if tkey in _blockers:
+                                _bt = state.tiles.get(_bl, {}).get(_bp)
+                                if _bt and not _bt.picked:
+                                    covered += 1
+                    # 임팩트 = 풀리는 타일 수. 무조건 아님(임팩트 0이면 보너스 0).
+                    impact = waiting + remaining_inner + covered
+                    base_score += min(60.0, 6.0 * impact) * max(0.3, profile.goal_priority)
 
         # Layer blocking awareness - prefer clearing upper layers
         layer_bonus = move.layer_idx * profile.blocking_awareness * 0.3

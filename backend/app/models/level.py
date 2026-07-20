@@ -179,6 +179,10 @@ class GenerationParams:
     # 적용된 레벨은 level_json["reverse_generated"]=True로 표시. 미지원 레벨은 자동 스킵(False).
     use_reverse_generation: bool = False
     reverse_generation_max_open: int = 2  # 난이도 레버(동시 미완성 그룹 수, 1~3). 클수록 어려움.
+    # [좁고깊은/중간보스] 동심 침식 스택: layer_0 채운 모양 → 위로 갈수록 테두리 한겹씩 벗겨(erode)
+    # 중앙 축소 = 거북등껍질 코히어런트 스택. 각층=아래층의 중앙 부분집합 → 홀짝 커버 정합, peel 클리어.
+    # 상위층 무작위 흩어짐 제거(유저 피드백). use_reverse_generation과 병용해 타입 솔버블화.
+    concentric_deep: bool = False
     # [보스 생성기] 10의 배수 보스 레벨 전용 모드. 효과:
     # - 그리드 상한: 선언 최대 8 (cols=7 → 짝수층 8, 디바이스 가독성 한계 9x9 미만 준수)
     # - 층수 5~6 (그리드 폭 대신 깊이로 물량/난이도 확보)

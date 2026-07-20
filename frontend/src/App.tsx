@@ -14,6 +14,7 @@ import { PatternDebugPanel } from './components/PatternDebugPanel';
 import { ColorBalancePanel } from './components/ColorBalancePanel';
 import { PatternImportPanel } from './components/PatternImportPanel';
 import { BossTemplatePanel } from './components/BossTemplatePanel';
+import { RemoteComputeToggle } from './components/RemoteComputeToggle';
 import { RLSimulationPanel } from './components/RLSimulationPanel';
 import { SolvabilityPanel } from './components/SolvabilityPanel';
 import { useLevelStore } from './stores/levelStore';
@@ -362,6 +363,7 @@ function AppContent() {
             <h1 className="text-xl font-bold text-gray-100">
               타일매치 레벨 디자이너
             </h1>
+            <RemoteComputeToggle />
           </div>
           <div className="flex items-center gap-2">
             {tabs.map((tab) => (

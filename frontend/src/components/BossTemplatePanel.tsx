@@ -26,6 +26,8 @@ interface BossLayer {
 const GIMMICK_PALETTE: { id: string; label: string; color: string }[] = [
   { id: '', label: '모양(t0)', color: '#6366f1' },
   { id: 'ice', label: '🧊 얼음', color: '#7dd3fc' },
+  { id: 'unknown', label: '📦 상자', color: '#c8a97e' },
+  { id: 'teleport', label: '🌀 텔레포터', color: '#22d3ee' },
   { id: 'chain', label: '⛓ 체인', color: '#a8a29e' },
   { id: 'grass', label: '🌿 잔디', color: '#86efac' },
   { id: 'frog', label: '🐸 개구리', color: '#4ade80' },
@@ -39,7 +41,7 @@ const GIMMICK_PALETTE: { id: string; label: string; color: string }[] = [
 
 // 팔레트 id → 언락 테이블 키(PROFESSIONAL_GIMMICK_UNLOCK_LEVELS). 게임 언락 정합.
 const PALETTE_UNLOCK_KEY: Record<string, string> = {
-  ice: 'ice', chain: 'chain', grass: 'grass', frog: 'frog', bomb: 'bomb', curtain_close: 'curtain',
+  ice: 'ice', unknown: 'unknown', teleport: 'teleport', chain: 'chain', grass: 'grass', frog: 'frog', bomb: 'bomb', curtain_close: 'curtain',
   craft: 'craft', stack: 'stack',
 };
 // 컨테이너 기믹 값 파싱: "craft_e_3"(방향e·내부3) 또는 구포맷 "craft"(내부3·방향auto).

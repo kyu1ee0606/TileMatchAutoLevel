@@ -13,6 +13,10 @@ import GameBoard from './GamePlayer/GameBoard';
 import { createGameEngine } from '../engine/gameEngine';
 import type { GameTile } from '../types/game';
 
+// 프로덕션 레이어 col 크기 = 5·6·7 (홀짝 base 5→[6,5], base 6→[7,6]). 신규 커스텀 패턴은
+// 이 3개 크기를 필수로 그려야 전 레벨 커버(그 외 4/8/9는 선택). 8+ 는 프로덕션 미사용.
+const REQUIRED_PATTERN_SIZES = [5, 6, 7];
+
 interface PatternInfo {
   index: number;
   count: number;
@@ -391,6 +395,9 @@ export function PatternDebugPanel() {
   const [disabledPatterns, setDisabledPatterns] = useState<Set<number>>(new Set());
   const [customNames, setCustomNames] = useState<Record<string, string>>({});
   const [isCreatingNew, setIsCreatingNew] = useState(false);
+  // [신규 패턴 다중 크기] 이름 + 크기별 그리드(각 크기 따로 그림). key=grid_size.
+  const [newPatternName, setNewPatternName] = useState('');
+  const [variantGrids, setVariantGrids] = useState<Record<number, boolean[][]>>({});
   const [baseCollapsed, setBaseCollapsed] = useState(false);
   const [customCollapsed, setCustomCollapsed] = useState(false);
 
@@ -635,30 +642,56 @@ export function PatternDebugPanel() {
     setIsCreatingNew(true);
     setSelectedPattern(null);
     setPreview(null);
-    // 빈 그리드
+    setNewPatternName('');
+    setVariantGrids({});
+    // 빈 그리드 (현재 gridSize)
     setEditGrid(Array.from({ length: gridSize }, () => Array(gridSize).fill(false)));
     setIsEditing(true);
   };
 
-  const saveAsNewPattern = async () => {
-    const positions = getEditedPositions();
-    if (positions.length < 3) return;
+  // 생성 중 크기 전환: 현재 그린 그리드를 그 크기로 보관 → 새 크기 그리드 로드(보관분 or 빈).
+  const switchCreatingSize = (newSize: number) => {
+    setVariantGrids(prev => ({ ...prev, [gridSize]: editGrid }));
+    const saved = variantGrids[newSize];
+    setEditGrid(saved && saved.length === newSize
+      ? saved
+      : Array.from({ length: newSize }, () => Array(newSize).fill(false)));
+    setGridSize(newSize);
+  };
+
+  // 크기별로 따로 그린 변형 전부를 한 인덱스+이름으로 저장.
+  const saveMultiSizePattern = async () => {
+    // 현재 편집 중 크기 포함해 병합
+    const merged: Record<number, boolean[][]> = { ...variantGrids, [gridSize]: editGrid };
+    const variants = Object.entries(merged).map(([sz, grid]) => {
+      const positions: string[] = [];
+      grid.forEach((row, y) => row.forEach((cell, x) => { if (cell) positions.push(`${x}_${y}`); }));
+      return { grid_size: Number(sz), positions };
+    }).filter(v => v.positions.length >= 3);
+    if (variants.length === 0) {
+      window.alert('최소 한 크기 이상 3타일 이상 그려주세요.');
+      return;
+    }
+    // [필수 크기] 프로덕션 레이어 col = 5·6·7 → 이 3개는 반드시 그려야 전 레벨 커버.
+    const drawnSizes = new Set(variants.map(v => v.grid_size));
+    const missing = REQUIRED_PATTERN_SIZES.filter(s => !drawnSizes.has(s));
+    if (missing.length > 0) {
+      window.alert(`필수 크기 미입력: ${missing.map(s => `${s}×${s}`).join(', ')}\n프로덕션 레이어(5·6·7)를 전부 그려야 저장됩니다.`);
+      return;
+    }
     try {
-      const res = await apiClient.post('/debug/pattern-create', null, {
-        params: { grid_size: gridSize, name: `custom_${Date.now()}` },
-        data: positions, // doesn't work as query, use body
-      });
-      // Use proper body request
-      await apiClient.post('/debug/pattern-save', {
-        pattern_index: res.data.pattern_index,
-        grid_size: gridSize,
-        positions,
+      const res = await apiClient.post('/debug/pattern-create-multi', {
+        name: newPatternName.trim(),
+        variants,
       });
       setIsCreatingNew(false);
-      loadPatterns();
+      setVariantGrids({});
+      setNewPatternName('');
+      await loadPatterns();
       setSelectedPattern(res.data.pattern_index);
     } catch (err) {
-      console.error('Create failed:', err);
+      console.error('Create-multi failed:', err);
+      window.alert(`저장 실패: ${(err as Error).message}`);
     }
   };
 
@@ -790,8 +823,17 @@ export function PatternDebugPanel() {
   // 패턴 완전 삭제 (모든 크기 변형 제거)
   const purgePattern = async () => {
     if (selectedPattern === null) return;
-    const name = getPatternName(selectedPattern);
-    if (!window.confirm(`패턴 #${selectedPattern} "${name}"의 모든 크기 변형을 완전히 삭제할까요?\n(레벨 생성에서 더 이상 사용되지 않습니다)`)) return;
+    // [고아 방지] 이 패턴 쓰는 프로덕션 레벨 조회 → 있으면 경고(삭제 시 그 레벨 고아).
+    let usageMsg = '';
+    try {
+      const u = await apiClient.get(`/debug/pattern-usage/${selectedPattern}`);
+      const cnt = u.data?.count ?? 0;
+      if (cnt > 0) {
+        const ex = (u.data?.levels || []).slice(0, 5).map((l: { level_number: number }) => `Lv${l.level_number}`).join(', ');
+        usageMsg = `\n\n⚠️ 이 패턴을 쓰는 프로덕션 레벨 ${cnt}개 (예: ${ex})\n삭제하면 그 레벨들이 고아(오참조)됩니다. 재생성 필요.`;
+      }
+    } catch { /* usage 조회 실패 시 경고 생략 */ }
+    if (!window.confirm(`패턴 #${selectedPattern} 의 모든 크기 변형을 완전히 삭제할까요?\n(레벨 생성에서 더 이상 사용되지 않습니다)${usageMsg}`)) return;
     try {
       await apiClient.delete(`/debug/pattern-save/${selectedPattern}`);
       setSelectedPattern(null);
@@ -844,7 +886,22 @@ export function PatternDebugPanel() {
 
   return (
     <div className="p-4 space-y-4" onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}>
-      <h2 className="text-lg font-bold text-white">🔧 패턴 디버그 & 편집</h2>
+      <div className="flex items-center gap-3 flex-wrap">
+        <h2 className="text-lg font-bold text-white">🔧 패턴 디버그 & 편집</h2>
+        {/* 번호로 찾기 — 프로덕션 레벨의 pattern_index(#64+) 로 커스텀 패턴 바로 열기 */}
+        <div className="flex items-center gap-1">
+          <span className="text-[11px] text-gray-400">번호로 찾기</span>
+          <input type="number" min={0} placeholder="예: 72"
+            className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-xs text-white"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                const idx = parseInt((e.target as HTMLInputElement).value, 10);
+                if (!isNaN(idx)) { loadPreview(idx); setCustomCollapsed(false); }
+              }
+            }} />
+          <span className="text-[10px] text-gray-500">Enter</span>
+        </div>
+      </div>
       <p className="text-sm text-gray-400">
         패턴을 선택 → 비교 확인 → 그리드 클릭/드래그로 편집 → 복사하여 공유
       </p>
@@ -852,11 +909,15 @@ export function PatternDebugPanel() {
       {/* 그리드 크기 */}
       <div className="flex items-center gap-2">
         <span className="text-sm text-gray-400">그리드:</span>
-        {[4, 5, 6, 7, 8, 9].map(s => (
-          <button key={s} onClick={() => setGridSize(s)}
-            className={`px-3 py-1 rounded text-sm ${gridSize === s ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-300'}`}
-          >{s}x{s}</button>
-        ))}
+        {[4, 5, 6, 7, 8, 9].map(s => {
+          const drawn = isCreatingNew && ((s === gridSize ? editGrid : variantGrids[s]) || []).flat().filter(Boolean).length > 0;
+          return (
+            <button key={s} onClick={() => (isCreatingNew ? switchCreatingSize(s) : setGridSize(s))}
+              className={`px-3 py-1 rounded text-sm ${gridSize === s ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-300'} ${drawn ? 'ring-1 ring-green-400' : ''}`}
+              title={isCreatingNew && drawn ? `${s}×${s} 그려짐(저장 대상)` : undefined}
+            >{s}x{s}{isCreatingNew && drawn ? ' ✓' : ''}</button>
+          );
+        })}
       </div>
 
       <div className="flex gap-4">
@@ -898,7 +959,8 @@ export function PatternDebugPanel() {
             };
 
             const basePatterns = applySorting(sortedPatterns.filter(p => !p.is_custom));
-            const customPatternsList = applySorting(sortedPatterns.filter(p => p.is_custom));
+            // 커스텀은 항상 인덱스 번호순 정렬(생성/삭제 후에도 자동 정렬 → #번호로 찾기 쉬움).
+            const customPatternsList = sortedPatterns.filter(p => p.is_custom).sort((a, b) => a.index - b.index);
 
             // 패턴 카드 렌더링 (그리드/리스트 공용)
             const renderPatternCard = (p: PatternInfo, isCyan = false) => {
@@ -933,12 +995,13 @@ export function PatternDebugPanel() {
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="text-xs text-white truncate">
-                          {isCyan && '★ '}{getPatternIcon(p.index)} {getPatternName(p.index)}
-                        </div>
-                        <div className="text-[10px] text-gray-500">
-                          #{p.index} · {p.count}t · {p.fill_rate}%
+                          {isCyan && '★ '}{getPatternIcon(p.index)} <b className={isCyan ? 'text-cyan-300' : 'text-indigo-300'}>#{p.index}</b>
                           {p.count % 3 !== 0 && <span className="text-red-400 ml-1">!3</span>}
                           {!customForSize.has(p.index) && <span className="text-orange-400 ml-1">⚠</span>}
+                        </div>
+                        <div className="text-[10px] text-gray-500 truncate">
+                          {p.count}t · {p.fill_rate}%
+                          {isCyan && getPatternName(p.index) && !getPatternName(p.index).startsWith('ai_') && <span className="text-gray-400 ml-1">· {getPatternName(p.index)}</span>}
                         </div>
                       </div>
                       <button onClick={(e) => { e.stopPropagation(); togglePatternEnabled(p.index); }}
@@ -1771,12 +1834,42 @@ export function PatternDebugPanel() {
             </>
           ) : isCreatingNew ? (
             <div className="space-y-4">
-              <div className="bg-green-900/20 rounded-lg p-3">
-                <h3 className="text-sm font-medium text-green-400">새 패턴 만들기</h3>
-                <p className="text-xs text-gray-400">그리드를 클릭/드래그하여 패턴을 그린 후 저장하세요</p>
+              <div className="bg-green-900/20 rounded-lg p-3 space-y-2">
+                <h3 className="text-sm font-medium text-green-400">새 패턴 만들기 (크기별로 따로 그리기)</h3>
+                <p className="text-xs text-gray-400">
+                  ① 이름 입력 → ② 상단 그리드 크기 버튼으로 크기 전환하며 각 크기마다 모양 그림 → ③ 저장 (그린 크기만 저장됨)
+                </p>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-gray-400 w-10">이름</span>
+                  <input
+                    type="text" value={newPatternName}
+                    onChange={e => setNewPatternName(e.target.value)}
+                    placeholder="예: 하트, 왕관, 고양이"
+                    className="flex-1 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-sm text-white"
+                  />
+                </div>
+                {/* 필수 크기 현황 (5·6·7 반드시) */}
+                <div className="flex items-center gap-1 flex-wrap text-[10px]">
+                  <span className="text-gray-500">필수(5·6·7):</span>
+                  {REQUIRED_PATTERN_SIZES.map(s => {
+                    const cnt = ((s === gridSize ? editGrid : variantGrids[s]) || []).flat().filter(Boolean).length;
+                    const ok = cnt >= 3;
+                    return <span key={s} className={`px-1.5 py-0.5 rounded ${ok ? 'bg-green-700 text-green-100' : 'bg-red-800 text-red-200'}`}>{ok ? '✓' : '✗'} {s}×{s}{ok ? ` (${cnt})` : ''}</span>;
+                  })}
+                </div>
+                {/* 선택 크기(4·8·9) 현황 */}
+                <div className="flex items-center gap-1 flex-wrap text-[10px]">
+                  <span className="text-gray-500">선택:</span>
+                  {[4, 8, 9].map(s => {
+                    const cnt = ((s === gridSize ? editGrid : variantGrids[s]) || []).flat().filter(Boolean).length;
+                    if (cnt < 3) return null;
+                    return <span key={s} className="px-1.5 py-0.5 rounded bg-gray-700 text-gray-300">{s}×{s} ({cnt})</span>;
+                  })}
+                  <span className="text-gray-600">(8·9는 프로덕션 미사용)</span>
+                </div>
               </div>
               <div>
-                <h4 className="text-xs text-gray-400 mb-1">편집 ({editedCount}개 타일)</h4>
+                <h4 className="text-xs text-gray-400 mb-1">편집: {gridSize}×{gridSize} ({editedCount}개 타일)</h4>
                 <div className="inline-block border border-gray-700 rounded select-none"
                   onMouseLeave={() => setIsDragging(false)}
                 >
@@ -1796,12 +1889,19 @@ export function PatternDebugPanel() {
                 </div>
               </div>
               <div className="flex gap-2">
-                <button onClick={saveAsNewPattern} disabled={editedCount < 3}
-                  className="px-4 py-2 rounded text-sm bg-green-600 hover:bg-green-500 text-white disabled:opacity-50"
-                >
-                  + 새 패턴으로 저장
-                </button>
-                <button onClick={() => setIsCreatingNew(false)}
+                {(() => {
+                  const reqMet = REQUIRED_PATTERN_SIZES.every(s =>
+                    ((s === gridSize ? editGrid : variantGrids[s]) || []).flat().filter(Boolean).length >= 3);
+                  return (
+                    <button onClick={saveMultiSizePattern} disabled={!reqMet}
+                      title={reqMet ? '5·6·7 전부 그려짐 → 저장' : '필수 크기 5×5·6×6·7×7 를 모두 그려야 저장됨'}
+                      className="px-4 py-2 rounded text-sm bg-green-600 hover:bg-green-500 text-white disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      + 새 패턴으로 저장 {reqMet ? '(그린 크기 전부)' : '(5·6·7 필수)'}
+                    </button>
+                  );
+                })()}
+                <button onClick={() => { setIsCreatingNew(false); setVariantGrids({}); setNewPatternName(''); }}
                   className="px-4 py-2 rounded text-sm bg-gray-700 hover:bg-gray-600 text-gray-300"
                 >
                   취소

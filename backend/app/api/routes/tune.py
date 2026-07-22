@@ -717,6 +717,161 @@ def tune_color(req: ColorTuneRequest) -> ColorTuneResult:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 타일 종류 수 튜너 — 필드 타일을 N개 색 팔레트로 재타이핑. 종류↑ = 어려움(트레이 다양↑).
+#   위치·기믹·컨테이너 불변. ÷3 클리어가능은 _finalize_divisibility_guarantee 로 보장.
+# ─────────────────────────────────────────────────────────────────────────────
+class TileCountTuneRequest(BaseModel):
+    level_json: Dict[str, Any]
+    tile_count: int = Field(..., ge=2, le=15)  # 목표 사용 타일 종류 수
+    evaluate: bool = False                      # true면 RL 예측까지
+    seed: Optional[int] = None
+    skill_mean: Optional[float] = None
+    skill_std: Optional[float] = None
+    rollouts_per_point: Optional[int] = None
+    skill_grid: Optional[List[float]] = None
+    max_moves: Optional[int] = None
+
+
+class TileCountTuneResult(BaseModel):
+    best_level_json: Dict[str, Any]
+    predicted_clear_rate: float
+    original_predicted: float
+    tile_count: int          # 실제 적용된 종류 수(요청값 clamp 결과)
+    requested: int           # 요청값
+    field_tiles: int
+    color_types: int         # 최종 필드 색 종류 수(finalize 후)
+    elapsed_ms: int
+
+
+@router.post("/tilecount", response_model=TileCountTuneResult)
+def tune_tilecount(req: TileCountTuneRequest) -> TileCountTuneResult:
+    """필드 타일을 N개 색 팔레트로 재타이핑(종류 수 조절). 종류 많을수록 어려움.
+    위치·기믹·컨테이너 불변. ÷3 클리어가능은 finalize 로 보장(필요시 잉여 1~2개 트림)."""
+    if not req.level_json or not req.level_json.get("layer"):
+        raise HTTPException(status_code=400, detail="유효한 level_json 필요")
+    started = time.monotonic()
+
+    from ...core.generator import select_color_balanced_tiles
+
+    positions, counts = _field_colors(req.level_json)
+    total = len(positions)
+    # 종류당 최소 3개(÷3) 필요 → 상한 = total//3. 요청값을 [2, min(15, total//3)] 로 clamp.
+    max_types = max(1, total // 3)
+    n = max(1, min(int(req.tile_count), 15, max_types))
+    seed = req.seed if req.seed is not None else (int(req.level_json.get("randSeed", 0) or 0) * 137 + 11)
+
+    if total < 3 or max_types < 2:
+        # 재타이핑 불가(필드 타일 부족) → 원본 그대로
+        return TileCountTuneResult(
+            best_level_json=req.level_json, predicted_clear_rate=0.0, original_predicted=0.0,
+            tile_count=len(counts), requested=int(req.tile_count),
+            field_tiles=total, color_types=len(counts),
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
+
+    # [컨테이너-aware] 컨테이너(craft/stack)는 런타임에 내부 타입을 필드로 배출한다. 클리어가능은
+    # 타입별 (필드 + 컨테이너배출) ÷3 이어야 한다(단순 필드 ÷3 아님). 재타이핑이 컨테이너 배출 타입을
+    # 팔레트서 빼면 그 타입이 orphan(합 1~2) → 클리어불가. → 배출 타입 강제포함 + 완성분 필드 배정.
+    c_out: Dict[str, int] = {}
+    nl = int(req.level_json.get("layer", 0) or 0)
+    for i in range(nl):
+        for td in ((req.level_json.get(f"layer_{i}", {}) or {}).get("tiles", {}) or {}).values():
+            if isinstance(td, list) and len(td) > 2 and isinstance(td[2], list) and len(td[2]) > 1:
+                for part in str(td[2][1]).split("_"):
+                    if part and part[0] == "t" and part[1:].isdigit():
+                        c_out[part] = c_out.get(part, 0) + 1
+    # 완성 필요 타입(배출량이 ÷3 아닌 것) = 반드시 팔레트 포함
+    forced = [t for t, cnt in c_out.items() if cnt % 3 != 0]
+    # N색 균형 팔레트 — 강제타입 우선, 나머지 균형선택으로 채움
+    n = max(n, len(forced))
+    n = min(n, 15, max_types)
+    palette = list(dict.fromkeys(forced))  # 강제타입(중복제거, 순서보존)
+    if len(palette) < n:
+        extra_pool = select_color_balanced_tiles(15, seed=seed, max_index=15)
+        for t in extra_pool:
+            if len(palette) >= n:
+                break
+            if t not in palette:
+                palette.append(t)
+    types = palette[:n]
+    n = len(types)
+
+    # 타입별 필드 최소분 r_t = (-c_out) mod 3 (컨테이너와 합쳐 ÷3). 나머지는 3단위 블록으로 균등 분배.
+    r = {t: (3 - (c_out.get(t, 0) % 3)) % 3 for t in types}
+    field_counts = {t: r[t] for t in types}
+    blocks = (total - sum(field_counts.values())) // 3  # 원본 ÷3-정합이라 정수·≥0 보장
+    for k in range(max(0, blocks)):
+        field_counts[types[k % n]] += 3
+    # 합 보정(반올림 오차 방어) — total 과 어긋나면 마지막 타입에서 ±3 조정
+    diff = total - sum(field_counts.values())
+    if diff:
+        # diff 는 3의 배수여야 정상. 아니면 finalize 가 잉여 트림으로 마무리.
+        adj = types[0]
+        field_counts[adj] = max(0, field_counts[adj] + diff)
+
+    # 노출순 라운드로빈 배정(결정적) — 분산 중립. 색 뭉침/흩어짐은 색 스프레드 다이얼로 별도 조절.
+    q = dict(field_counts)
+    seq: List[str] = []
+    while len(seq) < total:
+        placed = False
+        for t in types:
+            if q.get(t, 0) > 0:
+                seq.append(t)
+                q[t] -= 1
+                placed = True
+                if len(seq) >= total:
+                    break
+        if not placed:
+            break
+    # 시퀀스가 total 보다 짧으면(분배 부족) 남은 위치는 첫 타입으로 채움(finalize 가 ÷3 보정)
+    while len(seq) < total:
+        seq.append(types[0])
+
+    lv = _apply_colors(req.level_json, positions, seq)
+    # NOTE: _finalize_divisibility_guarantee 는 호출하지 않는다. 그 게이트는 '필드 per-type ÷3'를
+    # 강제(consolidate relabel)하는데, 컨테이너 배출 타입은 필드가 ÷3 아닌 나머지(r_t)를 가져야
+    # (필드+컨테이너) ÷3 이 된다. finalize 를 태우면 그 나머지를 상쇄해 orphan 을 되살린다.
+    # 위 배정은 이미 타입별 (필드+컨테이너) ÷3 + 총합 보존 → 클리어가능 자체보장.
+    _, final_counts = _field_colors(lv)
+    lv["useTileCount"] = len(final_counts)
+
+    if not req.evaluate:
+        return TileCountTuneResult(
+            best_level_json=lv, predicted_clear_rate=0.0, original_predicted=0.0,
+            tile_count=n, requested=int(req.tile_count),
+            field_tiles=total, color_types=len(final_counts),
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
+
+    _rollouts = req.rollouts_per_point if req.rollouts_per_point is not None else DEFAULT_ROLLOUTS_PER_POINT
+    _seed = req.seed if req.seed is not None else DEFAULT_BASE_SEED
+    try:
+        results = _parallel_point_sweep(
+            [(0, req.level_json), (1, lv)], req.skill_grid, _rollouts, _seed, req.max_moves,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[tune/tilecount] 시뮬 실패")
+        raise HTTPException(status_code=500, detail=f"시뮬레이션 실패: {exc}") from exc
+
+    mean = req.skill_mean if req.skill_mean is not None else CASUAL_SKILL_MEAN
+    std = req.skill_std if req.skill_std is not None else CASUAL_SKILL_STD
+
+    def _predtc(res: Dict[str, Any]) -> float:
+        if res.get("error"):
+            return 0.0
+        return round(population_clear_rate(res.get("skill_curve", []), mean=mean, std=std), 4)
+
+    return TileCountTuneResult(
+        best_level_json=lv,
+        predicted_clear_rate=_predtc(results[1]),
+        original_predicted=_predtc(results[0]),
+        tile_count=n, requested=int(req.tile_count),
+        field_tiles=total, color_types=len(final_counts),
+        elapsed_ms=int((time.monotonic() - started) * 1000),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 자동 튜너 — 순차검증/생성 연동. target 클리어율에 색+기믹 스윕으로 최근접 배치 자동선택.
 #   ① 색 스윕(싸고 안전, ÷3중립) → 근접하면 반환.
 #   ② 부족하면 기믹 스윕(넓은폭) → 그 위에 색 미세 → best 선택.

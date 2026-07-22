@@ -267,6 +267,7 @@ TileMatchAutoLevel/
 | [LOCAL_LEVELS_GUIDE.md](LOCAL_LEVELS_GUIDE.md) | 로컬 레벨 관리 가이드 |
 | [LEVEL_GENERATION_GUIDE.md](LEVEL_GENERATION_GUIDE.md) | 레벨 생성 도구 가이드 |
 | [CHANGELOG_20260715_ARRANGEMENT_TUNER.md](CHANGELOG_20260715_ARRANGEMENT_TUNER.md) | 난이도 미세조절 색 재배치 튜너(재생성 없이 색 순열로 목표 클리어율 근접, 모양·÷3·기믹 보존). 독립 엔드포인트 `/api/tune/arrangement` + 레벨행 🎚️미세 버튼 + 순차검증 실패시 색조절 우선 폴백 |
+| [CHANGELOG_20260722_PATTERN_SYNTH_AND_FIXES.md](CHANGELOG_20260722_PATTERN_SYNTH_AND_FIXES.md) | 패턴 합성 강화(씨앗기반 생성 A·랜덤성·recombine∪∩∖·씨앗변형강도), 커스텀 패턴 프로덕션 편입(~28%), 검증 false-pass RL통일, `/tune/tilecount`(종류수튜너), 패턴디버거(크기별그리기·5·6·7필수·번호검색·고아가드·#배지), 보스 unknown/teleport 팔레트+스토리 테마3~5(290~1500 122개) |
 | [CHANGELOG_20260716_TUTORIAL_GIMMICK_GUARANTEE.md](CHANGELOG_20260716_TUTORIAL_GIMMICK_GUARANTEE.md) | 언락 첫 스테이지 기믹 100% 보장(생성 종료 재보장·컨테이너·역생성 rescue 후 재보장). 180/180 검증 |
 | [CHANGELOG_20260716_DIFFICULTY_3DIAL.md](CHANGELOG_20260716_DIFFICULTY_3DIAL.md) | 난이도 3단 다이얼(모양→기믹→색), 즉시 프리뷰·캐스케이드·🎲다른모양. `/tune/gimmick` |
 | [CHANGELOG_20260716_COLOR_POTTS_ISING.md](CHANGELOG_20260716_COLOR_POTTS_ISING.md) | 색 분산 Potts–Metropolis(Kawasaki) 엔진 + join-count 지표, 슬라이더 균등화. `/tune/color` |

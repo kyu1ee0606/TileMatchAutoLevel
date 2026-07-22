@@ -999,6 +999,18 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
         // gridSize에 맞는 disabled 선택하는 헬퍼
         const getDisabledForSize = (gs: number) => new Set(disabledPatternsMap[String(gs)] || []);
 
+        // [커스텀 패턴 프로덕션 편입] 활성 커스텀(64+) 인덱스를 일반레벨 풀에 포함 → 생성에 실제 사용.
+        // count>0(그려진 것) + 비활성 아님. 실패 시 빈 배열(기본 64개만).
+        let customEnabledIndices: number[] = [];
+        try {
+          const plRes = await apiClient.get('/debug/pattern-list?grid_cols=8&grid_rows=8');
+          const list = (plRes.data?.patterns || []) as Array<{ index: number; is_custom?: boolean; count?: number }>;
+          const disabled8 = getDisabledForSize(8);
+          customEnabledIndices = list
+            .filter(p => p.is_custom && (p.count ?? 0) > 0 && !disabled8.has(p.index))
+            .map(p => p.index);
+        } catch { customEnabledIndices = []; }
+
         // OPTION D: Pre-compute pattern indices to prevent consecutive same patterns
         const preComputePatternIndices = (count: number, startLevelNumber: number): number[] => {
           const indices: number[] = [];
@@ -1019,6 +1031,8 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
               // POOR: #5,22,25,29,39,42,47,54,57,60 - 너무 성겨서 형태 불명확
               const EXCLUDED_PATTERNS = getDisabledForSize(8);
               pool = Array.from({ length: 64 }, (_, i) => i).filter(i => !EXCLUDED_PATTERNS.has(i));
+              // 활성 커스텀 패턴(64+)도 일반 풀에 합류 → 저장한 커스텀 모양이 프로덕션에 실제 등장.
+              if (customEnabledIndices.length > 0) pool = pool.concat(customEnabledIndices);
             }
 
             // Remove previous pattern from pool to prevent consecutive same pattern
@@ -3218,6 +3232,7 @@ function TestTab({
   const [clusterIndex, setClusterIndex] = useState<number | null>(null); // 색 뭉침 지표 −1~+1 (join-count)
   const [gimmickBusy, setGimmickBusy] = useState(false);
   const [dialDirty, setDialDirty] = useState(false);     // 미저장 조정 존재
+  const [tileCountInput, setTileCountInput] = useState<number>(6); // 사용 타일 종류 수 입력
   const gimmickBaseRef = useRef<{ level: number; json: LevelJsonLike } | null>(null);
 
   // 다이얼 base·상태 초기화 트리거: 레벨 선택 변경 OR 디스크 레벨 변경(재생성/저장 후 loadLevels).
@@ -3235,6 +3250,10 @@ function TestTab({
     setGimmickPred(null);
     setClusterIndex(null);
     setDialDirty(false);
+    // 사용 타일 종류 수 입력 초기값 = 디스크 레벨의 useTileCount (없으면 필드 실측)
+    const djson = ((disk ?? selectedLevel).level_json) as unknown as Record<string, unknown>;
+    const utc = Number(djson?.useTileCount) || 0;
+    setTileCountInput(utc >= 2 ? utc : 6);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedLevel?.meta.level_number, levels]);
 
@@ -3301,6 +3320,43 @@ function TestTab({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedLevel, dialDirty, batchId, addNotification, onStatsUpdate]);
+
+  // 사용 타일 종류 수 적용 — 필드 타일을 N색으로 재타이핑(종류↑=어려움). 디스크 base 기준 커밋(저장).
+  // 위치·기믹·컨테이너 불변, (필드+컨테이너)÷3 클리어가능 보장(백엔드). 저장 후 재검증 대상.
+  const applyTileCount = useCallback(async () => {
+    const base = gimmickBaseRef.current;
+    if (!selectedLevel || !base || base.level !== selectedLevel.meta.level_number) return;
+    const n = Math.max(2, Math.min(12, Math.round(tileCountInput)));
+    setGimmickBusy(true);
+    try {
+      const resp = await apiClient.post('/tune/tilecount', {
+        level_json: base.json,
+        tile_count: n,
+        evaluate: false,
+      });
+      const r = resp.data as { best_level_json: LevelJsonLike; tile_count: number; color_types: number };
+      await saveProductionLevels(batchId, [{
+        meta: {
+          ...selectedLevel.meta,
+          generated_at: new Date().toISOString(),
+          status_updated_at: new Date().toISOString(),
+          // 재타이핑 = 색 팔레트 변경 → 재검증 대상. 모양/난이도목표 유지.
+          verified: false, verification_passed: undefined, match_score: undefined,
+          regen_attempts: (selectedLevel.meta.regen_attempts || 0) + 1,
+        },
+        level_json: r.best_level_json as ProductionLevel['level_json'],
+      }]);
+      addNotification('success',
+        `Lv.${selectedLevel.meta.level_number} 사용 타일 ${r.color_types}종 적용 (재검증 대상). 종류↑=어려움.`);
+      loadLevels();
+      onStatsUpdate();
+    } catch (e) {
+      addNotification('error', `타일 종류 조절 실패: ${(e as Error).message}`);
+    } finally {
+      setGimmickBusy(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedLevel, tileCountInput, batchId, addNotification, onStatsUpdate]);
 
   // Batch auto test state
   const [batchTestProgress, setBatchTestProgress] = useState<{
@@ -3609,37 +3665,68 @@ function TestTab({
     setValidatingLevels(prev => new Set(prev).add(levelNumber));
 
     try {
-      const result = await analyzeAutoPlay(level.level_json, {
-        iterations: autoTestIterations,
-        targetDifficulty: level.meta.target_difficulty,
-      });
+      // [freshest json] 다이얼(기믹강도/색분산)은 selectedLevel.level_json(in-memory 프리뷰)만 바꾸고
+      // levels[](디스크)는 그대로다. 리스트 검증버튼은 levels[] 항목(level)을 넘기므로, 적용 전엔
+      // '변경 전' json을 측정해 예상률이 안 움직였다. → 같은 레벨이 선택+다이얼조정중이면 프리뷰 json을
+      // 측정+저장해 다이얼 변경을 검증에 반영한다(변경본 저장 = desync 방지).
+      const usePreview = !!(selectedLevel && selectedLevel.meta.level_number === levelNumber && dialDirty);
+      const verifyJson = usePreview ? selectedLevel!.level_json : level.level_json;
 
-      const matchScore = calculateMatchScoreFromBots(result.bot_stats);
-      // [v15.14] novice/casual 제외 - 검증용 3봇만 사용
-      const botClearRates = {
-        average: result.bot_stats.find(s => s.profile === 'average')?.clear_rate || 0,
-        expert: result.bot_stats.find(s => s.profile === 'expert')?.clear_rate || 0,
-        optimal: result.bot_stats.find(s => s.profile === 'optimal')?.clear_rate || 0,
-      };
+      // [v16 통일] 개별검증 pass 판정 = canonical RL 게이트 (기존 autoplay 봇 matchScore>=70 폐기).
+      // 폐기 이유: 봇 게이트는 bossTargetScale 미적용 + clear_rate_gap 미기록 → 이미 RL 측정된
+      // 보스(목표 절반)에 too-easy(gap>0.12)여도 봇 86점>=70으로 verification_passed=true 덮어씀 →
+      // gap 필드는 그대로 남아 "gap 큰데 통과" false-pass. RL 스윕+rlVerificationPassed 로 순차/자동측정과 동일 기준.
+      // 봇3게이지(bot_clear_rates) 표시용 autoplay 는 병행 실행(정보성) — pass 판정엔 안 씀.
+      const [rl, apRes] = await Promise.all([
+        simulateLevelSkillSweep({
+          level_json: verifyJson,
+          target_difficulty: level.meta.target_difficulty,
+          skill_mean: rlSkillMean,
+          target_clear_rate_scale: bossTargetScale(levelNumber),
+        }),
+        analyzeAutoPlay(verifyJson, {
+          iterations: autoTestIterations,
+          targetDifficulty: level.meta.target_difficulty,
+        }).catch(() => null),
+      ]);
+      const predicted = rl.predicted_clear_rate;
+      const target = rl.target_clear_rate ?? 0;
+      const gapPp = (rl.clear_rate_gap ?? predicted - target) * 100; // 양수=목표보다 쉬움
+      const matchScore = Math.max(0, 100 - Math.abs(gapPp) * 2);
+      const passed = rlVerificationPassed(levelNumber, rl) && maxDeclaredGridDim(verifyJson) <= MAX_PLAYABLE_GRID;
+      // 봇3게이지 갱신용(표시 전용). autoplay 실패 시 기존값 유지.
+      const botClearRates = apRes ? {
+        average: apRes.bot_stats.find(s => s.profile === 'average')?.clear_rate ?? 0,
+        expert: apRes.bot_stats.find(s => s.profile === 'expert')?.clear_rate ?? 0,
+        optimal: apRes.bot_stats.find(s => s.profile === 'optimal')?.clear_rate ?? 0,
+      } : level.meta.bot_clear_rates;
 
-      // Save to production storage
+      // Save to production storage — RL 메타 일괄 기록(부분갱신 desync 방지). 프리뷰면 변경본 json 저장.
       const updatedMeta = {
         ...level.meta,
-        bot_clear_rates: botClearRates,
+        verification_method: 'rl' as const,
+        predicted_clear_rate: predicted,
+        target_clear_rate: target,
+        clear_rate_gap: rl.clear_rate_gap ?? undefined,
+        rl_classification: rl.classification,
+        luck_suspect: rl.luck_suspect,
         match_score: matchScore,
+        bot_clear_rates: botClearRates,
         verified: true,
-        verification_passed: matchScore >= 70,
+        verification_passed: passed,
+        actual_difficulty: (typeof rl.difficulty_score === 'number') ? rl.difficulty_score : Math.max(0, Math.min(1, 1 - predicted)),
       };
 
       await saveProductionLevels(batchId, [{
         meta: updatedMeta,
-        level_json: level.level_json,
+        level_json: verifyJson,
       }]);
+      if (usePreview) setDialDirty(false);  // 프리뷰 검증=디스크 반영 완료 → dirty 해제
 
-      const passStatus = matchScore >= 70 ? '✓ 통과' : '✗ 미달';
+      const passStatus = passed ? '✓ 통과' : '✗ 미달';
       addNotification(
-        matchScore >= 70 ? 'success' : 'warning',
-        `Lv.${levelNumber} 검증 완료: ${matchScore.toFixed(0)}% ${passStatus}`
+        passed ? 'success' : 'warning',
+        `Lv.${levelNumber} RL검증: 예측 ${(predicted * 100).toFixed(0)}% / 목표 ${(target * 100).toFixed(0)}% (gap ${gapPp >= 0 ? '+' : ''}${gapPp.toFixed(0)}%p) ${passStatus}`
       );
       loadLevels();
       onStatsUpdate();
@@ -6928,6 +7015,11 @@ function TestTab({
                               ← 템플릿 #{templateNum}
                             </span>
                           )}
+                          {typeof level.meta.pattern_index === 'number' && level.meta.pattern_index >= 64 && (
+                            <span className="ml-2 text-xs text-cyan-400 font-normal" title="커스텀 패턴 기반 생성 — 패턴 디버거 '번호로 찾기'에 이 번호 입력">
+                              🎨 커스텀 #{level.meta.pattern_index}
+                            </span>
+                          )}
                         </div>
                         <div className={`text-xs ${isTemplateBased ? 'text-violet-400' : 'text-gray-400'}`}>
                           난이도: {level.meta.actual_difficulty.toFixed(3)} ({(level.meta.actual_difficulty * 100).toFixed(0)}%)
@@ -7260,6 +7352,26 @@ function TestTab({
                       ? `뭉침 ${clusterIndex >= 0 ? '+' : ''}${clusterIndex.toFixed(2)}`
                       : `뭉침 ${colorSpread}% 흩`}
                   </span>
+                </div>
+
+                {/* 4) 사용 타일 종류 수 — 입력 + 적용 (종류↑=어려움). 재타이핑=디스크 커밋(재검증 대상) */}
+                <div className="flex items-center gap-2">
+                  <span className="w-14 text-[10px] text-gray-400">타일 종류</span>
+                  <input
+                    type="number" min={2} max={12} step={1}
+                    value={tileCountInput}
+                    disabled={gimmickBusy}
+                    onChange={(e) => setTileCountInput(Number(e.target.value) || 2)}
+                    className="w-16 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-xs text-white"
+                  />
+                  <span className="text-[9px] text-gray-500">종 (많을수록 어려움)</span>
+                  <button
+                    onClick={applyTileCount}
+                    disabled={gimmickBusy}
+                    className="ml-auto px-2 py-1 rounded text-[10px] bg-indigo-700 hover:bg-indigo-600 text-white disabled:opacity-50"
+                    title="필드 타일을 N색으로 재타이핑 후 저장(재검증 대상). 위치·기믹·÷3 보존.">
+                    {gimmickBusy ? '⟳' : '적용'}
+                  </button>
                 </div>
 
                 {/* 상태 표시 */}

@@ -2801,6 +2801,34 @@ async def debug_list_custom_patterns():
     return {"custom_patterns": {k: v for k, v in data.items()}}
 
 
+@router.get("/debug/pattern-usage/{pattern_index}")
+async def debug_pattern_usage(pattern_index: int):
+    """이 pattern_index 를 쓰는 프로덕션 레벨 스캔(고아 방지용). 삭제 전 참조 확인.
+    Returns: {count, levels:[{batch_id, level_number}...]} (최대 50개)."""
+    import glob as _glob
+    prod_dir = os.path.normpath(os.path.join(
+        os.path.dirname(CUSTOM_PATTERNS_PATH), "production"))
+    hits: List[Dict[str, Any]] = []
+    total = 0
+    for f in _glob.glob(os.path.join(prod_dir, "*.json")):
+        try:
+            with open(f, encoding="utf-8") as fh:
+                d = json_module.load(fh)
+        except (OSError, ValueError):
+            continue
+        levels = d.get("levels") or (d.get("batch", {}) or {}).get("levels") or []
+        for lv in levels:
+            m = lv.get("meta", {}) if isinstance(lv, dict) else {}
+            if m.get("pattern_index") == pattern_index:
+                total += 1
+                if len(hits) < 50:
+                    hits.append({
+                        "batch_id": os.path.basename(f)[:-5],
+                        "level_number": m.get("level_number"),
+                    })
+    return {"pattern_index": pattern_index, "count": total, "levels": hits}
+
+
 # ===== [v16 🅑] 절차적 패턴 생성 + 큐레이션 =====
 def _positions_to_grid(positions: List[str], g: int) -> List[List[int]]:
     """미리보기용 2D 0/1 그리드."""
@@ -2829,6 +2857,21 @@ def _next_custom_index(data: Dict[str, Any]) -> int:
     return idx
 
 
+def _diversity_params(diversity: Optional[float]) -> Dict[str, Any]:
+    """랜덤성/다양성 슬라이더(0~1) → synthesize_concepts 파라미터 매핑.
+    0 = 정돈(안전·고품질·사람템플릿 위주), 1 = 최대랜덤(유기적·실험적·셀룰러 위주).
+    None = 기본값 사용(매핑 안 함)."""
+    if diversity is None:
+        return {}
+    d = max(0.0, min(1.0, float(diversity)))
+    return {
+        "pretty": d < 0.6,                     # 0.6+ 면 비대칭/유기적 모양 허용
+        "min_quality": round(0.62 - 0.30 * d, 3),   # 0.62→0.32 (높을수록 특이한 것 통과)
+        "template_ratio": round(0.50 - 0.35 * d, 3),# 0.50→0.15 (높을수록 템플릿 적게=신규↑)
+        "cellular_ratio": round(0.15 + 0.30 * d, 3),# 0.15→0.45 (높을수록 셀룰러 신규모양↑)
+    }
+
+
 class PatternSynthesizeRequest(_BaseModel):
     max_grid: int = 7                 # 컨셉 묶음 최대 그리드 한 변 (가시 캡 7)
     min_grid: int = 4                 # 컨셉 묶음 최소 그리드 한 변 (레벨 최소 4)
@@ -2838,6 +2881,10 @@ class PatternSynthesizeRequest(_BaseModel):
     fill_max: float = 0.85
     seed: Optional[int] = None
     cellular_only: bool = False       # True면 템플릿·모티프 배제, 순수 셀룰러 스프라이트만
+    diversity: Optional[float] = None # 0=정돈~1=최대랜덤 (None=기본)
+    seed_positions: Optional[List[str]] = None  # [A] 유저가 그린 씨앗 모양("x_y") — 이 모양 기반 변주 생성
+    seed_grid: Optional[int] = None             # 씨앗 그리드 한 변
+    seed_strength: float = 0.5                  # 씨앗 변형 강도 0~1
 
 
 @router.post("/patterns/synthesize")
@@ -2860,6 +2907,10 @@ async def patterns_synthesize(request: PatternSynthesizeRequest):
         fill_range=(request.fill_min, request.fill_max),
         seed=request.seed,
         cellular_only=request.cellular_only,
+        seed_positions=request.seed_positions,
+        seed_grid=request.seed_grid,
+        seed_strength=request.seed_strength,
+        **_diversity_params(request.diversity),
     )
     return {"concepts": concepts, "count": len(concepts)}
 
@@ -2873,6 +2924,10 @@ class PatternAutoGenerateRequest(_BaseModel):
     fill_max: float = 0.85
     seed: Optional[int] = None
     pool_multiplier: int = 12         # 후보 풀 배수(클수록 더 많이 생성→상위만 채택→품질↑)
+    diversity: Optional[float] = None # 0=정돈~1=최대랜덤 (None=기본)
+    seed_positions: Optional[List[str]] = None  # [A] 유저가 그린 씨앗 모양 — 이 모양 기반 변주 생성
+    seed_grid: Optional[int] = None             # 씨앗 그리드 한 변
+    seed_strength: float = 0.5                  # 씨앗 변형 강도 0~1
 
 
 @router.post("/patterns/auto-generate")
@@ -2896,6 +2951,10 @@ async def patterns_auto_generate(request: PatternAutoGenerateRequest):
         fill_range=(request.fill_min, request.fill_max),
         seed=request.seed,
         oversample=max(4, int(request.pool_multiplier)),
+        seed_positions=request.seed_positions,
+        seed_grid=request.seed_grid,
+        seed_strength=request.seed_strength,
+        **_diversity_params(request.diversity),
     )
 
     from ...core import pattern_db
@@ -3069,6 +3128,72 @@ async def create_new_pattern(grid_size: int = 8, positions: List[str] = [], name
     }
     _save_custom_patterns(custom)
     return {"created": True, "pattern_index": new_index, "positions_count": len(positions)}
+
+
+class PatternVariantIn(_BaseModel):
+    grid_size: int
+    positions: List[str]
+
+
+class PatternCreateMultiRequest(_BaseModel):
+    name: str = ""
+    variants: List[PatternVariantIn]   # 크기별로 따로 그린 변형들
+
+
+@router.post("/debug/pattern-create-multi")
+async def create_new_pattern_multi(request: PatternCreateMultiRequest):
+    """새 커스텀 패턴을 이름 + 여러 크기 변형으로 한 번에 저장.
+    각 크기(grid_size)는 사용자가 따로 그린 positions 로 저장된다(자동 fit 없음)."""
+    variants = [v for v in request.variants if v.positions and len(v.positions) >= 3]
+    if not variants:
+        raise HTTPException(status_code=400, detail="유효한 변형 없음(각 크기 최소 3타일)")
+
+    custom = _load_custom_patterns()
+    # 사용중 인덱스 집계(base "64" + 크기변형 "64_8x8" 둘 다 접두 숫자로 판단)
+    existing_indices = set()
+    for k in custom.keys():
+        head = str(k).split("_")[0]
+        if head.isdigit():
+            existing_indices.add(int(head))
+    new_index = 64
+    while new_index in existing_indices:
+        new_index += 1
+
+    # base 엔트리 = 이름 + 대표(첫) 변형
+    primary = variants[0]
+    custom[str(new_index)] = {
+        "grid_size": primary.grid_size,
+        "positions": primary.positions,
+        "count": len(primary.positions),
+        "name": request.name or f"custom_{new_index}",
+        "custom": True,
+    }
+    # 크기별 변형 저장
+    saved_sizes = []
+    for v in variants:
+        key = f"{new_index}_{v.grid_size}x{v.grid_size}"
+        custom[key] = {
+            "grid_size": v.grid_size,
+            "positions": v.positions,
+            "count": len(v.positions),
+        }
+        saved_sizes.append(v.grid_size)
+    _save_custom_patterns(custom)
+
+    # 이름을 pattern_config 에도 기록(목록 표시용)
+    try:
+        cfg = _load_pattern_config()
+        cfg.setdefault("custom_pattern_names", {})[str(new_index)] = custom[str(new_index)]["name"]
+        _save_pattern_config(cfg)
+    except Exception as ex:  # noqa: BLE001
+        print(f"[pattern-create-multi] name config 저장 스킵: {ex}")
+
+    return {
+        "created": True,
+        "pattern_index": new_index,
+        "name": custom[str(new_index)]["name"],
+        "sizes": sorted(saved_sizes),
+    }
 
 
 class TestLevelLayerConfig(_BaseModel):

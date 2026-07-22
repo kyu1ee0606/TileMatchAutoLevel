@@ -1,7 +1,22 @@
 # TileMatchAutoLevel - TODO 리스트
 
-**최종 업데이트**: 2026-07-16
-**프로젝트 버전**: MVP + 레벨 생성 자동화 + UX 개선 + 봇 시뮬레이터 v15.7 + 난이도 3단 다이얼 + 자동튜너 + 좁고깊은(동심)
+**최종 업데이트**: 2026-07-22
+**프로젝트 버전**: MVP + 레벨 생성 자동화 + 봇 시뮬레이터 + 난이도 튜너 + 패턴 합성 강화 + 커스텀 패턴 프로덕션 편입
+
+---
+
+## ✅ 완료 (2026-07-22)
+- **패턴 합성 강화**: 씨앗 기반 생성(A) `seed_positions`+`seed_strength`, 랜덤성 슬라이더, recombine ∪∩∖, template_ratio↑, `_build_seed_variants`(다운스케일 재연결). [문서](CHANGELOG_20260722_PATTERN_SYNTH_AND_FIXES.md)
+- **커스텀 패턴 프로덕션 편입**: `preComputePatternIndices`에 활성 커스텀(64+) 합류 → 실제 등장(~28%).
+- **검증 false-pass 수정**: 개별검증 canonical RL 통일(봇 matchScore≥70 폐기) + freshest json + 봇게이지 복원.
+- **타일 종류 수 튜너** `/tune/tilecount`: 컨테이너-aware ÷3 재타이핑(종류↑=어려움).
+- **패턴 디버거**: 크기별 그리기+이름(`/pattern-create-multi`), 5·6·7 필수, 인덱스 주식별자·번호검색·번호순정렬, 고아가드(`/pattern-usage`), 프로덕션 #배지, fallthrough 결정성 fix.
+- **보스 템플릿**: unknown·teleport 팔레트, 스토리 컨셉 테마3~5(290~1500, 122개).
+
+### 🔄 착수 예정: 유닛 조립 레이어 생성 (A안 본구현)
+- 위층 sparse(타일 미달) 해결: 바닥 큰층=주패턴 / 위층=밀도 높은 소형 유닛(3·6·9) 조립.
+- 설계 확정(외부 AI 자문 2회 + covering 교차검증): 경량 Bottom-Up Support-Mask, 인접 받침만으로 floating 0%, 유닛 3배수+예산 3배수→÷3 자연확보, reverse_generation 재사용, 앵커스냅.
+- 순서: 유닛 라이브러리 → 예산분배 → mask배치 → 앵커 → 패딩 → reverse연결 → 프로덕션 플래그.
 
 ---
 

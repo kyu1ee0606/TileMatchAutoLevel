@@ -80,6 +80,44 @@ def _largest_component(cells: Set[Cell]) -> Set[Cell]:
     return max(comps, key=len) if comps else set()
 
 
+def _dilate(cells: Set[Cell], g: int) -> Set[Cell]:
+    """1스텝 팽창(4방 이웃 추가, 격자 내). 리스케일로 끊긴 조각 재연결·최소칸 확보용."""
+    out = set(cells)
+    for (x, y) in cells:
+        for dx, dy in _NEI4:
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < g and 0 <= ny < g:
+                out.add((nx, ny))
+    return out
+
+
+def _build_seed_variants(cells: Set[Cell], src_g: int, sizes: List[int]) -> Dict[int, Set[Cell]]:
+    """유저 씨앗(src_g 좌표)을 각 목표 사이즈로 견고하게 렌더 → {size: cells}.
+    다운스케일 시 성긴 모양이 조각나는 문제를 팽창(dilate)으로 재연결 + 단일홀메움 + ÷3 보장.
+    (씨앗은 단일 사이즈만 주어지므로, 여기서 전 사이즈 변형을 미리 만들어 저장 → 이후 리스케일 실패 제거.)"""
+    out: Dict[int, Set[Cell]] = {}
+    for g in sizes:
+        c = set(cells) if g == src_g else _rescale_cells(cells, src_g, g)
+        # 조각났으면 팽창으로 재연결 (최대 3회)
+        for _ in range(3):
+            if len(_components(c)) <= 1:
+                break
+            c = _dilate(c, g)
+        c = _largest_component(c)
+        # 최소칸 미달이면 팽창으로 보강
+        for _ in range(3):
+            if len(c) >= 6:
+                break
+            c = _largest_component(_dilate(c, g))
+        c = _fill_single_holes(c, g)
+        c = _center_cells(c, g)
+        if len(c) % 3 != 0:
+            c = _enforce_div3(c, g)
+        if c and len(c) % 3 == 0 and 6 <= len(c) <= g * g:
+            out[g] = c
+    return out
+
+
 def _single_holes(cells: Set[Cell], g: int) -> Set[Cell]:
     """4방향이 모두 채워진(또는 그리드 밖) 빈 셀 = '깨진' 단일 구멍."""
     holes: Set[Cell] = set()
@@ -689,8 +727,13 @@ def _perturb_symmetric(cells: Set[Cell], g: int, rng: random.Random) -> Optional
 
 
 def _recombine_cells(a: Set[Cell], b: Set[Cell], g: int, op: str) -> Optional[Set[Cell]]:
-    """두 템플릿 셀을 합집합/교집합으로 재조합 → 새 모양. 정리·÷3 보장. 실패 시 None."""
-    cells = (a | b) if op == "union" else (a & b)
+    """두 템플릿 셀을 합집합/교집합/차집합으로 재조합 → 새 모양. 정리·÷3 보장. 실패 시 None."""
+    if op == "union":
+        cells = a | b
+    elif op == "diff":
+        cells = a - b            # 차집합: a 에서 b 겹치는 부분 파냄 → 구멍/오목 신규형
+    else:
+        cells = a & b            # 교집합
     cells = _largest_component(cells)
     cells = _fill_single_holes(cells, g)
     if len(cells) < 6 or len(cells) > g * g:
@@ -776,9 +819,12 @@ def synthesize_concepts(
     pretty: bool = True,
     min_quality: float = 0.55,
     use_templates: bool = True,
-    template_ratio: float = 0.30,
+    template_ratio: float = 0.45,   # [품질↑] 사람 템플릿 밑그림 비중 상향(0.30→0.45)
     cellular_ratio: float = 0.30,
     cellular_only: bool = False,
+    seed_positions: Optional[List[str]] = None,  # [A] 유저가 그린 씨앗 모양("x_y")
+    seed_grid: Optional[int] = None,             # 씨앗 그리드 한 변(positions 좌표계)
+    seed_strength: float = 0.5,                  # 씨앗 변형 강도 0=거의그대로~1=크게변형
 ) -> List[Dict]:
     """
     [v16 🅑] '모양 컨셉' 묶음 생성. 한 컨셉 = (전략·대칭·채움률 고정)을 [min_grid..max_grid]
@@ -801,6 +847,24 @@ def synthesize_concepts(
     disabled = _disabled_template_indices()           # 사람이 끈 템플릿은 씨앗 제외
     tmpl_keys = [i for i in templates.keys() if i not in disabled]
 
+    # [A] 유저 씨앗 모양 주입: 특수 인덱스 _SEED_IDX 로 templates 에 넣고, 아래 루프서 이 씨앗을
+    # 강제 base 로 써 변주(perturb)·재조합(recombine)·회전(plain) 변형만 생성 → '찍은 모양의 변주 묶음'.
+    _SEED_IDX = -999
+    seed_mode = False
+    if seed_positions and seed_grid and int(seed_grid) >= 3:
+        try:
+            scells = {tuple(map(int, p.split("_"))) for p in seed_positions
+                      if 0 <= int(p.split("_")[0]) < int(seed_grid) and 0 <= int(p.split("_")[1]) < int(seed_grid)}
+        except (ValueError, IndexError):
+            scells = set()
+        if len(scells) >= 4:
+            # 전 사이즈 변형 미리 견고 생성(다운스케일 조각남 방지). 한 사이즈라도 성공해야 씨앗모드.
+            seed_variants = _build_seed_variants(scells, int(seed_grid), sizes)
+            if seed_variants:
+                templates = dict(templates)
+                templates[_SEED_IDX] = seed_variants
+                seed_mode = True
+
     concepts: List[Dict] = []
     seen_concept: Set[Tuple] = set()
     # pretty 게이트가 후보를 많이 걸러내므로 시도 횟수를 키워 목표 count를 채운다.
@@ -813,7 +877,10 @@ def synthesize_concepts(
         motif_sym: Optional[str] = None  # 모티프 대칭화 모드(None=원형 유지)
         use_template = False
         use_cellular = False
-        if cellular_only:
+        if seed_mode:
+            # [A] 씨앗 강제 모드: 유저 씨앗(_SEED_IDX)만 base 로 변형 생성. mode 는 라벨용.
+            use_template, use_motif, mode = True, False, "seed"
+        elif cellular_only:
             # 순수 셀룰러 전용: 템플릿·모티프·기하 전부 배제, CA 스프라이트만 생성.
             use_cellular, use_motif, mode = True, False, "cellular"
         elif symmetry == "none":
@@ -841,29 +908,47 @@ def synthesize_concepts(
 
         t_submode = "plain"   # plain(회전/반전) | perturb(대칭변주) | recombine(재조합)
         t_idx2 = None
+        t_op = "union"        # recombine 연산: union|intersect|diff
         if use_template:
-            t_idx = rng.choice(tmpl_keys)
+            # [A] 씨앗 모드면 base 는 항상 유저 씨앗. 아니면 사람 템플릿 무작위.
+            t_idx = _SEED_IDX if seed_mode else rng.choice(tmpl_keys)
             t_rot = rng.randint(0, 3)
             t_flip = rng.random() < 0.5
             # 서브모드: plain은 원본 회전뿐이라 '기존과 똑같아 보임' → 비중 축소.
             # 변주·재조합(원본과 다른 모양) 위주: 30% plain · 40% perturb · 30% recombine.
             rsub = rng.random()
-            if rsub < 0.30:
+            # 씨앗 모드: 재조합 상대(t_idx2)는 사람 템플릿에서 뽑음(씨앗+템플릿 합성).
+            recomb_pool = tmpl_keys if seed_mode else [k for k in tmpl_keys if k != t_idx]
+            # [씨앗 변형 강도] seed_mode 면 strength 로 서브모드 분포 조절:
+            #  강도 0 → plain 80%(씨앗 거의 그대로) / 강도 1 → perturb·recombine 위주(크게 변형).
+            if seed_mode:
+                s = max(0.0, min(1.0, seed_strength))
+                # plain(회전본)은 고유 변형이 8개뿐이라 많이 잡으면 dedup으로 개수 부족.
+                # → plain 상한을 낮게(0.45) 두고 perturb/recombine(고유 다수)로 개수 확보.
+                plain_cut = 0.45 - 0.38 * s          # 0.45→0.07
+                perturb_cut = plain_cut + (0.30 + 0.15 * s)  # perturb 폭 0.30→0.45 (나머지 recombine)
+            else:
+                plain_cut, perturb_cut = 0.30, 0.70
+            if rsub < plain_cut:
                 t_submode = "plain"
-            elif rsub < 0.70:
+            elif rsub < perturb_cut:
                 t_submode = "perturb"
-            elif len(tmpl_keys) >= 2:
+            elif len(recomb_pool) >= 1:
                 t_submode = "recombine"
-                t_idx2 = rng.choice([k for k in tmpl_keys if k != t_idx])
+                t_idx2 = rng.choice(recomb_pool)
+                # 재조합 연산 다양화: union(합집합)·intersect(교집합)·diff(차집합) → 조합 다양성↑.
+                t_op = rng.choice(("union", "union", "intersect", "diff"))
             else:
                 t_submode = "perturb"
             rmark = "↻" * t_rot + ("⇋" if t_flip else "")
+            _base = "seed" if seed_mode else str(t_idx)  # 씨앗 모드 라벨 가독성
             if t_submode == "perturb":
-                strat_label = f"tmpl:{t_idx}{rmark}~p"
+                strat_label = f"tmpl:{_base}{rmark}~p"
             elif t_submode == "recombine":
-                strat_label = f"tmpl:{t_idx}+{t_idx2}"
+                _opmark = {"union": "∪", "intersect": "∩", "diff": "∖"}.get(t_op, "∪")
+                strat_label = f"tmpl:{_base}{_opmark}{t_idx2}"
             else:
-                strat_label = f"tmpl:{t_idx}{rmark}"
+                strat_label = f"tmpl:{_base}{rmark}"
         elif use_cellular:
             cell_bucket = rng.randint(0, 5)   # 패밀리 6개로 분산 → 라운드로빈서 여러 개 표면화
             strat_label = f"cellular#{cell_bucket}"
@@ -899,7 +984,7 @@ def synthesize_concepts(
                 if t_submode == "recombine":
                     ca = _make_template_cells(t_idx, g, t_rot, t_flip, templates)
                     cb = _make_template_cells(t_idx2, g, 0, False, templates)
-                    cells = _recombine_cells(ca, cb, g, "union") if (ca and cb) else None
+                    cells = _recombine_cells(ca, cb, g, t_op) if (ca and cb) else None
                 else:
                     cells = _make_template_cells(t_idx, g, t_rot, t_flip, templates)
                     if cells and t_submode == "perturb":
@@ -1014,6 +1099,9 @@ def synthesize_concepts(
 
     picked: List[Dict] = []
     picked_cells: List[Set[Cell]] = []
+    # 유사도 컷: 씨앗 모드는 모든 변형이 씨앗과 닮은 게 정상 → 완화(0.95)해야 개수 확보.
+    # 일반 모드는 0.82(서로 다른 모양 강제).
+    sim_cap = 0.95 if seed_mode else 0.82
 
     def _pick_from(cat: str, n: int) -> int:
         if n <= 0 or cat not in cat_fam:
@@ -1029,7 +1117,7 @@ def synthesize_concepts(
                 continue
             c = cat_fam[cat][f].pop()
             cs = _big_cells(c)
-            if any(len(cs & pc) / (len(cs | pc) or 1) >= 0.82 for pc in picked_cells):
+            if any(len(cs & pc) / (len(cs | pc) or 1) >= sim_cap for pc in picked_cells):
                 continue
             picked.append(c)
             picked_cells.append(cs)

@@ -5969,6 +5969,14 @@ class LevelGenerator:
 
         TOTAL_PATTERNS = 64
 
+        # [커스텀 fallthrough 결정성 fix] 커스텀 인덱스(64+)인데 요청 크기에 맞는 변형이 없어
+        # (_get_custom_pattern None) 여기 도달하면, 아래 else(auto-select)가 매 호출 random 으로
+        # 다른 모양을 골라 → 패턴 목록 프리뷰가 저장/리로드마다 깜빡이고(다른 커스텀이 랜덤 변경돼 보임)
+        # 레벨 생성도 비결정적이 됨. → built-in 패턴으로 결정적 매핑(index % 64). 같은 인덱스는 항상 같은 모양.
+        # (신규 커스텀은 5·6·7 필수 입력이라 정상적으론 여기 거의 안 옴 — 기존 불완전 변형 커스텀 방어용.)
+        if pattern_index is not None and pattern_index >= TOTAL_PATTERNS:
+            pattern_index = pattern_index % TOTAL_PATTERNS
+
         # If pattern_index is specified, use that specific pattern
         if pattern_index is not None and 0 <= pattern_index < TOTAL_PATTERNS:
             # PRIORITY 1: Use pixel-art template if available (more accurate shapes)

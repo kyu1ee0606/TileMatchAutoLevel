@@ -31,6 +31,8 @@ export interface GenerateRequest {
   reverse_generation_max_open?: number;  // 난이도 레버(1~3)
   // [B] 층별 크기 다양화 시작 레벨 (undefined=미적용). col/row 교대값 유지 → 게임 정합.
   size_diversity_start_level?: number;
+  // [유닛 조립] 바닥 주패턴 + 위층 소형 유닛 조립(sparse 해결). use_reverse_generation 병용 권장.
+  unit_assembly?: boolean;
   // [보스 생성기] 그리드≤8·5~6층·레시피 로테이션 (백엔드 boss_mode)
   boss_mode?: boolean;
 }
@@ -72,6 +74,8 @@ export async function generateLevel(
     pattern_index: params.pattern_index,
     // [B] 층별 크기 다양화 시작 레벨
     size_diversity_start_level: params.size_diversity_start_level,
+    // [유닛 조립]
+    unit_assembly: params.unit_assembly,
     // Auto gimmick selection
     auto_select_gimmicks: gimmickOptions?.auto_select_gimmicks,
     available_gimmicks: gimmickOptions?.available_gimmicks,

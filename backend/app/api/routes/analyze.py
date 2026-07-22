@@ -2801,6 +2801,25 @@ async def debug_list_custom_patterns():
     return {"custom_patterns": {k: v for k, v in data.items()}}
 
 
+@router.get("/debug/unit-library")
+async def debug_unit_library():
+    """[유닛 조립] 소형 유닛 라이브러리(3·6·9칸) 미리보기. 각 유닛=이름·크기·밀도·그리드."""
+    from ...core.unit_templates import UNITS_BY_SIZE
+    out = []
+    for size in sorted(UNITS_BY_SIZE.keys()):
+        for u in UNITS_BY_SIZE[size]:
+            grid = [[0] * u.w for _ in range(u.h)]
+            for (x, y) in u.cells:
+                grid[y][x] = 1
+            out.append({
+                "name": u.name, "size": u.size,
+                "w": u.w, "h": u.h,
+                "density": round(u.density(), 2),
+                "grid": grid,
+            })
+    return {"units": out, "count": len(out)}
+
+
 @router.get("/debug/pattern-usage/{pattern_index}")
 async def debug_pattern_usage(pattern_index: int):
     """이 pattern_index 를 쓰는 프로덕션 레벨 스캔(고아 방지용). 삭제 전 참조 확인.

@@ -680,6 +680,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
   // 다양화(인접층 회피)하고 중앙 배치 → 스택 실루엣 다양화. 튜토리얼/초반(<start)은 단순 유지.
   // 0/빈값이면 미적용. col/row(교대값)는 유지되어 게임과 정합.
   const [sizeDiversityStartLevel, setSizeDiversityStartLevel] = useState<number>(101);
+  const [unitAssembly, setUnitAssembly] = useState<boolean>(false); // 유닛 조립(sparse 해결, 일반레벨만)
   const [generationProgress, setGenerationProgress] = useState<ProductionGenerationProgress>({
     status: 'idle',
     total_sets: 0,
@@ -1250,6 +1251,9 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
               pattern_index: isBossLevel ? undefined : patternIndex,
               // [B] 층별 크기 다양화 (0이면 미적용)
               size_diversity_start_level: sizeDiversityStartLevel > 0 ? sizeDiversityStartLevel : undefined,
+              // [유닛 조립] 바닥 주패턴 + 위층 소형 유닛 조립(sparse 해결·타겟 도달). reverse_generation 병용.
+              unit_assembly: unitAssembly && !isBossLevel ? true : undefined,
+              use_reverse_generation: unitAssembly && !isBossLevel ? true : undefined,
               // [보스 생성기] 그리드≤8·5~6층·화려한 레시피. 목표 클리어율 절반은 RL 검증에서 적용.
               boss_mode: isBossLevel || undefined,
             };
@@ -2041,6 +2045,8 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             onTileTypeProfileChange={setTileTypeProfile}
             sizeDiversityStartLevel={sizeDiversityStartLevel}
             onSizeDiversityStartLevelChange={setSizeDiversityStartLevel}
+            unitAssembly={unitAssembly}
+            onUnitAssemblyChange={setUnitAssembly}
             rlSkillMean={rlSkillMean}
             onRlSkillMeanChange={setRlSkillMean}
             autoQueueRunning={autoQueueRunning}
@@ -2070,6 +2076,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             isGenerating={isGenerating}
             tileTypeProfile={tileTypeProfile}
             rlSkillMean={rlSkillMean}
+            unitAssembly={unitAssembly}
             onStatsUpdate={async () => {
               const newStats = await calculateProductionStats(selectedBatchId);
               setStats(newStats);
@@ -2435,6 +2442,8 @@ function GenerateTab({
   onTileTypeProfileChange,
   sizeDiversityStartLevel,
   onSizeDiversityStartLevelChange,
+  unitAssembly,
+  onUnitAssemblyChange,
   rlSkillMean,
   onRlSkillMeanChange,
   autoQueueRunning,
@@ -2465,6 +2474,8 @@ function GenerateTab({
   onTileTypeProfileChange: (value: string) => void;
   sizeDiversityStartLevel: number;
   onSizeDiversityStartLevelChange: (value: number) => void;
+  unitAssembly: boolean;
+  onUnitAssemblyChange: (value: boolean) => void;
   rlSkillMean: number;
   onRlSkillMeanChange: (value: number) => void;
   autoQueueRunning: boolean;
@@ -2712,6 +2723,19 @@ function GenerateTab({
               <span className="text-emerald-400"> 랜덤(최소 3×3~그리드, 인접층 회피)</span>으로 다양화하고 중앙 배치 →
               스택 실루엣 다양화. <span className="text-yellow-400">0이면 미적용</span>(튜토리얼/초반은 단순 유지 권장, 기본 101).
               레이어 col/row(교대값)는 유지되어 게임과 정합.
+            </p>
+          </div>
+
+          {/* [유닛 조립] 위층 sparse 해결 */}
+          <div className="bg-gray-700/40 rounded-lg p-3">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" checked={unitAssembly} onChange={(e) => onUnitAssemblyChange(e.target.checked)} />
+              <span className="text-sm text-white font-medium">🧱 유닛 조립 (위층 밀도 확보)</span>
+            </label>
+            <p className="text-xs text-gray-400 mt-1">
+              바닥 큰층 = 주 패턴 / <span className="text-emerald-400">위 작은층 = 밀도 높은 소형 유닛(3·6·9칸) 조립</span> →
+              위층 sparse(타일 미달) 해결 + 위층 다양성. 아래층 받침 규칙으로 floating 없음, ÷3·클리어 보장(reverse_generation 병용).
+              <span className="text-yellow-400"> 일반 레벨만</span>(보스 제외). Lv11+ 최소 60타일과 함께 밀도 향상.
             </p>
           </div>
 
@@ -3041,12 +3065,14 @@ function TestTab({
   onStatsUpdate,
   tileTypeProfile,
   rlSkillMean,
+  unitAssembly,
 }: {
   batchId: string;
   isGenerating?: boolean;
   onStatsUpdate: () => void;
   tileTypeProfile: string;
   rlSkillMean: number;
+  unitAssembly?: boolean;
 }) {
   const { addNotification } = useUIStore();
   const [levels, setLevels] = useState<ProductionLevel[]>([]);
@@ -4599,7 +4625,7 @@ function TestTab({
       // 데드락 모양에서 탈출 불가하므로 일반 generate 경로로 전환하고 meta.template_id 도 제거한다.
       // [보스 포맷 정합] 보스는 일반 레벨템플릿(7/7) 차용 재생성 금지 → 아래 boss_mode 절차생성(8/7).
       // (전용 보스 템플릿은 위 _boss_template_id 분기서 이미 from-boss-template로 처리됨.)
-      if (templateId && !userOverridingPattern && !forceNoTemplate && !isBossRegen && !options?.newShape) {
+      if (templateId && !userOverridingPattern && !forceNoTemplate && !isBossRegen && !options?.newShape && !unitAssembly) {
         const seed = Math.floor(Date.now() % 1_000_000);
         const tplResp = await apiClient.post('/generate/from-template', {
           template_id: templateId,
@@ -4791,6 +4817,9 @@ function TestTab({
                 pattern_type: patternType,
                 // 보스: pattern_index 미지정 → 백엔드 BOSS_RECIPES(레벨번호 결정적) 적용
                 pattern_index: isBossLevel ? undefined : patternIndex,
+                // [유닛 조립] 토글 켜짐 + 일반레벨이면 재생성도 유닛 조립 방식 적용(테스트).
+                unit_assembly: unitAssembly && !isBossLevel ? true : undefined,
+                use_reverse_generation: unitAssembly && !isBossLevel ? true : undefined,
                 // [보스 생성기]
                 boss_mode: isBossLevel || undefined,
               },

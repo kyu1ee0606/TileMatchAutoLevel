@@ -568,6 +568,12 @@ export function PatternDebugPanel() {
   };
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [showSynthModal, setShowSynthModal] = useState(false);
+  // [유닛 조립] 소형 유닛 라이브러리 뷰어
+  const [unitLib, setUnitLib] = useState<{ name: string; size: number; w: number; h: number; density: number; grid: number[][] }[]>([]);
+  const [unitOpen, setUnitOpen] = useState(false);
+  useEffect(() => {
+    apiClient.get('/debug/unit-library').then(r => setUnitLib(r.data.units || [])).catch(() => {});
+  }, []);
   const [sortMode, setSortMode] = useState<'order' | 'name' | 'count'>('order');
 
   useEffect(() => { loadPatterns(); loadConfig(); }, [gridSize]);
@@ -905,6 +911,31 @@ export function PatternDebugPanel() {
       <p className="text-sm text-gray-400">
         패턴을 선택 → 비교 확인 → 그리드 클릭/드래그로 편집 → 복사하여 공유
       </p>
+
+      {/* [유닛 조립] 소형 유닛 라이브러리 (unit_assembly 위층 조립에 사용) */}
+      <div className="bg-gray-800/50 rounded p-2">
+        <button onClick={() => setUnitOpen(o => !o)} className="text-xs text-amber-300 font-medium">
+          {unitOpen ? '▼' : '▶'} 🧱 유닛 라이브러리 ({unitLib.length}개) <span className="text-gray-500">— 유닛 조립 위층에 쓰이는 소형 조각(3·6·9칸)</span>
+        </button>
+        {unitOpen && (
+          <div className="flex flex-wrap gap-3 mt-2">
+            {unitLib.map((u, i) => (
+              <div key={i} className="flex flex-col items-center">
+                <div className="inline-block border border-amber-800/50 rounded">
+                  {u.grid.map((row, y) => (
+                    <div key={y} className="flex">
+                      {row.map((c, x) => (
+                        <div key={x} className={`w-4 h-4 border border-gray-900/40 ${c ? 'bg-amber-500' : 'bg-gray-800'}`} />
+                      ))}
+                    </div>
+                  ))}
+                </div>
+                <div className="text-[9px] text-gray-400 mt-0.5">{u.name} · {u.size}칸 · {Math.round(u.density * 100)}%</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* 그리드 크기 */}
       <div className="flex items-center gap-2">

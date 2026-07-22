@@ -183,6 +183,10 @@ class GenerationParams:
     # 중앙 축소 = 거북등껍질 코히어런트 스택. 각층=아래층의 중앙 부분집합 → 홀짝 커버 정합, peel 클리어.
     # 상위층 무작위 흩어짐 제거(유저 피드백). use_reverse_generation과 병용해 타입 솔버블화.
     concentric_deep: bool = False
+    # [유닛 조립] 바닥 큰층=주 패턴 / 위 작은층=밀도 높은 소형 유닛(3·6·9) 조립.
+    # 위층 sparse(타일 미달) 해결 + 다양성. 받침(valid_mask) 규칙으로 floating 0.
+    # use_reverse_generation 과 병용해 타입 솔버블화(÷3·클리어가능).
+    unit_assembly: bool = False
     # [보스 생성기] 10의 배수 보스 레벨 전용 모드. 효과:
     # - 그리드 상한: 선언 최대 8 (cols=7 → 짝수층 8, 디바이스 가독성 한계 9x9 미만 준수)
     # - 층수 5~6 (그리드 폭 대신 깊이로 물량/난이도 확보)

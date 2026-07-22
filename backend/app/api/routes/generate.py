@@ -1290,6 +1290,7 @@ def _generate_level_impl(
         min_layers=request.min_layers if getattr(request, "min_layers", None) else 3,
         layer_steps=getattr(request, "layer_steps", None),
         concentric_deep=getattr(request, "concentric_deep", False),
+        unit_assembly=getattr(request, "unit_assembly", False),
         layer_tile_configs=layer_tile_configs,
         layer_obstacle_configs=layer_obstacle_configs,
         layer_pattern_configs=layer_pattern_configs,

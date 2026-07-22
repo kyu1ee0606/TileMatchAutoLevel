@@ -115,6 +115,10 @@ class GenerateRequest(BaseModel):
         default=False,
         description="동심 침식 스택(좁고깊은/중간보스). 각 층=중앙 정사각, 위로 완만 축소 → 코히어런트 거북등껍질. use_reverse_generation과 병용 권장."
     )
+    unit_assembly: bool = Field(
+        default=False,
+        description="유닛 조립: 바닥 큰층=주 패턴 / 위 작은층=밀도 높은 소형 유닛(3·6·9) 조립. 위층 sparse(타일 미달) 해결·타겟 도달·floating 0. use_reverse_generation과 병용 권장."
+    )
     layer_tile_configs: Optional[List[LayerTileConfig]] = Field(
         default=None,
         description="Per-layer tile count settings. Unspecified layers auto-distribute remaining tiles."

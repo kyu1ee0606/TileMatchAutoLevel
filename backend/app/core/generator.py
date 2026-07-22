@@ -198,9 +198,9 @@ LEVEL_CONFIG_TABLE = [
     # 레이어 층수 상향으로 보충해 난이도(깊이/블로킹)·타일 총량 유지.
     (3,    1, 2, 4, (9, 18),   4,  "Tutorial - 튜토리얼 (1-3)"),
     (10,   3, 4, 5, (30, 36),  5,  "Tutorial - 후반 튜토리얼 (4-10)"),
-    (30,   3, 4, 5, (30, 48),  6,  "Early - 초반 (11-30)"),
-    (60,   3, 4, 6, (30, 50),  8,  "Early-Mid - 초중반 (31-60)"),
-    (100,  4, 6, 6, (50, 80),  9,  "Mid - 중반 (61-100)"),
+    (30,   3, 4, 5, (60, 72),  6,  "Early - 초반 (11-30) [최소60]"),
+    (60,   3, 4, 6, (60, 78),  8,  "Early-Mid - 초중반 (31-60) [최소60]"),
+    (100,  4, 6, 6, (60, 90),  9,  "Mid - 중반 (61-100) [최소60]"),
     (225,  5, 7, 6, (60, 90),  9,  "Mid-Late - 중후반 (101-225)"),
     (600,  6, 8, 6, (70, 100), 10, "Standard - A등급 주력 (226-600)"),
     (1125, 7, 9, 6, (75, 105), 11, "Advanced - B등급 기준선 (601-1125)"),
@@ -776,6 +776,7 @@ class LevelGenerator:
     # Exception: Level 1-5 tutorial levels can have fewer tiles
     MIN_TILE_COUNT = 18
     TUTORIAL_MIN_TILE_COUNT = 9  # Level 1-5 tutorial: minimum 3 sets (9 tiles)
+    MIN_TILE_COUNT_LV11 = 60     # [사용자] Lv11+ 최소 60타일(밀도 확보). ÷3 보정으로 60~63.
 
     @staticmethod
     def _create_goal_tile(goal_type: str, count: int) -> List:
@@ -1564,6 +1565,170 @@ class LevelGenerator:
             level[lk]["tiles"] = tiles
             level[lk]["num"] = str(len(tiles))
         logger.info(f"[CONCENTRIC] pattern={pidx} {len(active_layers)}층, 총 {len(all_positions)} 위치")
+        return all_positions
+
+    def _assemble_units_in_mask(self, mask, budget, gcol, grow, rng):
+        """valid_mask(받침 있는 칸) 안에 소형 유닛을 budget(3배수)만큼 조립. 앵커스냅(마스크 중심 근접)
+        + 상위후보 랜덤. 겹침 없이. 반환 = 배치된 셀 집합."""
+        from .unit_templates import UNITS_BY_SIZE, units_for_budget
+        placed = set()
+        if not mask:
+            return placed
+        mx = sum(x for x, y in mask) / len(mask)
+        my = sum(y for x, y in mask) / len(mask)
+        for sz in units_for_budget(budget):
+            units = UNITS_BY_SIZE.get(sz, [])
+            if not units:
+                continue
+            unit = rng.choice(units)
+            cands = []
+            for ox in range(0, gcol - unit.w + 1):
+                for oy in range(0, grow - unit.h + 1):
+                    pc = unit.placed(ox, oy)
+                    if pc <= mask and not (pc & placed):
+                        cx, cy = ox + unit.w / 2.0, oy + unit.h / 2.0
+                        cands.append(((cx - mx) ** 2 + (cy - my) ** 2, pc))
+            if not cands:
+                continue
+            cands.sort(key=lambda c: c[0])
+            k = min(len(cands), 5)
+            placed |= rng.choice(cands[:k])[1]
+        return placed
+
+    def _build_unit_assembly_layers(self, level: Dict[str, Any], active_layers: List[int],
+                                    cols: int, rows: int, params: "GenerationParams",
+                                    n_target: int) -> List[Tuple[int, str]]:
+        """[유닛 조립] 바닥 큰층=주 패턴 / 위 작은층=밀도 높은 소형 유닛(3·6·9)을 아래층 받침(valid_mask)
+        안에 예산만큼 조립. sparse(타일 미달) 해결 + 위층 다양성. floating/데드락 0(받침 규칙).
+        타입 t0(파이프라인/역생성 배정). 반환 = (layer_idx, pos) 목록."""
+        import random as _r
+        from .unit_templates import valid_support_mask, units_for_budget
+
+        # [최소 타일] preserve_pattern 이라 _ensure_minimum_tiles 가 스킵됨 → 여기서 직접 하한 반영.
+        # 생성 후 타입분배·÷3 보정이 ~15~20% trim 하므로, 빌더는 하한 위로 버퍼(×1.28)를 두어
+        # 최종이 하한 이상 되게 오버타겟. (그리드 용량 상한으로 자연 클램프)
+        _ln = getattr(params, "level_number", None)
+        if _ln is not None and _ln <= 5:
+            _min = self.TUTORIAL_MIN_TILE_COUNT
+        elif _ln is not None and _ln >= 11:
+            _min = self.MIN_TILE_COUNT_LV11
+        else:
+            _min = self.MIN_TILE_COUNT
+        n_target = max(n_target, int(round(_min * 1.28 / 3)) * 3)
+
+        n = len(active_layers)
+        # 층별 예산: 피라미드 가중(아래 많이). 각 3배수. Σ ≈ n_target.
+        weights = [n - i for i in range(n)]
+        wsum = sum(weights) or 1
+        budgets = [max(3, 3 * round((n_target * w / wsum) / 3)) for w in weights]
+
+        pidx = params.pattern_index if params.pattern_index is not None else _r.choice([0, 1, 2, 3, 8, 13, 16, 20])
+        pos_map: Dict[int, Set[Tuple[int, int]]] = {}
+        all_positions: List[Tuple[int, str]] = []
+
+        for i, layer_idx in enumerate(active_layers):
+            odd = (layer_idx % 2 == 1)
+            gcol = cols if odd else cols + 1
+            grow = rows if odd else rows + 1
+
+            if i == 0:
+                # 바닥 = 주 패턴 (받침 불필요)
+                try:
+                    mp = self._generate_aesthetic_positions(
+                        gcol, grow, target_count=1000, pattern_index=pidx,
+                        target_difficulty=params.target_difficulty)
+                    cells = set()
+                    for p in mp:
+                        x, y = map(int, p.split("_"))
+                        if 0 <= x < gcol and 0 <= y < grow:
+                            cells.add((x, y))
+                except Exception:  # noqa: BLE001
+                    cells = set()
+                if len(cells) < 6:
+                    c = gcol // 2
+                    cells = {(x, y) for x in range(gcol) for y in range(grow) if abs(x - c) + abs(y - c) <= c}
+            else:
+                below = pos_map[active_layers[i - 1]]
+                below_col = cols if (active_layers[i - 1] % 2 == 1) else cols + 1
+                mask = valid_support_mask(below, active_layers[i - 1], layer_idx, below_col, gcol, grow)
+                cells = self._assemble_units_in_mask(mask, budgets[i], gcol, grow, _r)
+
+            pos_map[layer_idx] = cells
+
+        # [패딩] 총합 < n_target 이면 Size-3 유닛으로 보충. 바닥층(받침 불필요) 먼저,
+        # 부족하면 위층 valid_mask(받침 있는 빈칸)로 확산 → 최소 타일 하한 달성.
+        from .unit_templates import UNITS_BY_SIZE
+        u3 = UNITS_BY_SIZE.get(3, [])
+
+        def _pad_layer(layer_idx: int, allowed: Set[Tuple[int, int]], need: int) -> int:
+            """allowed(놓을 수 있는 칸) 안에서 Size-3 유닛으로 need(3배수) 만큼 채움. 실제 추가 타일수 반환."""
+            if need <= 0 or not u3:
+                return 0
+            gcol = cols if (layer_idx % 2 == 1) else cols + 1
+            grow = cols if (layer_idx % 2 == 1) else cols + 1
+            free = [(x, y) for (x, y) in allowed if (x, y) not in pos_map[layer_idx]]
+            _r.shuffle(free)
+            added = 0
+            guard = 0
+            while need > 0 and guard < 200:
+                guard += 1
+                u = _r.choice(u3)
+                placed = None
+                freeset = set(free)
+                for (ox, oy) in free:
+                    pc = u.placed(ox, oy)
+                    if all(0 <= x < gcol and 0 <= y < grow for x, y in pc) and pc <= freeset and not (pc & pos_map[layer_idx]):
+                        placed = pc
+                        break
+                if placed is None:
+                    # 유닛 모양이 안 들어감 → 받침 있는 개별 셀 3개로 폴백(÷3 유지, floating 없음).
+                    if len(free) >= 3:
+                        placed = set(free[:3])
+                    else:
+                        break
+                pos_map[layer_idx] |= placed
+                free = [f for f in free if f not in placed]
+                added += 3
+                need -= 3
+            return added
+
+        total = sum(len(c) for c in pos_map.values())
+        if total < n_target and active_layers:
+            need = ((n_target - total) // 3) * 3
+            # 1) 바닥층 전체 그리드(받침 불필요)
+            g0 = cols + 1
+            allowed0 = {(x, y) for x in range(g0) for y in range(g0)}
+            need -= _pad_layer(active_layers[0], allowed0, need)
+            # 2) 부족하면 위층 valid_mask(아래층 받침 있는 칸)로 확산
+            for i in range(1, len(active_layers)):
+                if need <= 0:
+                    break
+                li = active_layers[i]
+                below = pos_map[active_layers[i - 1]]
+                below_col = cols if (active_layers[i - 1] % 2 == 1) else cols + 1
+                ucol = cols if (li % 2 == 1) else cols + 1
+                mask = valid_support_mask(below, active_layers[i - 1], li, below_col, ucol, ucol)
+                need -= _pad_layer(li, mask, need)
+
+        # write
+        for layer_idx in active_layers:
+            odd = (layer_idx % 2 == 1)
+            gcol = cols if odd else cols + 1
+            grow = rows if odd else rows + 1
+            cells = pos_map[layer_idx]
+            tiles: Dict[str, Any] = {}
+            for (x, y) in cells:
+                pos = f"{x}_{y}"
+                tiles[pos] = ["t0", ""]
+                all_positions.append((layer_idx, pos))
+            lk = f"layer_{layer_idx}"
+            if lk not in level or not isinstance(level.get(lk), dict):
+                level[lk] = {}
+            level[lk]["col"] = str(gcol)
+            level[lk]["row"] = str(grow)
+            level[lk]["tiles"] = tiles
+            level[lk]["num"] = str(len(tiles))
+        logger.info(f"[UNIT_ASSEMBLY] pattern={pidx} {n}층 예산{budgets} 총{len(all_positions)}타일 (목표{n_target})")
         return all_positions
 
     def _place_key_tiles(self, level: Dict[str, Any], count: int) -> None:
@@ -3095,7 +3260,13 @@ class LevelGenerator:
 
         # [좁고깊은/중간보스] 동심 침식 스택: layer_0 채운 모양 → 위로 erode(중앙 축소).
         # 상위층 무작위 흩어짐 제거. 나머지 패턴 블록 스킵. (타입 솔버블화는 use_reverse_generation.)
-        if getattr(params, "concentric_deep", False):
+        if getattr(params, "unit_assembly", False):
+            # [유닛 조립] 바닥 주패턴 + 위층 소형유닛(받침 내). sparse 해결·타겟 도달·floating 0.
+            all_layer_positions = self._build_unit_assembly_layers(
+                level, active_layers, cols, rows, params, total_target)
+            level["_preserve_pattern"] = True   # 조립 모양 보존(피라미드 클램프/재생성 스킵)
+            level["_pattern_locked_positions"] = {p for _, p in all_layer_positions}
+        elif getattr(params, "concentric_deep", False):
             all_layer_positions = self._build_concentric_layers(level, active_layers, cols, rows, params)
             level["_preserve_pattern"] = True  # 피라미드 클램프/재생성 스킵(동심 모양 보존)
             level["_pattern_locked_positions"] = {p for _, p in all_layer_positions}
@@ -12516,8 +12687,13 @@ class LevelGenerator:
 
         # Check minimum tile count based on level number
         # Tutorial levels (1-5) have lower minimum, regular levels (6+) need more tiles
-        is_tutorial = level_number is not None and level_number <= 5
-        min_tiles = self.TUTORIAL_MIN_TILE_COUNT if is_tutorial else self.MIN_TILE_COUNT
+        # [사용자 요청] Lv11+ 는 최소 60타일 보장(밀도 확보). Lv1-5 튜토(9), Lv6-10(18).
+        if level_number is not None and level_number <= 5:
+            min_tiles = self.TUTORIAL_MIN_TILE_COUNT
+        elif level_number is not None and level_number >= 11:
+            min_tiles = self.MIN_TILE_COUNT_LV11
+        else:
+            min_tiles = self.MIN_TILE_COUNT
         below_minimum = total_matchable < min_tiles
 
         # Level is playable if: no bad types, divisible by 3, and meets minimum

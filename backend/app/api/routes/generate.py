@@ -75,22 +75,42 @@ def _get_gen_pool() -> ProcessPoolExecutor:
     return _gen_process_pool
 
 
+# [B] autoplay(검증 봇시뮬) 전용 풀 — 기존엔 gen 풀 공유 → 검증이 생성풀을 독점해 배치 경합.
+# 분리해 생성(gen풀)과 검증(autoplay풀)이 서로 안 막게 함. 배치 throughput↑.
+_autoplay_process_pool: ProcessPoolExecutor | None = None
+AUTOPLAY_POOL_WORKERS = max(3, min(6, (os.cpu_count() or 4) - 2))
+
+
+def _get_autoplay_pool() -> ProcessPoolExecutor:
+    """검증 봇시뮬 전용 프로세스 풀 (lazy) — gen 풀과 분리."""
+    global _autoplay_process_pool
+    if _autoplay_process_pool is None:
+        _autoplay_process_pool = ProcessPoolExecutor(max_workers=AUTOPLAY_POOL_WORKERS)
+        logger.info(f"[AUTOPLAY_POOL] Created ProcessPoolExecutor with {AUTOPLAY_POOL_WORKERS} workers (PID={os.getpid()})")
+    return _autoplay_process_pool
+
+
 def warmup_gen_pool() -> None:
     """워커 프로세스 미리 스폰 — 첫 요청의 콜드스타트 지연 제거 (startup 훅에서 호출)."""
     try:
         pool = _get_gen_pool()
         list(pool.map(int, range(GEN_POOL_WORKERS)))
+        ap = _get_autoplay_pool()
+        list(ap.map(int, range(AUTOPLAY_POOL_WORKERS)))
         logger.info("[GEN_POOL] warmed up")
     except Exception:
         logger.exception("[GEN_POOL] warmup failed")
 
 
 def shutdown_gen_pool() -> None:
-    """앱 종료 시 생성 풀 정리 (main.py shutdown 훅에서 호출)."""
-    global _gen_process_pool
+    """앱 종료 시 생성/검증 풀 정리 (main.py shutdown 훅에서 호출)."""
+    global _gen_process_pool, _autoplay_process_pool
     if _gen_process_pool is not None:
         _gen_process_pool.shutdown(wait=False)
         _gen_process_pool = None
+    if _autoplay_process_pool is not None:
+        _autoplay_process_pool.shutdown(wait=False)
+        _autoplay_process_pool = None
 
 
 def _generate_core_worker(request_dict: dict) -> dict:

@@ -603,10 +603,12 @@ def _run_profiles_parallel(
     - 청크 시드는 누적 오프셋으로 겹치지 않게 분리(고정 시드일 때 중복 방지).
     - clear_rate/avg/min/max/combo는 정확 병합, std는 Chan 병렬분산으로 정확 병합.
     """
-    from .generate import _get_gen_pool, GEN_POOL_WORKERS
+    from .generate import _get_autoplay_pool
 
-    # 프로파일당 청크 수: 총 태스크가 풀 워커를 채우도록
-    chunks_per_profile = max(1, round(GEN_POOL_WORKERS / max(1, len(profiles))))
+    # [A] 프로파일당 청크=1 → 검증 1회가 프로파일당 1워커만 사용(총 len(profiles)워커).
+    # 기존엔 round(GEN_POOL_WORKERS/profiles)=3청크로 풀을 독점 → 동시 레벨 경합.
+    # 청크1이면 배치에서 여러 레벨 검증이 동시 진행(throughput↑). 단일레벨 latency만 약간↑.
+    chunks_per_profile = 1
     tasks: List[Tuple] = []
     for profile_name in profiles:
         base = iterations // chunks_per_profile
@@ -620,7 +622,8 @@ def _run_profiles_parallel(
             tasks.append((profile_name, level_json, chunk_iters, max_moves, chunk_seed, early_termination))
             offset += chunk_iters
 
-    pool = _get_gen_pool()
+    # [B] 검증 전용 autoplay 풀 (생성 gen 풀과 분리 → 생성-검증 경합 제거)
+    pool = _get_autoplay_pool()
     raw = list(pool.map(_run_bot_sim_chunk, tasks))
 
     # 프로파일별 병합

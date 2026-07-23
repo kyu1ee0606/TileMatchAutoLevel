@@ -198,9 +198,9 @@ LEVEL_CONFIG_TABLE = [
     # 레이어 층수 상향으로 보충해 난이도(깊이/블로킹)·타일 총량 유지.
     (3,    1, 2, 4, (9, 18),   4,  "Tutorial - 튜토리얼 (1-3)"),
     (10,   3, 4, 5, (30, 36),  5,  "Tutorial - 후반 튜토리얼 (4-10)"),
-    (30,   3, 4, 5, (60, 72),  6,  "Early - 초반 (11-30) [최소60]"),
-    (60,   3, 4, 6, (60, 78),  8,  "Early-Mid - 초중반 (31-60) [최소60]"),
-    (100,  4, 6, 6, (60, 90),  9,  "Mid - 중반 (61-100) [최소60]"),
+    (30,   3, 4, 5, (30, 48),  6,  "Early - 초반 (11-30)"),
+    (60,   3, 4, 6, (30, 50),  8,  "Early-Mid - 초중반 (31-60)"),
+    (100,  4, 6, 6, (50, 80),  9,  "Mid - 중반 (61-100)"),
     (225,  5, 7, 6, (60, 90),  9,  "Mid-Late - 중후반 (101-225)"),
     (600,  6, 8, 6, (70, 100), 10, "Standard - A등급 주력 (226-600)"),
     (1125, 7, 9, 6, (75, 105), 11, "Advanced - B등급 기준선 (601-1125)"),
@@ -12817,10 +12817,11 @@ class LevelGenerator:
 
         # Check minimum tile count based on level number
         # Tutorial levels (1-5) have lower minimum, regular levels (6+) need more tiles
-        # [사용자 요청] Lv11+ 는 최소 60타일 보장(밀도 확보). Lv1-5 튜토(9), Lv6-10(18).
+        # [수정] min60은 유닛조립(_unit_assembly 마커)에만 적용. 일반 레벨은 기존 하한(튜토9/18)
+        # 유지 — min60을 전체 Lv11+에 걸면 일반 레벨이 2배로 어려워져 RL 검증 대량 실패(회귀).
         if level_number is not None and level_number <= 5:
             min_tiles = self.TUTORIAL_MIN_TILE_COUNT
-        elif level_number is not None and level_number >= 11:
+        elif level.get("_unit_assembly"):
             min_tiles = self.MIN_TILE_COUNT_LV11
         else:
             min_tiles = self.MIN_TILE_COUNT

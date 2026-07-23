@@ -319,6 +319,13 @@ class RLSearchRequest(BaseModel):
     finalists: int = Field(default=DEFAULT_FINALISTS, ge=1, le=16, description="풀 측정할 상위 후보 수")
     rollouts_per_point: int = Field(default=DEFAULT_ROLLOUTS_PER_POINT, ge=4, le=500)
     seed: int = Field(default=DEFAULT_BASE_SEED)
+    # [생성모드 보존] 원본 레벨이 유닛조립/역생성/동심/프로파일/층크기다양화로 생성됐으면
+    # 탐색 후보도 동일 모드로 → RL탐색-적용 교체 시 규칙 유지. (프론트가 원본 마커에서 채움)
+    unit_assembly: bool = Field(default=False)
+    use_reverse_generation: bool = Field(default=False)
+    concentric_deep: bool = Field(default=False)
+    tile_type_profile: Optional[str] = Field(default=None)
+    size_diversity_start_level: Optional[int] = Field(default=None)
 
 
 class RLSearchCandidate(BaseModel):
@@ -360,6 +367,13 @@ def search_curve_target(request: RLSearchRequest) -> RLSearchResponse:
         target_k=request.target_k,
         count=request.candidates,
         seed=request.seed,
+        mode_opts={
+            "unit_assembly": request.unit_assembly,
+            "use_reverse_generation": request.use_reverse_generation,
+            "concentric_deep": request.concentric_deep,
+            "tile_type_profile": request.tile_type_profile,
+            "size_diversity_start_level": request.size_diversity_start_level,
+        },
     )
     valid = [c for c in cands if c["static_ok"]]
 

@@ -79,8 +79,10 @@ def sample_candidate_params(
     target_theta0: float,
     target_k: float,
     rng: random.Random,
+    mode_opts: Optional[Dict[str, Any]] = None,
 ) -> GenerationParams:
-    """목표 곡선 주변에서 생성기 파라미터를 변주해 후보 파라미터를 샘플."""
+    """목표 곡선 주변에서 생성기 파라미터를 변주해 후보 파라미터를 샘플.
+    mode_opts: 원본 레벨 생성모드(unit_assembly/역생성/동심/프로파일/층크기다양화) 보존용."""
     # 생성기의 target_difficulty는 자체 스케일 — θ0 주변에 ±0.15 지터
     gen_difficulty = min(0.95, max(0.05, target_theta0 + rng.uniform(-0.15, 0.15)))
 
@@ -106,6 +108,7 @@ def sample_candidate_params(
     # 레벨 번호 기준 언락된 기믹만 사용 (프로덕션 정책과 동일)
     gimmick_setup = _unlocked_gimmick_setup(level_number, gen_difficulty)
 
+    mo = mode_opts or {}
     return GenerationParams(
         target_difficulty=gen_difficulty,
         grid_size=grid,
@@ -116,6 +119,12 @@ def sample_candidate_params(
         obstacle_types=gimmick_setup["obstacle_types"],
         goals=gimmick_setup["goals"],
         tutorial_gimmick=gimmick_setup["tutorial_gimmick"],
+        # [생성모드 보존] RL탐색-적용이 원본 레벨을 교체할 때 모드 유지
+        unit_assembly=bool(mo.get("unit_assembly", False)),
+        concentric_deep=bool(mo.get("concentric_deep", False)),
+        use_reverse_generation=bool(mo.get("use_reverse_generation", False)),
+        tile_type_profile=mo.get("tile_type_profile"),
+        size_diversity_start_level=mo.get("size_diversity_start_level"),
     )
 
 
@@ -135,14 +144,16 @@ def generate_candidates(
     target_k: float,
     count: int,
     seed: int,
+    mode_opts: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """후보 레벨 생성 + 정적 체크. 반환: [{index, level_json, gen_params, static_ok, reject_reason}]"""
+    """후보 레벨 생성 + 정적 체크. 반환: [{index, level_json, gen_params, static_ok, reject_reason}]
+    mode_opts: 원본 레벨 생성모드 보존(RL탐색-적용 교체 시 규칙 유지)."""
     rng = random.Random(seed)
     generator = LevelGenerator()
     candidates: List[Dict[str, Any]] = []
 
     for i in range(count):
-        params = sample_candidate_params(level_number, target_theta0, target_k, rng)
+        params = sample_candidate_params(level_number, target_theta0, target_k, rng, mode_opts)
         entry: Dict[str, Any] = {
             "index": i,
             "gen_params": _params_summary(params),

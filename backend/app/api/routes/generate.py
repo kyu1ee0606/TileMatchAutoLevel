@@ -990,6 +990,7 @@ def generate_fallback_level(
     generator: "LevelGenerator",
     target_difficulty: float,
     goals: List[Dict] = None,
+    mode_opts: Dict = None,
 ) -> Dict:
     """
     Generate a guaranteed-to-work fallback level with simplified parameters.
@@ -1009,6 +1010,7 @@ def generate_fallback_level(
         simple_grid = (6, 6)
         simple_layers = 5
 
+    _mo = mode_opts or {}
     params = GenerationParams(
         target_difficulty=target_difficulty,
         grid_size=simple_grid,
@@ -1018,6 +1020,12 @@ def generate_fallback_level(
         goals=goals or [{"type": "craft", "direction": "s", "count": 2}],
         symmetry_mode="none",
         pattern_type="geometric",
+        # [생성모드 보존] 폴백도 원본 모드 유지(단순 그리드는 그대로 — 안전망 성격 유지).
+        unit_assembly=bool(_mo.get("unit_assembly", False)),
+        concentric_deep=bool(_mo.get("concentric_deep", False)),
+        use_reverse_generation=bool(_mo.get("use_reverse_generation", False)),
+        tile_type_profile=_mo.get("tile_type_profile"),
+        size_diversity_start_level=_mo.get("size_diversity_start_level"),
     )
 
     result = generator.generate(params)
@@ -2547,7 +2555,13 @@ def generate_validated_level(
     if best_result is None:
         print(f"All {request.max_retries} attempts failed. Generating fallback level...")
         try:
-            fallback = generate_fallback_level(generator, request.target_difficulty, goals)
+            fallback = generate_fallback_level(generator, request.target_difficulty, goals, mode_opts={
+                "unit_assembly": getattr(request, "unit_assembly", False),
+                "concentric_deep": getattr(request, "concentric_deep", False),
+                "use_reverse_generation": getattr(request, "use_reverse_generation", False),
+                "tile_type_profile": getattr(request, "tile_type_profile", None),
+                "size_diversity_start_level": getattr(request, "size_diversity_start_level", None),
+            })
             fallback_scoring_diff = request.scoring_difficulty if request.scoring_difficulty is not None else request.target_difficulty
             # [v15.34] Use adjusted target rates
             target_rates = calculate_adjusted_target_rates(fallback_scoring_diff, fallback["level_json"])

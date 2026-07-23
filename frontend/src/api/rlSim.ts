@@ -116,6 +116,12 @@ export interface RLSearchRequest {
   finalists?: number;
   rollouts_per_point?: number;
   seed?: number;
+  // [생성모드 보존] 원본 레벨 마커에서 채워 탐색 후보도 동일 모드 → 교체 시 규칙 유지
+  unit_assembly?: boolean;
+  use_reverse_generation?: boolean;
+  concentric_deep?: boolean;
+  tile_type_profile?: string;
+  size_diversity_start_level?: number;
 }
 
 export interface RLSearchCandidate {

@@ -29,6 +29,7 @@ import {
   type RLSimClassification,
   type RLSearchResponse,
   type RLSearchBest,
+  type RLSearchRequest,
 } from '../api/rlSim';
 import { batchAnalyzeSolvability, type SolvabilityVerdict } from '../api/analyze';
 import { useUIStore } from '../stores/uiStore';
@@ -380,6 +381,26 @@ ${tableLines.join('\n')}
     }
   }, [buildCsv, addNotification]);
 
+  // [생성모드 보존] 원본 프로덕션 레벨 마커에서 탐색용 모드필드 추출.
+  // RL탐색 후보가 원본과 동일 모드로 생성되도록 → 교체(applySingleReplacement) 시 규칙 유지.
+  const modeFieldsFromLevel = useCallback(async (levelNumber: number): Promise<Partial<RLSearchRequest>> => {
+    if (!selectedBatchId) return {};
+    try {
+      const lv = await getProductionLevel(selectedBatchId, levelNumber);
+      const j = lv?.level_json as Record<string, unknown> | undefined;
+      if (!j) return {};
+      const ua = Boolean(j._unit_assembly);
+      const cd = Boolean(j._concentric_deep);
+      return {
+        unit_assembly: ua,
+        concentric_deep: cd,
+        use_reverse_generation: ua || cd || Boolean(j.reverse_generated),
+        tile_type_profile: typeof j._tile_type_profile === 'string' ? j._tile_type_profile : undefined,
+        size_diversity_start_level: typeof j._size_diversity_start_level === 'number' ? j._size_diversity_start_level : undefined,
+      };
+    } catch { return {}; }
+  }, [selectedBatchId]);
+
   // 곡선 타겟 탐색 실행
   const handleSearch = useCallback(async () => {
     if (isSearching) return;
@@ -388,6 +409,7 @@ ${tableLines.join('\n')}
     try {
       const result = await searchCurveTarget({
         level_number: searchLevelNumber,
+        ...(await modeFieldsFromLevel(searchLevelNumber)),
         target_theta0: searchTheta0,
         target_k: searchK,
         candidates: searchCandidates,
@@ -638,8 +660,10 @@ ${tableLines.join('\n')}
         best: null, accepted: false, selected: false, applied: false,
       };
       try {
+        const modeFields = await modeFieldsFromLevel(row.level_number);
         let result = await searchCurveTarget({
           level_number: row.level_number,
+          ...modeFields,
           target_theta0: assessment.targetTheta,
           target_k: repairTargetK,
           candidates: 16,
@@ -650,6 +674,7 @@ ${tableLines.join('\n')}
         if (!result.accepted) {
           const retry = await searchCurveTarget({
             level_number: row.level_number,
+            ...modeFields,
             target_theta0: assessment.targetTheta,
             target_k: repairTargetK,
             candidates: 32,

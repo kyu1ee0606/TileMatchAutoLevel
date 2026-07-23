@@ -265,6 +265,22 @@ const bossTargetScale = (levelNumber: number | undefined): number | undefined =>
   return 0.5;
 };
 
+/**
+ * [공유 생성모드 필드] 모든 생성·재생성 경로가 사용 → 유닛조립/역생성 규칙 변경을 1곳에서.
+ * - 토글(unitAssemblyOn) 켜짐 OR 원본 레벨의 `_unit_assembly` 마커면 적용(재생성이 원본 모드 보존).
+ * - 보스(10배수)는 제외(보스 템플릿/레시피 사용).
+ * 새 생성모드 플래그 추가 시 여기만 고치면 배치·개별재생성·wrong-tilecount·2차패스 전부 반영.
+ */
+function genModeFields(
+  levelNumber: number,
+  unitAssemblyOn: boolean | undefined,
+  originalLevelJson?: { _unit_assembly?: boolean } | null,
+): { unit_assembly?: true; use_reverse_generation?: true } {
+  const isBoss = levelNumber % 10 === 0 && levelNumber > 0;
+  const ua = (Boolean(unitAssemblyOn) || Boolean(originalLevelJson?._unit_assembly)) && !isBoss;
+  return ua ? { unit_assembly: true, use_reverse_generation: true } : {};
+}
+
 // [보스 생성기/디바이스 제약] 선언 그리드 최대변 상한 — 9x9 이상은 타일이 작아 플레이 불가.
 const MAX_PLAYABLE_GRID = 8;
 const maxDeclaredGridDim = (levelJson: LevelJsonLike | undefined): number => {
@@ -1279,8 +1295,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
               // [B] 층별 크기 다양화 (0이면 미적용)
               size_diversity_start_level: sizeDiversityStartLevel > 0 ? sizeDiversityStartLevel : undefined,
               // [유닛 조립] 바닥 주패턴 + 위층 소형 유닛 조립(sparse 해결·타겟 도달). reverse_generation 병용.
-              unit_assembly: unitAssembly && !isBossLevel ? true : undefined,
-              use_reverse_generation: unitAssembly && !isBossLevel ? true : undefined,
+              ...genModeFields(levelNumber, unitAssembly),
               // [보스 생성기] 그리드≤8·5~6층·화려한 레시피. 목표 클리어율 절반은 RL 검증에서 적용.
               boss_mode: isBossLevel || undefined,
             };
@@ -2296,10 +2311,8 @@ function OverviewTab({ stats, batch, batchId }: { stats: ProductionStats; batch:
             }],
             symmetry_mode: symmetryMode,
             pattern_type: patternType,
-            // [유닛 조립] 원본이 유닛조립(_unit_assembly)이면 재생성도 동일 규칙 유지(솔리드→하단·패턴→상단).
-            // 토글 대신 per-level 마커 → 재생성이 원본 모드 보존.
-            unit_assembly: (Boolean((level.level_json as { _unit_assembly?: boolean } | undefined)?._unit_assembly) && !isBossLevel) ? true : undefined,
-            use_reverse_generation: (Boolean((level.level_json as { _unit_assembly?: boolean } | undefined)?._unit_assembly) && !isBossLevel) ? true : undefined,
+            // [유닛 조립] 원본 마커 기반(공유 헬퍼) → 재생성이 원본 모드 보존.
+            ...genModeFields(levelNumber, false, level.level_json as { _unit_assembly?: boolean } | undefined),
             // [보스 생성기] 레시피 로테이션 + 그리드 캡 (재생성도 동일 적용)
             boss_mode: isBossLevel || undefined,
           },
@@ -4229,6 +4242,8 @@ function TestTab({
           symmetry_mode: sym,
           pattern_type: 'aesthetic',
           pattern_index: (seed * 7 + 10) % 60,
+          // [유닛 조립] 공유 헬퍼 — 토글 반영(2차패스는 fresh 생성)
+          ...genModeFields(levelNumber, unitAssembly),
         },
         {
           auto_select_gimmicks: true,
@@ -4879,10 +4894,8 @@ function TestTab({
                 pattern_type: patternType,
                 // 보스: pattern_index 미지정 → 백엔드 BOSS_RECIPES(레벨번호 결정적) 적용
                 pattern_index: isBossLevel ? undefined : patternIndex,
-                // [유닛 조립] 토글 켜짐 OR 원본이 유닛조립(_unit_assembly 마커)이면 재생성도 동일 규칙 유지.
-                // (토글 꺼져도 원본 모드 보존 → 재생성이 규칙 일관되게 따름.)
-                unit_assembly: ((unitAssembly || Boolean((level.level_json as { _unit_assembly?: boolean } | undefined)?._unit_assembly)) && !isBossLevel) ? true : undefined,
-                use_reverse_generation: ((unitAssembly || Boolean((level.level_json as { _unit_assembly?: boolean } | undefined)?._unit_assembly)) && !isBossLevel) ? true : undefined,
+                // [유닛 조립] 토글 OR 원본 마커(공유 헬퍼) → 토글 꺼져도 원본 모드 보존.
+                ...genModeFields(levelNumber, unitAssembly, level.level_json as { _unit_assembly?: boolean } | undefined),
                 // [보스 생성기]
                 boss_mode: isBossLevel || undefined,
               },
@@ -5196,6 +5209,8 @@ function TestTab({
           pattern_type: patternType,
           // 보스: pattern_index 미지정 → BOSS_RECIPES 적용
           pattern_index: isBossLevel ? undefined : patternIndex,
+          // [유닛 조립] 공유 헬퍼 — 토글 OR 원본 마커 보존
+          ...genModeFields(levelNumber, unitAssembly, level.level_json as { _unit_assembly?: boolean } | undefined),
           // [보스 생성기]
           boss_mode: isBossLevel || undefined,
         };

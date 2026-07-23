@@ -588,6 +588,7 @@ class ValidatedGenerateRequest(BaseModel):
     concentric_deep: bool = Field(default=False, description="동심 침식 스택(좁고깊은/중간보스). 각 층=중앙 정사각, 위로 완만 축소. use_reverse_generation과 병용 권장.")
     unit_assembly: bool = Field(default=False, description="유닛 조립: 바닥 큰층=주 패턴 / 위 작은층=유닛 전용 그리드 적층. use_reverse_generation과 병용 권장.")
     size_diversity_start_level: Optional[int] = Field(default=None, description="[B] 층별 그리드 크기 다양화 시작 레벨. None=미적용. (검증 생성 재시도 루프가 참조 — 누락 시 엔드포인트 크래시→폴백)")
+    tile_type_profile: Optional[str] = Field(default=None, description="레벨별 타일 종류 수(V) 분포 프로파일. None=baseline. (누락 시 프로덕션 검증생성이 프론트 프로파일 무시)")
 
 
 class ValidatedGenerateResponse(BaseModel):

@@ -1756,6 +1756,12 @@ def generate_validated_level(
         # 문제: t0 사용 시 useTileCount가 level_number 기반으로 설정되어 난이도와 맞지 않음
         # Level 31+ 에서 B/C/D 등급의 난이도 일치율이 급격히 떨어지는 원인
         # 해결: 모든 등급에서 target_difficulty 기반 타일 수 사용
+        # [타일 프로파일] 프로파일 명시(non-baseline)면 프로파일 커브값으로 시드(검증 재시도 루프가
+        # 목표난이도로 미세조정 → 난이도 유지하며 프로파일 반영). baseline(None)은 기존 등급기반 유지.
+        if request.tile_type_profile:
+            from ...core.generator import get_use_tile_count_for_level
+            tile_type_count = get_use_tile_count_for_level(request.level_number, request.tile_type_profile)
+            logger.info(f"[TILE_PROFILE] Level {request.level_number}: profile={request.tile_type_profile} → tile_type_count={tile_type_count}")
         base_tile_types = [f"t{i}" for i in range(1, tile_type_count + 1)]
         logger.info(f"[TILE_FORCE] Level {request.level_number}: using {tile_type_count} actual tiles for target_difficulty={request.target_difficulty:.2f}")
     else:
@@ -1981,6 +1987,8 @@ def generate_validated_level(
                 # [동심/유닛조립] 프로덕션 토글 전달 (누락 시 프로덕션에서 무시되던 회귀 차단)
                 concentric_deep=getattr(request, "concentric_deep", False),
                 unit_assembly=getattr(request, "unit_assembly", False),
+                # [타일 프로파일] 검증생성이 프론트 tile_type_profile 반영(누락 시 무시되던 회귀 차단)
+                tile_type_profile=getattr(request, "tile_type_profile", None),
             )
 
             result = generator.generate(params)

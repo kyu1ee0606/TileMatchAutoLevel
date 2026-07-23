@@ -1631,7 +1631,7 @@ class LevelGenerator:
         안에 예산만큼 조립. sparse(타일 미달) 해결 + 위층 다양성. floating/데드락 0(받침 규칙).
         타입 t0(파이프라인/역생성 배정). 반환 = (layer_idx, pos) 목록."""
         import random as _r
-        from .unit_templates import valid_support_mask, units_for_budget
+        from .unit_templates import valid_support_mask, units_for_budget, get_cover_offsets
 
         # [최소 타일] preserve_pattern 이라 _ensure_minimum_tiles 가 스킵됨 → 여기서 직접 하한 반영.
         # 생성 후 타입분배·÷3 보정이 ~15~20% trim 하므로, 빌더는 하한 위로 버퍼(×1.28)를 두어
@@ -1653,23 +1653,20 @@ class LevelGenerator:
         def _gcol(layer_idx):
             return cols if (layer_idx % 2 == 1) else cols + 1
 
-        # [바닥 = 주 패턴] 순수 패턴만(유닛 안 섞음). 받침 불필요.
-        l0 = active_layers[0]
-        g0c, g0r = _gcol(l0), _gcol(l0)
-        try:
-            mp = self._generate_aesthetic_positions(
-                g0c, g0r, target_count=1000, pattern_index=pidx,
-                target_difficulty=params.target_difficulty)
-            p0 = {(x, y) for x, y in (map(int, p.split("_")) for p in mp) if 0 <= x < g0c and 0 <= y < g0r}
-        except Exception:  # noqa: BLE001
-            p0 = set()
-        if len(p0) < 6:
-            c = g0c // 2
-            p0 = {(x, y) for x in range(g0c) for y in range(g0r) if abs(x - c) + abs(y - c) <= c}
-        pos_map[l0] = p0
+        # ── 헬퍼 ──
+        def _aesthetic(gc):
+            try:
+                mp = self._generate_aesthetic_positions(
+                    gc, gc, target_count=1000, pattern_index=pidx,
+                    target_difficulty=params.target_difficulty)
+                s = {(x, y) for x, y in (map(int, p.split("_")) for p in mp) if 0 <= x < gc and 0 <= y < gc}
+            except Exception:  # noqa: BLE001
+                s = set()
+            if len(s) < 6:
+                c = gc // 2
+                s = {(x, y) for x in range(gc) for y in range(gc) if abs(x - c) + abs(y - c) <= c}
+            return s
 
-        # [탑 실루엣 수렴] 받침 마스크를 위로 갈수록 침식(테두리 벗김) → 중앙 수렴 = 탑 모양.
-        # 침식 셀 ⊆ 받침 마스크 → floating 0 유지(안전). 예산 미만이면 침식 멈춤(빈층 방지).
         def _erode_mask(cells):
             nb = ((1, 0), (-1, 0), (0, 1), (0, -1))
             return {(x, y) for (x, y) in cells if all((x + dx, y + dy) in cells for dx, dy in nb)}
@@ -1684,44 +1681,130 @@ class LevelGenerator:
                     break
             return m or mask
 
-        # [위층 = 유닛만] 패턴 층은 안 건드림. 유닛 예산 = (목표 - 패턴타일)을 위층에 피라미드 분배.
-        unit_layers = active_layers[1:]
-        unit_target = max(0, n_target - len(p0))
-        if unit_layers:
-            uw = [len(unit_layers) - i for i in range(len(unit_layers))]  # 아래 위층 많이
-            uws = sum(uw) or 1
-            ubudget = {unit_layers[i]: max(3, 3 * round((unit_target * uw[i] / uws) / 3)) for i in range(len(unit_layers))}
-            for i, layer_idx in enumerate(unit_layers):
-                gcol = _gcol(layer_idx)
-                below_idx = active_layers[active_layers.index(layer_idx) - 1]
-                mask = valid_support_mask(pos_map[below_idx], below_idx, layer_idx, _gcol(below_idx), gcol, gcol)
-                mask = _converge(mask, i, ubudget[layer_idx])  # 위로 한 겹씩 수렴(예산 하한 가드)
-                pos_map[layer_idx] = self._assemble_units_in_mask(mask, ubudget[layer_idx], gcol, gcol, _r)
+        def _support_cells_for(upper_cells, lower_layer, upper_layer, lower_col, upper_col):
+            """상위 셀들을 지지하는 하위 셀(상위 셀당 1개). 하위에 union → 상위 floating 0."""
+            offs = get_cover_offsets(lower_layer, upper_layer, lower_col, upper_col)
+            out = set()
+            for (ux, uy) in upper_cells:
+                for (dx, dy) in offs:
+                    lx, ly = ux - dx, uy - dy
+                    if 0 <= lx < lower_col and 0 <= ly < lower_col:
+                        out.add((lx, ly))
+                        break
+            return out
 
-        # [톱업] 총합 < n_target 이면 위층(유닛층)에만 유닛 추가로 채움. 패턴층·낱개셀 안 씀.
-        total = sum(len(c) for c in pos_map.values())
-        guard = 0
-        while total < n_target and unit_layers and guard < 20:
-            guard += 1
-            progressed = False
-            for layer_idx in unit_layers:
-                if total >= n_target:
+        top_layer = active_layers[-1]
+        gtc = _gcol(top_layer)
+        pat_top = _aesthetic(gtc)
+        fill_ratio = len(pat_top) / float(gtc * gtc)
+        unit_target = max(0, n_target - len(pat_top))  # 로그용
+
+        if fill_ratio < 0.55 and len(active_layers) >= 2:
+            # ═══ [역전] 성긴 패턴: 솔리드 채움→하단(마지막에 보임·숨김), 패턴→상단(먼저 보임) ═══
+            # 하단=밀도 베이스(모든 상위 지지), 상단=커스텀 패턴 실루엣. floating 0·÷3 유지.
+            lower = active_layers[:-1]
+            rest = max(0, n_target - len(pat_top))
+            w = [len(lower) - i for i in range(len(lower))]   # 바닥(i=0) 최대 밀도
+            ws = sum(w) or 1
+            lbud = {lower[i]: max(3, 3 * round((rest * w[i] / ws) / 3)) for i in range(len(lower))}
+            # 바닥층: 받침 불필요 → 전체 그리드 조립
+            g0 = _gcol(lower[0])
+            full0 = {(x, y) for x in range(g0) for y in range(g0)}
+            pos_map[lower[0]] = self._assemble_units_in_mask(full0, lbud[lower[0]], g0, g0, _r)
+            # 중간층: 아래 받침 내 조립(수렴 안 함 → 상단 패턴 지지 위해 넓게)
+            for k in range(1, len(lower)):
+                li = lower[k]; gc = _gcol(li); below = lower[k - 1]
+                smask = valid_support_mask(pos_map[below], below, li, _gcol(below), gc, gc)
+                pos_map[li] = self._assemble_units_in_mask(smask, lbud[li], gc, gc, _r)
+            # 상단 바로 아래층에 패턴 지지셀 보강(패턴 안 잘리게)
+            below_top = lower[-1]
+            bcol = _gcol(below_top)
+            pos_map[below_top] = pos_map[below_top] | _support_cells_for(pat_top, below_top, top_layer, bcol, gtc)
+            # 상단 = 패턴 ∩ 받침(지지 보강했으니 사실상 전체 패턴)
+            smask_top = valid_support_mask(pos_map[below_top], below_top, top_layer, bcol, gtc, gtc)
+            pos_map[top_layer] = (pat_top & smask_top) or smask_top
+            # 톱업: 목표 미달분은 하단층부터 채움(상단 패턴 불변)
+            total = sum(len(c) for c in pos_map.values())
+            guard = 0
+            while total < n_target and guard < 20:
+                guard += 1
+                progressed = False
+                for k in range(len(lower)):   # 바닥부터
+                    li = lower[k]; gc = _gcol(li)
+                    if k == 0:
+                        mask = {(x, y) for x in range(gc) for y in range(gc)}
+                    else:
+                        below = lower[k - 1]
+                        mask = valid_support_mask(pos_map[below], below, li, _gcol(below), gc, gc)
+                    free = mask - pos_map[li]
+                    extra = ((n_target - total) // 3) * 3
+                    if extra < 3 or not free:
+                        continue
+                    new = self._assemble_units_in_mask(free, extra, gc, gc, _r)
+                    if new:
+                        pos_map[li] |= new
+                        total += len(new)
+                        progressed = True
+                        if total >= n_target:
+                            break
+                if not progressed:
                     break
-                gcol = _gcol(layer_idx)
-                below_idx = active_layers[active_layers.index(layer_idx) - 1]
-                mask = valid_support_mask(pos_map[below_idx], below_idx, layer_idx, _gcol(below_idx), gcol, gcol)
-                mask = _converge(mask, unit_layers.index(layer_idx), 3)  # 수렴 유지
-                free_mask = mask - pos_map[layer_idx]
-                extra = ((n_target - total) // 3) * 3
-                if extra < 3 or not free_mask:
-                    continue
-                new = self._assemble_units_in_mask(free_mask, extra, gcol, gcol, _r)
-                if new:
-                    pos_map[layer_idx] |= new
-                    total += len(new)
-                    progressed = True
-            if not progressed:
-                break
+        else:
+            # ═══ [기존] 조밀 패턴: 패턴=바닥, 위로 수렴(탑 실루엣) ═══
+            l0 = active_layers[0]
+            pos_map[l0] = _aesthetic(_gcol(l0))
+            p0 = pos_map[l0]
+            unit_layers = active_layers[1:]
+            unit_target = max(0, n_target - len(p0))
+            if unit_layers:
+                uw = [len(unit_layers) - i for i in range(len(unit_layers))]
+                uws = sum(uw) or 1
+                ubudget = {unit_layers[i]: max(3, 3 * round((unit_target * uw[i] / uws) / 3)) for i in range(len(unit_layers))}
+                for i, layer_idx in enumerate(unit_layers):
+                    gcol = _gcol(layer_idx)
+                    below_idx = active_layers[active_layers.index(layer_idx) - 1]
+                    mask = valid_support_mask(pos_map[below_idx], below_idx, layer_idx, _gcol(below_idx), gcol, gcol)
+                    mask = _converge(mask, i, ubudget[layer_idx])
+                    pos_map[layer_idx] = self._assemble_units_in_mask(mask, ubudget[layer_idx], gcol, gcol, _r)
+            total = sum(len(c) for c in pos_map.values())
+            guard = 0
+            while total < n_target and unit_layers and guard < 20:
+                guard += 1
+                progressed = False
+                for layer_idx in unit_layers:
+                    if total >= n_target:
+                        break
+                    gcol = _gcol(layer_idx)
+                    below_idx = active_layers[active_layers.index(layer_idx) - 1]
+                    mask = valid_support_mask(pos_map[below_idx], below_idx, layer_idx, _gcol(below_idx), gcol, gcol)
+                    mask = _converge(mask, unit_layers.index(layer_idx), 3)
+                    free_mask = mask - pos_map[layer_idx]
+                    extra = ((n_target - total) // 3) * 3
+                    if extra < 3 or not free_mask:
+                        continue
+                    new = self._assemble_units_in_mask(free_mask, extra, gcol, gcol, _r)
+                    if new:
+                        pos_map[layer_idx] |= new
+                        total += len(new)
+                        progressed = True
+                if not progressed:
+                    break
+
+        # [floating 정화] 상위 타일이 하위 미덮으면 하위에 지지셀(그림자) 추가 → floating 0 보장.
+        # top-down 처리(층 j 고치면 j-1 성장 → 다음 j-1 검사에 반영). 몇 셀 늘지만 버퍼 내.
+        for j in range(len(active_layers) - 1, 0, -1):
+            li = active_layers[j]
+            below = active_layers[j - 1]
+            uc = _gcol(li)
+            bc = _gcol(below)
+            offs = get_cover_offsets(below, li, bc, uc)
+            for (ux, uy) in list(pos_map.get(li, set())):
+                if not any((ux - dx, uy - dy) in pos_map.get(below, set()) for dx, dy in offs):
+                    for (dx, dy) in offs:
+                        lx, ly = ux - dx, uy - dy
+                        if 0 <= lx < bc and 0 <= ly < bc:
+                            pos_map.setdefault(below, set()).add((lx, ly))
+                            break
 
         # write
         for layer_idx in active_layers:
@@ -3066,6 +3149,11 @@ class LevelGenerator:
 
                 # Clamp to valid range
                 active_layer_count = max(min_layers, min(max_layers, active_layer_count))
+
+                # [Lv11~30 준튜토리얼 재미 보강] 층수 +1 — 유닛조립 60타일 분산 여유(솔리드 완화).
+                # (재미·깊이 확보. 상한 5로 캡. 튜토리얼(1~3)은 제외.)
+                if params.level_number is not None and 11 <= params.level_number <= 30:
+                    active_layer_count = min(active_layer_count + 1, 5)
 
                 print(f"[GEN_LAYER] target={target:.2f}, params.max={params.max_layers}, min={min_layers}, max={max_layers}, active={active_layer_count}")
 

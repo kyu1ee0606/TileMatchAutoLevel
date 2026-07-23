@@ -571,9 +571,61 @@ export function PatternDebugPanel() {
   // [유닛 조립] 소형 유닛 라이브러리 뷰어
   const [unitLib, setUnitLib] = useState<{ name: string; size: number; w: number; h: number; density: number; grid: number[][] }[]>([]);
   const [unitOpen, setUnitOpen] = useState(false);
-  useEffect(() => {
-    apiClient.get('/debug/unit-library').then(r => setUnitLib(r.data.units || [])).catch(() => {});
-  }, []);
+  const UNIT_EDIT_SIZE = 5;
+  const [unitEditGrid, setUnitEditGrid] = useState<boolean[][]>(() => Array.from({ length: UNIT_EDIT_SIZE }, () => Array(UNIT_EDIT_SIZE).fill(false)));
+  const [unitEditName, setUnitEditName] = useState('');
+  const [unitPaint, setUnitPaint] = useState<boolean | null>(null);
+  const loadUnits = () => apiClient.get('/debug/unit-library').then(r => setUnitLib(r.data.units || [])).catch(() => {});
+  useEffect(() => { loadUnits(); }, []);
+  const unitEditCount = unitEditGrid.flat().filter(Boolean).length;
+  const saveUnit = async () => {
+    const cells: number[][] = [];
+    unitEditGrid.forEach((row, y) => row.forEach((c, x) => { if (c) cells.push([x, y]); }));
+    if (cells.length % 3 !== 0 || cells.length < 3 || cells.length > 15) { window.alert('타일수가 3의 배수 + 3~15칸이어야 함 (현재 ' + cells.length + '칸)'); return; }
+    try {
+      await apiClient.post('/debug/unit-save', { name: unitEditName.trim() || `u${Date.now() % 100000}`, cells });
+      setUnitEditGrid(Array.from({ length: UNIT_EDIT_SIZE }, () => Array(UNIT_EDIT_SIZE).fill(false)));
+      setUnitEditName('');
+      loadUnits();
+    } catch (e) {
+      const detail = (e as { response?: { data?: { detail?: string } } }).response?.data?.detail;
+      window.alert(`저장 실패: ${detail || (e as Error).message}`);
+    }
+  };
+  const deleteUnit = async (name: string) => {
+    if (!window.confirm(`유닛 "${name}" 삭제?`)) return;
+    await apiClient.delete(`/debug/unit-save/${encodeURIComponent(name)}`).catch(() => {});
+    loadUnits();
+  };
+  // 랜덤 유닛: 중앙에서 자라는 연결된 랜덤 모양, 타일수 ÷3(3·6·9·12). 클릭마다 다름.
+  const randomUnit = () => {
+    const g = UNIT_EDIT_SIZE;
+    const targets = [3, 6, 6, 9, 9, 12];
+    const target = targets[Math.floor(Math.random() * targets.length)];
+    const grid = Array.from({ length: g }, () => Array(g).fill(false));
+    const cx = Math.floor(g / 2), cy = Math.floor(g / 2);
+    const cells = new Set<string>([`${cx}_${cy}`]);
+    grid[cy][cx] = true;
+    let guard = 0;
+    while (cells.size < target && guard < 500) {
+      guard++;
+      const arr = [...cells];
+      const [x, y] = arr[Math.floor(Math.random() * arr.length)].split('_').map(Number);
+      const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+      const [dx, dy] = dirs[Math.floor(Math.random() * 4)];
+      const nx = x + dx, ny = y + dy;
+      if (nx >= 0 && nx < g && ny >= 0 && ny < g && !cells.has(`${nx}_${ny}`)) {
+        cells.add(`${nx}_${ny}`); grid[ny][nx] = true;
+      }
+    }
+    setUnitEditGrid(grid);
+    setUnitEditName(`rnd_${cells.size}_${Math.floor(Math.random() * 1000)}`);
+  };
+  const editUnit = (u: { name: string; grid: number[][] }) => {
+    const g = Array.from({ length: UNIT_EDIT_SIZE }, () => Array(UNIT_EDIT_SIZE).fill(false));
+    u.grid.forEach((row, y) => row.forEach((c, x) => { if (c && y < UNIT_EDIT_SIZE && x < UNIT_EDIT_SIZE) g[y][x] = true; }));
+    setUnitEditGrid(g); setUnitEditName(u.name); setUnitOpen(true);
+  };
   const [sortMode, setSortMode] = useState<'order' | 'name' | 'count'>('order');
 
   useEffect(() => { loadPatterns(); loadConfig(); }, [gridSize]);
@@ -684,6 +736,13 @@ export function PatternDebugPanel() {
     if (missing.length > 0) {
       window.alert(`필수 크기 미입력: ${missing.map(s => `${s}×${s}`).join(', ')}\n프로덕션 레이어(5·6·7)를 전부 그려야 저장됩니다.`);
       return;
+    }
+    // [÷3 자동조정 안내] 3의 배수 아닌 크기는 저장 시 서버가 인접+대칭 우선으로 ÷3 보정 → 패턴 안정성↑
+    const adjusts = variants
+      .filter(v => v.positions.length % 3 !== 0)
+      .map(v => `${v.grid_size}×${v.grid_size}: ${v.positions.length}→${v.positions.length + (3 - (v.positions.length % 3))}칸`);
+    if (adjusts.length > 0) {
+      if (!window.confirm(`일부 크기가 3의 배수가 아닙니다.\n저장 시 자동으로 ÷3 조정됩니다(인접+대칭 우선, 그리드 꽉 차면 가장자리 제거):\n\n${adjusts.join('\n')}\n\n계속할까요?`)) return;
     }
     try {
       const res = await apiClient.post('/debug/pattern-create-multi', {
@@ -918,21 +977,54 @@ export function PatternDebugPanel() {
           {unitOpen ? '▼' : '▶'} 🧱 유닛 라이브러리 ({unitLib.length}개) <span className="text-gray-500">— 유닛 조립 위층에 쓰이는 소형 조각(3·6·9칸)</span>
         </button>
         {unitOpen && (
-          <div className="flex flex-wrap gap-3 mt-2">
-            {unitLib.map((u, i) => (
-              <div key={i} className="flex flex-col items-center">
-                <div className="inline-block border border-amber-800/50 rounded">
-                  {u.grid.map((row, y) => (
-                    <div key={y} className="flex">
-                      {row.map((c, x) => (
-                        <div key={x} className={`w-4 h-4 border border-gray-900/40 ${c ? 'bg-amber-500' : 'bg-gray-800'}`} />
-                      ))}
-                    </div>
-                  ))}
-                </div>
-                <div className="text-[9px] text-gray-400 mt-0.5">{u.name} · {u.size}칸 · {Math.round(u.density * 100)}%</div>
+          <div className="mt-2 space-y-3">
+            {/* 유닛 에디터 (5×5, ÷3) */}
+            <div className="flex items-center gap-3 p-2 bg-amber-900/15 rounded" onMouseLeave={() => setUnitPaint(null)} onMouseUp={() => setUnitPaint(null)}>
+              <div className="text-[10px] text-amber-200">유닛 그리기<br /><span className={unitEditCount % 3 === 0 && unitEditCount >= 3 && unitEditCount <= 15 ? 'text-green-400' : 'text-yellow-400'}>{unitEditCount}칸 {unitEditCount % 3 === 0 && unitEditCount >= 3 && unitEditCount <= 15 ? '✓' : unitEditCount > 15 ? '(15칸 이하)' : '(÷3)'}</span></div>
+              <div className="inline-block border border-amber-700 rounded select-none">
+                {unitEditGrid.map((row, y) => (
+                  <div key={y} className="flex">
+                    {row.map((cell, x) => (
+                      <div key={x}
+                        className={`w-5 h-5 border border-gray-900/40 cursor-pointer ${cell ? 'bg-amber-500' : 'bg-gray-800 hover:bg-gray-700'}`}
+                        onMouseDown={() => { const nv = !cell; setUnitPaint(nv); setUnitEditGrid(g => g.map((r, yy) => yy === y ? r.map((c, xx) => xx === x ? nv : c) : r)); }}
+                        onMouseEnter={(e) => { if (unitPaint !== null && e.buttons === 1) setUnitEditGrid(g => g.map((r, yy) => yy === y ? r.map((c, xx) => xx === x ? unitPaint : c) : r)); }}
+                      />
+                    ))}
+                  </div>
+                ))}
               </div>
-            ))}
+              <div className="flex flex-col gap-1">
+                <input value={unitEditName} onChange={e => setUnitEditName(e.target.value)} placeholder="이름"
+                  className="w-24 px-1.5 py-0.5 bg-gray-700 border border-gray-600 rounded text-[11px] text-white" />
+                <button onClick={randomUnit}
+                  className="px-2 py-1 rounded text-[10px] bg-fuchsia-700 hover:bg-fuchsia-600 text-white" title="연결된 랜덤 모양(÷3) 자동 그리기 — 클릭마다 다름">🎲 랜덤</button>
+                <button onClick={saveUnit} disabled={unitEditCount % 3 !== 0 || unitEditCount < 3 || unitEditCount > 15}
+                  className="px-2 py-1 rounded text-[10px] bg-amber-700 hover:bg-amber-600 text-white disabled:opacity-40">저장</button>
+                <button onClick={() => setUnitEditGrid(Array.from({ length: UNIT_EDIT_SIZE }, () => Array(UNIT_EDIT_SIZE).fill(false)))}
+                  className="px-2 py-1 rounded text-[10px] bg-gray-700 hover:bg-gray-600 text-gray-200">비움</button>
+              </div>
+              <button onClick={async () => { await apiClient.post('/debug/unit-reset').catch(() => {}); loadUnits(); }}
+                className="ml-auto self-start px-2 py-1 rounded text-[10px] bg-red-900/60 hover:bg-red-800 text-red-200" title="기본 시드로 리셋">기본값 리셋</button>
+            </div>
+            {/* 유닛 목록 (클릭=편집, ×=삭제) */}
+            <div className="flex flex-wrap gap-3">
+              {unitLib.map((u, i) => (
+                <div key={i} className="flex flex-col items-center relative group">
+                  <button onClick={() => editUnit(u)} className="inline-block border border-amber-800/50 rounded hover:ring-1 hover:ring-amber-400" title="클릭=편집">
+                    {u.grid.map((row, y) => (
+                      <div key={y} className="flex">
+                        {row.map((c, x) => (
+                          <div key={x} className={`w-4 h-4 border border-gray-900/40 ${c ? 'bg-amber-500' : 'bg-gray-800'}`} />
+                        ))}
+                      </div>
+                    ))}
+                  </button>
+                  <button onClick={() => deleteUnit(u.name)} className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-red-700 text-white text-[9px] opacity-0 group-hover:opacity-100" title="삭제">×</button>
+                  <div className="text-[9px] text-gray-400 mt-0.5">{u.name} · {u.size}칸 · {Math.round(u.density * 100)}%</div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </div>
@@ -1885,7 +1977,12 @@ export function PatternDebugPanel() {
                   {REQUIRED_PATTERN_SIZES.map(s => {
                     const cnt = ((s === gridSize ? editGrid : variantGrids[s]) || []).flat().filter(Boolean).length;
                     const ok = cnt >= 3;
-                    return <span key={s} className={`px-1.5 py-0.5 rounded ${ok ? 'bg-green-700 text-green-100' : 'bg-red-800 text-red-200'}`}>{ok ? '✓' : '✗'} {s}×{s}{ok ? ` (${cnt})` : ''}</span>;
+                    const div3 = cnt % 3 === 0;
+                    const adj = ok && !div3 ? cnt + (3 - (cnt % 3)) : cnt;   // 저장 시 자동 ÷3(추가 우선)
+                    const cls = !ok ? 'bg-red-800 text-red-200' : (div3 ? 'bg-green-700 text-green-100' : 'bg-amber-700 text-amber-100');
+                    return <span key={s} className={`px-1.5 py-0.5 rounded ${cls}`}
+                      title={ok && !div3 ? `3의 배수 아님 → 저장 시 ${cnt}→${adj}칸 자동조정` : undefined}>
+                      {!ok ? '✗' : (div3 ? '✓' : '≈')} {s}×{s}{ok ? ` (${cnt}${div3 ? '' : `→${adj}`})` : ''}</span>;
                   })}
                 </div>
                 {/* 선택 크기(4·8·9) 현황 */}

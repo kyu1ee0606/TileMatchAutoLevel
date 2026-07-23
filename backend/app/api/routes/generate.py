@@ -1978,6 +1978,9 @@ def generate_validated_level(
                 reverse_generation_max_open=request.reverse_generation_max_open,
                 # [보스 생성기] 10의 배수 보스 전용 모드 (그리드≤8, 5~6층, 레시피 로테이션)
                 boss_mode=getattr(request, "boss_mode", False),
+                # [동심/유닛조립] 프로덕션 토글 전달 (누락 시 프로덕션에서 무시되던 회귀 차단)
+                concentric_deep=getattr(request, "concentric_deep", False),
+                unit_assembly=getattr(request, "unit_assembly", False),
             )
 
             result = generator.generate(params)
@@ -2169,18 +2172,17 @@ def generate_validated_level(
                 direction_changes = sum(1 for i in range(1, len(recent)) if recent[i] != recent[i-1])
                 if direction_changes >= 2 and best_result is not None:
                     print(f"[OSCILLATION] Detected {direction_changes} direction changes in last 4 attempts, returning best result")
-                    return ValidatedLevelResponse(
+                    return ValidatedGenerateResponse(
                         level_json=best_result.level_json,
-                        target_difficulty=request.target_difficulty,
-                        actual_difficulty=best_actual_difficulty,
+                        actual_difficulty=best_result.actual_difficulty,
                         grade=best_result.grade.value,
-                        generation_time_ms=generation_time_ms,
+                        generation_time_ms=int((time.time() - start_time) * 1000),
                         validation_passed=True,
                         attempts=attempt,
-                        bot_clear_rates=best_rates,
+                        bot_clear_rates=best_actual_rates,
                         target_clear_rates=target_rates,
-                        avg_gap=best_gap,
-                        max_gap=max_gap,
+                        avg_gap=best_gaps[0],
+                        max_gap=best_gaps[1],
                         match_score=best_match_score,
                     )
 

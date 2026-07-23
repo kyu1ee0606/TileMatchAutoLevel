@@ -2804,7 +2804,8 @@ async def debug_list_custom_patterns():
 @router.get("/debug/unit-library")
 async def debug_unit_library():
     """[유닛 조립] 소형 유닛 라이브러리(3·6·9칸) 미리보기. 각 유닛=이름·크기·밀도·그리드."""
-    from ...core.unit_templates import UNITS_BY_SIZE
+    from ...core.unit_templates import units_by_size
+    UNITS_BY_SIZE = units_by_size()
     out = []
     for size in sorted(UNITS_BY_SIZE.keys()):
         for u in UNITS_BY_SIZE[size]:
@@ -2818,6 +2819,35 @@ async def debug_unit_library():
                 "grid": grid,
             })
     return {"units": out, "count": len(out)}
+
+
+class UnitSaveRequest(_BaseModel):
+    name: str
+    cells: List[List[int]]   # [[x,y], ...] — 상대 좌표
+
+
+@router.post("/debug/unit-save")
+async def debug_unit_save(req: UnitSaveRequest):
+    """유닛 추가/수정. 타일수 ÷3 + 3~15칸 검증. 같은 이름이면 덮어씀."""
+    from ...core.unit_templates import save_unit
+    ok, msg = save_unit(req.name, [tuple(c) for c in req.cells])
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"saved": True, "name": req.name, "size": len(req.cells)}
+
+
+@router.delete("/debug/unit-save/{name}")
+async def debug_unit_delete(name: str):
+    """유닛 삭제."""
+    from ...core.unit_templates import delete_unit
+    return {"deleted": delete_unit(name), "name": name}
+
+
+@router.post("/debug/unit-reset")
+async def debug_unit_reset():
+    """유닛 라이브러리를 기본 시드로 리셋."""
+    from ...core.unit_templates import reset_units
+    return {"reset": True, "count": reset_units()}
 
 
 @router.get("/debug/pattern-usage/{pattern_index}")
@@ -3149,6 +3179,46 @@ async def create_new_pattern(grid_size: int = 8, positions: List[str] = [], name
     return {"created": True, "pattern_index": new_index, "positions_count": len(positions)}
 
 
+def _normalize_positions_div3(positions: List[str], grid_size: int) -> List[str]:
+    """패턴 변형 셀 수를 3의 배수로 자동 정규화. 추가 우선(인접+대칭, 모양 보존),
+    그리드 꽉 차면 가장자리 제거 폴백. 각 레이어 ÷3 → 하위 divisibility 트리밍 0 → 패턴 보존."""
+    cells = set()
+    for p in positions:
+        try:
+            x, y = map(int, p.split("_"))
+        except ValueError:
+            continue
+        cells.add((x, y))
+    r = len(cells) % 3
+    if r == 0:
+        return [f"{x}_{y}" for x, y in sorted(cells)]
+    c = (grid_size - 1) / 2.0
+    occ = set(cells)
+    adj = set()
+    for (x, y) in cells:
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < grid_size and 0 <= ny < grid_size and (nx, ny) not in occ:
+                adj.add((nx, ny))
+    need = 3 - r
+
+    def _add_score(cell):
+        mx, my = int(round(2 * c - cell[0])), int(round(2 * c - cell[1]))
+        sym = 0 if (mx, my) in occ else 1          # 대칭짝 존재 우선
+        return (sym, (cell[0] - c) ** 2 + (cell[1] - c) ** 2)
+
+    picks = sorted(adj, key=_add_score)[:need]
+    if len(picks) >= need:                          # 추가 성공(모양 보존)
+        cells |= set(picks)
+    else:                                           # 그리드 꽉참 → 가장자리 r개 제거 폴백
+        def _nbr(cell):
+            return sum((cell[0] + dx, cell[1] + dy) in occ
+                       for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)))
+        for cell in sorted(cells, key=_nbr)[:r]:
+            cells.discard(cell)
+    return [f"{x}_{y}" for x, y in sorted(cells)]
+
+
 class PatternVariantIn(_BaseModel):
     grid_size: int
     positions: List[str]
@@ -3166,6 +3236,10 @@ async def create_new_pattern_multi(request: PatternCreateMultiRequest):
     variants = [v for v in request.variants if v.positions and len(v.positions) >= 3]
     if not variants:
         raise HTTPException(status_code=400, detail="유효한 변형 없음(각 크기 최소 3타일)")
+
+    # [÷3 자동 정규화] 각 크기 변형을 3의 배수로 맞춤 → 레이어별 ÷3 → 하위 트리밍 0(패턴 보존)
+    for v in variants:
+        v.positions = _normalize_positions_div3(v.positions, v.grid_size)
 
     custom = _load_custom_patterns()
     # 사용중 인덱스 집계(base "64" + 크기변형 "64_8x8" 둘 다 접두 숫자로 판단)

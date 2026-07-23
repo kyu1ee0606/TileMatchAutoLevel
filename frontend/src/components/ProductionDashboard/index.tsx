@@ -659,9 +659,22 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
   });
   // [역생성] concrete 솔버블 보장 모드. 켜면 컨테이너/순서기믹 없는 plain concrete로 생성되며
   // witness-peeling 타입배정으로 솔버블·÷3 구조적 보장. 적용 레벨은 🧩역 배지 표시.
-  const [useReverseGen, setUseReverseGen] = useState(false);
-  // 타일 종류 분포(V) 프로파일. 'baseline'=기존 LEVEL_CONFIG_TABLE, 그 외=오버라이드
-  const [tileTypeProfile, setTileTypeProfile] = useState<string>('baseline');
+  // localStorage 영속 — 리로드/야간 자동생성 세션에서도 생성탭 설정 유지.
+  const USE_REVERSE_GEN_KEY = 'prod_use_reverse_gen_v1';
+  const [useReverseGen, setUseReverseGen] = useState<boolean>(() => {
+    try { return localStorage.getItem(USE_REVERSE_GEN_KEY) === '1'; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(USE_REVERSE_GEN_KEY, useReverseGen ? '1' : '0'); } catch { /* ignore */ }
+  }, [useReverseGen]);
+  // 타일 종류 분포(V) 프로파일. 'baseline'=기존 LEVEL_CONFIG_TABLE, 그 외=오버라이드. localStorage 영속.
+  const TILE_TYPE_PROFILE_KEY = 'prod_tile_type_profile_v1';
+  const [tileTypeProfile, setTileTypeProfile] = useState<string>(() => {
+    try { return localStorage.getItem(TILE_TYPE_PROFILE_KEY) || 'baseline'; } catch { return 'baseline'; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(TILE_TYPE_PROFILE_KEY, tileTypeProfile); } catch { /* ignore */ }
+  }, [tileTypeProfile]);
   // [RL 난이도 기준 스킬] 순차검증 RL 예측 클리어율을 이 실력(0=최고초보~1=최고고수) 중심으로 가중.
   // 낮추면 검증 엄격(쉬운 레벨만 통과=게임 쉬움), 높이면 관대(어려운 레벨도 통과=게임 어려움).
   // 기본 0.47(캐주얼). 프로덕션 전체 난이도 기준 조절 노브. localStorage 저장(리로드 유지).
@@ -679,8 +692,22 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
   // [B] 층별 그리드 크기 다양화 시작 레벨. 이 레벨 이상부터 각 층 채움 크기를 랜덤(min 3~그리드)으로
   // 다양화(인접층 회피)하고 중앙 배치 → 스택 실루엣 다양화. 튜토리얼/초반(<start)은 단순 유지.
   // 0/빈값이면 미적용. col/row(교대값)는 유지되어 게임과 정합.
-  const [sizeDiversityStartLevel, setSizeDiversityStartLevel] = useState<number>(101);
-  const [unitAssembly, setUnitAssembly] = useState<boolean>(false); // 유닛 조립(sparse 해결, 일반레벨만)
+  const SIZE_DIVERSITY_KEY = 'prod_size_diversity_start_v1';
+  const [sizeDiversityStartLevel, setSizeDiversityStartLevel] = useState<number>(() => {
+    try { const v = parseInt(localStorage.getItem(SIZE_DIVERSITY_KEY) ?? '', 10); return Number.isFinite(v) ? v : 101; } catch { return 101; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(SIZE_DIVERSITY_KEY, String(sizeDiversityStartLevel)); } catch { /* ignore */ }
+  }, [sizeDiversityStartLevel]);
+  // 유닛 조립(sparse 해결, 일반레벨만). localStorage 영속 — 리로드/야간 자동생성 세션에서도 유지.
+  // (영속 안 하면 새로고침 시 false로 리셋 → 야간 auto-queue가 unit_assembly 없이 생성하던 회귀)
+  const UNIT_ASSEMBLY_KEY = 'prod_unit_assembly_v1';
+  const [unitAssembly, setUnitAssembly] = useState<boolean>(() => {
+    try { return localStorage.getItem(UNIT_ASSEMBLY_KEY) === '1'; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(UNIT_ASSEMBLY_KEY, unitAssembly ? '1' : '0'); } catch { /* ignore */ }
+  }, [unitAssembly]);
   const [generationProgress, setGenerationProgress] = useState<ProductionGenerationProgress>({
     status: 'idle',
     total_sets: 0,
@@ -1322,7 +1349,38 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
               }
             };
 
-            for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+            // [보스 템플릿 우선] 보스 레벨(10배수)은 저장된 보스 템플릿으로 생성(from-boss-template).
+            // 구간 맞는 템플릿 없으면(404) 아래 boss_mode 후보생성으로 폴백. (기존엔 검증탭 재생성에서만
+            // 템플릿 적용되던 것 → 최초 생성에도 반영.)
+            let bossTemplateUsed = false;
+            if (isBossLevel) {
+              try {
+                const bossResp = await apiClient.post('/generate/from-boss-template', {
+                  level_number: levelNumber,
+                  target_difficulty: targetDifficulty,
+                  tile_type_profile: tileTypeProfile === 'baseline' ? undefined : tileTypeProfile,
+                  apply_gimmicks: true,
+                  gimmick_unlock_levels: batch.gimmick_unlock_levels || PROFESSIONAL_GIMMICK_UNLOCK_LEVELS,
+                }).catch((e: { response?: { status?: number } }) => {
+                  if (e.response?.status === 404) return null;  // 구간 템플릿 없음 → 폴백
+                  throw e;
+                });
+                if (bossResp) {
+                  bestResult = {
+                    level_json: bossResp.data.level_json,
+                    actual_difficulty: bossResp.data.actual_difficulty,
+                    grade: bossResp.data.grade,
+                  } as GenerationResult;
+                  bestGap = 0;
+                  totalCandidatesGenerated++;
+                  bossTemplateUsed = true;
+                }
+              } catch (e) {
+                console.warn(`Lv.${levelNumber} boss template gen failed → boss_mode fallback:`, e);
+              }
+            }
+
+            for (let attempt = 0; attempt < (bossTemplateUsed ? 0 : MAX_ATTEMPTS); attempt++) {
               actualAttempts = attempt + 1;
 
               // 점진적 허용오차: attempt가 증가할수록 오차 허용 범위 확대
@@ -1628,7 +1686,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
       setIsGenerating(false);
     }
     return completedOk;  // [자동큐] true=정상완료, false=중단/오류
-  }, [selectedBatchId, addNotification, useValidatedGeneration, validationConfig, useCoreBots, updateProgressThrottled, flushProgressImmediate, templateAssignments, autoAssignTemplates]);
+  }, [selectedBatchId, addNotification, useValidatedGeneration, validationConfig, useCoreBots, updateProgressThrottled, flushProgressImmediate, templateAssignments, autoAssignTemplates, unitAssembly, sizeDiversityStartLevel, tileTypeProfile, useReverseGen]);
 
   // 진행 상태를 idle로 리셋 (UI에서 프로그레스 바 사라짐)
   const resetGenerationProgress = useCallback(() => {

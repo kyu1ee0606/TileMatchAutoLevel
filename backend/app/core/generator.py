@@ -1568,31 +1568,60 @@ class LevelGenerator:
         return all_positions
 
     def _assemble_units_in_mask(self, mask, budget, gcol, grow, rng):
-        """valid_mask(받침 있는 칸) 안에 소형 유닛을 budget(3배수)만큼 조립. 앵커스냅(마스크 중심 근접)
-        + 상위후보 랜덤. 겹침 없이. 반환 = 배치된 셀 집합."""
-        from .unit_templates import UNITS_BY_SIZE, units_for_budget
+        """valid_mask(받침 있는 칸) 안에 유닛을 budget(3배수)만큼 조립. 매 스텝 '맞는 가장 큰 유닛'
+        부터 시도하고 안 맞으면 작은 크기로 폴백 → 빈 층 방지. [대칭] 세로 중심축 기준 좌우 짝 배치
+        우선(양쪽 다 마스크에 들어올 때만) → 균형. 안 되면 단독(축 위/예산 빠듯). 겹침 0·floating 0."""
+        from .unit_templates import units_by_size
+        _UBS = units_by_size()
+        sizes_desc = sorted(_UBS.keys(), reverse=True)
         placed = set()
         if not mask:
             return placed
-        mx = sum(x for x, y in mask) / len(mask)
+        axis = (gcol - 1) / 2.0                    # 세로 중심축(좌우 대칭)
         my = sum(y for x, y in mask) / len(mask)
-        for sz in units_for_budget(budget):
-            units = UNITS_BY_SIZE.get(sz, [])
-            if not units:
-                continue
-            unit = rng.choice(units)
-            cands = []
-            for ox in range(0, gcol - unit.w + 1):
-                for oy in range(0, grow - unit.h + 1):
-                    pc = unit.placed(ox, oy)
-                    if pc <= mask and not (pc & placed):
-                        cx, cy = ox + unit.w / 2.0, oy + unit.h / 2.0
-                        cands.append(((cx - mx) ** 2 + (cy - my) ** 2, pc))
-            if not cands:
-                continue
-            cands.sort(key=lambda c: c[0])
-            k = min(len(cands), 5)
-            placed |= rng.choice(cands[:k])[1]
+
+        def _mirror(pc):
+            return {(gcol - 1 - px, py) for (px, py) in pc}
+
+        remaining = (budget // 3) * 3
+        guard = 0
+        while remaining >= 3 and guard < 100:
+            guard += 1
+            step_placed = False
+            for sz in [s for s in sizes_desc if s <= remaining]:
+                units = list(_UBS.get(sz, []))
+                rng.shuffle(units)
+                for unit in units:
+                    pair_cands, single_cands = [], []
+                    for ox in range(0, gcol - unit.w + 1):
+                        for oy in range(0, grow - unit.h + 1):
+                            pc = unit.placed(ox, oy)
+                            if not (pc <= mask) or (pc & placed):
+                                continue
+                            cx = ox + unit.w / 2.0
+                            dist = (cx - axis) ** 2 + ((oy + unit.h / 2.0) - my) ** 2
+                            pcm = _mirror(pc)
+                            if pcm == pc:                      # 축 위 자기대칭 → 단독
+                                single_cands.append((dist, pc))
+                            elif (remaining >= 2 * sz and pcm <= mask
+                                  and not (pcm & placed) and not (pcm & pc)):
+                                pair_cands.append((dist, pc | pcm))   # 좌우 짝(양쪽)
+                            else:
+                                single_cands.append((dist, pc))
+                    chosen = None
+                    src = pair_cands or single_cands            # 짝 우선
+                    if src:
+                        src.sort(key=lambda c: c[0])
+                        chosen = rng.choice(src[:min(len(src), 5)])[1]
+                    if chosen:
+                        placed |= chosen
+                        remaining -= len(chosen)
+                        step_placed = True
+                        break
+                if step_placed:
+                    break
+            if not step_placed:
+                break  # 어떤 유닛도 안 맞음(마스크 소진)
         return placed
 
     def _build_unit_assembly_layers(self, level: Dict[str, Any], active_layers: List[int],
@@ -1617,98 +1646,82 @@ class LevelGenerator:
         n_target = max(n_target, int(round(_min * 1.28 / 3)) * 3)
 
         n = len(active_layers)
-        # 층별 예산: 피라미드 가중(아래 많이). 각 3배수. Σ ≈ n_target.
-        weights = [n - i for i in range(n)]
-        wsum = sum(weights) or 1
-        budgets = [max(3, 3 * round((n_target * w / wsum) / 3)) for w in weights]
-
         pidx = params.pattern_index if params.pattern_index is not None else _r.choice([0, 1, 2, 3, 8, 13, 16, 20])
         pos_map: Dict[int, Set[Tuple[int, int]]] = {}
         all_positions: List[Tuple[int, str]] = []
 
-        for i, layer_idx in enumerate(active_layers):
-            odd = (layer_idx % 2 == 1)
-            gcol = cols if odd else cols + 1
-            grow = rows if odd else rows + 1
+        def _gcol(layer_idx):
+            return cols if (layer_idx % 2 == 1) else cols + 1
 
-            if i == 0:
-                # 바닥 = 주 패턴 (받침 불필요)
-                try:
-                    mp = self._generate_aesthetic_positions(
-                        gcol, grow, target_count=1000, pattern_index=pidx,
-                        target_difficulty=params.target_difficulty)
-                    cells = set()
-                    for p in mp:
-                        x, y = map(int, p.split("_"))
-                        if 0 <= x < gcol and 0 <= y < grow:
-                            cells.add((x, y))
-                except Exception:  # noqa: BLE001
-                    cells = set()
-                if len(cells) < 6:
-                    c = gcol // 2
-                    cells = {(x, y) for x in range(gcol) for y in range(grow) if abs(x - c) + abs(y - c) <= c}
-            else:
-                below = pos_map[active_layers[i - 1]]
-                below_col = cols if (active_layers[i - 1] % 2 == 1) else cols + 1
-                mask = valid_support_mask(below, active_layers[i - 1], layer_idx, below_col, gcol, grow)
-                cells = self._assemble_units_in_mask(mask, budgets[i], gcol, grow, _r)
+        # [바닥 = 주 패턴] 순수 패턴만(유닛 안 섞음). 받침 불필요.
+        l0 = active_layers[0]
+        g0c, g0r = _gcol(l0), _gcol(l0)
+        try:
+            mp = self._generate_aesthetic_positions(
+                g0c, g0r, target_count=1000, pattern_index=pidx,
+                target_difficulty=params.target_difficulty)
+            p0 = {(x, y) for x, y in (map(int, p.split("_")) for p in mp) if 0 <= x < g0c and 0 <= y < g0r}
+        except Exception:  # noqa: BLE001
+            p0 = set()
+        if len(p0) < 6:
+            c = g0c // 2
+            p0 = {(x, y) for x in range(g0c) for y in range(g0r) if abs(x - c) + abs(y - c) <= c}
+        pos_map[l0] = p0
 
-            pos_map[layer_idx] = cells
+        # [탑 실루엣 수렴] 받침 마스크를 위로 갈수록 침식(테두리 벗김) → 중앙 수렴 = 탑 모양.
+        # 침식 셀 ⊆ 받침 마스크 → floating 0 유지(안전). 예산 미만이면 침식 멈춤(빈층 방지).
+        def _erode_mask(cells):
+            nb = ((1, 0), (-1, 0), (0, 1), (0, -1))
+            return {(x, y) for (x, y) in cells if all((x + dx, y + dy) in cells for dx, dy in nb)}
 
-        # [패딩] 총합 < n_target 이면 Size-3 유닛으로 보충. 바닥층(받침 불필요) 먼저,
-        # 부족하면 위층 valid_mask(받침 있는 빈칸)로 확산 → 최소 타일 하한 달성.
-        from .unit_templates import UNITS_BY_SIZE
-        u3 = UNITS_BY_SIZE.get(3, [])
-
-        def _pad_layer(layer_idx: int, allowed: Set[Tuple[int, int]], need: int) -> int:
-            """allowed(놓을 수 있는 칸) 안에서 Size-3 유닛으로 need(3배수) 만큼 채움. 실제 추가 타일수 반환."""
-            if need <= 0 or not u3:
-                return 0
-            gcol = cols if (layer_idx % 2 == 1) else cols + 1
-            grow = cols if (layer_idx % 2 == 1) else cols + 1
-            free = [(x, y) for (x, y) in allowed if (x, y) not in pos_map[layer_idx]]
-            _r.shuffle(free)
-            added = 0
-            guard = 0
-            while need > 0 and guard < 200:
-                guard += 1
-                u = _r.choice(u3)
-                placed = None
-                freeset = set(free)
-                for (ox, oy) in free:
-                    pc = u.placed(ox, oy)
-                    if all(0 <= x < gcol and 0 <= y < grow for x, y in pc) and pc <= freeset and not (pc & pos_map[layer_idx]):
-                        placed = pc
-                        break
-                if placed is None:
-                    # 유닛 모양이 안 들어감 → 받침 있는 개별 셀 3개로 폴백(÷3 유지, floating 없음).
-                    if len(free) >= 3:
-                        placed = set(free[:3])
-                    else:
-                        break
-                pos_map[layer_idx] |= placed
-                free = [f for f in free if f not in placed]
-                added += 3
-                need -= 3
-            return added
-
-        total = sum(len(c) for c in pos_map.values())
-        if total < n_target and active_layers:
-            need = ((n_target - total) // 3) * 3
-            # 1) 바닥층 전체 그리드(받침 불필요)
-            g0 = cols + 1
-            allowed0 = {(x, y) for x in range(g0) for y in range(g0)}
-            need -= _pad_layer(active_layers[0], allowed0, need)
-            # 2) 부족하면 위층 valid_mask(아래층 받침 있는 칸)로 확산
-            for i in range(1, len(active_layers)):
-                if need <= 0:
+        def _converge(mask, steps, keep_min):
+            m = mask
+            for _ in range(max(0, steps)):
+                e = _erode_mask(m)
+                if len(e) >= max(3, keep_min):
+                    m = e
+                else:
                     break
-                li = active_layers[i]
-                below = pos_map[active_layers[i - 1]]
-                below_col = cols if (active_layers[i - 1] % 2 == 1) else cols + 1
-                ucol = cols if (li % 2 == 1) else cols + 1
-                mask = valid_support_mask(below, active_layers[i - 1], li, below_col, ucol, ucol)
-                need -= _pad_layer(li, mask, need)
+            return m or mask
+
+        # [위층 = 유닛만] 패턴 층은 안 건드림. 유닛 예산 = (목표 - 패턴타일)을 위층에 피라미드 분배.
+        unit_layers = active_layers[1:]
+        unit_target = max(0, n_target - len(p0))
+        if unit_layers:
+            uw = [len(unit_layers) - i for i in range(len(unit_layers))]  # 아래 위층 많이
+            uws = sum(uw) or 1
+            ubudget = {unit_layers[i]: max(3, 3 * round((unit_target * uw[i] / uws) / 3)) for i in range(len(unit_layers))}
+            for i, layer_idx in enumerate(unit_layers):
+                gcol = _gcol(layer_idx)
+                below_idx = active_layers[active_layers.index(layer_idx) - 1]
+                mask = valid_support_mask(pos_map[below_idx], below_idx, layer_idx, _gcol(below_idx), gcol, gcol)
+                mask = _converge(mask, i, ubudget[layer_idx])  # 위로 한 겹씩 수렴(예산 하한 가드)
+                pos_map[layer_idx] = self._assemble_units_in_mask(mask, ubudget[layer_idx], gcol, gcol, _r)
+
+        # [톱업] 총합 < n_target 이면 위층(유닛층)에만 유닛 추가로 채움. 패턴층·낱개셀 안 씀.
+        total = sum(len(c) for c in pos_map.values())
+        guard = 0
+        while total < n_target and unit_layers and guard < 20:
+            guard += 1
+            progressed = False
+            for layer_idx in unit_layers:
+                if total >= n_target:
+                    break
+                gcol = _gcol(layer_idx)
+                below_idx = active_layers[active_layers.index(layer_idx) - 1]
+                mask = valid_support_mask(pos_map[below_idx], below_idx, layer_idx, _gcol(below_idx), gcol, gcol)
+                mask = _converge(mask, unit_layers.index(layer_idx), 3)  # 수렴 유지
+                free_mask = mask - pos_map[layer_idx]
+                extra = ((n_target - total) // 3) * 3
+                if extra < 3 or not free_mask:
+                    continue
+                new = self._assemble_units_in_mask(free_mask, extra, gcol, gcol, _r)
+                if new:
+                    pos_map[layer_idx] |= new
+                    total += len(new)
+                    progressed = True
+            if not progressed:
+                break
 
         # write
         for layer_idx in active_layers:
@@ -1728,7 +1741,7 @@ class LevelGenerator:
             level[lk]["row"] = str(grow)
             level[lk]["tiles"] = tiles
             level[lk]["num"] = str(len(tiles))
-        logger.info(f"[UNIT_ASSEMBLY] pattern={pidx} {n}층 예산{budgets} 총{len(all_positions)}타일 (목표{n_target})")
+        logger.info(f"[UNIT_ASSEMBLY] pattern={pidx} {n}층 유닛예산{unit_target} 총{len(all_positions)}타일 (목표{n_target})")
         return all_positions
 
     def _place_key_tiles(self, level: Dict[str, Any], count: int) -> None:
@@ -2076,6 +2089,12 @@ class LevelGenerator:
             New level JSON with reshuffled positions
         """
         import copy
+
+        # [형태보존] 패턴/유닛조립/동심 레벨은 위치 재배치 금지 — 셔플이 모양·받침(coverage)을
+        # 깨뜨려 유닛 흩어짐·floating 유발. 난이도는 타입 재배정(역생성/재분배)으로만 조정.
+        if level.get("_preserve_pattern"):
+            return copy.deepcopy(level)
+
         new_level = copy.deepcopy(level)
 
         num_layers = new_level.get("layer", 8)
@@ -9727,33 +9746,42 @@ class LevelGenerator:
                         # ADD 모드: 빈 위치(아직 타일 없음) 우선, 단 placed_positions/output_positions 충돌 금지
                         if try_pos in placed_positions or try_pos in output_positions:
                             continue
-                        if not is_valid_goal_position(try_col, try_row, goal_type):
+                        # [고립 방지] preserve 모드: 클러스터에 4-인접한 빈칸만 허용 → 골이 유닛에 붙음.
+                        # 인접 자리 없으면 pos=None 유지 → pass3가 클러스터 내부 타일 대체로 처리(연결 유지).
+                        if preserve_pattern and not any(
+                            f"{try_col + dx}_{try_row + dy}" in tiles
+                            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                        ):
                             continue
-                        col_off, row_off = get_output_direction(goal_type)
-                        output_pos = f"{try_col + col_off}_{try_row + row_off}"
-                        if output_pos in placed_positions or output_pos in output_positions:
+                        # [출력칸 자연확보] preserve 모드는 4방향 모두 시도 → 자연히 빈 출력칸 있는
+                        # 방향 채택. 클리어(=하위타일 제거→floating) 없이 연결 배치.
+                        base_g2 = goal_type[:-2] if goal_type.endswith(('_s', '_n', '_e', '_w')) else goal_type
+                        cur_d = goal_type[-1] if goal_type.endswith(('_s', '_n', '_e', '_w')) else 's'
+                        dirs_try = [cur_d] + [d for d in ('s', 'n', 'e', 'w') if d != cur_d] if preserve_pattern else [cur_d]
+                        chosen_type = None
+                        for _d in dirs_try:
+                            cand_type = f"{base_g2}_{_d}"
+                            if not is_valid_goal_position(try_col, try_row, cand_type):
+                                continue
+                            c_off, r_off = get_output_direction(cand_type)
+                            out_p = f"{try_col + c_off}_{try_row + r_off}"
+                            if out_p in placed_positions or out_p in output_positions or out_p in tiles:
+                                continue
+                            if get_adjacent_positions(try_col, try_row) & placed_positions:
+                                continue
+                            if get_adjacent_positions(try_col + c_off, try_row + r_off) & output_positions:
+                                continue
+                            if any(would_face_each_other(try_pos, cand_type, ep, et) for ep, et in goal_positions_info):
+                                continue
+                            if would_craft_stack_conflict(try_pos, cand_type, goal_positions_info, output_positions):
+                                continue
+                            chosen_type = cand_type
+                            break
+                        if chosen_type is None:
                             continue
-                        # output_pos는 비어 있어야 함 (다른 레이어 포함)
-                        # is_valid_goal_position이 이미 체크했지만 명시적으로 한 번 더
-                        if output_pos in tiles:
-                            continue
-                        adjacent = get_adjacent_positions(try_col, try_row)
-                        if adjacent & placed_positions:
-                            continue
-                        output_adjacent = get_adjacent_positions(try_col + col_off, try_row + row_off)
-                        if output_adjacent & output_positions:
-                            continue
-                        facing_conflict = False
-                        for existing_pos, existing_type in goal_positions_info:
-                            if would_face_each_other(try_pos, goal_type, existing_pos, existing_type):
-                                facing_conflict = True
-                                break
-                        if facing_conflict:
-                            continue
-                        if would_craft_stack_conflict(try_pos, goal_type, goal_positions_info, output_positions):
-                            continue
+                        goal_type = chosen_type
                         pos = try_pos
-                        logger.warning(f"[_add_goals_pass2] Found new position {pos} for {goal_type} (outside pattern)")
+                        logger.warning(f"[_add_goals_pass2] Found new position {pos} for {goal_type} (adjacent, no-clear)")
                         break
                     if pos:
                         break
@@ -12078,7 +12106,11 @@ class LevelGenerator:
         # If still_broken has any types, it means the total is not divisible by 3
         # or the reassignment strategies failed. Force fix by removing tiles.
         # NOTE: Even for symmetric patterns, we must force fix if redistribution failed
-        if still_broken:
+        # PATTERN MODE: skip forced tile removal here — defer to _finalize_divisibility_guarantee,
+        # which fixes ÷3 shape-safely (add adjacent / container-internal) instead of deleting pattern cells.
+        if still_broken and preserve_pattern:
+            logger.info("[_ensure_tile_count_divisible_by_3] Pattern mode: deferring ÷3 fix to finalize (no tile removal)")
+        elif still_broken:
             # Recount everything one more time
             total_matchable = 0
             removable_tiles_final: List[Tuple[int, str, str]] = []  # (layer_idx, pos, tile_type)
@@ -13240,10 +13272,12 @@ class LevelGenerator:
                     if redistributed:
                         continue  # Continue loop to handle the new type distribution
 
-                    # If redistribution failed, fall through to deletion
-                    logger.warning("[_force_fix_tile_counts] Pattern mode: redistribution failed, minimal tile deletion required")
+                    # Redistribution failed: do NOT delete pattern cells here.
+                    # Defer ÷3 to _finalize_divisibility_guarantee (shape-safe add / container-internal).
+                    logger.info("[_force_fix_tile_counts] Pattern mode: redistribution failed, deferring ÷3 fix to finalize (no tile removal)")
+                    break
 
-                # Need to remove tiles (non-pattern mode or failed redistribution)
+                # Need to remove tiles (non-pattern mode)
                 if rem2 and type_positions.get(rem2[0]):
                     # Remove 2 tiles from rem2 type to make it rem0
                     type_a = rem2[0]
@@ -13549,6 +13583,39 @@ class LevelGenerator:
         """
         level = self._sync_layer_num_fields(level)
         num_layers = int(level.get("layer", 0) or 0)
+        preserve_pattern = bool(level.get("_preserve_pattern"))
+
+        def _adjacent_empty_slots(need: int) -> List[Tuple[int, str]]:
+            """패턴 보존용: 기존 타일에 인접한 빈 칸을 need개까지 찾는다 (홀짝 레이어 dim 반영)."""
+            gcols = int(level.get("gridWidth", 7) or 7)
+            grows = int(level.get("gridHeight", 7) or 7)
+            found: List[Tuple[int, str]] = []
+            seen_global: set = set()
+            for li in range(num_layers):
+                if len(found) >= need:
+                    break
+                tiles = level.get(f"layer_{li}", {}).get("tiles", {})
+                if not tiles:
+                    continue
+                is_odd = li % 2 == 1
+                lc = gcols if is_odd else gcols + 1
+                lr = grows if is_odd else grows + 1
+                used = set(tiles.keys())
+                for pos in list(used):
+                    p = pos.split("_")
+                    if len(p) != 2:
+                        continue
+                    x, y = int(p[0]), int(p[1])
+                    for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                        nx, ny = x + dx, y + dy
+                        npos = f"{nx}_{ny}"
+                        key = (li, npos)
+                        if 0 <= nx < lc and 0 <= ny < lr and npos not in used and key not in seen_global:
+                            seen_global.add(key)
+                            found.append((li, npos))
+                            if len(found) >= need:
+                                return found
+            return found
 
         def _scan():
             """현재 레벨 구성 스캔: concrete 카운트/위치, regular t0 위치, 컨테이너(craft/stack)."""
@@ -13587,17 +13654,32 @@ class LevelGenerator:
         c_counts, c_pos = self._concrete_positions(level, num_layers)
         rc = sum(c_counts.values()) % 3
         if rc:
-            removed = 0
-            for tt in sorted(c_pos, key=lambda t: (-(c_counts[t] % 3), -c_counts[t])):
-                while c_pos[tt] and removed < rc:
-                    li, pos = c_pos[tt].pop()
-                    lk = f"layer_{li}"
-                    if pos in level.get(lk, {}).get("tiles", {}):
-                        del level[lk]["tiles"][pos]
-                        removed += 1
-                if removed >= rc:
-                    break
-            level = self._sync_layer_num_fields(level)
+            handled = False
+            if preserve_pattern:
+                # 패턴 모드: 삭제 대신 인접 빈칸에 concrete 타일 추가(모양 보존). Step2 relabel이 per-type 마무리.
+                need = 3 - rc
+                slots = _adjacent_empty_slots(need)
+                if len(slots) >= need:
+                    add_type = next(iter(c_counts), "t1")
+                    for li, pos in slots[:need]:
+                        level[f"layer_{li}"]["tiles"][pos] = [add_type, ""]
+                    logger.info(f"[FINALIZE_DIV] Pattern mode: added {need} adjacent concrete tile(s) for ÷3 (shape preserved)")
+                    level = self._sync_layer_num_fields(level)
+                    handled = True
+            if not handled:
+                removed = 0
+                for tt in sorted(c_pos, key=lambda t: (-(c_counts[t] % 3), -c_counts[t])):
+                    while c_pos[tt] and removed < rc:
+                        li, pos = c_pos[tt].pop()
+                        lk = f"layer_{li}"
+                        if pos in level.get(lk, {}).get("tiles", {}):
+                            del level[lk]["tiles"][pos]
+                            removed += 1
+                    if removed >= rc:
+                        break
+                if preserve_pattern:
+                    logger.warning(f"[FINALIZE_DIV] Pattern mode: no adjacent slot, removed {removed} concrete tile(s) as last resort")
+                level = self._sync_layer_num_fields(level)
 
         # ── Step 2: concrete per-type ÷3 (통합 relabel; 총합 ÷3 전제에서 항상 성공) ──
         self._consolidate_concrete_divisibility(level, num_layers)
@@ -13607,36 +13689,55 @@ class LevelGenerator:
         t0_count = len(t0_regular) + sum(_internal(td) for _, _, td in containers)
         rt = t0_count % 3
         if rt:
-            removed = 0
-            touched_container = False
-            for li, pos in sorted(t0_regular, key=lambda x: -x[0]):
-                if removed >= rt:
-                    break
-                lk = f"layer_{li}"
-                if pos in level.get(lk, {}).get("tiles", {}):
-                    del level[lk]["tiles"][pos]
-                    removed += 1
-            if removed < rt:
-                for li, pos, td in containers:
+            handled = False
+            if preserve_pattern:
+                # 패턴 모드: regular t0 삭제 대신 컨테이너 내부 t0를 (3-rt) 증가 → 시각 타일 무변경.
+                target = None
+                for _, _, td in containers:
+                    if len(td) > 2 and isinstance(td[2], list) and td[2]:
+                        target = td
+                        break
+                if target is not None:
+                    need = 3 - rt
+                    target[2][0] = _internal(target) + need
+                    gc: Dict[str, int] = {}
+                    for _, _, td in containers:
+                        gc[td[0]] = gc.get(td[0], 0) + _internal(td)
+                    level["goalCount"] = gc
+                    logger.info(f"[FINALIZE_DIV] Pattern mode: +{need} to container internal for t0 ÷3 (shape preserved)")
+                    level = self._sync_layer_num_fields(level)
+                    handled = True
+            if not handled:
+                removed = 0
+                touched_container = False
+                for li, pos in sorted(t0_regular, key=lambda x: -x[0]):
                     if removed >= rt:
                         break
-                    intern = _internal(td)
-                    take = min(intern - self.MIN_GOAL_COUNT, rt - removed)
-                    if take > 0:
-                        td[2][0] = intern - take
-                        removed += take
-                        touched_container = True
-            if touched_container:
-                gc: Dict[str, int] = {}
-                for _, _, td in containers:
-                    gc[td[0]] = gc.get(td[0], 0) + _internal(td)
-                level["goalCount"] = gc
-            if removed < rt:
-                logger.error(
-                    f"[FINALIZE_DIV] t0_count ÷3 보정 실패 (필요 {rt}, 제거 {removed})"
-                )
-                self._last_playability_warning = True
-            level = self._sync_layer_num_fields(level)
+                    lk = f"layer_{li}"
+                    if pos in level.get(lk, {}).get("tiles", {}):
+                        del level[lk]["tiles"][pos]
+                        removed += 1
+                if removed < rt:
+                    for li, pos, td in containers:
+                        if removed >= rt:
+                            break
+                        intern = _internal(td)
+                        take = min(intern - self.MIN_GOAL_COUNT, rt - removed)
+                        if take > 0:
+                            td[2][0] = intern - take
+                            removed += take
+                            touched_container = True
+                if touched_container:
+                    gc: Dict[str, int] = {}
+                    for _, _, td in containers:
+                        gc[td[0]] = gc.get(td[0], 0) + _internal(td)
+                    level["goalCount"] = gc
+                if removed < rt:
+                    logger.error(
+                        f"[FINALIZE_DIV] t0_count ÷3 보정 실패 (필요 {rt}, 제거 {removed})"
+                    )
+                    self._last_playability_warning = True
+                level = self._sync_layer_num_fields(level)
 
         # ── Step 4: 방어적 최종 검증 (실제 분배 측정). 위 불변식이 보장하므로 통상 통과 ──
         c_final, _, containers = _scan()

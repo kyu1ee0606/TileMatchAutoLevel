@@ -585,6 +585,9 @@ class ValidatedGenerateRequest(BaseModel):
     use_reverse_generation: bool = Field(default=False, description="[역생성] concrete(컨테이너/순서기믹 없는) 레벨에 witness-peeling 타입배정 적용 → 솔버블·÷3 보장. 적용 시 level_json.reverse_generated=true")
     reverse_generation_max_open: int = Field(default=2, ge=1, le=3, description="역생성 난이도 레버(동시 미완성 그룹 수 1~3, 클수록 어려움)")
     boss_mode: bool = Field(default=False, description="[보스 생성기] 10의 배수 보스 전용: 그리드 선언 최대 8, 5~6층, 레이어별 화려한 대칭 템플릿 레시피(level_number 결정적 로테이션), symmetry both, 기믹 강도 상향")
+    concentric_deep: bool = Field(default=False, description="동심 침식 스택(좁고깊은/중간보스). 각 층=중앙 정사각, 위로 완만 축소. use_reverse_generation과 병용 권장.")
+    unit_assembly: bool = Field(default=False, description="유닛 조립: 바닥 큰층=주 패턴 / 위 작은층=유닛 전용 그리드 적층. use_reverse_generation과 병용 권장.")
+    size_diversity_start_level: Optional[int] = Field(default=None, description="[B] 층별 그리드 크기 다양화 시작 레벨. None=미적용. (검증 생성 재시도 루프가 참조 — 누락 시 엔드포인트 크래시→폴백)")
 
 
 class ValidatedGenerateResponse(BaseModel):

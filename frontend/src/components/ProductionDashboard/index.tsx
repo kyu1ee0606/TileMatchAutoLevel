@@ -2296,6 +2296,10 @@ function OverviewTab({ stats, batch, batchId }: { stats: ProductionStats; batch:
             }],
             symmetry_mode: symmetryMode,
             pattern_type: patternType,
+            // [유닛 조립] 원본이 유닛조립(_unit_assembly)이면 재생성도 동일 규칙 유지(솔리드→하단·패턴→상단).
+            // 토글 대신 per-level 마커 → 재생성이 원본 모드 보존.
+            unit_assembly: (Boolean((level.level_json as { _unit_assembly?: boolean } | undefined)?._unit_assembly) && !isBossLevel) ? true : undefined,
+            use_reverse_generation: (Boolean((level.level_json as { _unit_assembly?: boolean } | undefined)?._unit_assembly) && !isBossLevel) ? true : undefined,
             // [보스 생성기] 레시피 로테이션 + 그리드 캡 (재생성도 동일 적용)
             boss_mode: isBossLevel || undefined,
           },
@@ -4875,9 +4879,10 @@ function TestTab({
                 pattern_type: patternType,
                 // 보스: pattern_index 미지정 → 백엔드 BOSS_RECIPES(레벨번호 결정적) 적용
                 pattern_index: isBossLevel ? undefined : patternIndex,
-                // [유닛 조립] 토글 켜짐 + 일반레벨이면 재생성도 유닛 조립 방식 적용(테스트).
-                unit_assembly: unitAssembly && !isBossLevel ? true : undefined,
-                use_reverse_generation: unitAssembly && !isBossLevel ? true : undefined,
+                // [유닛 조립] 토글 켜짐 OR 원본이 유닛조립(_unit_assembly 마커)이면 재생성도 동일 규칙 유지.
+                // (토글 꺼져도 원본 모드 보존 → 재생성이 규칙 일관되게 따름.)
+                unit_assembly: ((unitAssembly || Boolean((level.level_json as { _unit_assembly?: boolean } | undefined)?._unit_assembly)) && !isBossLevel) ? true : undefined,
+                use_reverse_generation: ((unitAssembly || Boolean((level.level_json as { _unit_assembly?: boolean } | undefined)?._unit_assembly)) && !isBossLevel) ? true : undefined,
                 // [보스 생성기]
                 boss_mode: isBossLevel || undefined,
               },

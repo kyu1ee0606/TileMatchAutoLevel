@@ -3373,6 +3373,7 @@ class LevelGenerator:
                 level, active_layers, cols, rows, params, total_target)
             level["_preserve_pattern"] = True   # 조립 모양 보존(피라미드 클램프/재생성 스킵)
             level["_pattern_locked_positions"] = {p for _, p in all_layer_positions}
+            level["_unit_assembly"] = True      # [재생성 보존] 순차검증/개별 재생성이 이 마커로 규칙 유지
         elif getattr(params, "concentric_deep", False):
             all_layer_positions = self._build_concentric_layers(level, active_layers, cols, rows, params)
             level["_preserve_pattern"] = True  # 피라미드 클램프/재생성 스킵(동심 모양 보존)

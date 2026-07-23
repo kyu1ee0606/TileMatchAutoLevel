@@ -636,7 +636,14 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
 
   // Generation state
   const [isGenerating, setIsGenerating] = useState(false);
-  const [useValidatedGeneration, setUseValidatedGeneration] = useState(false); // 검증 기반 생성 (기본 OFF - 빠른 생성)
+  // 검증 기반 생성 (기본 OFF - 빠른 생성). localStorage 영속 — 리로드/야간 세션 유지.
+  const USE_VALIDATED_KEY = 'prod_use_validated_gen_v1';
+  const [useValidatedGeneration, setUseValidatedGeneration] = useState<boolean>(() => {
+    try { return localStorage.getItem(USE_VALIDATED_KEY) === '1'; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(USE_VALIDATED_KEY, useValidatedGeneration ? '1' : '0'); } catch { /* ignore */ }
+  }, [useValidatedGeneration]);
 
   // [자동 연속생성 큐] 자리비움시 여러 1500배치를 연속(순차) 자동 생성. 로컬 CPU가 상한이라
   // 병렬 아닌 back-to-back. targetCount=0 → 정지 누를 때까지 무한.
@@ -667,12 +674,26 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
   useEffect(() => {
     try { localStorage.setItem(AUTO_ASSIGN_KEY, autoAssignTemplates ? '1' : '0'); } catch { /* ignore */ }
   }, [autoAssignTemplates]);
-  const [useCoreBots, setUseCoreBots] = useState(true); // 3봇 코어 모드 (기본 ON - 40% 빠름)
-  const [validationConfig, setValidationConfig] = useState({
-    max_retries: 3,           // 최대 재시도 횟수
-    tolerance: 20.0,          // 허용 오차 (%)
-    simulation_iterations: 20, // 시뮬레이션 반복 횟수 (가볍게)
+  // 3봇 코어 모드 (기본 ON - 40% 빠름). localStorage 영속.
+  const USE_CORE_BOTS_KEY = 'prod_use_core_bots_v1';
+  const [useCoreBots, setUseCoreBots] = useState<boolean>(() => {
+    try { const v = localStorage.getItem(USE_CORE_BOTS_KEY); return v === null ? true : v === '1'; } catch { return true; }
   });
+  useEffect(() => {
+    try { localStorage.setItem(USE_CORE_BOTS_KEY, useCoreBots ? '1' : '0'); } catch { /* ignore */ }
+  }, [useCoreBots]);
+  // 검증 설정. localStorage 영속(JSON).
+  const VALIDATION_CONFIG_KEY = 'prod_validation_config_v1';
+  const [validationConfig, setValidationConfig] = useState<{ max_retries: number; tolerance: number; simulation_iterations: number }>(() => {
+    try {
+      const raw = localStorage.getItem(VALIDATION_CONFIG_KEY);
+      if (raw) { const p = JSON.parse(raw); if (p && typeof p === 'object') return { max_retries: 3, tolerance: 20.0, simulation_iterations: 20, ...p }; }
+    } catch { /* ignore */ }
+    return { max_retries: 3, tolerance: 20.0, simulation_iterations: 20 };
+  });
+  useEffect(() => {
+    try { localStorage.setItem(VALIDATION_CONFIG_KEY, JSON.stringify(validationConfig)); } catch { /* ignore */ }
+  }, [validationConfig]);
   // [역생성] concrete 솔버블 보장 모드. 켜면 컨테이너/순서기믹 없는 plain concrete로 생성되며
   // witness-peeling 타입배정으로 솔버블·÷3 구조적 보장. 적용 레벨은 🧩역 배지 표시.
   // localStorage 영속 — 리로드/야간 자동생성 세션에서도 생성탭 설정 유지.
@@ -3273,7 +3294,7 @@ function TestTab({
     addNotification('success', `🏰 보스 재생성 완료: ${done}개 (템플릿없음 스킵 ${skipped}개)`);
     loadLevels();
     onStatsUpdate();
-  }, [levels, batchId, addNotification, onStatsUpdate, isBossTplReady]);
+  }, [levels, batchId, addNotification, onStatsUpdate, isBossTplReady, tileTypeProfile]);
 
   // [난이도 미세조절] 재생성 없이 색만 재배치해 목표 클리어율 근접. 모양·÷3·기믹 불변.
   // 백엔드 /tune/arrangement (독립 도구). 검증은 순차검증과 동일 RL(skill_mean·scale) 사용.

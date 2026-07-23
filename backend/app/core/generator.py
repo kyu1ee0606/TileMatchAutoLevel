@@ -1448,6 +1448,15 @@ class LevelGenerator:
                 level["reverse_generated"] = False
                 level["reverse_generation_reason"] = f"오류: {e}"
 
+        # [생성모드 마커] 재생성(순차검증/개별)이 원본 생성모드를 판별·보존하도록 level_json에 기록.
+        # (tile_type_profile·size_diversity는 level_json에 안 남던 설정 → 재생성이 놓치던 문제 차단.)
+        if getattr(params, "tile_type_profile", None):
+            level["_tile_type_profile"] = params.tile_type_profile
+        if getattr(params, "size_diversity_start_level", None):
+            level["_size_diversity_start_level"] = params.size_diversity_start_level
+        if getattr(params, "concentric_deep", False):
+            level["_concentric_deep"] = True
+
         # [LINK_SANITIZE] 모든 변형 단계(centering/÷3 삭제/OOB 제거/역생성) 이후 최종 실행.
         # 대상이 사라진 고아 link 속성을 제거 → 인게임 FindLinkTile null[0] NRE(스폰 크래시) 차단.
         level = self._strip_orphaned_link_tiles(level)

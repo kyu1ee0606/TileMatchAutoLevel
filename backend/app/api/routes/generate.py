@@ -1342,6 +1342,10 @@ def _generate_level_impl(
                         tutorial_gimmick_min_count=3,
                         level_number=request.level_number,
                         size_diversity_start_level=request.size_diversity_start_level,  # [B]
+                        # [생성모드 보존] 재시도도 유닛조립/동심/역생성 유지 (누락 시 재시도가 일반레벨로 회귀)
+                        unit_assembly=getattr(request, "unit_assembly", False),
+                        concentric_deep=getattr(request, "concentric_deep", False),
+                        use_reverse_generation=request.use_reverse_generation,
                     )
 
                 if attempt >= 2:
@@ -1363,6 +1367,10 @@ def _generate_level_impl(
                         tutorial_gimmick_min_count=3,
                         level_number=request.level_number,
                         size_diversity_start_level=request.size_diversity_start_level,  # [B]
+                        # [생성모드 보존] 폴백도 유닛조립/동심/역생성 유지
+                        unit_assembly=getattr(request, "unit_assembly", False),
+                        concentric_deep=getattr(request, "concentric_deep", False),
+                        use_reverse_generation=request.use_reverse_generation,
                     )
 
             result = generator.generate(params)

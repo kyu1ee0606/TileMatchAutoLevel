@@ -1129,10 +1129,11 @@ def batch_verify_with_regeneration(
                     from .generate import generate_validated_level
                     from ...models.schemas import ValidatedGenerateRequest
 
-                    # [재생성 규칙 보존] 원본이 유닛조립(_unit_assembly)/역생성으로 생성됐으면
-                    # 재생성도 동일 모드로 → 순차검증 후 재생성이 규칙(솔리드→하단·패턴→상단 등) 유지.
+                    # [재생성 규칙 보존] 원본 생성모드 마커 읽어 재생성도 동일 모드로 →
+                    # 순차검증 후 재생성이 규칙(솔리드→하단·패턴→상단·프로파일·층크기다양화 등) 유지.
                     _ua = bool(original_json.get("_unit_assembly"))
-                    _rev = _ua or bool(original_json.get("reverse_generated"))
+                    _cd = bool(original_json.get("_concentric_deep"))
+                    _rev = _ua or _cd or bool(original_json.get("reverse_generated"))
                     vreq = ValidatedGenerateRequest(
                         target_difficulty=target_difficulty,
                         grid_size=tuple(grid_size) if isinstance(grid_size, list) else grid_size,
@@ -1144,7 +1145,10 @@ def batch_verify_with_regeneration(
                         pattern_index=pattern_index,
                         level_number=level_item.level_number,
                         unit_assembly=_ua,
+                        concentric_deep=_cd,
                         use_reverse_generation=_rev,
+                        tile_type_profile=original_json.get("_tile_type_profile"),
+                        size_diversity_start_level=original_json.get("_size_diversity_start_level"),
                     )
                     vresp = generate_validated_level(vreq, get_level_generator())
                     new_json = vresp.level_json

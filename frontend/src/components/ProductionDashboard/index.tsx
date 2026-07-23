@@ -40,6 +40,7 @@ import {
   listProductionBatches,
   saveProductionLevels,
   getProductionLevelsByBatch,
+  getProductionLevelNumbersByBatch,
   getPlaytestQueue,
   addPlaytestResult,
   approveLevel,
@@ -1000,6 +1001,14 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
     let completedCount = 0;
     const failedLevels: number[] = [];
 
+    // [이어서 생성] 이미 생성된 레벨번호 조회 → 재개 시 스킵(전체 재생성 방지, 안 된 것만 생성).
+    // 신규 배치는 빈 집합이라 무영향. completedCount에 반영해 진행률 정합.
+    let existingLevelNumbers = new Set<number>();
+    try {
+      existingLevelNumbers = await getProductionLevelNumbersByBatch(activeBatchId);
+      completedCount = existingLevelNumbers.size;
+    } catch { /* 조회 실패 시 전체 생성(안전) */ }
+
     // In-memory counters to avoid post-generation full IndexedDB scans
     const statusCounts = { generated_count: 0, playtest_count: 0, approved_count: 0, rejected_count: 0, exported_count: 0 };
     const gradeCounts: Record<string, number> = { S: 0, A: 0, B: 0, C: 0, D: 0 };
@@ -1119,6 +1128,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
         const levelTasks: LevelTask[] = [];
         for (let localIdx = 1; localIdx <= batch.levels_per_set; localIdx++) {
           const levelNumber = setIdx * batch.levels_per_set + localIdx;
+          if (existingLevelNumbers.has(levelNumber)) continue;  // [이어서 생성] 이미 있는 레벨 스킵
           let targetDifficulty = baseDifficulty;
           if (batch.use_sawtooth) {
             const localProgress = (localIdx - 1) / (batch.levels_per_set - 1);
@@ -3039,23 +3049,31 @@ function GenerateTab({
             )}
 
             {/* Actions */}
-            <div className="flex gap-2">
-              {isGenerating && (
-                <Button onClick={onCancel} variant="danger" className="flex-1">
-                  ⏸️ 일시 정지
-                </Button>
-              )}
-              {progress.status === 'paused' && (
-                <Button onClick={() => onStart({ strategy: playtestStrategy })} className="flex-1">
-                  ▶️ 계속 생성
-                </Button>
-              )}
-              {progress.status === 'completed' && (
-                <div className="w-full p-2 bg-green-900/30 border border-green-700/30 rounded text-center text-sm text-green-300">
-                  ✅ 생성 완료! 테스트 탭으로 이동하세요.
+            {(() => {
+              // [이어서 생성] 부분배치(0<생성<전체)면 status(paused/error/completed/idle) 무관하게 재개 버튼.
+              // progress는 비영속(리로드시 초기화)이라 배치 레코드 기준으로 판정 → 항상 재개 가능.
+              const incomplete = !!batch && batch.generated_count > 0 && batch.generated_count < batch.total_levels;
+              const fullyDone = !!batch && batch.total_levels > 0 && batch.generated_count >= batch.total_levels;
+              return (
+                <div className="flex gap-2">
+                  {isGenerating && (
+                    <Button onClick={onCancel} variant="danger" className="flex-1">
+                      ⏸️ 일시 정지
+                    </Button>
+                  )}
+                  {!isGenerating && (progress.status === 'paused' || incomplete) && (
+                    <Button onClick={() => onStart({ strategy: playtestStrategy })} className="flex-1">
+                      ▶️ 이어서 생성{batch ? ` (${batch.generated_count}/${batch.total_levels})` : ''}
+                    </Button>
+                  )}
+                  {!isGenerating && fullyDone && (
+                    <div className="w-full p-2 bg-green-900/30 border border-green-700/30 rounded text-center text-sm text-green-300">
+                      ✅ 생성 완료! 테스트 탭으로 이동하세요.
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
+              );
+            })()}
           </div>
         );
       })()}

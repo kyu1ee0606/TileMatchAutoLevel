@@ -297,6 +297,31 @@ export async function countLevelsByBatch(batchId: string): Promise<number> {
 }
 
 /**
+ * 배치에 이미 존재하는 레벨번호 집합 (level_json 미로드 — key cursor로 경량 조회).
+ * "이어서 생성" 재개 시 기존 레벨 스킵 판정용. (compound key [batchId, level_number])
+ */
+export async function getProductionLevelNumbersByBatch(batchId: string): Promise<Set<number>> {
+  const database = await initProductionDB();
+  return new Promise((resolve, reject) => {
+    const out = new Set<number>();
+    const tx = database.transaction(STORES.LEVELS, 'readonly');
+    const req = tx.objectStore(STORES.LEVELS).index('batch_id').openKeyCursor(batchId);
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      const cur = req.result;
+      if (cur) {
+        const pk = cur.primaryKey as [string, number] | number;
+        const ln = Array.isArray(pk) ? pk[1] : pk;
+        if (typeof ln === 'number') out.add(ln);
+        cur.continue();
+      } else {
+        resolve(out);
+      }
+    };
+  });
+}
+
+/**
  * 배치의 모든 레벨 조회
  */
 export async function getProductionLevelsByBatch(

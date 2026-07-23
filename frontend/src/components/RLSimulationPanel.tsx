@@ -394,7 +394,7 @@ ${tableLines.join('\n')}
       return {
         unit_assembly: ua,
         concentric_deep: cd,
-        use_reverse_generation: ua || cd || Boolean(j.reverse_generated),
+        use_reverse_generation: cd || Boolean(j.reverse_generated),  // [봇클리어] ua는 reverse 강제 안 함
         tile_type_profile: typeof j._tile_type_profile === 'string' ? j._tile_type_profile : undefined,
         size_diversity_start_level: typeof j._size_diversity_start_level === 'number' ? j._size_diversity_start_level : undefined,
       };

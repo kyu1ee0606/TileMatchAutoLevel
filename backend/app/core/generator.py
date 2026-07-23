@@ -1205,7 +1205,9 @@ class LevelGenerator:
         # CRITICAL: Deadlock prevention - ensure tiles are well-distributed across layers
         # This prevents scenarios where matching tiles are all blocked in lower layers
         # Skip when skip_deadlock_check=True for ultra-fast generation (use batch verify later)
-        if not params.skip_deadlock_check:
+        # [봇클리어 수정] 단 unit_assembly는 reverse 없이 생성되므로 데드락 위험 → 강제로 체크 실행
+        # (skip 무시). 언클리어러블 필터 → RL 검증 통과율 회복.
+        if not params.skip_deadlock_check or getattr(params, "unit_assembly", False):
             level, deadlock_ok, deadlock_clear_rate = self._ensure_no_deadlock(level, max_attempts=10)
             if not deadlock_ok:
                 logger.warning(
@@ -3159,10 +3161,8 @@ class LevelGenerator:
                 # Clamp to valid range
                 active_layer_count = max(min_layers, min(max_layers, active_layer_count))
 
-                # [Lv11~30 준튜토리얼 재미 보강] 층수 +1 — 유닛조립 60타일 분산 여유(솔리드 완화).
-                # (재미·깊이 확보. 상한 5로 캡. 튜토리얼(1~3)은 제외.)
-                if params.level_number is not None and 11 <= params.level_number <= 30:
-                    active_layer_count = min(active_layer_count + 1, 5)
+                # [생산복구] Lv11-30 +1층 원복 — 유닛조립용이었으나 일반 초반레벨도 어렵게 만들어
+                # 검증 회귀 기여. 유닛조립은 빌더가 자체 층수 처리. (재도입은 성긴-대칭 재설계 시.)
 
                 print(f"[GEN_LAYER] target={target:.2f}, params.max={params.max_layers}, min={min_layers}, max={max_layers}, active={active_layer_count}")
 

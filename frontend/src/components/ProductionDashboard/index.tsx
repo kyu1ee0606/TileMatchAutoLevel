@@ -276,10 +276,12 @@ function genModeFields(
   levelNumber: number,
   unitAssemblyOn: boolean | undefined,
   originalLevelJson?: { _unit_assembly?: boolean } | null,
-): { unit_assembly?: true; use_reverse_generation?: true } {
+): { unit_assembly?: true } {
   const isBoss = levelNumber % 10 === 0 && levelNumber > 0;
   const ua = (Boolean(unitAssemblyOn) || Boolean(originalLevelJson?._unit_assembly)) && !isBoss;
-  return ua ? { unit_assembly: true, use_reverse_generation: true } : {};
+  // [봇클리어 수정] reverse_generation은 봇-하드(clear 0.0~0.3) 유발 → 유닛조립에 강제 안 함.
+  // 데드락체크는 백엔드가 unit_assembly면 강제 실행(언클리어러블 필터) → clear 0.5~0.8 정상화.
+  return ua ? { unit_assembly: true } : {};
 }
 
 // [보스 생성기/디바이스 제약] 선언 그리드 최대변 상한 — 9x9 이상은 타일이 작아 플레이 불가.
@@ -739,7 +741,9 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
   }, [sizeDiversityStartLevel]);
   // 유닛 조립(sparse 해결, 일반레벨만). localStorage 영속 — 리로드/야간 자동생성 세션에서도 유지.
   // (영속 안 하면 새로고침 시 false로 리셋 → 야간 auto-queue가 unit_assembly 없이 생성하던 회귀)
-  const UNIT_ASSEMBLY_KEY = 'prod_unit_assembly_v1';
+  // [생산복구] v1→v2 키 버전업: 봇-언클리어러블 회귀로 유닛조립 강제 OFF 리셋(리로드시 기본 false).
+  // 성긴-대칭 재설계+봇클리어 검증 통과 후 재활성. (사용자가 다시 켜면 v2에 저장됨.)
+  const UNIT_ASSEMBLY_KEY = 'prod_unit_assembly_v2';
   const [unitAssembly, setUnitAssembly] = useState<boolean>(() => {
     try { return localStorage.getItem(UNIT_ASSEMBLY_KEY) === '1'; } catch { return false; }
   });

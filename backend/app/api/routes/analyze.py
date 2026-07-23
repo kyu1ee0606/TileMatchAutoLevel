@@ -1136,7 +1136,8 @@ def batch_verify_with_regeneration(
                     # 순차검증 후 재생성이 규칙(솔리드→하단·패턴→상단·프로파일·층크기다양화 등) 유지.
                     _ua = bool(original_json.get("_unit_assembly"))
                     _cd = bool(original_json.get("_concentric_deep"))
-                    _rev = _ua or _cd or bool(original_json.get("reverse_generated"))
+                    # [봇클리어 수정] unit_assembly는 reverse 강제 안 함(reverse=봇하드). 데드락체크가 대체.
+                    _rev = _cd or bool(original_json.get("reverse_generated"))
                     vreq = ValidatedGenerateRequest(
                         target_difficulty=target_difficulty,
                         grid_size=tuple(grid_size) if isinstance(grid_size, list) else grid_size,

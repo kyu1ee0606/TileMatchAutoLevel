@@ -428,6 +428,9 @@ def tune_gimmick(req: GimmickTuneRequest) -> GimmickTuneResult:
     orig_gimmicks = _count_attr_gimmicks(req.level_json)
     seed = req.seed if req.seed is not None else int(req.level_json.get("randSeed", 0) or 0)
     lv, new_gimmicks, eligible = _gimmick_arrangement(req.level_json, req.level_number, req.intensity, seed)
+    # [LINK_SANITIZE] 기믹 재배치가 링크 타겟에 기믹을 얹거나 링크를 옮겨 고아/불량 링크를
+    # 만들 수 있다 → 인게임 FindLinkTile 크래시. 반환 전 생성기 정화기로 무효 링크 plain화.
+    lv = _gen_for_tune._strip_orphaned_link_tiles(lv)
 
     if not req.evaluate:
         return GimmickTuneResult(
@@ -995,6 +998,10 @@ def tune_auto(req: AutoTuneRequest) -> AutoTuneResult:
 
     if orig_pred < 0:
         orig_pred = 0.0
+    # [LINK_SANITIZE] 기믹 스윕(_gimmick_arrangement)이 링크 타겟 위에 기믹을 얹거나 링크를
+    # 재배치해 고아/불량 링크(타겟=기믹/goal/부재)를 만들 수 있다. 생성기 정화기를 최종 적용해
+    # 인게임 FindLinkTile 크래시(스폰 멈춤)를 막는다. (색 스윕은 링크 무영향이나 무해.)
+    best_lv = _gen_for_tune._strip_orphaned_link_tiles(best_lv)
     return AutoTuneResult(
         tuned=(best_lv is not req.level_json),
         best_level_json=best_lv,

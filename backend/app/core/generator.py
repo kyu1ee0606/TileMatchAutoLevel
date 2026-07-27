@@ -1486,6 +1486,11 @@ class LevelGenerator:
             elif final_tut not in ("craft", "stack", "key"):
                 level = self._ensure_tutorial_gimmick_count(level, final_tut, min_ct)
 
+        # [LINK_SANITIZE 백스톱] 위 '튜토리얼 기믹 최종 보장'이 1464의 정화기 '이후'에 link 타일을
+        # 추가하므로, 여기서 링크 정화를 한 번 더 돌려 고아 링크가 절대 출력에 남지 않게 한다.
+        # (링크 언락 첫 스테이지 Lv.51에서 ensure가 추가한 link의 짝 부재/방향오류가 leak되던 버그 방어.)
+        level = self._strip_orphaned_link_tiles(level)
+
         generation_time_ms = int((time.time() - start_time) * 1000)
 
         return GenerationResult(
@@ -7282,7 +7287,9 @@ class LevelGenerator:
                     # Check for vertical pair (north-south)
                     south_pos = f"{col}_{row+1}"
                     if south_pos in layer_eligible and south_pos not in used_positions and south_pos not in blocked_positions:
-                        link_pairs.append((pos, south_pos, "link_n", "link_s", current_tiles))
+                        # [LINK_DIR_FIX] 소스=pos(북쪽 멤버)는 남쪽 짝(row+1)을 가리켜야 하므로 link_s.
+                        # 게임 FindLinkTile: link_s→(x,row+1)=south_pos. (link_n는 row-1을 봐서 짝을 못 찾음=고아)
+                        link_pairs.append((pos, south_pos, "link_s", "link_n", current_tiles))
                         used_positions.add(pos)
                         used_positions.add(south_pos)
                         # Block adjacent positions to prevent adjacent links
@@ -7609,7 +7616,9 @@ class LevelGenerator:
                         if isinstance(south_data, list) and len(south_data) >= 1:
                             if not (south_data[0] in self.GOAL_TYPES or south_data[0].startswith("craft_") or south_data[0].startswith("stack_")):
                                 if len(south_data) < 2 or not south_data[1]:
-                                    pairs.append((pos, south_pos, "link_n", "link_s"))
+                                    # [LINK_DIR_FIX] 소스=pos(북쪽 멤버)는 남쪽 짝을 가리켜야 하므로 link_s
+                                    # (게임 FindLinkTile: link_s→row+1=south_pos). link_n는 row-1 조회 → 고아.
+                                    pairs.append((pos, south_pos, "link_s", "link_n"))
                                     used.add(pos)
                                     used.add(south_pos)
                                     # Block adjacent positions

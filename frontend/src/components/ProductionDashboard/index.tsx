@@ -3146,6 +3146,44 @@ function extractGimmicksFromLevel(levelJson: LevelJSON): string[] {
   return Array.from(gimmicks);
 }
 
+// [LINK_SANITIZE / 자가치유] 고아·불량 링크(짝 없음/타겟이 기믹·goal)를 plain화.
+// 백엔드 _strip_orphaned_link_tiles 와 동일 규칙(게임 FindLinkTile §2): 같은 레이어 이웃
+// link_e→x+1 / link_w→x-1 / link_s→y+1 / link_n→y-1, 타겟은 plain 1:1이어야 유효.
+// 순차검증이 매 레벨 처리 시작에 호출 → 기존 배치의 고아 링크가 검증 통과/실패 무관하게 치유됨.
+// 반환: 제거한 개수(0=변경 없음). level_json 을 제자리 수정.
+const LINK_DELTA: Record<string, [number, number]> = {
+  link_e: [1, 0], link_w: [-1, 0], link_s: [0, 1], link_n: [0, -1],
+};
+function sanitizeOrphanLinks(levelJson: unknown): number {
+  let data = levelJson as Record<string, unknown>;
+  if (!data) return 0;
+  if (data.map && typeof data.map === 'object') data = data.map as Record<string, unknown>;
+  const numLayers = (data.layer as number) || 0;
+  let stripped = 0;
+  for (let i = 0; i < numLayers; i++) {
+    const layer = data[`layer_${i}`] as { tiles?: Record<string, unknown[]> } | undefined;
+    const tiles = layer?.tiles;
+    if (!tiles) continue;
+    for (const pos in tiles) {
+      const d = tiles[pos];
+      if (!Array.isArray(d) || d.length < 2 || typeof d[1] !== 'string') continue;
+      const attr = d[1] as string;
+      if (!attr.startsWith('link_')) continue;
+      const delta = LINK_DELTA[attr];
+      if (!delta) { d[1] = ''; stripped++; continue; }
+      const parts = pos.split('_');
+      const x = parseInt(parts[0], 10), y = parseInt(parts[1], 10);
+      if (Number.isNaN(x) || Number.isNaN(y)) continue;
+      const tgt = tiles[`${x + delta[0]}_${y + delta[1]}`];
+      if (!(Array.isArray(tgt) && tgt.length && typeof tgt[0] === 'string')) { d[1] = ''; stripped++; continue; }
+      const ttype = tgt[0] as string;
+      const tattr = (tgt.length > 1 && typeof tgt[1] === 'string') ? tgt[1] as string : '';
+      if (ttype.startsWith('craft_') || ttype.startsWith('stack_') || tattr !== '') { d[1] = ''; stripped++; }
+    }
+  }
+  return stripped;
+}
+
 // Gimmick display names in Korean
 const GIMMICK_NAMES: Record<string, string> = {
   chain: '체인',
@@ -3243,6 +3281,17 @@ function TestTab({
   const [selectedSequentialLevels, setSelectedSequentialLevels] = useState<Set<number>>(new Set());
   const [lastClickedSequentialLevel, setLastClickedSequentialLevel] = useState<number | null>(null);
   const sequentialAbortRef = useRef<AbortController | null>(null);
+  // [freeze/누수 방지] 언마운트(탭 전환 등) 시 진행중 순차검증 8워커를 즉시 중단.
+  // abort → 워커풀 while(!signal.aborted) 탈출 → 클로저(1500 level state) 해제 → GC.
+  // 안 하면 언마운트돼도 워커가 유령처럼 돌며 백엔드 때리고 죽은 상태를 붙잡음(계단식 악화).
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      sequentialAbortRef.current?.abort();
+    };
+  }, []);
 
   // [보스 템플릿 재생성] 보스 레벨(10의 배수)을 저장된 보스 템플릿으로 재생성
   const [bossRegen, setBossRegen] = useState<{ running: boolean; done: number; total: number; skipped: number }>(
@@ -3953,6 +4002,13 @@ function TestTab({
 
       while (attempts < MAX_ATTEMPTS && !passed && !signal.aborted) {
         attempts++;
+        // [링크 자가치유] 매 attempt 측정·저장 직전에 고아/불량 링크 plain화. 진입 원본뿐 아니라
+        // 재생성/튜닝으로 교체된 currentLevel(템플릿 재생성 등 정화 누락 경로 포함)도 커버 →
+        // best-of-N 스냅샷/최종 저장이 항상 링크-클린. (인게임 FindLinkTile 스폰멈춤 방지.)
+        if (currentLevel) {
+          const _lh = sanitizeOrphanLinks(currentLevel.level_json);
+          if (_lh > 0) console.info(`[link-heal] Lv.${levelNumber} attempt${attempts}: 고아/불량 링크 ${_lh}개 plain화`);
+        }
         const passThreshold = computeSequentialPassThreshold(currentLevel?.meta.target_difficulty);
         lastPassThreshold = passThreshold;
         lastTargetDifficulty = currentLevel?.meta.target_difficulty;
@@ -4217,6 +4273,9 @@ function TestTab({
         addNotification('success', `2차패스 회수: ${recovered.length}/${failedNums.length}개 추가 통과`);
       }
     }
+
+    // [언마운트 가드] 언마운트로 abort된 경우 죽은 컴포넌트/부모에 setState·재로드 금지.
+    if (!mountedRef.current) return;
 
     setIsSequentialProcessing(false);
     setSequentialProgress(prev => ({ ...prev, status: 'idle' }));
@@ -7073,10 +7132,14 @@ function TestTab({
           )}
         </div>
 
-        {/* Level list */}
+        {/* Level list — 가상화 스크롤 컨테이너.
+            react-virtual은 스크롤 요소의 '확정 높이'가 필요. flex-1만 두면 min-height:auto(=콘텐츠)로
+            높이가 스페이서(getTotalSize)에 따라 커져 측정↔레이아웃 무한 피드백 → "Too many re-renders".
+            min-h-0로 flex 축소 허용 + maxHeight로 상한 고정 → 측정 안정. */}
         <div
           ref={levelListRef}
-          className="flex-1 overflow-y-auto"
+          className="flex-1 min-h-0 overflow-y-auto"
+          style={{ maxHeight: 'calc(100vh - 320px)' }}
           onScroll={(e) => {
             // 로딩 중에는 스크롤 위치 저장하지 않음 (리렌더링 시 0으로 덮어쓰기 방지)
             if (!isLoadingLevelsRef.current) {
@@ -7103,6 +7166,10 @@ function TestTab({
                 <div
                   key={level.meta.level_number}
                   onClick={() => handleSelectLevel(level)}
+                  // [freeze 방지] content-visibility:auto — 브라우저가 화면 밖 행의 레이아웃/페인트를
+                  // 자동 스킵. 1500행이 DOM에 있어도 scrollTop 읽기(강제 reflow)가 보이는 행만 계산 →
+                  // 메인스레드 고정 해소. react-virtual은 이 컨테이너 레이아웃과 충돌(무한 렌더)해서 배제.
+                  style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 96px' } as React.CSSProperties}
                   className={`p-3 cursor-pointer transition-colors ${
                     selectedLevel?.meta.level_number === level.meta.level_number
                       ? (isTemplateBased ? 'bg-violet-800/60 border-l-4 border-violet-400' : 'bg-indigo-900/50')

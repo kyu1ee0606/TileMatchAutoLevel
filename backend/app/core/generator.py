@@ -1491,6 +1491,12 @@ class LevelGenerator:
         # (링크 언락 첫 스테이지 Lv.51에서 ensure가 추가한 link의 짝 부재/방향오류가 leak되던 버그 방어.)
         level = self._strip_orphaned_link_tiles(level)
 
+        # [MAX_MOVES 백스톱] 최종 타일수 기준으로 max_moves 재계산.
+        # 라인 1244 계산이 이후 단계(craft 골 ÷3 보정으로 내부타일 3→6 증가, 튜토리얼 ensure, ÷3 finalize의
+        # 타일 제거 등)로 stale되어 '수집필요 타일수 > max_moves'가 되면 구조적으로 깰 수 있어도 무브 소진으로
+        # 실패(예: Lv.38 필요111 vs 108). RL 시뮬도 같은 max_moves 사용 → unclearable 오판. 맨 끝 재계산으로 방어.
+        level["max_moves"] = self._calculate_max_moves(level)
+
         generation_time_ms = int((time.time() - start_time) * 1000)
 
         return GenerationResult(

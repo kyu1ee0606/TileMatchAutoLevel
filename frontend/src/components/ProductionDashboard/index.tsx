@@ -3184,6 +3184,37 @@ function sanitizeOrphanLinks(levelJson: unknown): number {
   return stripped;
 }
 
+// [MAX_MOVES 자가치유] 수집 필요 타일수 = plain 타일 + craft/stack 내부타일. 백엔드 _calculate_max_moves 미러.
+// (min 30). 구코드 배치는 max_moves가 stale-low(craft 골 ÷3 보정으로 내부 3→6 증가 후 재계산 누락 등)라
+// '수집필요 > max_moves' → 무브부족으로 클리어 불가·RL false-unclearable. 검증 진입 시 재계산·교정.
+function computeMaxMoves(levelJson: unknown): number {
+  let data = levelJson as Record<string, unknown>;
+  if (!data) return 30;
+  if (data.map && typeof data.map === 'object') data = data.map as Record<string, unknown>;
+  const numLayers = (data.layer as number) || 0;
+  let total = 0;
+  for (let i = 0; i < numLayers; i++) {
+    const tiles = (data[`layer_${i}`] as { tiles?: Record<string, unknown[]> } | undefined)?.tiles;
+    if (!tiles) continue;
+    for (const pos in tiles) {
+      const t = tiles[pos];
+      if (!(Array.isArray(t) && t.length && typeof t[0] === 'string')) { total += 1; continue; }
+      const tp = t[0] as string;
+      if (tp.startsWith('craft_') || tp.startsWith('stack_')) {
+        let inner = 1;
+        const extra = t[2];
+        if (Array.isArray(extra) && extra.length) inner = Number(extra[0]) || 1;
+        else if (extra && typeof extra === 'object') inner = Number((extra as Record<string, unknown>).totalCount ?? (extra as Record<string, unknown>).count ?? 1) || 1;
+        else if (typeof extra === 'number') inner = extra;
+        total += inner;
+      } else {
+        total += 1;
+      }
+    }
+  }
+  return Math.max(30, total);
+}
+
 // Gimmick display names in Korean
 const GIMMICK_NAMES: Record<string, string> = {
   chain: '체인',
@@ -3998,6 +4029,17 @@ function TestTab({
       // 링크 자가치유 — 측정·저장 정화본 사용(기존 배치 고아 링크 구제)
       const _lh = sanitizeOrphanLinks(currentLevel.level_json);
       if (_lh > 0) console.info(`[link-heal] Lv.${levelNumber}: 고아/불량 링크 ${_lh}개 plain화`);
+      // [max_moves 자가치유] 구코드 stale-low max_moves(수집필요 > max_moves) 교정 → 측정·저장 모두 정확한
+      // 무브버짓 사용 → 무브부족 false-unclearable 제거(재생성 불필요). 값 낮을 때만 올림(임의 하향 방지).
+      {
+        const lj = currentLevel.level_json as unknown as Record<string, unknown>;
+        const need = computeMaxMoves(lj);
+        const cur = Number(lj.max_moves ?? 0);
+        if (cur < need) {
+          lj.max_moves = need;
+          console.info(`[maxmoves-heal] Lv.${levelNumber}: max_moves ${cur} → ${need} (수집필요 기준 교정)`);
+        }
+      }
 
       const passThreshold = computeSequentialPassThreshold(currentLevel.meta.target_difficulty);
       setSequentialProgress(prev => ({ ...prev, currentIndex: passedSet.size, currentLevel: levelNumber, currentAttempt: round, status: 'testing' }));

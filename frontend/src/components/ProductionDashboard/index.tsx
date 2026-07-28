@@ -4228,7 +4228,11 @@ function TestTab({
       // 난이도 조준은 아래 층수(ml, offset)/기믹으로만. (기존: 난이도기반 baseTileCount+offset 로 종류 축소 → 그래프 붕괴)
       const cnt = Math.max(4, Math.min(15, vAtLevel(TILE_TYPE_PROFILE_CURVES[tileTypeProfile] ?? TILE_TYPE_PROFILE_CURVES.baseline, levelNumber)));
       const ml = Math.max(2, Math.min(10, Math.min(10, 3 + Math.floor(td * 7)) + Math.trunc(offset / 2)));
-      const sym = (['horizontal', 'vertical', 'both', 'none'] as const)[seed % 4];
+      // [422 방지] seed = off*10+s+1 에서 off(난이도offset)가 음수면 seed<0 → JS 음수 모듈로/음수 인덱스로
+      // sym·goal type/direction=undefined, pattern_index<0 → 백엔드 스키마(≥0, type 필수) 위반 422.
+      // 후보 생성 실패(2차패스 회수 낭비). 인덱싱은 항상 비음수 psd 사용(결정성 유지).
+      const psd = Math.abs(seed);
+      const sym = (['horizontal', 'vertical', 'both', 'none'] as const)[psd % 4];
       const res = await generateLevel(
         {
           target_difficulty: td,
@@ -4238,13 +4242,13 @@ function TestTab({
           tile_types: Array.from({ length: cnt }, (_, i) => `t${i + 1}`),
           obstacle_types: [],
           goals: [{
-            type: (['craft', 'stack'] as const)[seed % 2],
-            direction: (['s', 'n', 'e', 'w'] as const)[seed % 4],
+            type: (['craft', 'stack'] as const)[psd % 2],
+            direction: (['s', 'n', 'e', 'w'] as const)[psd % 4],
             count: Math.max(2, Math.floor(3 + td * 2)),
           }],
           symmetry_mode: sym,
           pattern_type: 'aesthetic',
-          pattern_index: (seed * 7 + 10) % 60,
+          pattern_index: (psd * 7 + 10) % 60,
           // [유닛 조립] 공유 헬퍼 — 토글 반영(2차패스는 fresh 생성)
           ...genModeFields(levelNumber, unitAssembly),
         },

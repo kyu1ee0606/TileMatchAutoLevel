@@ -195,6 +195,8 @@ export async function syncBidirectional(): Promise<{ pushed: number; pulled: num
 // ── 자동 push (디바운스) + 충돌 처리 ─────────────────────────────────────────
 const PUSH_DEBOUNCE_MS = 4000;
 const pushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const inFlightPush = new Set<string>();   // 배치당 push 진행중 여부(직렬화)
+const pendingPush = new Set<string>();    // 진행중에 들어온 재요청 → 완료 후 1회 실행
 let conflictHandler: ((batchId: string, serverVersion: number) => void) | null = null;
 
 /** 충돌(다른 브라우저 선수정) 발생 시 UI 알림 콜백 등록. */
@@ -217,15 +219,30 @@ export function schedulePush(batchId: string): void {
   if (!batchId || _syncing) return; // pull로 인한 쓰기는 push 트리거 금지(피드백 방지)
   const existing = pushTimers.get(batchId);
   if (existing) clearTimeout(existing);
-  pushTimers.set(batchId, setTimeout(async () => {
+  pushTimers.set(batchId, setTimeout(() => {
     pushTimers.delete(batchId);
-    try {
-      await pushBatchToServer(batchId);
-    } catch (e) {
-      if (e instanceof SyncConflictError) conflictHandler?.(batchId, e.serverVersion);
-      // 그 외(서버 미가동 등)는 조용히 무시
-    }
+    void runSerializedPush(batchId);
   }, PUSH_DEBOUNCE_MS));
+}
+
+/**
+ * [직렬화] 배치당 push는 한 번에 하나만. in-flight 중 새 요청은 pending 플래그만 세우고 완료 후 1회
+ * 재실행 → base_version이 항상 '직전 push가 올린 서버버전'을 반영하므로 자기 push끼리 레이스로 인한
+ * 409 오탐("다른 브라우저에서 수정됨")이 사라진다. (직렬화 후에도 409면 진짜 외부 수정 → 경고 유지.)
+ * 순차검증처럼 레벨 저장이 잦아 push가 겹치던 상황(v99 등)을 해소.
+ */
+async function runSerializedPush(batchId: string): Promise<void> {
+  if (inFlightPush.has(batchId)) { pendingPush.add(batchId); return; }
+  inFlightPush.add(batchId);
+  try {
+    await pushBatchToServer(batchId);
+  } catch (e) {
+    if (e instanceof SyncConflictError) conflictHandler?.(batchId, e.serverVersion);
+    // 그 외(서버 미가동 등)는 조용히 무시
+  } finally {
+    inFlightPush.delete(batchId);
+    if (pendingPush.has(batchId)) { pendingPush.delete(batchId); void runSerializedPush(batchId); }
+  }
 }
 
 let autoSyncRegistered = false;

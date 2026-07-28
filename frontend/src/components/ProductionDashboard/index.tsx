@@ -3942,8 +3942,13 @@ function TestTab({
       return;
     }
 
-    const MAX_ATTEMPTS = 10; // [v16] 5→10: near-miss 통과율↑ (학습 출발점과 시너지). 시간↑ 감수.
-    const BASE_PASS_THRESHOLD = 70; // 70% match score to pass
+    // [페이즈 분리 v17] 라운드 기반: 1~N 전체 "측정만"(재생성X) → 미달만 1회 재생성 → 반복.
+    // 기존: 레벨당 인라인 최대 10회(측정+재생성 한 워커서 뒤섞임) → CPU 이중부하(load 55, 탭 멈춤). 제거.
+    // 코어배정: 측정 1건 = skill 8점 sweep → RL pool(8워커) 포화 = 8코어 → 동시 2(꼬리만 겹침).
+    //           재생성 1건 = gen pool 1태스크 = 1코어 → 동시 8(8코어 채움). 한 시점에 한 종류만 → 이중부하 해소.
+    const MAX_ROUNDS = 10;              // 라운드(전체검증↔미달재생성) 상한. 기존 레벨당 10회 attempt 대체.
+    const VERIFY_CONCURRENCY = 2;
+    const REGEN_CONCURRENCY = 8;
 
     sequentialAbortRef.current = new AbortController();
     const signal = sequentialAbortRef.current.signal;
@@ -3954,324 +3959,178 @@ function TestTab({
       total: targetLevelNumbers.length,
       currentLevel: targetLevelNumbers[0],
       currentAttempt: 0,
-      maxAttempts: MAX_ATTEMPTS,
+      maxAttempts: MAX_ROUNDS,
       status: 'testing',
       results: [],
     });
 
-    const results: {
-      level_number: number;
-      attempts: number;
-      final_score: number;
-      success: boolean;
-      pass_threshold?: number;
-      target_difficulty?: number;
-      worst_bot?: string;
-      worst_gap_pp?: number;
-      direction?: 'too_easy' | 'too_hard' | 'ok';
-    }[] = [];
-
-    // [v16] 레벨 단위 병렬 처리. 각 레벨은 독립(생성·측정·재생성)이고 저장은 IndexedDB 레벨별 put이라
-    // 동시 쓰기 안전. SEQ_CONCURRENCY개 워커가 큐에서 꺼내 동시 처리.
-    // 백엔드 RL은 이미 point-granularity ProcessPool(워커 8) → 이 값을 8로 올려 pool을 항상 포화
-    // (레벨 전환 사이 idle 제거). 8워커 pool 기준 최적. (품질=롤아웃 수 불변.)
-    const SEQ_CONCURRENCY = 8;
+    type SeqResult = {
+      level_number: number; attempts: number; final_score: number; success: boolean;
+      pass_threshold?: number; target_difficulty?: number; worst_bot?: string;
+      worst_gap_pp?: number; direction?: 'too_easy' | 'too_hard' | 'ok';
+    };
+    // 라운드 간 유지 상태
+    const resultByLn = new Map<number, SeqResult>();
+    const passedSet = new Set<number>();                    // 통과한 레벨(다음 라운드 측정 제외)
+    const offsetByLn = new Map<number, number>();           // 측정 gap 기반 난이도 조준(재생성에 전달, 누적)
+    const forceNoTemplateByLn = new Set<number>();          // 템플릿 언클리어러블 → 일반생성 강제
+    const bestByLn = new Map<number, { snapshot: { level_json: ProductionLevel['level_json']; meta: ProductionLevelMeta }; absGap: number; isClearable: boolean }>();
     let _completed = 0;
-    const _queue = [...targetLevelNumbers];
-    const processOneLevel = async (levelNumber: number): Promise<void> => {
-      if (signal.aborted) return;
-      let currentLevel = levels.find(l => l.meta.level_number === levelNumber);
-      if (!currentLevel) return;
 
-      let attempts = 0;
-      let matchScore = 0;
-      let passed = false;
-      let lastWorstBot: string | undefined;
-      let lastWorstGapPp: number | undefined;
-      let lastDirection: 'too_easy' | 'too_hard' | 'ok' | undefined;
-      let lastTargetDifficulty: number | undefined = currentLevel.meta.target_difficulty;
-      let lastPassThreshold = BASE_PASS_THRESHOLD;
-      // [v16 Phase2] best-of-N 유지: 전 attempt 중 목표(gap) 가장 가까운 버전 보관.
-      // 통과 못해도 최근접 버전을 최종 저장 → 단조개선 보장 (이전엔 마지막 attempt가 덮어써 더 나빠질 수 있었음).
-      let bestAbsGap = Infinity;
-      let bestIsClearable = false;  // [A2] 솔버블(언클리어러블 아님) 후보 우선
-      let bestSnapshot: { level_json: ProductionLevel['level_json']; meta: ProductionLevelMeta } | null = null;
-      // [v16 자가개선] 학습된 보정값에서 출발 (없으면 0). 검증 돌릴수록 좋은 출발점.
-      let difficultyOffset = getLearnedOffset(levelNumber, currentLevel.meta.target_difficulty);
-      let genOffset = difficultyOffset;  // 현재 측정중 레벨을 생성한 offset (통과 시 학습 기록용)
-
-      while (attempts < MAX_ATTEMPTS && !passed && !signal.aborted) {
-        attempts++;
-        // [링크 자가치유] 매 attempt 측정·저장 직전에 고아/불량 링크 plain화. 진입 원본뿐 아니라
-        // 재생성/튜닝으로 교체된 currentLevel(템플릿 재생성 등 정화 누락 경로 포함)도 커버 →
-        // best-of-N 스냅샷/최종 저장이 항상 링크-클린. (인게임 FindLinkTile 스폰멈춤 방지.)
-        if (currentLevel) {
-          const _lh = sanitizeOrphanLinks(currentLevel.level_json);
-          if (_lh > 0) console.info(`[link-heal] Lv.${levelNumber} attempt${attempts}: 고아/불량 링크 ${_lh}개 plain화`);
+    // 동시성 풀 헬퍼 — concurrency개 워커가 큐에서 꺼내 처리. (측정=2, 재생성=8)
+    const runPool = async (nums: number[], fn: (ln: number) => Promise<void>, concurrency: number): Promise<void> => {
+      const q = [...nums];
+      const workers = Array.from({ length: Math.min(concurrency, q.length || 1) }, async () => {
+        while (q.length > 0 && !signal.aborted) {
+          const ln = q.shift();
+          if (ln === undefined) break;
+          try { await fn(ln); } catch (e) { console.error('[seq] 처리 실패', ln, e); }
         }
-        const passThreshold = computeSequentialPassThreshold(currentLevel?.meta.target_difficulty);
-        lastPassThreshold = passThreshold;
-        lastTargetDifficulty = currentLevel?.meta.target_difficulty;
-
-        // Update progress: testing (병렬이라 현재 처리중 레벨/완료수 표시)
-        setSequentialProgress(prev => ({
-          ...prev,
-          currentIndex: _completed,
-          currentLevel: levelNumber,
-          currentAttempt: attempts,
-          status: 'testing',
-        }));
-
-        // Test the level — [v16] RL 예측 유저 클리어율 기반 검증 (봇 match_score 대체)
-        try {
-          const rl = await simulateLevelSkillSweep({
-            level_json: currentLevel.level_json,
-            target_difficulty: currentLevel.meta.target_difficulty,
-            seed: attempts, // attempt별 시드 변경 — 재생성 재측정 독립성
-            skill_mean: rlSkillMean,
-            target_clear_rate_scale: bossTargetScale(currentLevel.meta.level_number),
-          });
-
-          const predicted = rl.predicted_clear_rate;
-          const target = rl.target_clear_rate ?? 0;
-          const gapPp = (rl.clear_rate_gap ?? predicted - target) * 100; // 양수=목표보다 쉬움
-          // 레거시 UI/필터 호환용 match_score (0~100): 갭 작을수록 높음. 통과(±10%p)→80+
-          matchScore = Math.max(0, 100 - Math.abs(gapPp) * 2);
-
-          // [P3-D 솔버 앵커] RL이 unclearable_suspect(봇이 못 깸)라도, A* 완전탐색이 클리어 가능
-          //   확정(PROVEN_SOLVABLE)하면 "불가능" 낙인 해제 — 봇 약점(고종류 독관리 등)으로 인한
-          //   오탐 구제. 게이팅: unclearable_suspect일 때만 A* 호출(드묾 → 비용 적음).
-          //   난이도 gap(too_hard/easy) 판정은 RL 유지 — D는 '클리어 가능성'만 담당.
-          let solverClearable = false;
-          if (rl.classification === 'unclearable_suspect') {
-            try {
-              const sv = await analyzeSolvability(currentLevel.level_json, { nodeBudget: 200000, timeBudgetS: 6 });
-              if (sv.verdict === 'PROVEN_SOLVABLE') {
-                solverClearable = true;
-                console.info(`[solver-anchor] Lv.${levelNumber} RL=unclearable_suspect이나 A* PROVEN_SOLVABLE(${sv.moves_to_clear}수) → 클리어가능 인정`);
-              }
-            } catch { /* 솔버 실패시 구제 안 함(그대로) */ }
-          }
-
-          // 실패 분류: gap 부호 (too_easy/too_hard). unclearable은 too_hard로.
-          lastWorstBot = undefined; // RL은 봇별 분해 없음
-          lastWorstGapPp = gapPp;
-          lastDirection = rl.classification === 'unclearable_suspect'
-            ? 'too_hard'
-            : Math.abs(gapPp) <= 5
-              ? 'ok'
-              : gapPp > 0
-                ? 'too_easy'
-                : 'too_hard';
-
-          // [v16 피드백제어] 측정 gap → 다음 재생성 난이도 조준.
-          // 생성변동(±30%p)이 커서 ±1 완만 스텝으로 점진 이동(급격 조정은 진동만 유발).
-          // 주목적: 시도마다 난이도 regime을 넓혀 best-of-5가 목표를 걸치게(탐색). clamp[-3,+3].
-          if (rl.classification === 'unclearable_suspect') {
-            difficultyOffset -= 1;
-          } else if (gapPp > 12) {
-            difficultyOffset += 1; // 너무쉬움 → 어렵게
-          } else if (gapPp < -12) {
-            difficultyOffset -= 1; // 너무어려움 → 쉽게
-          }
-          difficultyOffset = Math.max(-3, Math.min(3, difficultyOffset));
-
-          // 통과 판정: 튜토리얼(1~10) 예외 포함 (쉬움 허용). 일반은 백엔드 기준.
-          // [디바이스 제약] 선언 그리드 최대변 > 8 → 실기에서 타일이 너무 작아 플레이 불가 →
-          // RL 통과와 무관하게 실패 처리(재생성 유도, 보스 10x10 템플릿 잔재 정리).
-          const gridDim = maxDeclaredGridDim(currentLevel.level_json);
-          if (gridDim > MAX_PLAYABLE_GRID) {
-            console.warn(`[seq] Lv.${levelNumber} 선언 그리드 ${gridDim} > ${MAX_PLAYABLE_GRID} → 실패 처리(재생성)`);
-          }
-          const isPassed = rlVerificationPassed(levelNumber, rl) && gridDim <= MAX_PLAYABLE_GRID;
-
-          // RL 검증 메타 (봇 대신 예측 클리어율)
-          // [P1] actual_difficulty = 실플레이 시뮬 측정값(difficulty_score=1-AUC). 정적 analyzer 추정 폐기.
-          //   생성 시 넣던 정적 난이도를 검증 측정값으로 '덮어씀'(...currentLevel.meta 뒤에 spread).
-          //   difficulty_score 없으면 1-predicted로 폴백.
-          const measuredDifficulty = (typeof rl.difficulty_score === 'number')
-            ? rl.difficulty_score
-            : Math.max(0, Math.min(1, 1 - predicted));
-          const rlMeta = {
-            verification_method: 'rl' as const,
-            predicted_clear_rate: predicted,
-            target_clear_rate: target,
-            clear_rate_gap: rl.clear_rate_gap ?? undefined,
-            rl_classification: rl.classification,
-            luck_suspect: rl.luck_suspect,
-            match_score: matchScore,
-            verified: true,
-            verification_passed: isPassed,
-            actual_difficulty: measuredDifficulty,  // [P1] 실측 난이도
-          };
-
-          // [v16 Phase2+A2] best-of-N: 솔버블 우선 → 그 안에서 목표 최근접(gap 최소).
-          // 언클리어러블(0% 클리어)은 gap이 작아도 절대 선택 안 함 (솔버블 후보 있으면).
-          const absGap = Math.abs(rl.clear_rate_gap ?? 1);
-          // [P3-D] 솔버가 클리어 가능 확정하면 봇 판정(unclearable)보다 우선 → clearable 인정
-          const isClearable = solverClearable || (rl.classification !== 'unclearable_suspect' && rl.max_clear_rate >= 0.05);
-          const better =
-            bestSnapshot === null
-            || (isClearable && !bestIsClearable)                       // 솔버블이 비솔버블을 항상 이김
-            || (isClearable === bestIsClearable && absGap < bestAbsGap); // 동급이면 gap 최소
-          if (better) {
-            bestAbsGap = absGap;
-            bestIsClearable = isClearable;
-            bestSnapshot = {
-              level_json: currentLevel.level_json,
-              meta: { ...currentLevel.meta, ...rlMeta },
-            };
-          }
-
-          await saveProductionLevels(batchId, [{
-            meta: { ...currentLevel.meta, ...rlMeta },
-            level_json: currentLevel.level_json,
-          }]);
-
-          // Update levels state (preserve scroll position)
-          const scrollTop = levelListRef.current?.scrollTop || 0;
-          setLevels(prev => prev.map(l =>
-            l.meta.level_number === levelNumber
-              ? { ...l, meta: { ...l.meta, ...rlMeta } }
-              : l
-          ));
-          // Restore scroll position after React re-render
-          requestAnimationFrame(() => {
-            if (levelListRef.current) {
-              levelListRef.current.scrollTop = scrollTop;
-            }
-          });
-
-          if (isPassed) {
-            passed = true;
-            // [v16 자가개선] 통과한 레벨을 만든 offset(genOffset)을 학습 기록 → 다음 검증의 출발점 개선.
-            recordPassedOffset(levelNumber, currentLevel.meta.target_difficulty, genOffset);
-          } else if (attempts < MAX_ATTEMPTS && !signal.aborted) {
-            // [미세조절 우선] 재생성 전에 색+기믹 자동튜닝으로 목표 도달 시도(매 시도, 재생성보다 쌈·정확).
-            // /tune/auto: 색 스윕(안전)→부족시 기믹 스윕(넓은폭) → 목표 최근접 배치. 모양·÷3 보존.
-            // 클리어 가능(언클X)일 때만. attempts<=3까지 튜닝 우선(스크리닝 노이즈 대비 여러 샷) → 이후 재생성.
-            // (보스 등 이상치가 재생성만으론 수렴 못하던 문제: 튜너가 색배치로 목표 도달 → 재생성 루프 탈출.)
-            if (attempts <= 3 && (rl.max_clear_rate ?? 0) >= 0.05 && !signal.aborted) {
-              try {
-                setSequentialProgress(prev => ({ ...prev, status: 'regenerating' }));
-                const tr = await apiClient.post('/tune/auto', {
-                  level_json: currentLevel.level_json,
-                  level_number: levelNumber,
-                  target_difficulty: currentLevel.meta.target_difficulty,
-                  target_clear_rate_scale: bossTargetScale(levelNumber) ?? 1.0,
-                  skill_mean: rlSkillMean,
-                  tolerance: 0.12,
-                });
-                // close=목표 tolerance 내 도달(엔진이 스크리닝 RL로 판정). 근접 못하면 재생성 직행.
-                if (tr.data?.tuned && tr.data?.close) {
-                  await saveProductionLevels(batchId, [{
-                    meta: { ...currentLevel.meta, verified: false, verification_passed: undefined, match_score: undefined },
-                    level_json: tr.data.best_level_json as ProductionLevel['level_json'],
-                  }]);
-                  const rlt = await getProductionLevelsByBatch(batchId);
-                  const t = rlt.find((l: ProductionLevel) => l.meta.level_number === levelNumber);
-                  if (t) {
-                    currentLevel = t;
-                    addNotification('info', `Lv.${levelNumber} 자동튜닝(${tr.data.lever}) 적용 → 재측정`);
-                    continue;  // 다음 iteration이 튜닝된 배치를 정밀 재측정 → 통과 시 재생성 회피
-                  }
-                }
-              } catch { /* 튜닝 실패 → 아래 재생성 폴백 */ }
-            }
-            // Regenerate if not passed
-            setSequentialProgress(prev => ({ ...prev, status: 'regenerating' }));
-
-            // [unclear-template-escape] 템플릿 기반 레벨에서 모든 봇 클리어율이 사실상 0(<5%)이면
-            // 같은 모양으로 색만 바꿔봐야 데드락 탈출 불가 → 일반 generate 경로로 강제 전환.
-            // 데이터 분석 결과(2026-05-21) May7 배치의 23개 반복 실패 중 22개가 이 케이스였음.
-            const hasTemplate = !!(currentLevel?.meta as { template_id?: string } | undefined)?.template_id;
-            // RL: 최고실력(max_clear_rate)으로도 못 깨면 언클리어러블. classification도 병행 확인.
-            const maxClearRate = rl.max_clear_rate;
-            // [P3-D] 솔버가 클리어 가능 확정이면 템플릿 언클리어러블 탈출 강제 안 함(봇 오탐 구제)
-            const unclearableTemplate = hasTemplate && !solverClearable
-              && (maxClearRate < 0.05 || rl.classification === 'unclearable_suspect');
-            if (unclearableTemplate) {
-              addNotification(
-                'warning',
-                `Lv.${levelNumber} 템플릿 언클리어러블 감지 (max clear ${(maxClearRate * 100).toFixed(0)}%) → 일반 생성 경로로 전환`
-              );
-            }
-
-            // Use existing regeneration logic — 피드백 offset 전달(측정 gap 기반 난이도 조준)
-            // 이 regen이 만든 레벨을 다음 시도가 측정 → 그 레벨의 생성 offset 기록(통과 시 학습용)
-            genOffset = difficultyOffset;
-            await handleRegenerateLevel(levelNumber, undefined, undefined, {
-              forceNoTemplate: unclearableTemplate,
-              difficultyOffset,
-            });
-
-            // Reload the level after regeneration from storage
-            const reloadedLevels = await getProductionLevelsByBatch(batchId);
-            currentLevel = reloadedLevels.find((l: ProductionLevel) => l.meta.level_number === levelNumber);
-            if (!currentLevel) break;
-          }
-        } catch (err) {
-          console.error(`Sequential process failed for level ${levelNumber}:`, err);
-          break;
-        }
-      }
-
-      // [v16 Phase2] 통과 못했으면 전 attempt 중 최근접(best) 버전을 최종 저장.
-      // bestSnapshot은 정의상 측정된 것 중 gap 최소 → 마지막 attempt가 best면 동일내용(무해), 아니면 단조개선.
-      if (!passed && bestSnapshot) {
-        await saveProductionLevels(batchId, [bestSnapshot]);
-        const snap = bestSnapshot;
-        setLevels(prev => prev.map(l =>
-          l.meta.level_number === levelNumber ? { ...l, meta: snap.meta, level_json: snap.level_json } : l
-        ));
-        matchScore = snap.meta.match_score ?? matchScore;
-        addNotification('info', `Lv.${levelNumber} 통과실패 → 최근접 버전 보관 (예측 ${((snap.meta.predicted_clear_rate ?? 0) * 100).toFixed(0)}%, 목표 ${((snap.meta.target_clear_rate ?? 0) * 100).toFixed(0)}%)`);
-      }
-
-      results.push({
-        level_number: levelNumber,
-        attempts,
-        final_score: matchScore,
-        success: passed,
-        pass_threshold: lastPassThreshold,
-        target_difficulty: lastTargetDifficulty,
-        worst_bot: lastWorstBot,
-        worst_gap_pp: lastWorstGapPp,
-        direction: lastDirection,
       });
-      _completed++;
-      setSequentialProgress(prev => ({ ...prev, currentIndex: _completed, results: [...results] }));
+      await Promise.all(workers);
     };
 
-    // 동시성 풀: SEQ_CONCURRENCY개 워커가 큐에서 레벨을 꺼내 병렬 처리
-    const _workers = Array.from({ length: Math.min(SEQ_CONCURRENCY, _queue.length || 1) }, async () => {
-      while (_queue.length > 0 && !signal.aborted) {
-        const ln = _queue.shift();
-        if (ln === undefined) break;
-        try {
-          await processOneLevel(ln);
-        } catch (e) {
-          console.error('[seq] 레벨 처리 실패', ln, e);
-        }
-      }
-    });
-    await Promise.all(_workers);
+    // ── 측정 전용(재생성 없음) ── round별 fresh 디스크본(byLn) 사용(재생성 반영). 통과 시 passedSet 추가.
+    const measureOneLevel = async (levelNumber: number, round: number, byLn: Map<number, ProductionLevel>): Promise<void> => {
+      if (signal.aborted) return;
+      const currentLevel = byLn.get(levelNumber);
+      if (!currentLevel) return;
+      // 링크 자가치유 — 측정·저장 정화본 사용(기존 배치 고아 링크 구제)
+      const _lh = sanitizeOrphanLinks(currentLevel.level_json);
+      if (_lh > 0) console.info(`[link-heal] Lv.${levelNumber}: 고아/불량 링크 ${_lh}개 plain화`);
 
-    // [v16 QD 2차패스] 실패레벨 전용: 밴드별 다양성 풀 생성→RL측정→목표 최근접 배정.
-    // 양봉분포(20%/80%만, 중간 드묾)를 '풀에서 어쩌다 나온 중간값'으로 정면돌파. 풀 한 번에 측정해
-    // 통(bin)별로 두고 각 실패슬롯에 가장 근접한 솔버블 후보 배정 → 온디맨드 생성 정밀도 불필요.
-    let failedNums = results.filter(r => !r.success).map(r => r.level_number);
-    if (failedNums.length > 0 && !signal.aborted) {
+      const passThreshold = computeSequentialPassThreshold(currentLevel.meta.target_difficulty);
+      setSequentialProgress(prev => ({ ...prev, currentIndex: passedSet.size, currentLevel: levelNumber, currentAttempt: round, status: 'testing' }));
+
+      try {
+        const rl = await simulateLevelSkillSweep({
+          level_json: currentLevel.level_json,
+          target_difficulty: currentLevel.meta.target_difficulty,
+          seed: round,  // 라운드별 시드 → 재측정 독립성
+          skill_mean: rlSkillMean,
+          target_clear_rate_scale: bossTargetScale(currentLevel.meta.level_number),
+        });
+        const predicted = rl.predicted_clear_rate;
+        const target = rl.target_clear_rate ?? 0;
+        const gapPp = (rl.clear_rate_gap ?? predicted - target) * 100;
+        const matchScore = Math.max(0, 100 - Math.abs(gapPp) * 2);
+
+        // 솔버 앵커: RL 언클리어러블 오탐을 A* 완전탐색으로 구제
+        let solverClearable = false;
+        if (rl.classification === 'unclearable_suspect') {
+          try {
+            const sv = await analyzeSolvability(currentLevel.level_json, { nodeBudget: 200000, timeBudgetS: 6 });
+            if (sv.verdict === 'PROVEN_SOLVABLE') solverClearable = true;
+          } catch { /* 구제 안 함 */ }
+        }
+
+        const direction: 'too_easy' | 'too_hard' | 'ok' = rl.classification === 'unclearable_suspect'
+          ? 'too_hard' : Math.abs(gapPp) <= 5 ? 'ok' : gapPp > 0 ? 'too_easy' : 'too_hard';
+
+        // 난이도 조준 offset(재생성 페이즈에 전달) — 라운드 누적, clamp[-3,+3]
+        let off = offsetByLn.get(levelNumber) ?? getLearnedOffset(levelNumber, currentLevel.meta.target_difficulty);
+        if (rl.classification === 'unclearable_suspect') off -= 1;
+        else if (gapPp > 12) off += 1;
+        else if (gapPp < -12) off -= 1;
+        off = Math.max(-3, Math.min(3, off));
+        offsetByLn.set(levelNumber, off);
+
+        const gridDim = maxDeclaredGridDim(currentLevel.level_json);
+        if (gridDim > MAX_PLAYABLE_GRID) console.warn(`[seq] Lv.${levelNumber} 선언 그리드 ${gridDim} > ${MAX_PLAYABLE_GRID} → 실패 처리`);
+        const isPassed = rlVerificationPassed(levelNumber, rl) && gridDim <= MAX_PLAYABLE_GRID;
+
+        const measuredDifficulty = (typeof rl.difficulty_score === 'number') ? rl.difficulty_score : Math.max(0, Math.min(1, 1 - predicted));
+        const rlMeta = {
+          verification_method: 'rl' as const, predicted_clear_rate: predicted, target_clear_rate: target,
+          clear_rate_gap: rl.clear_rate_gap ?? undefined, rl_classification: rl.classification,
+          luck_suspect: rl.luck_suspect, match_score: matchScore, verified: true,
+          verification_passed: isPassed, actual_difficulty: measuredDifficulty,
+        };
+
+        // best-of-N (라운드 간): 솔버블 우선 → gap 최소. 최종 미달 시 최근접 버전 보관용.
+        const absGap = Math.abs(rl.clear_rate_gap ?? 1);
+        const isClearable = solverClearable || (rl.classification !== 'unclearable_suspect' && rl.max_clear_rate >= 0.05);
+        const prevBest = bestByLn.get(levelNumber);
+        const better = !prevBest || (isClearable && !prevBest.isClearable) || (isClearable === prevBest.isClearable && absGap < prevBest.absGap);
+        if (better) bestByLn.set(levelNumber, { snapshot: { level_json: currentLevel.level_json, meta: { ...currentLevel.meta, ...rlMeta } }, absGap, isClearable });
+
+        // 템플릿 언클리어러블 → 재생성 페이즈에서 일반생성 강제
+        const hasTemplate = !!(currentLevel.meta as { template_id?: string } | undefined)?.template_id;
+        if (hasTemplate && !solverClearable && (rl.max_clear_rate < 0.05 || rl.classification === 'unclearable_suspect')) forceNoTemplateByLn.add(levelNumber);
+        else forceNoTemplateByLn.delete(levelNumber);
+
+        await saveProductionLevels(batchId, [{ meta: { ...currentLevel.meta, ...rlMeta }, level_json: currentLevel.level_json }]);
+        const scrollTop = levelListRef.current?.scrollTop || 0;
+        setLevels(prev => prev.map(l => l.meta.level_number === levelNumber ? { ...l, meta: { ...l.meta, ...rlMeta } } : l));
+        requestAnimationFrame(() => { if (levelListRef.current) levelListRef.current.scrollTop = scrollTop; });
+
+        if (isPassed) { passedSet.add(levelNumber); recordPassedOffset(levelNumber, currentLevel.meta.target_difficulty, off); }
+
+        resultByLn.set(levelNumber, {
+          level_number: levelNumber, attempts: round, final_score: matchScore, success: isPassed,
+          pass_threshold: passThreshold, target_difficulty: currentLevel.meta.target_difficulty,
+          worst_gap_pp: gapPp, direction,
+        });
+        _completed++;
+        setSequentialProgress(prev => ({ ...prev, currentIndex: passedSet.size, results: [...resultByLn.values()] }));
+      } catch (err) {
+        console.error(`측정 실패 Lv.${levelNumber}:`, err);
+      }
+    };
+
+    // ── 재생성 전용(측정 없음) ── 실패 레벨을 1회 재생성. 다음 라운드가 재측정. (동시 8 = gen pool 8코어)
+    const regenOneLevel = async (levelNumber: number): Promise<void> => {
+      if (signal.aborted) return;
+      setSequentialProgress(prev => ({ ...prev, currentLevel: levelNumber, status: 'regenerating' }));
+      try {
+        await handleRegenerateLevel(levelNumber, undefined, undefined, {
+          forceNoTemplate: forceNoTemplateByLn.has(levelNumber),
+          difficultyOffset: offsetByLn.get(levelNumber) ?? 0,
+        });
+      } catch (err) {
+        console.error(`재생성 실패 Lv.${levelNumber}:`, err);
+      }
+    };
+
+
+    // ── 라운드 루프: (A)전체 측정만(동시2) → (C)미달만 1회 재생성(동시8) → 반복 ──
+    // 한 시점에 측정 or 재생성 '한 종류'만 → CPU 이중부하 제거. 통과분은 다음 라운드 측정 제외.
+    let pending = [...targetLevelNumbers];
+    for (let round = 1; round <= MAX_ROUNDS && !signal.aborted; round++) {
+      addNotification('info', `순차검증 라운드 ${round}: ${pending.length}개 측정…`);
+      // 재생성 반영된 최신 디스크본 로드(라운드당 1회 벌크)
+      const fresh = await getProductionLevelsByBatch(batchId);
+      const byLn = new Map<number, ProductionLevel>(fresh.map((l: ProductionLevel) => [l.meta.level_number, l]));
+      // 페이즈 A: 측정만 (동시 2 = RL pool 8코어 포화, 초과구독 방지)
+      await runPool(pending, (ln) => measureOneLevel(ln, round, byLn), VERIFY_CONCURRENCY);
+      if (signal.aborted) break;
+
+      const failed = pending.filter(ln => !passedSet.has(ln));
+      if (failed.length === 0) { addNotification('success', `라운드 ${round}: 전원 통과 🎉`); break; }
+      if (round === MAX_ROUNDS) break;  // 마지막 라운드는 측정까지만 (재생성 후 미측정 방지)
+
+      // 페이즈 C: 미달만 1회 재생성 (동시 8 = gen pool 8코어)
+      addNotification('info', `라운드 ${round}: 미달 ${failed.length}개 재생성…`);
+      await runPool(failed, regenOneLevel, REGEN_CONCURRENCY);
+      pending = failed;  // 다음 라운드는 미달분만 재측정
+    }
+
+    // ── 최종: 남은 미달 → 라운드 간 best(최근접) 스냅샷 복원 + QD 2차패스 ──
+    const stillFailed = targetLevelNumbers.filter(ln => !passedSet.has(ln));
+    for (const ln of stillFailed) {
+      const b = bestByLn.get(ln);
+      if (b?.snapshot) {
+        await saveProductionLevels(batchId, [b.snapshot]);
+        const snap = b.snapshot;
+        setLevels(prev => prev.map(l => l.meta.level_number === ln ? { ...l, meta: snap.meta, level_json: snap.level_json } : l));
+      }
+    }
+    if (stillFailed.length > 0 && !signal.aborted) {
       setSequentialProgress(prev => ({ ...prev, status: 'testing' }));
-      addNotification('info', `2차패스(QD): 실패 ${failedNums.length}개 풀생성·배정 시작…`);
-      const recovered = await runFailedLevelSecondPass(failedNums, signal);
-      for (const ln of recovered) {
-        const r = results.find(x => x.level_number === ln);
-        if (r) r.success = true;
-      }
-      if (recovered.length > 0) {
-        addNotification('success', `2차패스 회수: ${recovered.length}/${failedNums.length}개 추가 통과`);
-      }
+      addNotification('info', `2차패스(QD): 실패 ${stillFailed.length}개 풀생성·배정 시작…`);
+      const recovered = await runFailedLevelSecondPass(stillFailed, signal);
+      recovered.forEach(ln => passedSet.add(ln));
+      if (recovered.length > 0) addNotification('success', `2차패스 회수: ${recovered.length}/${stillFailed.length}개 추가 통과`);
     }
 
     // [언마운트 가드] 언마운트로 abort된 경우 죽은 컴포넌트/부모에 setState·재로드 금지.
@@ -4280,8 +4139,8 @@ function TestTab({
     setIsSequentialProcessing(false);
     setSequentialProgress(prev => ({ ...prev, status: 'idle' }));
 
-    const successCount = results.filter(r => r.success).length;
-    const failCount = results.filter(r => !r.success).length;
+    const successCount = passedSet.size;
+    const failCount = targetLevelNumbers.length - successCount;
     addNotification(
       successCount > 0 ? 'success' : 'warning',
       `순차 처리 완료: ${successCount}개 통과, ${failCount}개 미통과`

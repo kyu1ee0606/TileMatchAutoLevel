@@ -17,6 +17,118 @@ import type { GameTile } from '../types/game';
 // 이 3개 크기를 필수로 그려야 전 레벨 커버(그 외 4/8/9는 선택). 8+ 는 프로덕션 미사용.
 const REQUIRED_PATTERN_SIZES = [5, 6, 7];
 
+/**
+ * [프로덕션 사용 예시] 그린 패턴이 실제 레벨에서 어떻게 쓰이는지 보여준다.
+ *
+ * 게임 레이어는 홀짝 교대(짝수층 S×S / 홀수층 (S-1)×(S-1))라, 한 레벨은 **연속한 두 크기**만 쓴다:
+ *   base 5 레벨 → 6,5,6,5…   |   base 6 레벨 → 7,6,7,6…
+ * 그래서 5·6·7 세 크기를 그리면 두 계열(base5·base6)의 전 레벨을 커버한다.
+ * 여기서는 각 계열의 층 스택 + 겹쳐본 모습(홀수층은 반칸 스태거) + 타일수/÷3 을 미리 보여준다.
+ */
+function ProductionUsagePreview({ getGrid }: { getGrid: (size: number) => boolean[][] }) {
+  const countOf = (s: number) => getGrid(s).flat().filter(Boolean).length;
+
+  const FAMILIES: Array<{ label: string; base: number; sizes: number[] }> = [
+    { label: 'base 5 레벨', base: 5, sizes: [6, 5, 6] },
+    { label: 'base 6 레벨', base: 6, sizes: [7, 6, 7] },
+  ];
+
+  const CELL = 9;
+
+  const MiniGrid = ({ size, dim }: { size: number; dim?: boolean }) => {
+    const g = getGrid(size);
+    if (!g.length) {
+      return <div className="text-[9px] text-red-400 px-1 py-2">{size}×{size} 미입력</div>;
+    }
+    return (
+      <div className="inline-block border border-gray-700 rounded overflow-hidden">
+        {g.map((row, y) => (
+          <div key={y} className="flex">
+            {row.map((c, x) => (
+              <div key={x} style={{ width: CELL, height: CELL }}
+                className={c ? (dim ? 'bg-emerald-700/60' : 'bg-emerald-500') : 'bg-gray-800'} />
+            ))}
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  return (
+    <div className="mt-3 p-2 bg-gray-900/60 border border-gray-700 rounded space-y-3">
+      <div className="text-xs text-cyan-300 font-medium">
+        🎮 프로덕션 사용 예시
+        <span className="text-[10px] text-gray-500 ml-2">
+          레이어는 홀짝 교대(짝수 S / 홀수 S−1) → 한 레벨은 연속한 두 크기만 사용
+        </span>
+      </div>
+
+      {FAMILIES.map(fam => {
+        const missing = Array.from(new Set(fam.sizes)).filter(s => countOf(s) < 3);
+        const total = fam.sizes.reduce((a, s) => a + countOf(s), 0);
+        return (
+          <div key={fam.base} className="space-y-1">
+            <div className="text-[11px] text-gray-300">
+              {fam.label} <span className="text-gray-500">— 층 크기 {fam.sizes.join(' → ')}</span>
+              {missing.length > 0 && (
+                <span className="text-red-400 ml-2">({missing.map(s => `${s}×${s}`).join(', ')} 미입력)</span>
+              )}
+            </div>
+
+            {/* 층별 나열 */}
+            <div className="flex items-end gap-3 flex-wrap">
+              {fam.sizes.map((s, li) => (
+                <div key={li} className="text-center">
+                  <MiniGrid size={s} dim={li > 0} />
+                  <div className="text-[9px] text-gray-500 mt-0.5">
+                    L{li} · {s}×{s} · {countOf(s)}개
+                  </div>
+                </div>
+              ))}
+
+              {/* 겹쳐본 모습 — 홀수층은 반칸 스태거(게임 홀짝 배치) */}
+              <div className="text-center">
+                <div className="relative inline-block"
+                  style={{ width: fam.sizes[0] * CELL, height: fam.sizes[0] * CELL }}>
+                  {fam.sizes.map((s, li) => {
+                    const g = getGrid(s);
+                    if (!g.length) return null;
+                    const off = li % 2 === 1 ? CELL / 2 : 0;   // 홀수층 반칸 어긋남
+                    return (
+                      <div key={li} className="absolute" style={{ left: off, top: off, opacity: li === 0 ? 0.9 : 0.55 }}>
+                        {g.map((row, y) => (
+                          <div key={y} className="flex">
+                            {row.map((c, x) => (
+                              <div key={x} style={{ width: CELL, height: CELL }}
+                                className={c ? (li === 0 ? 'bg-emerald-500' : li === 1 ? 'bg-sky-400' : 'bg-fuchsia-400') : ''} />
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="text-[9px] text-gray-500 mt-0.5">
+                  겹침(3층) · 총 {total}개 {total % 3 === 0
+                    ? <span className="text-green-400">÷3 ✓</span>
+                    : <span className="text-amber-400">÷3 아님(저장 시 보정)</span>}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+
+      <div className="text-[10px] text-gray-500 leading-relaxed">
+        · 위층으로 갈수록 <b className="text-gray-400">피라미드 축소</b>가 적용될 수 있어 실제 층수·모양은 난이도에 따라 달라짐<br />
+        · 겹침 뷰에서 <span className="text-emerald-400">아래층</span>이 <span className="text-sky-300">위층</span>에 가려지면
+        그 타일은 <b className="text-gray-400">위층을 먼저 치워야</b> 선택 가능 → 가림이 많을수록 어려움<br />
+        · 사슬은 <b className="text-gray-400">같은 층 좌·우</b>에 타일이 있어야 풀리므로, 가로로 고립된 칸이 많으면 사슬 배치가 제한됨
+      </div>
+    </div>
+  );
+}
+
 interface PatternInfo {
   index: number;
   count: number;
@@ -2016,6 +2128,11 @@ export function PatternDebugPanel() {
                   ))}
                 </div>
               </div>
+              {/* [프로덕션 사용 예시] 그린 모양이 실제 레벨에서 어떻게 쌓이는지 */}
+              <ProductionUsagePreview
+                getGrid={(s) => (s === gridSize ? editGrid : variantGrids[s]) || []}
+              />
+
               <div className="flex gap-2">
                 {(() => {
                   const reqMet = REQUIRED_PATTERN_SIZES.every(s =>

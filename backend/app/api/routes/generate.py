@@ -171,6 +171,11 @@ def _generate_core_worker(request_dict: dict) -> dict:
                     else:
                         _lj = generator._ensure_tutorial_gimmick_count(_lj, _tut, 3)
                     _lj = generator._finalize_divisibility_guarantee(_lj)
+                    # [FINALIZE] 이 구제 경로는 generate() 반환 **이후**라 generate() 말미의
+                    # 백스톱(chain 클로저 / link sanitize / max_moves / timea) 밖이다.
+                    # 게다가 위 _ensure_tutorial_gimmick_count 가 chain/link 속성을 새로 얹는다
+                    # (스냅샷 후보 일괄 변환 → 서로의 앵커를 덮을 수 있음). 반환 직전 재적용 필수.
+                    _lj = generator._finalize_level(_lj)
                     response.level_json = _lj
         return {"ok": True, "response": response}
     except HTTPException as he:

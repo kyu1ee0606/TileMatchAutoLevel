@@ -562,7 +562,10 @@ export async function recalculateBatchCounts(batchId: string): Promise<void> {
     }
   }
 
-  await updateProductionBatch(batchId, counts);
+  // [이어서 생성 판정용] '실제 저장된 레벨 수'. generated_count 는 status==='generated' 인 것만
+  // 세므로 검증을 거쳐 playtest_queue/approved 로 바뀌면 줄어든다 → 생성 진척도로 쓰면 안 된다.
+  // (실측: 950개 저장됐는데 generated_count=672 → 재개 판정이 어긋남)
+  await updateProductionBatch(batchId, { ...counts, saved_level_count: levels.length });
 }
 
 /**

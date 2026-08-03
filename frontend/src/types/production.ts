@@ -236,6 +236,12 @@ export interface ProductionBatch {
   approved_count: number;
   rejected_count: number;
   exported_count: number;
+  /**
+   * 실제 저장된 레벨 수(status 무관). '이어서 생성' 재개 판정 근거.
+   * generated_count 는 status==='generated' 인 것만 세므로 검증 후 playtest_queue 로 바뀌면
+   * 줄어든다 → 생성 진척도로 쓰면 안 됨. 구배치는 undefined 라 폴백 필요.
+   */
+  saved_level_count?: number;
 
   // 난이도 설정
   difficulty_start: number;    // 시작 난이도 (예: 0.1)

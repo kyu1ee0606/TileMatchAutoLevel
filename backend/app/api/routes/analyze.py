@@ -1413,6 +1413,10 @@ async def fix_centering(request: FixCenteringRequest):
         # [÷3 재보장] 중앙정렬(타일 위치 변형)이 매칭타입 ÷3 카운트를 깰 수 있으므로
         # generate() 밖 변형 직후에도 권위 게이트를 한 번 더 통과(멱등). 클리어불가 출고 차단.
         fixed_level = generator._finalize_divisibility_guarantee(fixed_level)
+        # [FINALIZE] _fix_visual_centering 은 타일 위치를 시프트한다 → 링크 짝/사슬 앵커가
+        # 어긋날 수 있다(sanitizer docstring 이 이 함수를 고아링크 원인으로 지목).
+        # 여기엔 link strip 이 없었다 → 공통 마무리 적용(멱등).
+        fixed_level = generator._finalize_level(fixed_level)
 
         # 수정 후 diff 계산
         diff_after = _calc_visual_center_diff(fixed_level)
@@ -1558,9 +1562,31 @@ async def debug_pattern_list(grid_cols: int = 8, grid_rows: int = 8):
 
 # ===== 커스텀 패턴 저장/로드 =====
 import os
+import tempfile
 import json as json_module
 
 CUSTOM_PATTERNS_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "data", "custom_patterns.json")
+
+
+def _atomic_json_dump(path: str, data: Any, indent: int = 2) -> None:
+    """[원자적 저장] 임시파일 → os.replace. 부분쓰기/손상 방지.
+
+    기존 방식(`open(path,"w")` 직접 쓰기)은 uvicorn 워커가 여러 개(run.sh 4개)라
+    동시 쓰기 시 파일이 찢어질 수 있고, `_load_*` 가 JSONDecodeError 를 삼켜 `{}` 를
+    반환하므로 **찢어진 읽기 후 저장 = 라이브러리 전체 소실**이 된다.
+    production_store.py:344-353 의 검증된 패턴을 재사용.
+    """
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json_module.dump(data, f, ensure_ascii=False, indent=indent)
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
 
 
 def _load_custom_patterns() -> Dict[str, Any]:
@@ -1572,9 +1598,7 @@ def _load_custom_patterns() -> Dict[str, Any]:
 
 
 def _save_custom_patterns(data: Dict[str, Any]):
-    os.makedirs(os.path.dirname(CUSTOM_PATTERNS_PATH), exist_ok=True)
-    with open(CUSTOM_PATTERNS_PATH, "w") as f:
-        json_module.dump(data, f, indent=2)
+    _atomic_json_dump(CUSTOM_PATTERNS_PATH, data)
 
 
 # ===== [보스 템플릿] 다층 t0 모양 손그림 저장 — 프로덕션 보스(10의 배수) 생성용 =====
@@ -1592,9 +1616,7 @@ def _load_boss_templates() -> Dict[str, Any]:
 
 
 def _save_boss_templates(data: Dict[str, Any]):
-    os.makedirs(os.path.dirname(BOSS_TEMPLATES_PATH), exist_ok=True)
-    with open(BOSS_TEMPLATES_PATH, "w") as f:
-        json_module.dump(data, f, indent=2)
+    _atomic_json_dump(BOSS_TEMPLATES_PATH, data)
 
 
 class BossTemplateLayer(_BaseModel):
@@ -2003,8 +2025,14 @@ async def generate_from_boss_template(req: BossTemplateGenerateRequest):
                 else:  # grass — 4방 이웃 ≥2 필요(게임 remaining=2)
                     if sum(1 for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)) if f"{_px+dx}_{_py+dy}" in _lt) < 2:
                         _t[1] = ""; grass_stripped += 1
+        # [TUTORIAL_GUARANTEE] 보스 템플릿도 generate() 우회 → 언락 첫 스테이지 기믹 보장 미적용.
+        # (보스는 10의 배수라 현재 언락표와 겹치지 않지만, 표가 바뀌어도 안전하게 멱등 호출.)
+        level = gen._ensure_tutorial_unlock_gimmick(level, ln)
         level = gen._finalize_divisibility_guarantee(level)
-        level = gen._strip_orphaned_link_tiles(level)
+        # [FINALIZE] 위 인라인 chain 검사는 '수평 이웃 칸 존재'만 본다 → 이웃이 잠긴 chain /
+        # craft 루트 / 가려짐인 경우를 못 잡는다. 고정점 클로저로 최종 판정(멱등).
+        # link sanitize + max_moves + timea 도 함께 처리.
+        level = gen._finalize_level(level)
         level = gen._diversify_container_inner_tiles(level)
         # [grass 홀짝착각방지] 짝수 층차 0오프셋 겹침 grass 일괄 제거(생성기와 동일 규칙).
         _before_g = grass_stripped
@@ -2080,9 +2108,7 @@ def _load_level_templates() -> Dict[str, Any]:
 
 
 def _save_level_templates(data: Dict[str, Any]):
-    os.makedirs(os.path.dirname(LEVEL_TEMPLATES_PATH), exist_ok=True)
-    with open(LEVEL_TEMPLATES_PATH, "w") as f:
-        json_module.dump(data, f, indent=2)
+    _atomic_json_dump(LEVEL_TEMPLATES_PATH, data)
 
 
 def _tile_effective_count(tile: Any) -> int:
@@ -2490,15 +2516,28 @@ async def generate_from_template(request: LevelTemplateFromTemplateRequest):
     cropped_applied = False
     cropped_max_dim = None
     if request.crop_max_dim is not None:
-        from ...core.generator import crop_level_to_max_dim
-        cropped_applied, cropped_max_dim = crop_level_to_max_dim(level_json, int(request.crop_max_dim))
+        # [가드] 손상 템플릿(col/row null 등)에서 크롭이 실패해도 500 을 내지 않는다.
+        # 크롭은 '가독성 최적화'라 실패해도 레벨 생성 자체는 계속돼야 한다.
+        try:
+            from ...core.generator import crop_level_to_max_dim
+            cropped_applied, cropped_max_dim = crop_level_to_max_dim(level_json, int(request.crop_max_dim))
+        except Exception as ex:  # noqa: BLE001
+            print(f"[from-template] crop skipped ({request.template_id}): {type(ex).__name__}: {ex}")
 
     # [÷3 게이트] from-template 은 generator.generate() 를 우회하므로 v16 권위 게이트를
     # 여기서 직접 호출(멱등). 템플릿이 비-÷3 타일 분배를 가지면 클리어 불가 레벨이 되는데,
     # 게이트가 잉여 t0/타일 r(1~2)개 제거로 총합 ÷3 → 클리어가능 보장. (root: 우회 경로 차단)
     try:
         from ...core.generator import LevelGenerator
-        level_json = LevelGenerator()._finalize_divisibility_guarantee(level_json)
+        _gen_ft = LevelGenerator()
+        # [TUTORIAL_GUARANTEE] 템플릿 경로는 generate() 의 '언락 첫 스테이지 기믹 보장'을 타지 않는다.
+        # 실측: Lv291(폭탄 언락)이 템플릿으로 만들어져 기믹 0개로 출고됨. ÷3 보정 **전에** 넣어
+        # 기믹 추가로 인한 타입 변동까지 뒤에서 정리되게 한다.
+        level_json = _gen_ft._ensure_tutorial_unlock_gimmick(level_json, request.level_number)
+        level_json = _gen_ft._finalize_divisibility_guarantee(level_json)
+        # [FINALIZE] from-template 도 generate() 우회 → chain 클로저/link sanitize/max_moves/timea
+        # 백스톱 밖. 공통 마무리 적용(멱등).
+        level_json = _gen_ft._finalize_level(level_json)
     except Exception as ex:
         print(f"[from-template] divisibility gate skipped: {ex}")
 
@@ -3485,4 +3524,255 @@ async def debug_color_balance_test(tile_count: int = 6, samples: int = 10):
         "balance_score": round(
             min(color_stats_total.values()) / max(max(color_stats_total.values()), 1) * 100, 1
         ) if any(v > 0 for v in color_stats_total.values()) else 0,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# [층별 패턴(Level Shapes)] 층마다 고정 모양인 레벨 스택 — 타운팝 템플릿 크롭 편입용
+#
+# 기존 패턴 라이브러리와 저장 모델이 다르다(그리드크기별 변형 vs 레벨 스택 전체).
+# 원본 level_templates.json 은 **읽기 전용**, 크롭 결과만 level_shapes.json 에 사본 저장.
+# 게임 격자 = layer_0.row(짝수층 S / 홀수층 S-1 정사각) → 크롭·검증 모두 이 축 기준.
+# ═══════════════════════════════════════════════════════════════════════
+
+class LevelShapeImportRequest(_BaseModel):
+    target_max_dim: int = 8            # 보스에서 이미 허용된 크기
+    iou_gate: float = 0.85             # Tier B 실루엣 유지 기준
+    max_loss_pct: float = 15.0         # Tier B 손실 상한(%)
+    tiers: List[str] = ["A", "B"]      # 저장할 Tier
+    dry_run: bool = False
+
+
+class LevelShapePatchRequest(_BaseModel):
+    enabled: Optional[bool] = None
+    target_max_dim: Optional[int] = None   # 지정 시 재크롭
+
+
+def _import_one_shape(tpl_id: str, tpl: Dict[str, Any], target: int,
+                      iou_gate: float, max_loss_pct: float) -> Optional[Dict[str, Any]]:
+    """원본 템플릿 1개 → 크롭 + 파이프라인 → 엔트리(dict) 또는 None(실패)."""
+    import copy
+    from ...core import level_shapes as LS
+    from ...core.generator import LevelGenerator
+
+    raw = (tpl or {}).get("level_json") or {}
+    if not raw:
+        return None
+    orig = _normalize_level_json_strings(copy.deepcopy(raw))
+    orig_dim = LS.board_size(orig)
+    if orig_dim <= 0:
+        return None
+
+    cropped, lost, cut = LS.uniform_crop(orig, target)
+    total = sum(len(t) for _, _, _, t in LS._layers(orig)) or 1
+    loss_pct = lost / total * 100
+
+    gen = LevelGenerator()
+    # [순서 고정] 튜토리얼 기믹 보장 → ÷3 → finalize.
+    # _finalize_level 은 ÷3 을 포함하지 않는다(도크스트링) → 반드시 앞에서 돌려야
+    # max_moves/timea 가 stale 해지지 않는다(실측: 크롭 후 130/208 에서 타일 수 변동).
+    try:
+        cropped = gen._finalize_divisibility_guarantee(cropped)
+        cropped = gen._finalize_level(cropped)
+    except Exception as ex:  # noqa: BLE001
+        print(f"[level-shapes] {tpl_id} finalize 실패: {type(ex).__name__}: {ex}")
+        return None
+
+    # 하드 검증 — 게임 격자 모델(N_i = row_0 - i%2). 위반이면 강등이 아니라 **거부**.
+    viol = LS.assert_in_board(cropped)
+    if viol:
+        print(f"[level-shapes] {tpl_id} 격자 위반 거부: {viol[:3]}")
+        return None
+
+    # IoU 는 **파이프라인 통과 후** 최종본 기준(÷3 보정이 타일을 추가하므로 크롭 직후 값은 무의미)
+    iou = LS.silhouette_iou(orig, cropped, shift=(cut[0], cut[2]))
+    tier = "A" if lost == 0 else ("B" if (loss_pct <= max_loss_pct and iou >= iou_gate) else "C")
+
+    return {
+        "name": (tpl or {}).get("name") or tpl_id,
+        "source_template_id": tpl_id,
+        "tier": tier,
+        "orig_max_dim": orig_dim,
+        "max_dim": LS.board_size(cropped),
+        "target_max_dim": target,
+        "crop": list(cut),
+        "lost_tiles": lost,
+        "loss_pct": round(loss_pct, 2),
+        "iou": round(iou, 3),
+        "layer_count": len(LS._layers(cropped)),
+        "total_tiles": sum(len(t) for _, _, _, t in LS._layers(cropped)),
+        "gimmicks": LS.gimmicks_of(cropped),
+        "min_level": LS.min_level_for(cropped),   # ← 기믹 해금 규칙(배정 필터용)
+        "enabled": True,
+        "level_json": cropped,
+    }
+
+
+@router.get("/debug/level-shapes")
+async def list_level_shapes(enabled_only: bool = False):
+    """층별 패턴 목록(요약 — level_json 제외)."""
+    from ...core import level_shapes as LS
+    items = LS.list_shapes(enabled_only=enabled_only)
+    return {"shapes": items, "count": len(items)}
+
+
+@router.get("/debug/level-shapes/{shape_id}")
+async def get_level_shape(shape_id: str):
+    from ...core import level_shapes as LS
+    v = LS.get_shape(shape_id)
+    if not v:
+        raise HTTPException(status_code=404, detail=f"shape_not_found: {shape_id}")
+    return v
+
+
+@router.post("/debug/level-shapes/import")
+async def import_level_shapes(request: LevelShapeImportRequest):
+    """원본 레벨 템플릿 전수 스캔 → 크롭·검증 → Tier 분류 → 저장.
+
+    원본(level_templates.json)은 건드리지 않는다. id 는 `lp_<원본id>` 고정(재크롭 시 갱신).
+    """
+    from ...core import level_shapes as LS
+    data = _load_level_templates()
+    tpls = data.get("templates") or {}
+    saved: Dict[str, Any] = {}
+    stats = {"A": 0, "B": 0, "C": 0, "rejected": 0}
+    for tid, tpl in tpls.items():
+        if not isinstance(tpl, dict):
+            continue
+        e = _import_one_shape(tid, tpl, request.target_max_dim,
+                              request.iou_gate, request.max_loss_pct)
+        if e is None:
+            stats["rejected"] += 1
+            continue
+        stats[e["tier"]] += 1
+        if e["tier"] in request.tiers:
+            saved[f"lp_{tid}"] = e
+    if not request.dry_run and saved:
+        LS.put_many(saved)
+    return {
+        "ok": True, "scanned": len(tpls), "stats": stats,
+        "saved": 0 if request.dry_run else len(saved),
+        "dry_run": request.dry_run,
+        "min_level_hist": _hist([e["min_level"] for e in saved.values()]),
+    }
+
+
+def _hist(vals: List[int]) -> Dict[str, int]:
+    from collections import Counter
+    return {str(k): v for k, v in sorted(Counter(vals).items())}
+
+
+@router.patch("/debug/level-shapes/{shape_id}")
+async def patch_level_shape(shape_id: str, request: LevelShapePatchRequest):
+    """enabled 토글 / target_max_dim 변경 시 원본에서 재크롭."""
+    from ...core import level_shapes as LS
+    cur = LS.get_shape(shape_id)
+    if not cur:
+        raise HTTPException(status_code=404, detail=f"shape_not_found: {shape_id}")
+    if request.target_max_dim is not None and request.target_max_dim != cur.get("target_max_dim"):
+        data = _load_level_templates()
+        tpl = (data.get("templates") or {}).get(cur.get("source_template_id"))
+        if not tpl:
+            raise HTTPException(status_code=409, detail="source_template_missing")
+        e = _import_one_shape(cur["source_template_id"], tpl, request.target_max_dim,
+                              0.0, 100.0)  # 재크롭은 사용자가 명시했으므로 게이트 완화
+        if e is None:
+            raise HTTPException(status_code=422, detail="recrop_failed")
+        e["enabled"] = cur.get("enabled", True) if request.enabled is None else request.enabled
+        LS.put_shape(shape_id, e)
+        return {"ok": True, "recropped": True, **{k: v for k, v in e.items() if k != "level_json"}}
+    if request.enabled is not None:
+        LS.patch_shape(shape_id, enabled=request.enabled)
+    return {"ok": True, "recropped": False}
+
+
+@router.delete("/debug/level-shapes/{shape_id}")
+async def delete_level_shape(shape_id: str):
+    """크롭본만 삭제. 원본 템플릿은 그대로."""
+    from ...core import level_shapes as LS
+    if not LS.delete_shape(shape_id):
+        raise HTTPException(status_code=404, detail=f"shape_not_found: {shape_id}")
+    return {"ok": True, "deleted": shape_id}
+
+
+class LevelShapeGenerateRequest(_BaseModel):
+    shape_id: str
+    level_number: Optional[int] = None
+    use_tile_count: Optional[int] = 6
+    randomize_tiles: bool = True
+    random_seed: Optional[int] = None
+
+
+@router.post("/generate/from-level-shape")
+async def generate_from_level_shape(request: LevelShapeGenerateRequest):
+    """층별 패턴(크롭본)으로 레벨 생성. `/generate/from-template` 과 동일 파이프라인.
+
+    차이: 소스가 level_shapes 저장소이고 **이미 크롭된 상태**라 crop 단계가 없다.
+    기믹은 템플릿 그대로 보존되고(t0 만 색 배정), 배정 가능 최소 레벨은 엔트리의 min_level.
+    """
+    import copy
+    import random
+    from ...core import level_shapes as LS
+    from ...core.generator import LevelGenerator, select_color_balanced_tiles
+    from ...core.analyzer import LevelAnalyzer
+
+    entry = LS.get_shape(request.shape_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"shape_not_found: {request.shape_id}")
+
+    # 기믹 해금 규칙 — 이 모양이 요구하는 최소 레벨보다 낮은 슬롯엔 배정 불가
+    min_lv = int(entry.get("min_level", 0) or 0)
+    if request.level_number is not None and int(request.level_number) < min_lv:
+        raise HTTPException(
+            status_code=409,
+            detail=f"gimmick_unlock_violation: shape requires level>={min_lv}, got {request.level_number}")
+
+    level_json = copy.deepcopy(entry.get("level_json") or {})
+    if not level_json:
+        raise HTTPException(status_code=400, detail="empty_level_json")
+
+    # 타일 타입 배정 — t0(placeholder)만 색으로. 기믹 속성/컨테이너 타입은 보존.
+    if request.randomize_tiles:
+        tile_count = max(1, min(6, request.use_tile_count or 6))
+        seed = request.random_seed if request.random_seed is not None else request.level_number
+        tile_types = select_color_balanced_tiles(tile_count, seed=seed)
+        rng = random.Random(seed)
+        try:
+            n = int(level_json.get("layer", 0) or 0)
+        except (TypeError, ValueError):
+            n = 0
+        for i in range(n):
+            ld = level_json.get(f"layer_{i}")
+            if not isinstance(ld, dict):
+                continue
+            for _pos, tile in (ld.get("tiles") or {}).items():
+                if isinstance(tile, list) and tile and tile[0] == "t0":
+                    tile[0] = rng.choice(tile_types)
+
+    gen = LevelGenerator()
+    # from-template 과 동일 순서: 튜토리얼 보장 → ÷3 → finalize
+    level_json = gen._ensure_tutorial_unlock_gimmick(level_json, request.level_number)
+    level_json = gen._finalize_divisibility_guarantee(level_json)
+    level_json = gen._finalize_level(level_json)
+
+    # 격자 하드 검증(게임 모델) — 통과 못하면 출고 금지
+    viol = LS.assert_in_board(level_json)
+    if viol:
+        raise HTTPException(status_code=422, detail={"board_violation": viol[:10]})
+
+    analyzer = LevelAnalyzer()
+    try:
+        static = analyzer.analyze(level_json)
+        actual_difficulty = float(static.score) / 100.0
+        grade = static.grade.value if hasattr(static.grade, "value") else str(static.grade)
+    except Exception:  # noqa: BLE001
+        actual_difficulty, grade = 0.5, "C"
+
+    return {
+        "level_json": level_json,
+        "actual_difficulty": actual_difficulty,
+        "grade": grade,
+        "shape_id": request.shape_id,
+        "min_level": min_lv,
+        "tier": entry.get("tier"),
     }

@@ -742,7 +742,12 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
   // 유닛 조립(sparse 해결, 일반레벨만). localStorage 영속 — 리로드/야간 자동생성 세션에서도 유지.
   // (영속 안 하면 새로고침 시 false로 리셋 → 야간 auto-queue가 unit_assembly 없이 생성하던 회귀)
   // [생산복구] v1→v2 키 버전업: 봇-언클리어러블 회귀로 유닛조립 강제 OFF 리셋(리로드시 기본 false).
-  // 성긴-대칭 재설계+봇클리어 검증 통과 후 재활성. (사용자가 다시 켜면 v2에 저장됨.)
+  // [v2 재설계 검증] 성긴-대칭 재작성 후 프론트 동일조건 실측(30레벨×4라운드, RL 스킬스윕):
+  //   통과율 86.7%→96.7%, 평균|gap| 0.073→0.049, 언클리어러블 잔존 동일(1).
+  // [v3 슬롯 모델] v2가 난이도를 '유닛 크기'로 올려(12·15셀=박스 4~5) 한쪽 폭(3칸)을 넘겨
+  //   중앙 가로지르는 통짜 배치가 되던 문제 수정 → 난이도는 '슬롯 개수'로만 조절.
+  //   → 기본값은 **OFF 유지**(수동 토글 정책). 사용자가 켜면 이 키에 저장돼 유지된다.
+  //   키를 다시 올리지 말 것 — 올리면 사용자가 켜둔 설정이 리셋된다.
   const UNIT_ASSEMBLY_KEY = 'prod_unit_assembly_v2';
   const [unitAssembly, setUnitAssembly] = useState<boolean>(() => {
     try { return localStorage.getItem(UNIT_ASSEMBLY_KEY) === '1'; } catch { return false; }
@@ -908,7 +913,18 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
     const autoAssignWarnings: string[] = [];
     if (autoAssignTemplates) {
       try {
-        const tplRes = await apiClient.get('/debug/level-templates');
+        // [층별 패턴 우선] 원본 템플릿은 10x10 등 인게임 규격 초과가 대부분(211개 중 183개).
+        // 크롭·검증을 통과한 사본(level-shapes)을 우선 사용하고, 없으면 원본으로 폴백.
+        // 사본에는 min_level(기믹 해금 규칙)이 기록돼 있어 조기 등장 방지 필터를 걸 수 있다.
+        const [tplRes, shapeRes] = await Promise.all([
+          apiClient.get('/debug/level-templates'),
+          apiClient.get('/debug/level-shapes?enabled_only=true').catch(() => ({ data: { shapes: [] } })),
+        ]);
+        const shapes = (shapeRes.data?.shapes || []) as Array<{
+          id: string; min_level?: number; source_template_id?: string; tier?: string;
+        }>;
+        // 원본 id → 크롭본 id·min_level 매핑(난이도 메타는 원본에만 있으므로 조인해서 쓴다)
+        const shapeBySource = new Map(shapes.map(s => [s.source_template_id || '', s]));
         const allTemplates = (tplRes.data.templates || []) as Array<{
           template_id: string;
           measured_difficulty?: number | null;
@@ -943,16 +959,26 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
 
         for (const tpl of sortedTpls) {
           const diff = tpl.measured_difficulty!;
+          // 크롭본이 있으면 그것을 쓴다(인게임 규격 통과분). min_level = 기믹 해금 요구 레벨.
+          const shape = shapeBySource.get(tpl.template_id);
+          const assignId = shape ? shape.id : tpl.template_id;
+          const minLv = shape ? (shape.min_level ?? 0) : 0;
           let bestSlot: typeof slots[number] | null = null;
           let bestGap = Infinity;
           for (const slot of slots) {
             if (slot.level % 10 === 0) continue;         // 보스 슬롯 제외 (핵심)
             if (takenLevels.has(slot.level)) continue;
+            // [기믹 해금 규칙] 커튼/폭탄/개구리 등을 해금 전 레벨에 배정하면 조기 등장.
+            // 실측: 원본 211개 중 101개(48%)가 해금 전 기믹 보유(커튼만 63개).
+            if (slot.level < minLv) continue;
             const gap = Math.abs(slot.targetDiff - diff);
             if (gap < bestGap) { bestGap = gap; bestSlot = slot; }
           }
-          if (bestSlot) { effectiveAssignments[bestSlot.level] = tpl.template_id; takenLevels.add(bestSlot.level); }
-          else { autoAssignWarnings.push(`${tpl.name || tpl.template_id}: 빈 non-boss 슬롯 없음 — 미배치`); }
+          if (bestSlot) { effectiveAssignments[bestSlot.level] = assignId; takenLevels.add(bestSlot.level); }
+          else {
+            autoAssignWarnings.push(
+              `${tpl.name || tpl.template_id}: 배치 가능 슬롯 없음${minLv > 0 ? ` (기믹 해금 Lv${minLv}+ 필요)` : ''} — 미배치`);
+          }
         }
         // 보스 슬롯: effectiveAssignments 미설정 → 전용 보스 템플릿(regen) 또는 boss_mode 절차생성(8/7)
 
@@ -1161,13 +1187,29 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
           if (templateId && !isBossTemplate) {
             try {
               const tplStartTime = Date.now();
-              const tplResp = await apiClient.post('/generate/from-template', {
+              // [층별 패턴] id 가 `lp_` 로 시작하면 크롭·검증을 통과한 사본(level-shapes) →
+              // 전용 엔드포인트 사용(이미 크롭돼 있어 crop 단계 없음, 기믹 해금 검증 포함).
+              const isLayeredShape = templateId.startsWith('lp_');
+              const tplResp = isLayeredShape
+                ? await apiClient.post('/generate/from-level-shape', {
+                    shape_id: templateId,
+                    level_number: levelNumber,
+                    use_tile_count: 6,
+                    randomize_tiles: true,
+                    random_seed: levelNumber,
+                  })
+                : await apiClient.post('/generate/from-template', {
                 template_id: templateId,
                 level_number: levelNumber,
                 use_tile_count: 6,
                 randomize_tiles: true,
                 random_seed: levelNumber,
-                crop_max_dim: isBossTemplate ? MAX_PLAYABLE_GRID : undefined,
+                // [크롭 항상 적용] 이 블록은 `templateId && !isBossTemplate` 안이라
+                // `isBossTemplate ? ... : undefined` 는 **항상 undefined** 였다(죽은 삼항).
+                // → 비보스 템플릿이 크롭을 못 받아 10x10 그대로 나오고, 뒤의
+                //   maxDeclaredGridDim(...) <= MAX_PLAYABLE_GRID 게이트에서 전부 탈락.
+                // 타운팝 템플릿 대부분이 10칸이므로 이 한 줄이 사용 가능 여부를 갈랐다.
+                crop_max_dim: MAX_PLAYABLE_GRID,
               });
               const levelJson = tplResp.data.level_json;
               // 보스인데 크롭해도 >8(D타입) → 템플릿 폐기, 절차생성 폴백
@@ -1716,6 +1758,14 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
         }
         // Update batch counts after pause
         await recalculateBatchCounts(activeBatchId);
+        // [이어서 생성 버튼] 배치 목록도 갱신해야 UI의 batch.generated_count 가 최신이 된다.
+        // 정상완료 경로는 갱신하는데 일시정지 경로가 빠져 있었다 → generated_count 가 stale(대개 0)
+        // → `incomplete` 판정 false → 탭 리로드로 progress.status('paused')까지 날아가면
+        //   '▶️ 이어서 생성' 버튼이 아예 사라져 재개 불가.
+        try {
+          const refreshed = await listProductionBatches();
+          setBatches(refreshed);
+        } catch { /* 목록 갱신 실패해도 일시정지 자체는 성립 */ }
         flushProgressImmediate();
         setGenerationProgress(prev => ({
           ...prev,
@@ -2605,6 +2655,17 @@ function GenerateTab({
   useEffect(() => { try { localStorage.setItem('prod_autoqueue_preset_v1', autoQueuePreset); } catch { /* ignore */ } }, [autoQueuePreset]);
   useEffect(() => { try { localStorage.setItem('prod_autoqueue_count_v1', autoQueueCountInput); } catch { /* ignore */ } }, [autoQueueCountInput]);
 
+  // [이어서 생성] 배치 레코드 기준 진척도. progress 는 비영속이라 리로드 후엔 이 값만 신뢰 가능.
+  // savedCount = 실제 저장된 레벨 수(status 무관). generated_count 는 status==='generated' 인
+  // 것만 세므로 검증을 거치면(playtest_queue) 줄어든다 → 진척도로 쓰면 안 됨.
+  // (실측: 950개 저장됐는데 generated_count=672)
+  const savedCount = batch
+    ? (batch.saved_level_count ?? (batch.generated_count + batch.playtest_count
+        + batch.approved_count + batch.rejected_count + batch.exported_count))
+    : 0;
+  const batchFullyDone = !!batch && batch.total_levels > 0 && savedCount >= batch.total_levels;
+  const batchIncomplete = !!batch && batch.total_levels > 0 && !batchFullyDone;
+
   const progressPercent = progress.total_levels > 0
     ? (progress.completed_levels / progress.total_levels) * 100
     : 0;
@@ -2836,16 +2897,25 @@ function GenerateTab({
             </p>
           </div>
 
-          {/* [유닛 조립] 위층 sparse 해결 */}
+          {/* [유닛 조립 v3] 슬롯 대칭 모델 (기본 OFF · 수동 토글) */}
           <div className="bg-gray-700/40 rounded-lg p-3">
             <label className="flex items-center gap-2 cursor-pointer">
               <input type="checkbox" checked={unitAssembly} onChange={(e) => onUnitAssemblyChange(e.target.checked)} />
-              <span className="text-sm text-white font-medium">🧱 유닛 조립 (위층 밀도 확보)</span>
+              <span className="text-sm text-white font-medium">🧱 유닛 조립 v3 (슬롯 대칭)</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-800 text-emerald-200">검증됨</span>
             </label>
             <p className="text-xs text-gray-400 mt-1">
-              바닥 큰층 = 주 패턴 / <span className="text-emerald-400">위 작은층 = 밀도 높은 소형 유닛(3·6·9칸) 조립</span> →
-              위층 sparse(타일 미달) 해결 + 위층 다양성. 아래층 받침 규칙으로 floating 없음, ÷3·클리어 보장(reverse_generation 병용).
-              <span className="text-yellow-400"> 일반 레벨만</span>(보스 제외). Lv11+ 최소 60타일과 함께 밀도 향상.
+              바닥층 = 주 패턴(디자인 모양 유지) / <span className="text-emerald-400">위층 = 소형 유닛을 좌우 슬롯에 대칭 배치</span> →
+              위층이 바닥 패턴의 축소 복사본이 아니라 <span className="text-emerald-400">다른 조각</span>이 되어 "같은 모양 반복" 완화.
+              받침 규칙으로 floating 없음, ÷3 보장. <span className="text-yellow-400">일반 레벨만</span>(보스 제외).
+            </p>
+            <p className="text-[10px] text-gray-500 mt-1 leading-relaxed">
+              <b className="text-gray-400">규칙</b> · 유닛은 바운딩박스 <b>정사각 슬롯</b>을 차지(3×2 유닛 → 3×3 슬롯) ·
+              중심축 <b>한쪽에만 놓고 미러</b>(홀수 그리드는 중앙열을 축으로 비움) · 슬롯끼리 <b>겹침 금지</b> ·
+              같은 층엔 <b>서로 다른 모양만</b>(같은 네모 반복 방지).<br />
+              난이도는 <b className="text-gray-400">유닛 크기가 아니라 슬롯 개수</b>로 조절 → 한쪽 폭(5·6·7 그리드 기준 2~3칸)을
+              넘는 통짜 배치가 구조적으로 불가. 채움률 실측 12~37%.
+              <span className="text-gray-600"> · v1(조밀 채움)은 언클리어러블 대량 발생으로 비활성화, v2는 크기를 키워 절반 이상 덮이는 문제 → v3에서 슬롯 모델로 해결.</span>
             </p>
           </div>
 
@@ -2906,7 +2976,10 @@ function GenerateTab({
       )}
 
       {/* Progress - Enhanced Dashboard */}
-      {(isGenerating || progress.status !== 'idle') && (() => {
+      {/* [이어서 생성] progress 는 비영속(탭 리로드 시 idle 로 초기화)이라 이 패널을
+          progress.status 로만 게이팅하면, 리로드 후 '▶️ 이어서 생성' 버튼까지 통째로 사라져
+          미완성 배치를 재개할 방법이 없어진다. 배치 레코드 기준 '미완성' 도 표시 조건에 포함. */}
+      {(isGenerating || progress.status !== 'idle' || batchIncomplete) && (() => {
         // 평균 속도 계산 (레벨/분)
         const avgSpeed = progress.elapsed_ms > 0
           ? (progress.completed_levels / (progress.elapsed_ms / 60000))
@@ -3056,8 +3129,14 @@ function GenerateTab({
             {(() => {
               // [이어서 생성] 부분배치(0<생성<전체)면 status(paused/error/completed/idle) 무관하게 재개 버튼.
               // progress는 비영속(리로드시 초기화)이라 배치 레코드 기준으로 판정 → 항상 재개 가능.
-              const incomplete = !!batch && batch.generated_count > 0 && batch.generated_count < batch.total_levels;
-              const fullyDone = !!batch && batch.total_levels > 0 && batch.generated_count >= batch.total_levels;
+              // [이어서 생성] '아직 다 안 만들어진 배치'면 무조건 재개 버튼을 띄운다.
+              // 기존 조건은 generated_count > 0 을 요구해 (a) 0개 생성 상태에서 리로드하거나
+              // (b) 배치 목록이 stale 이면 버튼이 사라져 재개 불가였다.
+              // onStart 는 이미 생성된 레벨을 스킵하므로(1008,1135) 0개일 때 눌러도 안전 = 처음부터 생성.
+              // 진척도 판정은 컴포넌트 상단에서 계산(savedCount/batchFullyDone/batchIncomplete).
+              // 패널 표시 조건과 동일한 값을 써야 '패널은 떴는데 버튼은 없음' 같은 불일치가 안 생긴다.
+              const fullyDone = batchFullyDone;
+              const incomplete = batchIncomplete;
               return (
                 <div className="flex gap-2">
                   {isGenerating && (
@@ -3067,7 +3146,7 @@ function GenerateTab({
                   )}
                   {!isGenerating && (progress.status === 'paused' || incomplete) && (
                     <Button onClick={() => onStart({ strategy: playtestStrategy })} className="flex-1">
-                      ▶️ 이어서 생성{batch ? ` (${batch.generated_count}/${batch.total_levels})` : ''}
+                      ▶️ 이어서 생성{batch ? ` (${savedCount}/${batch.total_levels})` : ''}
                     </Button>
                   )}
                   {!isGenerating && fullyDone && (
@@ -3213,6 +3292,306 @@ function computeMaxMoves(levelJson: unknown): number {
     }
   }
   return Math.max(30, total);
+}
+
+// [헤더-OOB 자가치유] 게임은 층 헤더 col/row로 격자생성 → 밖 좌표 타일 잘림 → 인게임 클리어불가.
+// 백엔드 repair_header_oob.py 미러. Class A(경계초과): 초과타일을 최근접 in-header 빈칸으로 relocate
+// (헤더 불변→홀짝 보존). Class B(0/0 헤더): 실 extent 기반 정사각교대 헤더 재구성. 반환: 수정 타일/헤더 수.
+function sanitizeHeaderOob(levelJson: unknown): number {
+  let data = levelJson as Record<string, unknown>;
+  if (!data) return 0;
+  if (data.map && typeof data.map === 'object') data = data.map as Record<string, unknown>;
+  const numLayers = (data.layer as number) || 0;
+  let fixed = 0;
+
+  const goalOutputs = (tiles: Record<string, unknown[]>): Set<string> => {
+    const out = new Set<string>();
+    for (const pos in tiles) {
+      const td = tiles[pos];
+      if (!(Array.isArray(td) && td.length && typeof td[0] === 'string')) continue;
+      const tt = td[0] as string;
+      if (!(tt.startsWith('craft_') || tt.startsWith('stack_'))) continue;
+      const [c, r] = pos.split('_').map(Number);
+      const d = tt[tt.length - 1];
+      if (d === 's') out.add(`${c}_${r + 1}`);
+      else if (d === 'n') out.add(`${c}_${r - 1}`);
+      else if (d === 'e') out.add(`${c + 1}_${r}`);
+      else if (d === 'w') out.add(`${c - 1}_${r}`);
+    }
+    return out;
+  };
+  const bfsEmpty = (cx: number, cy: number, col: number, row: number, occ: Set<string>, avoid: Set<string>): string | null => {
+    const seen = new Set<string>([`${cx}_${cy}`]);
+    const q: Array<[number, number]> = [[cx, cy]];
+    while (q.length) {
+      const [x, y] = q.shift()!;
+      const pos = `${x}_${y}`;
+      if (x >= 0 && x < col && y >= 0 && y < row && !occ.has(pos) && !avoid.has(pos)) return pos;
+      for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [1, 1], [-1, 1], [1, -1]]) {
+        const nx = x + dx, ny = y + dy, k = `${nx}_${ny}`;
+        if (!seen.has(k) && nx >= -2 && nx < col + 2 && ny >= -2 && ny < row + 2) { seen.add(k); q.push([nx, ny]); }
+      }
+    }
+    return null;
+  };
+
+  // Class B 판정: 어떤 층이든 tiles 있는데 col/row<=0 or NaN → 정사각교대 헤더 재구성
+  let needReconstruct = false;
+  const ext: number[] = [];
+  for (let i = 0; i < numLayers; i++) {
+    const layer = data[`layer_${i}`] as { col?: unknown; row?: unknown; tiles?: Record<string, unknown[]> } | undefined;
+    const tiles = layer?.tiles || {};
+    let mx = 0;
+    for (const c of Object.keys(tiles)) { const [x, y] = c.split('_').map(Number); mx = Math.max(mx, x + 1, y + 1); }
+    ext[i] = mx;
+    const col = parseInt(String(layer?.col), 10), row = parseInt(String(layer?.row), 10);
+    if (Object.keys(tiles).length > 0 && (!Number.isFinite(col) || !Number.isFinite(row) || col <= 0 || row <= 0)) needReconstruct = true;
+  }
+  if (needReconstruct) {
+    let needEven = 0, needOdd = 0;
+    for (let i = 0; i < numLayers; i++) { if (i % 2 === 0) needEven = Math.max(needEven, ext[i]); else needOdd = Math.max(needOdd, ext[i]); }
+    const S = Math.max(needEven, needOdd + 1, 1);
+    for (let i = 0; i < numLayers; i++) {
+      const layer = data[`layer_${i}`] as { col?: unknown; row?: unknown } | undefined;
+      if (!layer) continue;
+      const s = i % 2 === 0 ? S : S - 1;
+      const wasStr = typeof layer.col === 'string';
+      layer.col = wasStr ? String(s) : s;
+      layer.row = wasStr ? String(s) : s;
+      fixed++;
+    }
+    return fixed;  // 재구성 후 좌표는 이미 헤더내(1..8) → relocate 불필요
+  }
+
+  // Class A: 경계초과 타일 relocate
+  for (let i = 0; i < numLayers; i++) {
+    const layer = data[`layer_${i}`] as { col?: unknown; row?: unknown; num?: unknown; tiles?: Record<string, unknown[]> } | undefined;
+    const tiles = layer?.tiles;
+    if (!tiles) continue;
+    const col = parseInt(String(layer!.col), 10), row = parseInt(String(layer!.row), 10);
+    if (!Number.isFinite(col) || !Number.isFinite(row) || col <= 0 || row <= 0) continue;
+    const oob: Array<[string, number, number]> = [];
+    for (const pos of Object.keys(tiles)) {
+      const [x, y] = pos.split('_').map(Number);
+      if (x < 0 || x >= col || y < 0 || y >= row) oob.push([pos, x, y]);
+    }
+    if (!oob.length) continue;
+    const occ = new Set(Object.keys(tiles));
+    const avoid = goalOutputs(tiles);
+    for (const [pos, x, y] of oob) {
+      const cx = Math.min(Math.max(x, 0), col - 1), cy = Math.min(Math.max(y, 0), row - 1);
+      occ.delete(pos);
+      const tgt = bfsEmpty(cx, cy, col, row, occ, avoid);
+      if (!tgt) continue;
+      tiles[tgt] = tiles[pos];
+      delete tiles[pos];
+      occ.add(tgt);
+      fixed++;
+    }
+    if (layer) layer.num = String(Object.keys(tiles).length);
+  }
+  return fixed;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// [규칙 미러] 백엔드 generator.py 와 반드시 동기. 값이 어긋나면 프론트가 치유한 결과를
+// 백엔드 게이트가 다시 위반으로 판정해 무한 재검증 루프가 된다.
+//   - 폭탄 카운트다운 범위: BOMB_COUNTDOWN_MIN/MAX
+//   - timea: 정수(밀리) 산술 — 부동소수 평가순서 차이로 1초 어긋나는 것 방지
+// ─────────────────────────────────────────────────────────────────────
+const BOMB_COUNTDOWN_MIN = 3;
+const BOMB_COUNTDOWN_MAX = 5;
+const TIMEA_BASE_MILLI = 900;
+const TIMEA_TIER_MILLI: Record<number, number> = { 1: 1150, 2: 850, 3: 600 };
+const TIMEA_MIN_SEC = 60;
+const TIMEA_MAX_SEC = 600;
+
+/** 타일 속성 정규화 — td[1] 이 null/누락이면 "". (프로덕션 배치에 null 이 약 10% 존재) */
+function tileAttr(td: unknown): string {
+  return Array.isArray(td) && td.length > 1 && typeof td[1] === 'string' ? (td[1] as string) : '';
+}
+
+function levelRoot(levelJson: unknown): Record<string, unknown> | null {
+  let data = levelJson as Record<string, unknown>;
+  if (!data) return null;
+  if (data.map && typeof data.map === 'object') data = data.map as Record<string, unknown>;
+  return data;
+}
+
+/** 수집 필요 타일 수(= 실제 탭 횟수). plain + craft/stack 내부타일. 하한 없음(백엔드 _collectable_tile_count 미러). */
+function collectableTileCount(levelJson: unknown): number {
+  const data = levelRoot(levelJson);
+  if (!data) return 0;
+  const n = (data.layer as number) || 0;
+  let total = 0;
+  for (let i = 0; i < n; i++) {
+    const tiles = (data[`layer_${i}`] as { tiles?: Record<string, unknown[]> } | undefined)?.tiles;
+    if (!tiles) continue;
+    for (const pos in tiles) {
+      const t = tiles[pos];
+      if (!(Array.isArray(t) && t.length && typeof t[0] === 'string')) { total += 1; continue; }
+      const tp = t[0] as string;
+      if (tp.startsWith('craft_') || tp.startsWith('stack_')) {
+        let inner = 1;
+        const extra = t[2];
+        if (Array.isArray(extra) && extra.length) inner = Number(extra[0]) || 1;
+        else if (extra && typeof extra === 'object') inner = Number((extra as Record<string, unknown>).totalCount ?? (extra as Record<string, unknown>).count ?? 1) || 1;
+        else if (typeof extra === 'number') inner = extra;
+        total += inner;
+      } else total += 1;
+    }
+  }
+  return total;
+}
+
+/** timea 산출(정수 산술). 백엔드 _apply_timea 미러. */
+function computeTimea(tileCount: number, tier: number): number {
+  const mult = TIMEA_TIER_MILLI[tier];
+  if (!mult || tileCount <= 0) return 0;
+  const milli = tileCount * TIMEA_BASE_MILLI * mult;
+  const secs = Math.ceil(milli / 1_000_000);
+  return Math.max(TIMEA_MIN_SEC, Math.min(TIMEA_MAX_SEC, secs));
+}
+
+/**
+ * [사슬 자가치유] 해제 불가 사슬의 속성만 제거(plain화). 백엔드 _chain_release_closure 미러.
+ * 게임 규칙: 사슬은 **같은 층 수평 이웃(x±1)** 이 픽될 때만 해제되고, 잠긴 사슬은 픽 불가.
+ * 게임 자체 검출기는 *살아있는* 이웃만 세므로(CheckRemainNearTile) 이웃이 잠긴 사슬이면
+ * 실패 알림조차 안 뜨는 소프트락이 된다.
+ * 판정: monotone → "결국 픽 가능(EP)" 최소고정점. ice/grass/bomb 등 다른 기믹은 결국 픽 가능 =
+ * 유효 앵커. craft 루트만 제외(직접 픽 불가). 커버리지는 결국 해소되므로 판정에 넣지 않음.
+ */
+function sanitizeUnreleasableChains(levelJson: unknown): number {
+  const data = levelRoot(levelJson);
+  if (!data) return 0;
+  const numLayers = (data.layer as number) || 0;
+  let cleared = 0;
+  for (let i = 0; i < numLayers; i++) {
+    const tiles = (data[`layer_${i}`] as { tiles?: Record<string, unknown[]> } | undefined)?.tiles;
+    if (!tiles) continue;
+    const chains = new Set(Object.keys(tiles).filter(p => tileAttr(tiles[p]) === 'chain'));
+    if (!chains.size) continue;
+    const isCraftRoot = (p: string) => {
+      const d = tiles[p];
+      return Array.isArray(d) && d.length > 0 && typeof d[0] === 'string' && (d[0] as string).startsWith('craft_');
+    };
+    const ep = new Set<string>();
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const p of chains) {
+        if (ep.has(p)) continue;
+        const parts = p.split('_');
+        const x = parseInt(parts[0], 10), y = parseInt(parts[1], 10);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        for (const nx of [x - 1, x + 1]) {
+          const np = `${nx}_${y}`;
+          if (!(np in tiles)) continue;
+          if (isCraftRoot(np)) continue;
+          if (tileAttr(tiles[np]) === 'chain' && !ep.has(np)) continue;
+          ep.add(p); changed = true; break;
+        }
+      }
+    }
+    for (const p of chains) {
+      if (ep.has(p)) continue;
+      const d = tiles[p];
+      if (Array.isArray(d) && d.length > 1) { d[1] = ''; cleared++; }
+    }
+  }
+  return cleared;
+}
+
+/** [폭탄 자가치유] bomb_N 을 기획 3~5 로 정규화. 속성만 변경 → ÷3/모양 무영향. */
+function normalizeBombCountdowns(levelJson: unknown): number {
+  const data = levelRoot(levelJson);
+  if (!data) return 0;
+  const numLayers = (data.layer as number) || 0;
+  let fixed = 0;
+  for (let i = 0; i < numLayers; i++) {
+    const tiles = (data[`layer_${i}`] as { tiles?: Record<string, unknown[]> } | undefined)?.tiles;
+    if (!tiles) continue;
+    for (const pos in tiles) {
+      const d = tiles[pos];
+      const attr = tileAttr(d);
+      if (!attr.startsWith('bomb')) continue;
+      const parts = attr.split('_');
+      let n: number;
+      if (parts.length === 2 && /^\d+$/.test(parts[1])) {
+        n = parseInt(parts[1], 10);
+        if (n >= BOMB_COUNTDOWN_MIN && n <= BOMB_COUNTDOWN_MAX) continue;
+        n = Math.max(BOMB_COUNTDOWN_MIN, Math.min(BOMB_COUNTDOWN_MAX, n));
+      } else if (attr === 'bomb') {
+        n = BOMB_COUNTDOWN_MAX;
+      } else continue;
+      (d as unknown[])[1] = `bomb_${n}`;
+      fixed++;
+    }
+  }
+  return fixed;
+}
+
+/**
+ * [규칙 위반 검출] read-only. 백엔드 _scan_rule_violations 미러(수리 불가 항목 중심).
+ * 치유 가능한 사슬/폭탄은 self-heal 이 처리하므로, 여기선 **재생성이 필요한** 항목만 본다.
+ *   tutorial_missing : 기믹 언락 첫 스테이지인데 해당 기믹 부재 → 학습 기회 상실
+ *   timea_tight      : 가장 촉박한 티어 예산보다도 부족 → 물리적으로 클리어 불가
+ */
+function detectRuleViolations(levelNumber: number, levelJson: unknown): string[] {
+  const data = levelRoot(levelJson);
+  if (!data) return [];
+  const out: string[] = [];
+  const numLayers = (data.layer as number) || 0;
+
+  const tut = TUTORIAL_UNLOCK_GIMMICKS[levelNumber];
+  if (tut && tut !== 'key') {
+    let found = 0;
+    for (let i = 0; i < numLayers; i++) {
+      const tiles = (data[`layer_${i}`] as { tiles?: Record<string, unknown[]> } | undefined)?.tiles;
+      if (!tiles) continue;
+      for (const pos in tiles) {
+        const d = tiles[pos];
+        const t0 = Array.isArray(d) && d.length && typeof d[0] === 'string' ? (d[0] as string) : '';
+        if (t0.startsWith(tut) || tileAttr(d).startsWith(tut)) found++;
+      }
+    }
+    if (found === 0) out.push(`tutorial_missing:${tut}`);
+  }
+
+  const ta = Number((data.timea as number) ?? 0);
+  if (ta > 0) {
+    const need = computeTimea(collectableTileCount(levelJson), 3); // 가장 촉박한 티어
+    if (ta < need) out.push(`timea_tight:${ta}<${need}`);
+  }
+  return out;
+}
+
+// 기믹 언락 첫 스테이지 — 백엔드 TUTORIAL_UNLOCK_LEVELS 미러
+const TUTORIAL_UNLOCK_GIMMICKS: Record<number, string> = {
+  11: 'craft', 21: 'stack', 31: 'ice', 51: 'link', 81: 'chain', 111: 'key',
+  151: 'grass', 191: 'unknown', 241: 'curtain', 291: 'bomb', 391: 'frog', 441: 'teleport',
+};
+
+// [헤더-OOB 검출] read-only. 헤더 밖 타일 or 0/붕괴 헤더 있으면 true. (relocate 안 함)
+function levelHasHeaderOob(levelJson: unknown): boolean {
+  let data = levelJson as Record<string, unknown>;
+  if (!data) return false;
+  if (data.map && typeof data.map === 'object') data = data.map as Record<string, unknown>;
+  const numLayers = (data.layer as number) || 0;
+  for (let i = 0; i < numLayers; i++) {
+    const layer = data[`layer_${i}`] as { col?: unknown; row?: unknown; tiles?: Record<string, unknown> } | undefined;
+    if (!layer || typeof layer !== 'object') continue;
+    const tiles = layer.tiles || {};
+    const keys = Object.keys(tiles);
+    const col = parseInt(String(layer.col), 10), row = parseInt(String(layer.row), 10);
+    if (keys.length > 0 && (!Number.isFinite(col) || !Number.isFinite(row) || col <= 0 || row <= 0)) return true;
+    for (const k of keys) {
+      const p = k.split('_');
+      const c = parseInt(p[0], 10), r = parseInt(p[1], 10);
+      if (c < 0 || c >= col || r < 0 || r >= row) return true;
+    }
+  }
+  return false;
 }
 
 // Gimmick display names in Korean
@@ -4027,8 +4406,19 @@ function TestTab({
       const currentLevel = byLn.get(levelNumber);
       if (!currentLevel) return;
       // 링크 자가치유 — 측정·저장 정화본 사용(기존 배치 고아 링크 구제)
+      // [순서 중요] 헤더-OOB 치유가 **타일을 이동**(relocate)하므로 반드시 link 치유보다 **먼저**.
+      // 반대 순서면 relocate 가 link 짝을 어긋나게 만들어도 이미 link 정화가 끝나 고아가 남는다.
+      const _ho = sanitizeHeaderOob(currentLevel.level_json);
+      if (_ho > 0) console.info(`[oob-heal] Lv.${levelNumber}: 헤더-OOB ${_ho}개 교정(relocate/재구성)`);
       const _lh = sanitizeOrphanLinks(currentLevel.level_json);
       if (_lh > 0) console.info(`[link-heal] Lv.${levelNumber}: 고아/불량 링크 ${_lh}개 plain화`);
+      // [사슬 치유] 해제 불가 사슬(수평 이웃이 전부 잠긴사슬/craft루트/없음) plain화.
+      // 게임 검출기(CheckRemainNearTile<1)도 못 잡는 무알림 소프트락 → 백엔드 _chain_release_closure 미러.
+      const _ch = sanitizeUnreleasableChains(currentLevel.level_json);
+      if (_ch > 0) console.info(`[chain-heal] Lv.${levelNumber}: 해제불가 사슬 ${_ch}개 plain화`);
+      // [폭탄 치유] bomb_N 을 기획 3~5 로 정규화(시뮬 클램프와 불일치 제거).
+      const _bo = normalizeBombCountdowns(currentLevel.level_json);
+      if (_bo > 0) console.info(`[bomb-heal] Lv.${levelNumber}: 폭탄 카운트 ${_bo}개 3~5로 교정`);
       // [max_moves 자가치유] 구코드 stale-low max_moves(수집필요 > max_moves) 교정 → 측정·저장 모두 정확한
       // 무브버짓 사용 → 무브부족 false-unclearable 제거(재생성 불필요). 값 낮을 때만 올림(임의 하향 방지).
       {
@@ -4079,7 +4469,13 @@ function TestTab({
 
         const gridDim = maxDeclaredGridDim(currentLevel.level_json);
         if (gridDim > MAX_PLAYABLE_GRID) console.warn(`[seq] Lv.${levelNumber} 선언 그리드 ${gridDim} > ${MAX_PLAYABLE_GRID} → 실패 처리`);
-        const isPassed = rlVerificationPassed(levelNumber, rl) && gridDim <= MAX_PLAYABLE_GRID;
+        // [규칙 게이트] RL 은 '클리어율'만 본다 → 규칙 위반은 난이도가 우연히 맞으면 통과해버린다.
+        // (실측: 폭탄 언락 Lv291 이 기믹 0개로 출고됐는데 실패 사유는 '너무 어려움'이었다.)
+        // 치유 가능한 사슬/폭탄은 위 self-heal 이 이미 처리했고, 여기선 **재생성이 필요한**
+        // 항목(튜토리얼 기믹 누락 / timea 부족)만 실패 처리해 재생성 루프로 되돌린다.
+        const ruleViol = detectRuleViolations(levelNumber, currentLevel.level_json);
+        if (ruleViol.length) console.warn(`[seq] Lv.${levelNumber} 규칙 위반 → 실패 처리: ${ruleViol.join(', ')}`);
+        const isPassed = rlVerificationPassed(levelNumber, rl) && gridDim <= MAX_PLAYABLE_GRID && ruleViol.length === 0;
 
         const measuredDifficulty = (typeof rl.difficulty_score === 'number') ? rl.difficulty_score : Math.max(0, Math.min(1, 1 - predicted));
         const rlMeta = {
@@ -4135,9 +4531,25 @@ function TestTab({
     };
 
 
+    // [커서 영속] 검증 진행상태(통과분)를 localStorage에 저장 → 탭 리로드/크래시 후 '멈춘 지점부터 재개'.
+    // 대상 레벨 집합이 동일할 때만 복원(다른 검증 범위면 무시). 레벨 데이터는 이미 디스크 저장이라 여기선 커서만.
+    const CURSOR_KEY = `seq_cursor_v1_${batchId}`;
+    try {
+      const raw = localStorage.getItem(CURSOR_KEY);
+      if (raw) {
+        const c = JSON.parse(raw);
+        if (Array.isArray(c?.passed) && Array.isArray(c?.target)
+            && c.target.length === targetLevelNumbers.length
+            && c.target.every((x: number, i: number) => x === targetLevelNumbers[i])) {
+          c.passed.forEach((ln: number) => passedSet.add(ln));
+          if (passedSet.size > 0) addNotification('info', `이전 검증 재개 — 통과 ${passedSet.size}개 복원, 나머지만 검증`);
+        }
+      }
+    } catch { /* localStorage 불가 시 재개 없이 처음부터 */ }
+
     // ── 라운드 루프: (A)전체 측정만(동시2) → (C)미달만 1회 재생성(동시8) → 반복 ──
     // 한 시점에 측정 or 재생성 '한 종류'만 → CPU 이중부하 제거. 통과분은 다음 라운드 측정 제외.
-    let pending = [...targetLevelNumbers];
+    let pending = targetLevelNumbers.filter(ln => !passedSet.has(ln));
     for (let round = 1; round <= MAX_ROUNDS && !signal.aborted; round++) {
       addNotification('info', `순차검증 라운드 ${round}: ${pending.length}개 측정…`);
       // 재생성 반영된 최신 디스크본 로드(라운드당 1회 벌크)
@@ -4145,6 +4557,8 @@ function TestTab({
       const byLn = new Map<number, ProductionLevel>(fresh.map((l: ProductionLevel) => [l.meta.level_number, l]));
       // 페이즈 A: 측정만 (동시 2 = RL pool 8코어 포화, 초과구독 방지)
       await runPool(pending, (ln) => measureOneLevel(ln, round, byLn), VERIFY_CONCURRENCY);
+      // 라운드 측정 완료마다 커서 저장 → 이 시점에 리로드돼도 통과분 재개.
+      try { localStorage.setItem(CURSOR_KEY, JSON.stringify({ passed: [...passedSet], round, target: targetLevelNumbers })); } catch { /* ignore */ }
       if (signal.aborted) break;
 
       const failed = pending.filter(ln => !passedSet.has(ln));
@@ -4167,16 +4581,30 @@ function TestTab({
         setLevels(prev => prev.map(l => l.meta.level_number === ln ? { ...l, meta: snap.meta, level_json: snap.level_json } : l));
       }
     }
-    if (stillFailed.length > 0 && !signal.aborted) {
+    // [보스 제외] 2차패스(QD)는 밴드 후보풀에서 **generic 7x7 후보**를 실패 슬롯에 배정한다.
+    // 보스 슬롯에 배정되면 보스 템플릿 모양이 사라지고 일반 모양이 된다(비보스화).
+    // 보스는 라운드 재생성(from-boss-template)이 담당하므로 여기서 제외하고,
+    // 전 라운드 미달이면 best-snapshot(보스 모양)을 유지한다.
+    const stillFailedNonBoss = stillFailed.filter(ln => !(ln % 10 === 0 && ln > 0));
+    const bossExcluded = stillFailed.length - stillFailedNonBoss.length;
+    if (bossExcluded > 0) {
+      console.info(`[seq] 2차패스 보스 제외 ${bossExcluded}개 — 보스 모양 보존(라운드 재생성이 담당)`);
+    }
+    if (stillFailedNonBoss.length > 0 && !signal.aborted) {
       setSequentialProgress(prev => ({ ...prev, status: 'testing' }));
-      addNotification('info', `2차패스(QD): 실패 ${stillFailed.length}개 풀생성·배정 시작…`);
-      const recovered = await runFailedLevelSecondPass(stillFailed, signal);
+      addNotification('info', `2차패스(QD): 실패 ${stillFailedNonBoss.length}개 풀생성·배정 시작…`
+        + (bossExcluded ? ` (보스 ${bossExcluded}개 제외)` : ''));
+      const recovered = await runFailedLevelSecondPass(stillFailedNonBoss, signal);
       recovered.forEach(ln => passedSet.add(ln));
-      if (recovered.length > 0) addNotification('success', `2차패스 회수: ${recovered.length}/${stillFailed.length}개 추가 통과`);
+      if (recovered.length > 0) addNotification('success', `2차패스 회수: ${recovered.length}/${stillFailedNonBoss.length}개 추가 통과`);
     }
 
     // [언마운트 가드] 언마운트로 abort된 경우 죽은 컴포넌트/부모에 setState·재로드 금지.
+    // (커서는 abort시 남겨둠 → 재개용. 정상 완료시에만 아래서 삭제.)
     if (!mountedRef.current) return;
+
+    // [커서 삭제] 정상 완료 → 재개 커서 제거(다음 검증은 처음부터).
+    try { localStorage.removeItem(CURSOR_KEY); } catch { /* ignore */ }
 
     setIsSequentialProcessing(false);
     setSequentialProgress(prev => ({ ...prev, status: 'idle' }));
@@ -4659,9 +5087,18 @@ function TestTab({
       // 재생성 — 기존 적용 모양+useTileCount(그래프)+기믹 자동. 보스는 패턴/대칭(자동 모양) 선택을
       // 무시하고 항상 기존 템플릿 모양 유지(임의 모양 방지). 언클리어러블 폴백(forceNoTemplate)만 예외.
       // (_boss_template_id는 보스 전용 필드라 이 분기는 보스 레벨에만 걸림.)
+      // [수정] 예전엔 `_boss_template_id` **스탬프가 있을 때만** 이 분기를 탔다. 그래서
+      // 한 번이라도 스탬프 없이 만들어진 보스(2차패스 배정분·구버전 생성분·절차생성 폴백분)는
+      // 재생성해도 영영 템플릿을 안 쓰고 boss_mode 절차생성으로만 갔다(실측: Lv20 스탬프 None,
+      // 템플릿 boss_20_20_99_3L '편지지'는 멀쩡히 존재).
+      // → **레벨 번호로 판정**한다. 서버가 level_number 로 구간 템플릿을 조회하므로 스탬프는 불필요하고,
+      //   구간 템플릿이 없으면 404 → null → 아래 boss_mode 폴백(기존 동작 유지).
       const bossTplId = (level.level_json as { _boss_template_id?: string } | undefined)?._boss_template_id;
-      if (bossTplId && !options?.forceNoTemplate && !options?.newShape) {
-        const resp = await apiClient.post('/generate/from-boss-template', {
+      const isBossLevelForTpl = levelNumber % 10 === 0 && levelNumber > 0;
+      if ((bossTplId || isBossLevelForTpl) && !options?.forceNoTemplate && !options?.newShape) {
+        // [진단 마커] 쿼리스트링은 서버 액세스 로그에 그대로 찍힌다 → 이 분기가 실제로
+        // 탔는지, 어느 레벨인지 서버 로그만으로 판별 가능(백엔드는 미사용 쿼리 무시).
+        const resp = await apiClient.post(`/generate/from-boss-template?src=regen&lv=${levelNumber}`, {
           level_number: levelNumber,
           target_difficulty: targetDifficulty,
           tile_type_profile: tileTypeProfile === 'baseline' ? undefined : tileTypeProfile, // 배치 그래프 프로파일 정합
@@ -4711,13 +5148,26 @@ function TestTab({
       // (전용 보스 템플릿은 위 _boss_template_id 분기서 이미 from-boss-template로 처리됨.)
       if (templateId && !userOverridingPattern && !forceNoTemplate && !isBossRegen && !options?.newShape && !unitAssembly) {
         const seed = Math.floor(Date.now() % 1_000_000);
-        const tplResp = await apiClient.post('/generate/from-template', {
+        // [층별 패턴 보존] 재생성에서도 원래 소스 종류를 유지해야 모양이 안 바뀐다.
+        // (`lp_` = 크롭·검증 통과 사본 → 전용 엔드포인트)
+        const isLayeredShapeRegen = templateId.startsWith('lp_');
+        const tplResp = isLayeredShapeRegen
+          ? await apiClient.post('/generate/from-level-shape', {
+              shape_id: templateId,
+              level_number: levelNumber,
+              use_tile_count: 6,
+              randomize_tiles: true,
+              random_seed: seed,
+            })
+          : await apiClient.post('/generate/from-template', {
           template_id: templateId,
           level_number: levelNumber,
           use_tile_count: 6,
           randomize_tiles: true,
           random_seed: seed,
-          crop_max_dim: isBossRegen ? MAX_PLAYABLE_GRID : undefined,
+          // 비보스도 크롭 적용(원본 10x10 → 8). 예전엔 `isBossRegen ? ... : undefined` 라
+          // 비보스가 크롭을 못 받아 그리드 게이트에서 탈락했다.
+          crop_max_dim: MAX_PLAYABLE_GRID,
         });
         const tplLevelJson = tplResp.data?.level_json;
         if (!tplLevelJson) {
@@ -5783,11 +6233,12 @@ function TestTab({
               <div className="bg-gray-900/60 border border-gray-600 rounded-lg p-3 space-y-2">
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-gray-300 font-medium">
-                    Lv.{sequentialProgress.currentLevel} {sequentialProgress.status === 'testing' ? '테스트 중' : '재생성 중'}
-                    {' '}(시도 {sequentialProgress.currentAttempt}/{sequentialProgress.maxAttempts})
+                    <span className="text-indigo-300">라운드 {sequentialProgress.currentAttempt}/{sequentialProgress.maxAttempts}</span>
+                    {' · '}{sequentialProgress.status === 'testing' ? '측정' : sequentialProgress.status === 'regenerating' ? '재생성' : '진행'}
+                    {' · '}Lv.{sequentialProgress.currentLevel}
                   </span>
                   <span className="text-gray-400">
-                    {sequentialProgress.currentIndex + 1} / {sequentialProgress.total}
+                    통과 {sequentialProgress.currentIndex} / {sequentialProgress.total}
                   </span>
                 </div>
                 <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
@@ -5829,6 +6280,19 @@ function TestTab({
                   >
                     🎯 선택 {selectedSequentialLevels.size}개 처리
                   </Button>
+                  {(() => {
+                    const oobNums = levels.filter(l => levelHasHeaderOob(l.level_json)).map(l => l.meta.level_number);
+                    return oobNums.length > 0 ? (
+                      <Button
+                        onClick={() => handleSequentialProcess(oobNums)}
+                        size="sm"
+                        className="flex-1 bg-amber-600 hover:bg-amber-500"
+                        title="헤더-OOB 레벨만 heal+재검증. 정상 통과 레벨 무손상."
+                      >
+                        🩹 OOB만 {oobNums.length}개
+                      </Button>
+                    ) : null;
+                  })()}
                 </>
               )}
             </div>
@@ -6050,6 +6514,19 @@ function TestTab({
               >
                 {isSequentialProcessing ? '검증 중…' : `🔁 전체 ${levels.length}개 재검증 (RL)`}
               </Button>
+              {(() => {
+                const oobNums = levels.filter(l => levelHasHeaderOob(l.level_json)).map(l => l.meta.level_number);
+                return oobNums.length > 0 ? (
+                  <Button
+                    onClick={() => handleSequentialProcess(oobNums)}
+                    disabled={isSequentialProcessing || bossRegen.running}
+                    className="bg-amber-600 hover:bg-amber-500"
+                    title="헤더-OOB(경계초과/붕괴) 레벨만 골라 heal+재검증. 이미 통과한 정상 레벨은 안 건드림."
+                  >
+                    🩹 OOB 레벨만 검증 ({oobNums.length})
+                  </Button>
+                ) : null;
+              })()}
               {bossRegen.running ? (
                 <Button onClick={() => { bossRegenStopRef.current = true; }} variant="danger">
                   ⏹ 보스 재생성 정지 ({bossRegen.done}/{bossRegen.total})

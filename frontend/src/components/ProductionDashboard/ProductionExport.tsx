@@ -13,6 +13,129 @@ import { saveLevelSetToStorage, saveLocalLevelToStorage } from '../../storage/le
 import { checkGBoostHealth, listFromGBoost, loadFromGBoost, saveToGBoost } from '../../api/gboost';
 import { simulateLevelSkillSweep } from '../../api/rlSim';
 
+// ─────────────────────────────────────────────────────────────────────
+// [배포 게이트] 게임에 나가면 안 되는 레벨 판정. **순수함수** — 네트워크 try 밖에서 평가해
+// 예외로 게이트 전체가 무력화(fail-OPEN)되는 일이 없게 한다.
+// 모든 배포 경로(JSON 내보내기 / GBoost 업로드 / 백업업로드 / 로컬저장)가 공유해야 한다.
+// 백엔드 규칙 미러: BOMB 3~5, timea 정수산술, 기믹 언락 첫 스테이지 표.
+// ─────────────────────────────────────────────────────────────────────
+const DEPLOY_BOMB_MIN = 3;
+const DEPLOY_BOMB_MAX = 5;
+const DEPLOY_TIMEA_BASE_MILLI = 900;
+const DEPLOY_TIMEA_TIGHTEST_MILLI = 600;   // 티어3
+const DEPLOY_TIMEA_MIN_SEC = 60;
+const DEPLOY_TIMEA_MAX_SEC = 600;
+const DEPLOY_TUTORIAL_GIMMICKS: Record<number, string> = {
+  11: 'craft', 21: 'stack', 31: 'ice', 51: 'link', 81: 'chain', 111: 'key',
+  151: 'grass', 191: 'unknown', 241: 'curtain', 291: 'bomb', 391: 'frog', 441: 'teleport',
+};
+
+function deployLevelRoot(lv: unknown): Record<string, unknown> | null {
+  const root = (lv as { map?: unknown })?.map ?? lv;
+  return (root && typeof root === 'object') ? root as Record<string, unknown> : null;
+}
+
+function deployScanLevel(levelNumber: number, lv: unknown): string[] {
+  const lj = deployLevelRoot(lv);
+  if (!lj) return [];
+  const reasons: string[] = [];
+  const n = parseInt(String(lj.layer ?? 0), 10) || 0;
+  const attrOf = (d: unknown) => Array.isArray(d) && d.length > 1 && typeof d[1] === 'string' ? d[1] as string : '';
+  const typeOf = (d: unknown) => Array.isArray(d) && d.length > 0 && typeof d[0] === 'string' ? d[0] as string : '';
+
+  let tutFound = 0;
+  const tut = DEPLOY_TUTORIAL_GIMMICKS[levelNumber];
+  let collectable = 0;
+
+  for (let i = 0; i < n; i++) {
+    const layer = lj[`layer_${i}`] as { col?: unknown; row?: unknown; tiles?: Record<string, unknown> } | undefined;
+    if (!layer || typeof layer !== 'object') continue;
+    const tiles = layer.tiles || {};
+    const keys = Object.keys(tiles);
+    const col = parseInt(String(layer.col), 10);
+    const row = parseInt(String(layer.row), 10);
+    // 헤더-OOB: 게임은 헤더 col/row 로 격자생성 → 밖 좌표 타일은 스폰 안 됨 → 클리어 불가
+    if (keys.length > 0 && (!Number.isFinite(col) || !Number.isFinite(row) || col <= 0 || row <= 0)) {
+      if (!reasons.includes('header_oob')) reasons.push('header_oob');
+    }
+    const chains = new Set<string>();
+    for (const k of keys) {
+      const d = tiles[k];
+      const a = attrOf(d), t0 = typeOf(d);
+      const p = k.split('_');
+      const c = parseInt(p[0], 10), r = parseInt(p[1], 10);
+      if (c < 0 || c >= col || r < 0 || r >= row) {
+        if (!reasons.includes('header_oob')) reasons.push('header_oob');
+      }
+      if (a === 'chain') chains.add(k);
+      if (a.startsWith('bomb')) {
+        const parts = a.split('_');
+        const num = parts.length === 2 && /^\d+$/.test(parts[1]) ? parseInt(parts[1], 10) : NaN;
+        if (!Number.isFinite(num) || num < DEPLOY_BOMB_MIN || num > DEPLOY_BOMB_MAX) {
+          if (!reasons.includes('bomb_range')) reasons.push('bomb_range');
+        }
+      }
+      if (tut && (t0.startsWith(tut) || a.startsWith(tut))) tutFound++;
+      // 수집 타일 수(탭 횟수)
+      if (t0.startsWith('craft_') || t0.startsWith('stack_')) {
+        const extra = Array.isArray(d) ? (d as unknown[])[2] : undefined;
+        let inner = 1;
+        if (Array.isArray(extra) && extra.length) inner = Number(extra[0]) || 1;
+        collectable += inner;
+      } else collectable += 1;
+    }
+    // 해제 불가 사슬(최소고정점) — craft 루트만 앵커 제외, 다른 기믹은 결국 픽 가능 = 유효 앵커
+    if (chains.size) {
+      const ep = new Set<string>();
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const p of chains) {
+          if (ep.has(p)) continue;
+          const s = p.split('_');
+          const x = parseInt(s[0], 10), y = parseInt(s[1], 10);
+          for (const nx of [x - 1, x + 1]) {
+            const np = `${nx}_${y}`;
+            if (!(np in tiles)) continue;
+            if (typeOf(tiles[np]).startsWith('craft_')) continue;
+            if (attrOf(tiles[np]) === 'chain' && !ep.has(np)) continue;
+            ep.add(p); changed = true; break;
+          }
+        }
+      }
+      if (chains.size > ep.size && !reasons.includes('chain_unreleasable')) reasons.push('chain_unreleasable');
+    }
+  }
+
+  if (tut && tut !== 'key' && tutFound === 0) reasons.push(`tutorial_missing:${tut}`);
+
+  const ta = parseInt(String(lj.timea ?? 0), 10) || 0;
+  if (ta > 0 && collectable > 0) {
+    const need = Math.max(DEPLOY_TIMEA_MIN_SEC, Math.min(DEPLOY_TIMEA_MAX_SEC,
+      Math.ceil((collectable * DEPLOY_TIMEA_BASE_MILLI * DEPLOY_TIMEA_TIGHTEST_MILLI) / 1_000_000)));
+    if (ta < need) reasons.push('timea_tight');
+  }
+  return reasons;
+}
+
+export function findUndeployableLevels(levels: ProductionLevel[]): Array<{ levelNumber: number; reasons: string[] }> {
+  const out: Array<{ levelNumber: number; reasons: string[] }> = [];
+  for (const l of levels) {
+    const reasons: string[] = [];
+    const m = l.meta as typeof l.meta & { divisibility_violation?: unknown; rule_violations?: unknown };
+    if (m.verification_passed === false) reasons.push('unverified');
+    if (m.rl_classification === 'unclearable_suspect') reasons.push('unclearable');
+    if (m.predicted_clear_rate === 0) reasons.push('clear_rate_0');
+    if (m.divisibility_violation !== undefined) reasons.push('div3');
+    if (m.rule_violations !== undefined) reasons.push('rule');
+    try {
+      reasons.push(...deployScanLevel(m.level_number, l.level_json));
+    } catch { reasons.push('scan_error'); }   // 스캔 실패 = 배포 불가(fail-CLOSED)
+    if (reasons.length) out.push({ levelNumber: m.level_number, reasons });
+  }
+  return out;
+}
+
 // Migration helper: fix tile data format for Unity client compatibility
 function migrateTileData(tileData: TileData): { changed: boolean; data: TileData } {
   if (!Array.isArray(tileData) || tileData.length < 2) {
@@ -246,6 +369,23 @@ export function ProductionExport({
       return;
     }
 
+    // [export 하드게이트] 클리어 불가/미검증/규칙위반 레벨이 게임 배포에 섞이는 걸 원천 차단.
+    // ⚠️ 조회(네트워크/IDB)와 판정을 분리한다. 예전엔 전체가 하나의 try/catch 안에 있어
+    //    새 검사에서 예외가 나면 ÷3·헤더OOB 게이트까지 통째로 무력화되는 fail-OPEN 이었다.
+    let _exportSet: ProductionLevel[] | null = null;
+    try {
+      const _all = await getProductionLevelsByBatch(batchId);
+      _exportSet = _all.filter(l => l.meta.status === 'approved' || l.meta.status === 'exported');
+    } catch { /* 조회 실패 시에만 진행(서버 게이트가 최종 방어) */ }
+    if (_exportSet) {
+      const _bad = findUndeployableLevels(_exportSet);   // 순수함수 — try 밖에서 평가(fail-CLOSED)
+      if (_bad.length > 0) {
+        const nums = _bad.slice(0, 12).map(b => `${b.levelNumber}(${b.reasons[0]})`).join(', ');
+        addNotification('error', `❌ 내보내기 차단 — 배포 불가 ${_bad.length}개 포함 (예: ${nums}${_bad.length > 12 ? '…' : ''}). 재검증/재생성으로 통과시킨 뒤 내보내세요.`);
+        return;
+      }
+    }
+
     setIsExporting(true);
 
     try {
@@ -450,6 +590,16 @@ export function ProductionExport({
 
       if (exportableLevels.length === 0) {
         addNotification('warning', '업로드할 수 있는 레벨이 없습니다');
+        setGboostPhase('config');
+        return;
+      }
+
+      // [배포 하드게이트] 여기가 **실제 게임 배포 경로**다. 기존엔 JSON 내보내기에만 게이트가 있어
+      // 업로드로는 클리어 불가/규칙 위반 레벨이 그대로 나갔다. 순수함수라 fail-CLOSED.
+      const _undeployable = findUndeployableLevels(exportableLevels);
+      if (_undeployable.length > 0) {
+        const nums = _undeployable.slice(0, 12).map(b => `${b.levelNumber}(${b.reasons[0]})`).join(', ');
+        addNotification('error', `❌ 업로드 차단 — 배포 불가 ${_undeployable.length}개 포함 (예: ${nums}${_undeployable.length > 12 ? '…' : ''}). 재검증/재생성 후 업로드하세요.`);
         setGboostPhase('config');
         return;
       }

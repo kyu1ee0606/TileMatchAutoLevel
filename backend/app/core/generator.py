@@ -267,8 +267,14 @@ def crop_level_to_max_dim(level_json: Dict[str, Any], max_dim: int = 8) -> Tuple
     rx = min(l[1] - 1 - l[4] for l in filled)
     ty = min(l[5] for l in filled)
     by = min(l[2] - 1 - l[6] for l in filled)
-    cur_max = max(max(l[1], l[2]) for l in layers if l[1] > 0)
-    new_max = max(max(l[1] - lx - rx, l[2] - ty - by) for l in layers if l[1] > 0)
+    # [가드] col/row 가 null/0 인 손상 템플릿은 `if l[1] > 0` 필터가 전부 걸러 빈 시퀀스가 되고
+    # max() 가 ValueError 로 터진다(실측: level_templates 211개 중 3개 — 127/137/169).
+    # 크래시 대신 '크롭 불가'로 반환해 상위에서 헤더 복구 후 재시도하게 한다.
+    sized = [l for l in layers if l[1] > 0 and l[2] > 0]
+    if not sized:
+        return (False, 0)
+    cur_max = max(max(l[1], l[2]) for l in sized)
+    new_max = max(max(l[1] - lx - rx, l[2] - ty - by) for l in sized)
     if lx + rx + ty + by == 0 or new_max > max_dim:
         return (False, cur_max)
     for i, col, row, *_ in layers:
@@ -300,6 +306,43 @@ def crop_level_to_max_dim(level_json: Dict[str, Any], max_dim: int = 8) -> Tuple
         level_json["_pattern_grid_rows"] -= (ty + by)
     return (True, new_max)
 
+
+# ─────────────────────────────────────────────────────────────────────────
+# [TIMEA v2] 타임어택 제한시간 산출 상수 — 여기 한 곳에서만 관리.
+#   timea = clamp(MIN, MAX, ceil(수집타일수 * BASE * TIER_MULT[tier]))
+# 티어는 난이도와 분리된 **독립 레버**: 1=넉넉 / 2=보통 / 3=촉박.
+# 정수(밀리) 산술로 고정 — 프론트 미러와 부동소수 평가순서 차이로 1초 어긋나는 것 방지.
+# 근거: 게임은 탭 입력 락이 없어(LevelController.cs:1269-1283) 타일 비행 0.5s 애니가
+#   다음 탭을 막지 않는다 → 애니 하한 ≈0. 실질 하한은 인간 탭속도 ≈0.25s/타일.
+#   BASE 0.9s 는 참조 페이스(하한 아님, C#서 도출 불가 — 실플레이 로깅으로 보정 대상).
+# MIN/MAX 60~600 = 게임 스키마 계약(DESIGN_LEVEL_MAP_SCHEMA.md §2 timea).
+# ─────────────────────────────────────────────────────────────────────────
+# [BOMB] 폭탄 남은횟수(카운트다운) 범위 — 기획 3~5. 여기 한 곳에서만 관리.
+# 게임 규칙: 다른 타일 수집 시 카운트↓, 0이면 게임오버(단 **가려진 폭탄은 틱하지 않음**).
+# ⚠️ 구코드는 randint(5,10) 이라 기획 위반 + 시뮬(bot_simulator.py:1239)이 max(3,min(5,·))로
+# 클램프해 **생성값과 검증값이 불일치**했다(6~10을 5로 보고 평가 → 난이도 왜곡).
+BOMB_COUNTDOWN_MIN = 3
+BOMB_COUNTDOWN_MAX = 5
+
+TIMEA_BASE_MILLI = 900                     # 0.9초/타일 (참조 페이스)
+TIMEA_TIER_MILLI: Dict[int, int] = {
+    1: 1150,   # 넉넉  — 실효 1.035s/타일 (Lv341 튜토리얼 · 저난이도 보스)
+    2: 850,    # 보통  — 실효 0.765s/타일
+    3: 600,    # 촉박  — 실효 0.540s/타일 (물리하한 0.25s의 약 2.2배)
+}
+TIMEA_MIN_SEC = 60
+TIMEA_MAX_SEC = 600
+TIMEA_ABS_MIN_SEC_PER_TILE = 0.45          # 안전선: 가장 촉박한 티어도 이 아래로 못 감
+# 시작 시 상수 자체 검증 — 티어 표를 잘못 조정해 물리적으로 불가능한 레벨을 만드는 것 차단
+assert (TIMEA_BASE_MILLI * min(TIMEA_TIER_MILLI.values())) / 1_000_000 >= TIMEA_ABS_MIN_SEC_PER_TILE, \
+    "TIMEA 티어 배수가 물리 하한(TIMEA_ABS_MIN_SEC_PER_TILE) 아래로 설정됨"
+
+# time_attack 해금 레벨 — leveling_config 정본에서 유도(상수 중복 방지)
+try:  # pragma: no cover - import 경로 방어
+    from ..models.leveling_config import PROFESSIONAL_GIMMICK_UNLOCK as _GUC
+    TIME_ATTACK_UNLOCK_LEVEL = int(_GUC["time_attack"].unlock_level)
+except Exception:  # noqa: BLE001
+    TIME_ATTACK_UNLOCK_LEVEL = 341
 
 # ─────────────────────────────────────────────────────────────────────────
 # 타일 타입 분포 프로파일 (레벨별 V = 서로 다른 타일 종류 수만 오버라이드)
@@ -1253,29 +1296,13 @@ class LevelGenerator:
         # - 보통 (0.3 <= difficulty < 0.5): 90초
         # - 어려움 (0.5 <= difficulty < 0.7): 60초
         # - 매우 어려움 (0.7 <= difficulty): 45초
-        TIME_ATTACK_UNLOCK_LEVEL = 341  # 백엔드 leveling_config.py와 동기화
-        if level_number >= TIME_ATTACK_UNLOCK_LEVEL and gimmick_intensity > 0:
-            is_time_tutorial = (level_number == TIME_ATTACK_UNLOCK_LEVEL)
-            # 톱니바퀴 패턴의 보스 레벨 (10번째 = 가장 어려운 레벨)
-            is_boss_level = (level_number % 10 == 0)
-
-            # 튜토리얼 레벨 또는 보스 레벨에만 적용
-            if is_time_tutorial or is_boss_level:
-                # 난이도에 따라 제한 시간 결정
-                # 튜토리얼은 넉넉하게 120초, 그 외는 난이도 기반
-                if is_time_tutorial:
-                    time_limit = 120  # 튜토리얼은 넉넉하게
-                else:
-                    difficulty = params.target_difficulty
-                    if difficulty < 0.3:
-                        time_limit = 120  # 쉬움: 2분
-                    elif difficulty < 0.5:
-                        time_limit = 90   # 보통: 1분 30초
-                    elif difficulty < 0.7:
-                        time_limit = 60   # 어려움: 1분
-                    else:
-                        time_limit = 45   # 매우 어려움: 45초
-                level["timea"] = time_limit
+        # [TIMEA v2] 여기서는 **티어만 결정**하고 값은 산출하지 않는다.
+        # 이유: 아래 단계들이 타일 수를 바꾼다(경계트림/피라미드/OOB제거/컨테이너 튜토리얼(+2)/
+        # ÷3 finalize(-2..+2)). 실측 드리프트 최대 -18타일 → 여기서 계산하면 stale.
+        # 실제 timea 는 _finalize_level() → _apply_timea() 가 최종 타일 수로 산출한다.
+        tier = self._decide_timea_tier(level_number, gimmick_intensity, params)
+        if tier is not None:
+            level["_timea_tier"] = tier
 
         # CRITICAL: Final boundary check - remove any tiles outside valid grid
         # This prevents tiles at positions like (7, 3) in a 7x7 grid
@@ -1322,6 +1349,13 @@ class LevelGenerator:
         # boundary trim 등)가 타일을 그리드 경계 밖으로 밀 수 있음(윗줄 주석의 "can violate").
         # 여기서 무조건 잘라내고, 아래 _finalize_divisibility_guarantee + FINAL_REPAIR가 ÷3 재보장.
         level = self._remove_out_of_bounds_tiles(level)
+
+        # [유닛조립 대칭 복원] 빌더는 좌우대칭으로 배치하지만 이후 단계(_fix_visual_centering 시프트,
+        # 피라미드 클램프, OOB 제거)가 한쪽만 잘라 대칭이 깨진다 → 최상층에 '구석에 치우친 덩어리'가
+        # 남아 시각적으로 어색. ÷3 보정(아래) **직전**에 미러 셀을 채워 복원한다.
+        # (여기서 타일이 늘어도 곧바로 _finalize_divisibility_guarantee 가 ÷3 을 재보장.)
+        if level.get("_unit_assembly"):
+            level = self._symmetrize_unit_layers(level)
 
         # CRITICAL: Final sync of layer num fields before returning
         # This ensures t0 distribution calculations are based on correct tile counts
@@ -1396,29 +1430,29 @@ class LevelGenerator:
                         level[layer_key]["tiles"][pos] = [b, gimmick]
                         type_counts[a] -= 1
                         type_counts[b] = type_counts.get(b, 0) + 1
-                # Remaining single-class offenders: route surplus to a type whose count is divisible
-                done_types = [t for t, c in type_counts.items() if c % 3 == 0 and c > 0]
-                # Recompute residual offenders
-                still_bad = {t: c for t, c in type_counts.items() if c % 3 != 0}
-                guard = 0
-                while still_bad and done_types and guard < 50:
-                    guard += 1
-                    a, ca = next(iter(still_bad.items()))
-                    surplus = ca % 3
-                    target = done_types[0]
-                    moved = 0
-                    while moved < surplus and type_positions.get(a):
-                        li, pos = type_positions[a].pop()
-                        layer_key = f"layer_{li}"
-                        cur = level[layer_key]["tiles"].get(pos)
-                        if isinstance(cur, list) and cur:
-                            gimmick = cur[1] if len(cur) > 1 else ""
-                            level[layer_key]["tiles"][pos] = [target, gimmick]
-                            type_counts[a] -= 1
-                            type_counts[target] = type_counts.get(target, 0) + 1
-                            moved += 1
-                    still_bad = {t: c for t, c in type_counts.items() if c % 3 != 0}
-                    done_types = [t for t, c in type_counts.items() if c % 3 == 0 and c > 0]
+                # [FINAL_REPAIR 수렴수정] 남은 offender 잉여를 '깨끗한 타입'에 밀어넣으면(구버전) 그 타입이
+                # 다시 위반돼 remainder가 이동만 되고 순환(예: rem1 3개 → 미수렴). 대신 offender끼리 '잔여완성':
+                # 각 타입에서 잉여(count%3)를 풀로 떼면 각자 ÷3. _finalize가 총합 ÷3 보장하므로 |pool|=Σ잉여≡0(mod3)=3k.
+                # 풀을 3개씩 묶어 타입에 재배정(+3 → ÷3 유지). 깨끗한 타입 안 건드림 → 항상 수렴.
+                pool: List[Tuple[int, str]] = []
+                for t in list(type_counts.keys()):
+                    r = type_counts[t] % 3
+                    for _ in range(r):
+                        if type_positions.get(t):
+                            li, pos = type_positions[t].pop()
+                            pool.append((li, pos))
+                            type_counts[t] -= 1
+                targets = [t for t, c in type_counts.items() if c % 3 == 0 and c > 0] or list(type_counts.keys())
+                if targets and len(pool) >= 3:
+                    for gi in range(len(pool) // 3):
+                        tgt = targets[gi % len(targets)]
+                        for k in range(3):
+                            li, pos = pool[gi * 3 + k]
+                            cur = level[f"layer_{li}"]["tiles"].get(pos)
+                            if isinstance(cur, list) and cur:
+                                gimmick = cur[1] if len(cur) > 1 else ""
+                                level[f"layer_{li}"]["tiles"][pos] = [tgt, gimmick]
+                                type_counts[tgt] = type_counts.get(tgt, 0) + 1
                 # Final assertion logging — if we still failed, mark the level so consumers can see.
                 final_offenders = {t: c for t, c in type_counts.items() if c % 3 != 0}
                 if final_offenders:
@@ -1486,16 +1520,15 @@ class LevelGenerator:
             elif final_tut not in ("craft", "stack", "key"):
                 level = self._ensure_tutorial_gimmick_count(level, final_tut, min_ct)
 
-        # [LINK_SANITIZE 백스톱] 위 '튜토리얼 기믹 최종 보장'이 1464의 정화기 '이후'에 link 타일을
-        # 추가하므로, 여기서 링크 정화를 한 번 더 돌려 고아 링크가 절대 출력에 남지 않게 한다.
-        # (링크 언락 첫 스테이지 Lv.51에서 ensure가 추가한 link의 짝 부재/방향오류가 leak되던 버그 방어.)
-        level = self._strip_orphaned_link_tiles(level)
-
-        # [MAX_MOVES 백스톱] 최종 타일수 기준으로 max_moves 재계산.
-        # 라인 1244 계산이 이후 단계(craft 골 ÷3 보정으로 내부타일 3→6 증가, 튜토리얼 ensure, ÷3 finalize의
-        # 타일 제거 등)로 stale되어 '수집필요 타일수 > max_moves'가 되면 구조적으로 깰 수 있어도 무브 소진으로
-        # 실패(예: Lv.38 필요111 vs 108). RL 시뮬도 같은 max_moves 사용 → unclearable 오판. 맨 끝 재계산으로 방어.
-        level["max_moves"] = self._calculate_max_moves(level)
+        # [FINALIZE 백스톱] 위 '튜토리얼 기믹 최종 보장'이 1478의 정화기 '이후'에 chain/link 속성을
+        # 추가하므로, 공통 마무리를 여기서 한 번 더 돌린다(멱등):
+        #   ÷3 → chain 클로저(해제불가 사슬 plain화) → link sanitize(고아 링크 plain화)
+        #   → max_moves 재계산 → timea 산출.
+        # max_moves: 앞선 계산이 이후 단계(craft 골 ÷3 보정 내부타일 3→6, 튜토리얼 ensure, ÷3 finalize의
+        #   타일 추가/제거)로 stale되면 '수집필요 > max_moves' → 구조적으로 깰 수 있어도 무브 소진 실패
+        #   (예: Lv.38 필요111 vs 108). RL 시뮬도 같은 max_moves 사용 → unclearable 오판.
+        # timea: 같은 이유로 최종 타일 수에서만 정확히 산출 가능(드리프트 실측 최대 -18타일).
+        level = self._finalize_level(level)
 
         generation_time_ms = int((time.time() - start_time) * 1000)
 
@@ -1646,26 +1679,109 @@ class LevelGenerator:
                 break  # 어떤 유닛도 안 맞음(마스크 소진)
         return placed
 
+    # [유닛 조립 v2] 난이도 → 유닛 크기/개수. 층당 개수를 **고정 소수**로 제한해 조밀 폭주를 막는다.
+    # 근거: v1 은 예산(budget)을 큰 유닛부터 꽉 채워(budget-fill) 조밀 구조가 되고, 실측 ~40% 가
+    # 봇-언클리어러블(clear 0.0)이었다 → 프로덕션 1300/1500 통과가 붕괴해 강제 OFF 됐다.
+    # v2 는 '성긴 대칭' — 층당 1~3 유닛만 좌우대칭으로 얹어 선택 여지를 남긴다.
+    UNIT_V2_DIFFICULTY_PLAN: List[Tuple[float, Tuple[int, ...], Tuple[int, int]]] = [
+        # (난이도 상한, 선호 유닛 크기들, (층당 최소, 최대))  — v3에서 미사용(이력 보존)
+        (0.3, (3, 6), (1, 2)),
+        (0.5, (6, 9), (2, 2)),
+        (0.7, (9, 12), (2, 3)),
+        (1.01, (12, 15), (3, 3)),
+    ]
+
+    # [유닛 조립 v3] 슬롯 모델 — 난이도는 **개수**로만 조절. 크기는 그리드가 결정한다.
+    #
+    # v2 결함: 개수(1~3)만 제한하고 크기를 난이도로 키워(12·15셀 = 바운딩박스 4~5) 한쪽 폭(3칸)을
+    # 넘겨 중앙을 가로지르는 통짜 배치가 됐다 → "3개인데 절반 이상이 사각형으로 덮임".
+    #
+    # v3 규칙:
+    #   1) 유닛은 **바운딩박스 정사각 슬롯**을 차지한다(3×2 유닛 → 3×3 슬롯).
+    #   2) 좌우대칭 배치 → 중심축 기준 **한쪽에만** 놓고 미러. 홀수 그리드는 중앙열 제외.
+    #      한쪽 폭 = 짝수 G: G/2,  홀수 G: (G-1)/2   → 슬롯 크기 s ≤ 한쪽 폭
+    #   3) 슬롯끼리 **겹침 금지**(격자 분할).
+    #   4) 같은 층에는 **서로 다른 모양만** → 시각적 다양성, 같은 네모 반복 방지.
+    #   실제 프로덕션 그리드(5·6·7)에서 한쪽 폭은 2~3 → 사용 유닛은 셀 3~9(박스 2~3)로 자연 제한.
+    UNIT_V3_SLOTS_BY_DIFFICULTY: List[Tuple[float, Tuple[int, int]]] = [
+        # (난이도 상한, (한쪽 최소 슬롯수, 최대 슬롯수))
+        (0.3, (1, 1)),
+        (0.5, (1, 2)),
+        (0.7, (2, 2)),
+        (1.01, (2, 3)),
+    ]
+
+    def _symmetrize_unit_layers(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """[유닛조립] 각 층을 좌우대칭으로 복원(미러 셀 추가). 바닥층(주 패턴)은 건드리지 않는다.
+
+        빌더는 대칭 배치하지만 이후 시프트/클램프/OOB 제거가 한쪽만 잘라 대칭을 깬다.
+        여기서 미러 위치에 같은 타입 타일을 채워 복원한다.
+        - 추가 셀 타입은 t0(런타임 분배) → 타입 카운트 왜곡 없음
+        - floating 은 하위층 지지셀을 함께 넣어 방지
+        - ÷3 은 호출 직후 `_finalize_divisibility_guarantee` 가 재보장
+        """
+        n = int(level.get("layer", 0) or 0)
+        added = 0
+        for i in range(1, n):  # 바닥층(0) 제외 — 디자인 패턴 보존
+            ld = level.get(f"layer_{i}")
+            if not isinstance(ld, dict):
+                continue
+            tiles = ld.get("tiles")
+            if not isinstance(tiles, dict) or not tiles:
+                continue
+            try:
+                col = int(ld.get("col"))
+            except (TypeError, ValueError):
+                continue
+            for pos in list(tiles.keys()):
+                try:
+                    x, y = map(int, pos.split("_"))
+                except ValueError:
+                    continue
+                mx = col - 1 - x
+                if mx == x or not (0 <= mx < col):
+                    continue
+                mpos = f"{mx}_{y}"
+                if mpos in tiles:
+                    continue
+                tiles[mpos] = ["t0", ""]
+                added += 1
+                # 하위층 지지 보강(floating 방지)
+                below = level.get(f"layer_{i-1}")
+                if isinstance(below, dict) and isinstance(below.get("tiles"), dict):
+                    try:
+                        bcol = int(below.get("col"))
+                    except (TypeError, ValueError):
+                        continue
+                    from .unit_templates import get_cover_offsets
+                    offs = get_cover_offsets(i - 1, i, bcol, col)
+                    bt = below["tiles"]
+                    if not any(f"{mx-dx}_{y-dy}" in bt for dx, dy in offs):
+                        for dx, dy in offs:
+                            lx, ly = mx - dx, y - dy
+                            if 0 <= lx < bcol and 0 <= ly < int(below.get("row", bcol)):
+                                bt[f"{lx}_{ly}"] = ["t0", ""]
+                                added += 1
+                                break
+        if added:
+            logger.info(f"[UNIT_SYMMETRY] 미러 셀 {added}개 추가해 좌우대칭 복원")
+        return level
+
     def _build_unit_assembly_layers(self, level: Dict[str, Any], active_layers: List[int],
                                     cols: int, rows: int, params: "GenerationParams",
                                     n_target: int) -> List[Tuple[int, str]]:
-        """[유닛 조립] 바닥 큰층=주 패턴 / 위 작은층=밀도 높은 소형 유닛(3·6·9)을 아래층 받침(valid_mask)
-        안에 예산만큼 조립. sparse(타일 미달) 해결 + 위층 다양성. floating/데드락 0(받침 규칙).
-        타입 t0(파이프라인/역생성 배정). 반환 = (layer_idx, pos) 목록."""
-        import random as _r
-        from .unit_templates import valid_support_mask, units_for_budget, get_cover_offsets
+        """[유닛 조립 v2 — 성긴 대칭] 바닥층 = 주 패턴(디자인 모양 유지),
+        위층 = 난이도별 소형 유닛 **1~3개만** 좌우대칭 배치(아래층 받침 안).
 
-        # [최소 타일] preserve_pattern 이라 _ensure_minimum_tiles 가 스킵됨 → 여기서 직접 하한 반영.
-        # 생성 후 타입분배·÷3 보정이 ~15~20% trim 하므로, 빌더는 하한 위로 버퍼(×1.28)를 두어
-        # 최종이 하한 이상 되게 오버타겟. (그리드 용량 상한으로 자연 클램프)
-        _ln = getattr(params, "level_number", None)
-        if _ln is not None and _ln <= 5:
-            _min = self.TUTORIAL_MIN_TILE_COUNT
-        elif _ln is not None and _ln >= 11:
-            _min = self.MIN_TILE_COUNT_LV11
-        else:
-            _min = self.MIN_TILE_COUNT
-        n_target = max(n_target, int(round(_min * 1.28 / 3)) * 3)
+        v1 대비 변경(재설계 계획 PLAN_unit_assembly_sparse_symmetric.md):
+          - budget-fill / top-up 루프 **제거** → 타일수는 결과값(목표 강제 안 함)
+          - 밀도역전(성긴패턴이면 솔리드를 바닥에) 분기 **제거** — 조밀 주범
+          - 층당 유닛 수 **고정 상한**(1~3) → 조밀 폭주 차단
+          - 좌우 대칭 배치 유지(비주얼 코히어런스)
+        불변식: floating 0(받침 마스크 + 사후 그림자 보강), 겹침 0, 타입은 t0(뒤에서 배정).
+        """
+        import random as _r
+        from .unit_templates import valid_support_mask, get_cover_offsets, units_by_size
 
         n = len(active_layers)
         pidx = params.pattern_index if params.pattern_index is not None else _r.choice([0, 1, 2, 3, 8, 13, 16, 20])
@@ -1675,7 +1791,6 @@ class LevelGenerator:
         def _gcol(layer_idx):
             return cols if (layer_idx % 2 == 1) else cols + 1
 
-        # ── 헬퍼 ──
         def _aesthetic(gc):
             try:
                 mp = self._generate_aesthetic_positions(
@@ -1689,128 +1804,95 @@ class LevelGenerator:
                 s = {(x, y) for x in range(gc) for y in range(gc) if abs(x - c) + abs(y - c) <= c}
             return s
 
-        def _erode_mask(cells):
-            nb = ((1, 0), (-1, 0), (0, 1), (0, -1))
-            return {(x, y) for (x, y) in cells if all((x + dx, y + dy) in cells for dx, dy in nb)}
+        # ── 난이도 → 한쪽 슬롯 개수 (크기는 그리드가 결정) ──
+        _diff = float(getattr(params, "target_difficulty", 0.5) or 0.5)
+        smin, smax = 1, 1
+        for cap, cnt in self.UNIT_V3_SLOTS_BY_DIFFICULTY:
+            if _diff < cap:
+                smin, smax = cnt
+                break
 
-        def _converge(mask, steps, keep_min):
-            m = mask
-            for _ in range(max(0, steps)):
-                e = _erode_mask(m)
-                if len(e) >= max(3, keep_min):
-                    m = e
-                else:
-                    break
-            return m or mask
+        _UBS = units_by_size()
+        ALL_UNITS = [u for lst in _UBS.values() for u in lst]
 
-        def _support_cells_for(upper_cells, lower_layer, upper_layer, lower_col, upper_col):
-            """상위 셀들을 지지하는 하위 셀(상위 셀당 1개). 하위에 union → 상위 floating 0."""
-            offs = get_cover_offsets(lower_layer, upper_layer, lower_col, upper_col)
-            out = set()
-            for (ux, uy) in upper_cells:
-                for (dx, dy) in offs:
-                    lx, ly = ux - dx, uy - dy
-                    if 0 <= lx < lower_col and 0 <= ly < lower_col:
-                        out.add((lx, ly))
-                        break
+        def _bbox(u):
+            return max(u.w, u.h)
+
+        def _half_width(gc):
+            """중심축 한쪽 폭. 홀수 그리드는 중앙열을 비워 대칭축으로 쓴다."""
+            return (gc - 1) // 2 if gc % 2 == 1 else gc // 2
+
+        def _slot_grid(gc, s):
+            """한쪽 영역을 s×s 슬롯으로 분할한 좌상단 좌표들."""
+            half = _half_width(gc)
+            out = []
+            for oy in range(0, gc - s + 1, s):
+                for ox in range(0, half - s + 1, s):
+                    out.append((ox, oy))
             return out
 
-        top_layer = active_layers[-1]
-        gtc = _gcol(top_layer)
-        pat_top = _aesthetic(gtc)
-        fill_ratio = len(pat_top) / float(gtc * gtc)
-        unit_target = max(0, n_target - len(pat_top))  # 로그용
+        def _place_slot_symmetric(mask, gc, want_slots):
+            """[v3] 한쪽 s×s 슬롯에 서로 다른 모양의 유닛을 배치하고 좌우 미러.
 
-        if fill_ratio < 0.55 and len(active_layers) >= 2:
-            # ═══ [역전] 성긴 패턴: 솔리드 채움→하단(마지막에 보임·숨김), 패턴→상단(먼저 보임) ═══
-            # 하단=밀도 베이스(모든 상위 지지), 상단=커스텀 패턴 실루엣. floating 0·÷3 유지.
-            lower = active_layers[:-1]
-            rest = max(0, n_target - len(pat_top))
-            w = [len(lower) - i for i in range(len(lower))]   # 바닥(i=0) 최대 밀도
-            ws = sum(w) or 1
-            lbud = {lower[i]: max(3, 3 * round((rest * w[i] / ws) / 3)) for i in range(len(lower))}
-            # 바닥층: 받침 불필요 → 전체 그리드 조립
-            g0 = _gcol(lower[0])
-            full0 = {(x, y) for x in range(g0) for y in range(g0)}
-            pos_map[lower[0]] = self._assemble_units_in_mask(full0, lbud[lower[0]], g0, g0, _r)
-            # 중간층: 아래 받침 내 조립(수렴 안 함 → 상단 패턴 지지 위해 넓게)
-            for k in range(1, len(lower)):
-                li = lower[k]; gc = _gcol(li); below = lower[k - 1]
-                smask = valid_support_mask(pos_map[below], below, li, _gcol(below), gc, gc)
-                pos_map[li] = self._assemble_units_in_mask(smask, lbud[li], gc, gc, _r)
-            # 상단 바로 아래층에 패턴 지지셀 보강(패턴 안 잘리게)
-            below_top = lower[-1]
-            bcol = _gcol(below_top)
-            pos_map[below_top] = pos_map[below_top] | _support_cells_for(pat_top, below_top, top_layer, bcol, gtc)
-            # 상단 = 패턴 ∩ 받침(지지 보강했으니 사실상 전체 패턴)
-            smask_top = valid_support_mask(pos_map[below_top], below_top, top_layer, bcol, gtc, gtc)
-            pos_map[top_layer] = (pat_top & smask_top) or smask_top
-            # 톱업: 목표 미달분은 하단층부터 채움(상단 패턴 불변)
-            total = sum(len(c) for c in pos_map.values())
-            guard = 0
-            while total < n_target and guard < 20:
-                guard += 1
-                progressed = False
-                for k in range(len(lower)):   # 바닥부터
-                    li = lower[k]; gc = _gcol(li)
-                    if k == 0:
-                        mask = {(x, y) for x in range(gc) for y in range(gc)}
-                    else:
-                        below = lower[k - 1]
-                        mask = valid_support_mask(pos_map[below], below, li, _gcol(below), gc, gc)
-                    free = mask - pos_map[li]
-                    extra = ((n_target - total) // 3) * 3
-                    if extra < 3 or not free:
-                        continue
-                    new = self._assemble_units_in_mask(free, extra, gc, gc, _r)
-                    if new:
-                        pos_map[li] |= new
-                        total += len(new)
-                        progressed = True
-                        if total >= n_target:
-                            break
-                if not progressed:
-                    break
-        else:
-            # ═══ [기존] 조밀 패턴: 패턴=바닥, 위로 수렴(탑 실루엣) ═══
-            l0 = active_layers[0]
-            pos_map[l0] = _aesthetic(_gcol(l0))
-            p0 = pos_map[l0]
-            unit_layers = active_layers[1:]
-            unit_target = max(0, n_target - len(p0))
-            if unit_layers:
-                uw = [len(unit_layers) - i for i in range(len(unit_layers))]
-                uws = sum(uw) or 1
-                ubudget = {unit_layers[i]: max(3, 3 * round((unit_target * uw[i] / uws) / 3)) for i in range(len(unit_layers))}
-                for i, layer_idx in enumerate(unit_layers):
-                    gcol = _gcol(layer_idx)
-                    below_idx = active_layers[active_layers.index(layer_idx) - 1]
-                    mask = valid_support_mask(pos_map[below_idx], below_idx, layer_idx, _gcol(below_idx), gcol, gcol)
-                    mask = _converge(mask, i, ubudget[layer_idx])
-                    pos_map[layer_idx] = self._assemble_units_in_mask(mask, ubudget[layer_idx], gcol, gcol, _r)
-            total = sum(len(c) for c in pos_map.values())
-            guard = 0
-            while total < n_target and unit_layers and guard < 20:
-                guard += 1
-                progressed = False
-                for layer_idx in unit_layers:
-                    if total >= n_target:
+            - 슬롯 크기 s ≤ 한쪽 폭 → 중앙을 가로지르는 통짜 배치 불가
+            - 슬롯끼리 겹치지 않음(격자 분할)
+            - 같은 층에 같은 모양 재사용 금지(시각적 다양성)
+            """
+            placed: Set[Tuple[int, int]] = set()
+            if not mask:
+                return placed
+            half = _half_width(gc)
+            if half < 2:
+                return placed
+            # 슬롯 크기: 큰 것부터 시도(모양이 또렷) — 슬롯이 부족하면 작은 크기로
+            for s in range(min(half, 3), 1, -1):
+                slots = _slot_grid(gc, s)
+                if not slots:
+                    continue
+                _r.shuffle(slots)
+                usable = [u for u in ALL_UNITS if _bbox(u) <= s]
+                if not usable:
+                    continue
+                used_names = set()
+                got = 0
+                for (ox, oy) in slots:
+                    if got >= want_slots:
                         break
-                    gcol = _gcol(layer_idx)
-                    below_idx = active_layers[active_layers.index(layer_idx) - 1]
-                    mask = valid_support_mask(pos_map[below_idx], below_idx, layer_idx, _gcol(below_idx), gcol, gcol)
-                    mask = _converge(mask, unit_layers.index(layer_idx), 3)
-                    free_mask = mask - pos_map[layer_idx]
-                    extra = ((n_target - total) // 3) * 3
-                    if extra < 3 or not free_mask:
-                        continue
-                    new = self._assemble_units_in_mask(free_mask, extra, gcol, gcol, _r)
-                    if new:
-                        pos_map[layer_idx] |= new
-                        total += len(new)
-                        progressed = True
-                if not progressed:
-                    break
+                    cands = [u for u in usable if u.name not in used_names]
+                    if not cands:
+                        break
+                    _r.shuffle(cands)
+                    for unit in cands:
+                        # 슬롯 안에서 중앙 정렬
+                        px = ox + (s - unit.w) // 2
+                        py = oy + (s - unit.h) // 2
+                        pc = unit.placed(px, py)
+                        if not (pc <= mask) or (pc & placed):
+                            continue
+                        mc = {(gc - 1 - x, y) for (x, y) in pc}
+                        if mc & placed:
+                            continue
+                        placed |= pc | mc          # 좌우 대칭 확정
+                        used_names.add(unit.name)
+                        got += 1
+                        break
+                if got:
+                    return placed
+            return placed
+
+        # ── 바닥층 = 주 패턴(디자인 모양 유지) ──
+        l0 = active_layers[0]
+        pos_map[l0] = _aesthetic(_gcol(l0))
+
+        # ── 위층 = 슬롯 기반 대칭 유닛층 ──
+        for i, layer_idx in enumerate(active_layers[1:]):
+            gc = _gcol(layer_idx)
+            below = active_layers[active_layers.index(layer_idx) - 1]
+            mask = valid_support_mask(pos_map[below], below, layer_idx, _gcol(below), gc, gc)
+            # 위로 갈수록 슬롯 수를 줄여 탑 실루엣(자연 수렴). 최소 1개는 유지.
+            want = max(1, _r.randint(smin, smax) - (i // 2))
+            pos_map[layer_idx] = _place_slot_symmetric(mask, gc, want)
+
 
         # [floating 정화] 상위 타일이 하위 미덮으면 하위에 지지셀(그림자) 추가 → floating 0 보장.
         # top-down 처리(층 j 고치면 j-1 성장 → 다음 j-1 검사에 반영). 몇 셀 늘지만 버퍼 내.
@@ -1846,7 +1928,8 @@ class LevelGenerator:
             level[lk]["row"] = str(grow)
             level[lk]["tiles"] = tiles
             level[lk]["num"] = str(len(tiles))
-        logger.info(f"[UNIT_ASSEMBLY] pattern={pidx} {n}층 유닛예산{unit_target} 총{len(all_positions)}타일 (목표{n_target})")
+        logger.info(f"[UNIT_ASSEMBLY_V3] pattern={pidx} {n}층 슬롯대칭(diff={_diff:.2f} "
+                    f"한쪽슬롯{smin}~{smax}) 총{len(all_positions)}타일")
         return all_positions
 
     def _place_key_tiles(self, level: Dict[str, Any], count: int) -> None:
@@ -2414,6 +2497,42 @@ class LevelGenerator:
         new_level["randSeed"] = random.randint(100000, 999999)
 
         return new_level
+
+    def _collectable_tile_count(self, level: Dict[str, Any]) -> int:
+        """수집 필요 타일 수(= 실제 탭 횟수). plain + craft/stack 내부타일.
+
+        [TIMEA] `_calculate_max_moves` 의 순수 버전 — max(30,·) 하한 없음.
+        timea(제한시간) 산출은 반드시 이 값을 써야 한다. 하한 포함 값을 쓰면
+        30타일 미만 레벨에 시간이 과다 배정된다(예: 18타일 → 30 = 1.67배).
+        """
+        total_tiles = 0
+        num_layers = level.get("layer", 8)
+        try:
+            num_layers = int(num_layers)
+        except (TypeError, ValueError):
+            num_layers = 8
+
+        for i in range(num_layers):
+            tiles = (level.get(f"layer_{i}") or {}).get("tiles") or {}
+            for _pos, tile_data in tiles.items():
+                if isinstance(tile_data, list) and len(tile_data) > 0:
+                    tile_type = tile_data[0]
+                    if isinstance(tile_type, str) and (tile_type.startswith("stack_") or tile_type.startswith("craft_")):
+                        stack_count = 1
+                        if len(tile_data) > 2:
+                            extra = tile_data[2]
+                            if isinstance(extra, list) and len(extra) > 0:
+                                stack_count = int(extra[0]) if extra[0] else 1
+                            elif isinstance(extra, dict):
+                                stack_count = int(extra.get("totalCount", extra.get("count", 1)))
+                            elif isinstance(extra, (int, float)):
+                                stack_count = int(extra)
+                        total_tiles += stack_count
+                    else:
+                        total_tiles += 1
+                else:
+                    total_tiles += 1
+        return total_tiles
 
     def _calculate_max_moves(self, level: Dict[str, Any]) -> int:
         """Calculate max_moves based on total tiles in the level.
@@ -7726,7 +7845,7 @@ class LevelGenerator:
                         tile_data = tiles[pos]
                         # Bomb needs countdown in attribute (format: "bomb_N")
                         if gimmick_type == "bomb":
-                            countdown = random.randint(5, 10)
+                            countdown = random.randint(BOMB_COUNTDOWN_MIN, BOMB_COUNTDOWN_MAX)
                             attr_to_set = f"bomb_{countdown}"
                         else:
                             attr_to_set = gimmick_attr
@@ -8752,8 +8871,8 @@ class LevelGenerator:
                 continue
 
             # Set bomb with countdown (format: "bomb_N" where N is countdown)
-            # Client expects xEffect = "bomb_7" format, not separate extra array
-            countdown = random.randint(5, 10)
+            # Client expects xEffect = "bomb_5" format, not separate extra array
+            countdown = random.randint(BOMB_COUNTDOWN_MIN, BOMB_COUNTDOWN_MAX)
             tile_data[1] = f"bomb_{countdown}"
             # Clear extra field if exists (countdown is now in attribute)
             if len(tile_data) >= 3:
@@ -10729,7 +10848,12 @@ class LevelGenerator:
         Covered frogs are removed (attribute cleared) as there's no safe place to move them
         that wouldn't violate placement rules or break tile count divisibility.
         """
-        num_layers = level.get("layer", 8)
+        # [방어] 템플릿 계열 level_json 은 layer 가 문자열("5")인 경우가 있다(타운팝 임포트분).
+        # int 변환 없이 range() 에 넣으면 TypeError 로 파이프라인 전체가 죽는다.
+        try:
+            num_layers = int(level.get("layer", 8) or 8)
+        except (TypeError, ValueError):
+            num_layers = 8
         removed_count = 0
 
         for layer_idx in range(num_layers):
@@ -11178,8 +11302,11 @@ class LevelGenerator:
 
             # Find a valid new position
             new_pos = None
-            for row in range(grid_height):
-                for col in range(grid_width):
+            # [OOB_FIX] 대상 층의 실제 헤더로 스캔 (phantom gridWidth 기본7 → OOB 방지)
+            lw = int(level[layer_key].get("col", grid_width) or grid_width)
+            lh = int(level[layer_key].get("row", grid_height) or grid_height)
+            for row in range(lh):
+                for col in range(lw):
                     candidate_pos = f"{col}_{row}"
                     # Must not be occupied, must not be goal output position, must not be goal position
                     if (candidate_pos not in occupied_positions and
@@ -11205,8 +11332,11 @@ class LevelGenerator:
                     alt_tiles = level.get(alt_layer_key, {}).get("tiles", {})
                     alt_occupied = set(alt_tiles.keys())
 
-                    for row in range(grid_height):
-                        for col in range(grid_width):
+                    # [OOB_FIX] 대체 층의 실제 헤더로 스캔
+                    alt_lw = int(level.get(alt_layer_key, {}).get("col", grid_width) or grid_width)
+                    alt_lh = int(level.get(alt_layer_key, {}).get("row", grid_height) or grid_height)
+                    for row in range(alt_lh):
+                        for col in range(alt_lw):
                             candidate_pos = f"{col}_{row}"
                             if (candidate_pos not in alt_occupied and
                                 candidate_pos not in goal_output_positions and
@@ -12381,6 +12511,336 @@ class LevelGenerator:
 
         return level
 
+    def _decide_timea_tier(self, level_number: Optional[int], gimmick_intensity: float,
+                           params: "GenerationParams") -> Optional[int]:
+        """[TIMEA v2] 타임어택 티어(1~3) 결정. None = 타임어택 미적용.
+
+        티어는 난이도와 **분리된 독립 레버**. 1=넉넉 / 2=보통 / 3=촉박.
+        - params.timea_tier 명시 지정 최우선
+        - Lv341(튜토리얼): gimmick_intensity 무관하게 적용 + 티어1(가장 쉬움).
+          (구코드는 `gimmick_intensity > 0` 게이트에 묶여 341이 아예 제외됐다 — 보존패턴
+           튜토리얼은 intensity=0 이라 timea 가 안 붙었고, 그래서 티어1이 죽은 상수였다.)
+        - 그 외: 보스(10의 배수)만, 난이도 유도 <0.5→1 / <0.7→2 / else→3
+        """
+        if level_number is None:
+            return None
+        explicit = getattr(params, "timea_tier", None)
+        if explicit in (1, 2, 3):
+            return int(explicit)
+        if level_number < TIME_ATTACK_UNLOCK_LEVEL:
+            return None
+        if level_number == TIME_ATTACK_UNLOCK_LEVEL:
+            return 1  # 튜토리얼: 가장 쉬운 조건
+        if gimmick_intensity <= 0 or level_number % 10 != 0:
+            return None
+        d = float(getattr(params, "target_difficulty", 0.5) or 0.5)
+        if d < 0.5:
+            return 1
+        if d < 0.7:
+            return 2
+        return 3
+
+    def _apply_timea(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """[TIMEA v2] 최종 타일 수 기준으로 timea(제한시간, 초) 산출.
+
+        공식:  timea = clamp(60, 600, ceil(tiles * 0.9s * TIER_MULT[tier]))
+        - tiles = _collectable_tile_count (하한 없는 순수 수집타일수 = 실제 탭 횟수)
+        - 정수 산술 고정: 프론트 미러와 부동소수 평가순서 차이로 1초 어긋나는 것 방지
+          (예: n=100,mult=1.6 → (n*0.9)*t=144 vs n*(0.9*t)=145)
+        - 하한 60/상한 600 = 게임 스키마 계약(DESIGN_LEVEL_MAP_SCHEMA.md: timea 60~600)
+
+        캘리브레이션 근거: 게임은 탭 입력 락이 없어(LevelController.cs:1269-1283) 타일 비행
+        0.5s 애니가 다음 탭을 막지 않는다 → 애니 하한 ≈0, 실질 하한은 인간 탭속도 ≈0.25s/타일.
+        티어3 실효 0.54s/타일 = 물리하한의 약 2.2배.
+        타이머는 연출 완료 후 시작 + 연출 중 레이캐스트 OFF(LevelController.cs:1192-1215)
+        → 별도 오버헤드 가산 불필요.
+        """
+        tier = level.get("_timea_tier")
+        if tier not in (1, 2, 3):
+            return level
+        tiles = self._collectable_tile_count(level)
+        if tiles <= 0:
+            return level
+        milli = tiles * TIMEA_BASE_MILLI * TIMEA_TIER_MILLI[int(tier)]
+        secs = -(-milli // 1_000_000)  # ceil
+        secs = max(TIMEA_MIN_SEC, min(TIMEA_MAX_SEC, int(secs)))
+        level["timea"] = secs
+        return level
+
+    @staticmethod
+    def _tile_attr(tile_data: Any) -> str:
+        """타일 속성 정규화. td[1] 이 None/누락이면 "" 로 취급.
+
+        [CHAIN_CLOSURE] 실측: 프로덕션 배치에 td[1]=None 타일이 약 10%(수만 건) 존재.
+        `td[1] == ""` 리터럴 비교만 하면 이들이 '속성 있음'으로 오분류되어
+        정상 앵커가 앵커로 인정되지 않는다(주배치 사슬의 74.9% 오탐 실측).
+        """
+        if isinstance(tile_data, list) and len(tile_data) > 1 and isinstance(tile_data[1], str):
+            return tile_data[1]
+        return ""
+
+    def _chain_release_closure(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """[CHAIN_CLOSURE] 해제 불가능한 chain 속성 제거(plain화).
+
+        게임 규칙(TileEffect.cs:932-951, 1066-1069): chain 타일은 잠긴 상태로 스폰되고
+        **같은 층 수평 이웃(x±1)** 이 픽될 때만 해제된다. 잠긴 chain 은 픽 불가.
+
+        게임의 자체 검출기 `CheckEffectTileCanUncover`(TileEffect.cs:1341)는
+        `CheckRemainNearTile(true) < 1` 로 판정하는데, 이는 *살아있는* 이웃만 센다
+        (Tile.cs:1542). 따라서 이웃이 '잠긴 chain' 이어도 count>=1 이 되어
+        **FailReason.Chain 이 영구 미발동** → 플레이어에게 알림 없는 소프트락.
+        게임에 '합법수 0 → 자동 리셔플' 구제도 없다(셔플은 유료 + 타입만 교환).
+
+        판정: monotone 시스템(픽은 제거만 함) → "결국 픽 가능(EP)"의 최소고정점 = 정확한 답.
+          EP 진입 조건(chain c): 수평 이웃 n 중 하나가
+            - 보드에 존재(같은 층)              AND
+            - craft 컨테이너 루트 아님(직접 픽 불가; stack 루트는 top 타일이 있어 픽 가능) AND
+            - (attr(n) != chain  OR  n ∈ EP)
+        ice/grass/curtain/unknown/bomb/teleport/link 등은 결국 픽 가능 → **유효 앵커**.
+        frog 는 on_frog 동안 픽 불가지만 매 픽마다 이동하고 대상 없으면 제거되므로 앵커 인정.
+        앵커 1개면 충분(plain 1개가 좌우 chain 둘 다 해제) → 런 길이 자체는 위반 아님.
+
+        [커버리지 비판정] 상위층에 가려진 chain 도 위반으로 보지 않는다. 커버리지는 엄격한
+        상향 DAG(FindAllUpperTiles 는 위층만 스캔)이고 픽에 매치가 필요 없어 최상층은 항상
+        픽 가능 → 모든 가림은 **결국 해소**된다. '가려진 동안 앵커를 먼저 소진'하는 건
+        플레이어가 순서로 회피 가능한 실수지 구조적 불가가 아니다.
+        (초안은 run>=2 에 커버리지를 요구했으나 실측에서 Lv190 처럼 앵커가 plain 인
+         RL 통과 레벨까지 걸려 과잉엄격이었다 — 정상 사슬 파괴가 이 검증기의 역사적 실패모드.)
+
+        수리: 위반 chain 의 **속성만 제거**(td[1]=""). 타일/좌표/타입 불변 →
+        ÷3(_clearability_type_counts)·패턴모양·max_moves 전부 보존.
+        """
+        num_layers = int(level.get("layer", 0) or 0)
+        cleared = 0
+        for i in range(num_layers):
+            layer = level.get(f"layer_{i}")
+            if not isinstance(layer, dict):
+                continue
+            tiles = layer.get("tiles")
+            if not isinstance(tiles, dict) or not tiles:
+                continue
+
+            chains = {p for p, d in tiles.items() if self._tile_attr(d) == "chain"}
+            if not chains:
+                continue
+
+            def _is_craft_root(pos: str) -> bool:
+                d = tiles.get(pos)
+                return (isinstance(d, list) and d and isinstance(d[0], str)
+                        and d[0].startswith("craft_"))
+
+            def _parse(pos: str):
+                try:
+                    x_s, y_s = pos.split("_")
+                    return int(x_s), int(y_s)
+                except (ValueError, AttributeError):
+                    return None
+
+            # 최소고정점
+            ep: set = set()
+            changed = True
+            while changed:
+                changed = False
+                for p in chains - ep:
+                    xy = _parse(p)
+                    if xy is None:
+                        continue
+                    x, y = xy
+                    for nx in (x - 1, x + 1):
+                        npos = f"{nx}_{y}"
+                        if npos not in tiles:
+                            continue
+                        if _is_craft_root(npos):
+                            continue
+                        nattr = self._tile_attr(tiles[npos])
+                        if nattr == "chain" and npos not in ep:
+                            continue
+                        ep.add(p)
+                        changed = True
+                        break
+
+            for p in sorted(chains - ep):
+                data = tiles.get(p)
+                if isinstance(data, list) and len(data) > 1:
+                    data[1] = ""
+                    cleared += 1
+        if cleared:
+            logger.info(f"[CHAIN_CLOSURE] stripped {cleared} unreleasable chain attr(s) (plain화; ÷3/모양 보존)")
+        return level
+
+    def _normalize_bomb_countdowns(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """[BOMB_RANGE] bomb_N 의 N 을 기획 범위(3~5)로 정규화. 속성만 변경 → ÷3/모양 무영향.
+
+        구코드가 randint(5,10) 으로 출고한 6~10, 그리고 tune/템플릿 경로가 만든 범위 밖 값을
+        일괄 교정. 시뮬레이터는 max(3,min(5,·))로 클램프하므로(bot_simulator.py:1239) 범위 밖
+        값은 '생성값 ≠ 검증값' 불일치를 만든다 → 난이도 평가 왜곡.
+        속성만 'bomb' 인 경우(카운트 없음)도 기본값 부여.
+        """
+        fixed = 0
+        for i in range(int(level.get("layer", 0) or 0)):
+            tiles = (level.get(f"layer_{i}") or {}).get("tiles") or {}
+            for _pos, td in tiles.items():
+                if not (isinstance(td, list) and len(td) > 1 and isinstance(td[1], str)):
+                    continue
+                attr = td[1]
+                if not attr.startswith("bomb"):
+                    continue
+                parts = attr.split("_")
+                if len(parts) == 2 and parts[1].isdigit():
+                    n = int(parts[1])
+                    if BOMB_COUNTDOWN_MIN <= n <= BOMB_COUNTDOWN_MAX:
+                        continue
+                    n = max(BOMB_COUNTDOWN_MIN, min(BOMB_COUNTDOWN_MAX, n))
+                elif attr == "bomb":
+                    n = BOMB_COUNTDOWN_MAX  # 카운트 누락 → 가장 관대한 값
+                else:
+                    continue
+                td[1] = f"bomb_{n}"
+                fixed += 1
+        if fixed:
+            logger.info(f"[BOMB_RANGE] normalized {fixed} bomb countdown(s) into {BOMB_COUNTDOWN_MIN}~{BOMB_COUNTDOWN_MAX}")
+        return level
+
+    # craft/stack 방향 → 배출칸 오프셋
+    _GOAL_DIR_DELTA = {"s": (0, 1), "n": (0, -1), "e": (1, 0), "w": (-1, 0)}
+
+    def _repair_goal_output_direction(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """[GOAL_OUTPUT] craft/stack 배출칸이 격자 밖이면 방향을 격자 안 빈칸으로 회전.
+
+        게임 동작(확인됨): 배출칸에 앵커 타일이 없어도 `TileGroup.cs:1071` 이 배출을 진행하고,
+        `Tile.cs:2843-2848` `AddOffset` 이 키를 `-1_3` 같은 값으로 재작성한다.
+        `DB_Level.cs:898` 은 음수 인덱스에 null 을 반환 → 그 타일은 **영구 매칭 불가**(클리어 불가).
+        개발팀도 형제 케이스를 v1.10.572 에서 패치했다(`TileCraft.cs:849-859` 주석).
+
+        실측: 타운팝 템플릿 211개 중 46개에 배출칸 OOB 86건(대부분 `stack_s` 가 아래로 벗어남).
+        82/83 은 방향 회전만으로 수리 가능.
+
+        규칙: 격자 안이면서 (비어 있거나 컨테이너가 아닌) 칸을 향하는 방향으로 교체.
+        후보가 없으면 그대로 두고 경고(상위에서 거부/강등 판단).
+        """
+        fixed = 0
+        for i in range(int(level.get("layer", 0) or 0)):
+            ld = level.get(f"layer_{i}")
+            if not isinstance(ld, dict):
+                continue
+            tiles = ld.get("tiles")
+            if not isinstance(tiles, dict) or not tiles:
+                continue
+            try:
+                col, row = int(ld.get("col")), int(ld.get("row"))
+            except (TypeError, ValueError):
+                continue
+            for pos, td in tiles.items():
+                if not (isinstance(td, list) and td and isinstance(td[0], str)):
+                    continue
+                tp = td[0]
+                if not (tp.startswith("craft_") or tp.startswith("stack_")):
+                    continue
+                d = tp[-1]
+                delta = self._GOAL_DIR_DELTA.get(d)
+                if not delta:
+                    continue
+                try:
+                    x, y = map(int, pos.split("_"))
+                except ValueError:
+                    continue
+                ox, oy = x + delta[0], y + delta[1]
+                if 0 <= ox < col and 0 <= oy < row:
+                    continue  # 정상
+                # 격자 안을 향하는 대체 방향 탐색(빈칸 우선, 없으면 비컨테이너 칸)
+                base = tp[:-1]
+                best = None
+                for nd, (dx, dy) in self._GOAL_DIR_DELTA.items():
+                    if nd == d:
+                        continue
+                    nx, ny = x + dx, y + dy
+                    if not (0 <= nx < col and 0 <= ny < row):
+                        continue
+                    npos = f"{nx}_{ny}"
+                    occ = tiles.get(npos)
+                    occ_type = occ[0] if isinstance(occ, list) and occ and isinstance(occ[0], str) else None
+                    if occ is None:
+                        best = nd
+                        break  # 빈칸이 최선
+                    if best is None and not (occ_type or "").startswith(("craft_", "stack_")):
+                        best = nd
+                if best:
+                    td[0] = base + best
+                    fixed += 1
+                else:
+                    logger.warning(f"[GOAL_OUTPUT] L{i} {pos} {tp}: 격자 안 배출칸 없음 — 수리 실패")
+        if fixed:
+            logger.info(f"[GOAL_OUTPUT] repaired {fixed} container direction(s) (배출칸 OOB → 격자 안)")
+        return level
+
+    def _ensure_tutorial_unlock_gimmick(self, level: Dict[str, Any], level_number: Optional[int],
+                                        min_count: int = 3) -> Dict[str, Any]:
+        """[TUTORIAL_GUARANTEE] 기믹 언락 첫 스테이지에 해당 기믹이 반드시 존재하도록 보장.
+
+        generate() 는 말미에서 이 보장을 수행하지만, **generate() 를 우회하는 경로**
+        (템플릿 기반 생성 `/generate/from-template`, 보스 템플릿)는 타지 않는다.
+        실측: 폭탄 언락 레벨 Lv291 이 템플릿 경로로 만들어져 **기믹 0개**로 출고됨
+        (randSeed==291·pattern_index 없음·10x10 = 템플릿 시그니처). 튜토리얼인데 폭탄이 없으면
+        플레이어가 그 기믹을 학습할 기회 자체를 잃는다.
+
+        멱등: 이미 min_count 이상 있으면 아무것도 하지 않는다.
+        """
+        if level_number is None:
+            return level
+        try:
+            level_number = int(level_number)
+        except (TypeError, ValueError):
+            return level
+        tut = self.TUTORIAL_UNLOCK_LEVELS.get(level_number)
+        if not tut:
+            return level
+        try:
+            if tut == "unknown":
+                return self._ensure_unknown_tutorial_count(level, min_count)
+            if tut in ("craft", "stack"):
+                return self._ensure_container_goal_tutorial(level, tut)
+            if tut == "key":
+                return level  # key 는 게임이 런타임 배치(unlockTile) — 별도 보장 로직 소관
+            return self._ensure_tutorial_gimmick_count(level, tut, min_count)
+        except Exception as exc:  # noqa: BLE001 - 보장 실패가 생성 자체를 깨뜨리지 않게
+            logger.warning(f"[TUTORIAL_GUARANTEE] Lv{level_number} '{tut}' 보장 실패: {exc}")
+            return level
+
+    def _finalize_level(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """[FINALIZE] 레벨 출고 직전 공통 마무리. **멱등**.
+
+        chain 클로저 → link sanitize → max_moves/timea 재산출 순서.
+        generate() 말미뿐 아니라 generate() 를 우회/이후에 타일을 만지는 모든 경로
+        (역생성 구제, 보스 템플릿, tune)에서 호출해야 한다. 과거 chain/link 버그의
+        공통 원인은 '이 tail 이 여러 곳에 손수 복제되어 일부에 누락' 이었다.
+
+        ⚠️ `_finalize_divisibility_guarantee` 는 **여기 넣지 않는다**. 그것은 *총합* ÷3만
+        보장하고 per-type 은 바로 뒤따르는 FINAL_REPAIR relabel 블록이 마무리하는 2단 구조라,
+        단독 재호출하면 per-type ÷3 이 깨진다(실측: Lv81/341/350 전부 위반 발생).
+        본 함수의 두 sanitizer 는 td[1](속성)만 만지므로 ÷3 에 영향이 없다 — 그래서 ÷3
+        보정 이후 어디서든 안전하게 호출 가능하다. ÷3 이 필요한 호출부는 각자
+        `_finalize_divisibility_guarantee` 를 먼저 돌린 뒤 이 함수를 부른다.
+        """
+        level = self._chain_release_closure(level)
+        level = self._strip_orphaned_link_tiles(level)
+        level = self._normalize_bomb_countdowns(level)
+        # frog 는 스폰 즉시 선택 가능해야 한다(가려지면 안 됨). 검증기가 1158 에 있으나
+        # 그 이후 튜토리얼 ensure(1141/1501)와 상위층 블로커 배치가 frog 를 덮을 수 있어 재적용.
+        level = self._validate_and_fix_frog_positions(level)
+        # [GOAL_OUTPUT] 배출칸이 격자 밖인 craft/stack → 방향 회전(영구 매칭불가 타일 방지).
+        # 기존엔 `_relocate_tiles_from_goal_outputs` 가 '점유'만 보고 경계는 안 봤고,
+        # _preserve_pattern 이면 early-return 이라 템플릿 경로가 통째로 무방비였다.
+        level = self._repair_goal_output_direction(level)
+        # [GRASS] 4방 이웃 < 2 인 grass 는 게임서 FailReason.Grass_CantRevive 소프트락.
+        # `_strip_confusing_grass` 가 generate()/보스 경로에만 있어 템플릿 경로는 무방비였다.
+        try:
+            level = self._strip_confusing_grass(level)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[GRASS] strip 실패(무시): {exc}")
+        level["max_moves"] = self._calculate_max_moves(level)
+        level = self._apply_timea(level)
+        return level
+
     def _strip_orphaned_link_tiles(self, level: Dict[str, Any]) -> Dict[str, Any]:
         """[LINK_SANITIZE] 대상 이웃이 없는 link_* 속성 제거(plain화).
 
@@ -12834,10 +13294,12 @@ class LevelGenerator:
         # Tutorial levels (1-5) have lower minimum, regular levels (6+) need more tiles
         # [수정] min60은 유닛조립(_unit_assembly 마커)에만 적용. 일반 레벨은 기존 하한(튜토9/18)
         # 유지 — min60을 전체 Lv11+에 걸면 일반 레벨이 2배로 어려워져 RL 검증 대량 실패(회귀).
+        # [유닛조립 v3] min60 은 v1(조밀 채움) 시절 밀도 확보용이었다. v3 는 '성긴 대칭'이
+        # 설계 목표라 이 하한이 오히려 `_ensure_minimum_tiles` 를 상시 호출해 층을 통짜로
+        # 메워버렸다(실측: 빌더 6타일 → 채움 후 7×3 통짜 21타일). 계획서대로 하한을 폐기하고
+        # 타일 수는 결과값으로 둔다. 일반 하한(18)은 그대로 적용해 빈 레벨은 막는다.
         if level_number is not None and level_number <= 5:
             min_tiles = self.TUTORIAL_MIN_TILE_COUNT
-        elif level.get("_unit_assembly"):
-            min_tiles = self.MIN_TILE_COUNT_LV11
         else:
             min_tiles = self.MIN_TILE_COUNT
         below_minimum = total_matchable < min_tiles
@@ -12853,6 +13315,99 @@ class LevelGenerator:
             "below_minimum": below_minimum,
             "min_required": min_tiles
         }
+
+    def _fill_symmetric_for_units(self, level: Dict[str, Any], need: int,
+                                  tile_types: List[str]) -> int:
+        """[유닛조립 전용 채움] 좌우대칭 쌍으로만 타일을 추가. 반환: 추가한 타일 수.
+
+        기본 채움(`_ensure_minimum_tiles` 본문)은 좌→우 순차 스캔이라 유닛 레벨의
+        성긴 대칭 구조를 통짜 사각형으로 뭉갠다. 여기서는:
+          - 아래층부터(위층은 성기게 유지 = 탑 실루엣 보존)
+          - 기존 타일에 **상하좌우로 인접한** 빈칸만(흩어짐 방지)
+          - 중심축 미러 쌍으로 **2칸씩** 추가(대칭 유지)
+        남은 부족분은 호출부의 기본 경로가 마무리한다(멱등).
+        """
+        if need <= 0:
+            return 0
+        try:
+            n = int(level.get("layer", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+        added = 0
+        ttypes = tile_types or ["t1"]
+        for layer_idx in range(n):                      # 바닥층부터
+            if added >= need:
+                break
+            L = level.get(f"layer_{layer_idx}")
+            if not isinstance(L, dict):
+                continue
+            tiles = L.get("tiles")
+            if not isinstance(tiles, dict) or not tiles:
+                continue
+            try:
+                col, row = int(L.get("col")), int(L.get("row"))
+            except (TypeError, ValueError):
+                continue
+            # 기존 타일에 인접한 빈칸 후보(중심축 왼쪽만 — 오른쪽은 미러로 채움)
+            # [세로 우선] 가로 이웃(dx≠0)만 채우면 한 줄이 통째로 메워져 '띠 사각형'이 된다.
+            # 세로 방향(dy≠0) 후보를 우선 소비해 실루엣이 세로로 자라게 한다.
+            cands = []
+            for pos in list(tiles.keys()):
+                try:
+                    x, y = map(int, pos.split("_"))
+                except ValueError:
+                    continue
+                for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+                    nx, ny = x + dx, y + dy
+                    if not (0 <= nx < col and 0 <= ny < row):
+                        continue
+                    mx = col - 1 - nx
+                    if mx == nx or not (0 <= mx < col):
+                        continue                        # 중심열은 쌍이 안 됨 → 스킵
+                    np, mp = f"{nx}_{ny}", f"{mx}_{ny}"
+                    if np in tiles or mp in tiles:
+                        continue
+                    if nx > mx:
+                        np, mp = mp, np                 # 항상 왼쪽 먼저(중복 후보 방지)
+                    cands.append((np, mp, 0 if dy != 0 else 1))   # 0=세로(우선), 1=가로
+
+            def _row_fill(r_idx: int) -> int:
+                """그 행이 이미 얼마나 찼는지 — 꽉 찬 행에 더 붙이면 띠가 된다."""
+                return sum(1 for p in tiles if p.endswith(f"_{r_idx}"))
+
+            # 세로 후보 먼저, 그다음 '덜 찬 행' 순
+            def _key(c):
+                np = c[0]
+                try:
+                    ry = int(np.split("_")[1])
+                except (ValueError, IndexError):
+                    ry = 0
+                return (c[2], _row_fill(ry))
+            cands.sort(key=_key)
+
+            seen = set()
+            for np, mp, _pri in cands:
+                if added + 2 > need:
+                    break
+                if np in seen or mp in seen or np in tiles or mp in tiles:
+                    continue
+                try:
+                    ry = int(np.split("_")[1])
+                except (ValueError, IndexError):
+                    ry = 0
+                # [띠 방지] 이미 폭의 2/3 이상 찬 행은 더 채우지 않는다(통짜 가로줄 억제).
+                if _row_fill(ry) >= max(2, int(col * 2 / 3)):
+                    continue
+                t = ttypes[(added // 3) % len(ttypes)]
+                tiles[np] = [t, ""]
+                tiles[mp] = [t, ""]
+                seen.add(np)
+                seen.add(mp)
+                added += 2
+            L["num"] = str(len(tiles))
+        if added:
+            logger.info(f"[UNIT_FILL] 대칭 쌍으로 {added}타일 보충(통짜 채움 방지)")
+        return added
 
     def _ensure_minimum_tiles(
         self,
@@ -12922,6 +13477,13 @@ class LevelGenerator:
 
         # Find positions to add tiles (prefer upper layers, avoid existing tiles)
         added = 0
+        # [유닛조립 대칭 채움] 유닛 레벨은 좌우대칭 성긴 구조가 정체성인데, 아래 기본 채움은
+        # 최상층부터 좌→우·위→아래 **순차 스캔**으로 빈칸을 메워 통짜 사각형을 만든다.
+        # (실측: v3 빌더가 6타일을 놓았는데 최소치 미달로 채움이 돌아 7×3 통짜 21타일이 됨.)
+        # 유닛 레벨이면 대칭 채움을 먼저 시도하고, 남은 부족분만 아래 기본 경로로 넘긴다.
+        if level.get("_unit_assembly"):
+            added += self._fill_symmetric_for_units(level, tiles_to_add - added, valid_tile_types)
+
         for layer_idx in range(num_layers - 1, -1, -1):  # Start from top layer
             layer_key = f"layer_{layer_idx}"
             if layer_key not in level:
@@ -13701,19 +14263,23 @@ class LevelGenerator:
 
         def _adjacent_empty_slots(need: int) -> List[Tuple[int, str]]:
             """패턴 보존용: 기존 타일에 인접한 빈 칸을 need개까지 찾는다 (홀짝 레이어 dim 반영)."""
-            gcols = int(level.get("gridWidth", 7) or 7)
-            grows = int(level.get("gridHeight", 7) or 7)
             found: List[Tuple[int, str]] = []
             seen_global: set = set()
             for li in range(num_layers):
                 if len(found) >= need:
                     break
-                tiles = level.get(f"layer_{li}", {}).get("tiles", {})
+                ld = level.get(f"layer_{li}", {}) or {}
+                tiles = ld.get("tiles", {})
                 if not tiles:
                     continue
-                is_odd = li % 2 == 1
-                lc = gcols if is_odd else gcols + 1
-                lr = grows if is_odd else grows + 1
+                # [OOB_FIX] 실제 층 헤더(col/row)로 경계 계산.
+                # 기존: phantom gridWidth/gridHeight(생성기가 절대 안 씀→기본7) 사용 →
+                # 짝수 layer_0에 nx<8 허용, 실헤더(6/7) 무시 → ÷3 애드백 타일이 헤더 밖 → 인게임 클리어불가.
+                try:
+                    lc = int(ld.get("col"))
+                    lr = int(ld.get("row"))
+                except (TypeError, ValueError):
+                    continue  # 헤더 불명 → 이 층은 슬롯 소스에서 제외
                 used = set(tiles.keys())
                 for pos in list(used):
                     p = pos.split("_")

@@ -173,6 +173,9 @@ class GenerationParams:
     # 다양화(인접층 회피)하고 중앙 배치. 레이어 col/row는 짝홀 교대값 유지(게임 FindAllUpperTiles 정합).
     # None이면 미적용(기존 step 기반 크기). 절차생성 경로(패턴/auto)만 대상, 배치·템플릿 무영향.
     size_diversity_start_level: Optional[int] = None
+    # [TIMEA v2] 타임어택 제한시간 티어(1=넉넉 / 2=보통 / 3=촉박). None=난이도에서 자동 유도.
+    # 난이도와 분리된 독립 레버 — 같은 난이도에서 시간압만 조절할 때 명시 지정.
+    timea_tier: Optional[int] = None
     # Fast generation mode - skip internal deadlock checking
     skip_deadlock_check: bool = True  # Skip deadlock check for ultra-fast generation (use batch verify later)
     # [역생성] concrete(컨테이너/순서기믹 없는) 레벨에 witness-peeling 타입배정 적용 → 솔버블 보장.

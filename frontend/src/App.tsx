@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { GridEditor } from './components/GridEditor';
 import { DifficultyPanel } from './components/DifficultyPanel';
@@ -14,6 +14,8 @@ import { PatternDebugPanel } from './components/PatternDebugPanel';
 import { ColorBalancePanel } from './components/ColorBalancePanel';
 import { PatternImportPanel } from './components/PatternImportPanel';
 import { BossTemplatePanel } from './components/BossTemplatePanel';
+// [지연로딩] 신규 패널은 141개 미니그리드를 그리므로 초기 번들에서 분리.
+const LevelShapesPanel = lazy(() => import('./components/LevelShapesPanel'));
 import { RemoteComputeToggle } from './components/RemoteComputeToggle';
 import { RLSimulationPanel } from './components/RLSimulationPanel';
 import { SolvabilityPanel } from './components/SolvabilityPanel';
@@ -270,6 +272,7 @@ function AppContent() {
     { id: 'color-balance', label: '색상 테스트', icon: '🎨' },
     { id: 'pattern-import', label: '패턴 임포트', icon: '📁' },
     { id: 'boss-template', label: '보스 템플릿', icon: '🏰' },
+    { id: 'level-shapes', label: '층별 패턴', icon: '🧩' },
     { id: 'benchmark', label: '벤치마크', icon: '📊' },
     { id: 'gboost', label: '게임부스트', icon: '☁️' },
     { id: 'play', label: '플레이', icon: '▶️' },
@@ -459,6 +462,13 @@ function AppContent() {
         {activeTab === 'boss-template' && (
           <div className="max-w-6xl mx-auto">
             <BossTemplatePanel />
+          </div>
+        )}
+        {activeTab === 'level-shapes' && (
+          <div className="max-w-7xl mx-auto">
+            <Suspense fallback={<div className="text-center text-gray-500 py-10">패널 로딩 중…</div>}>
+              <LevelShapesPanel />
+            </Suspense>
           </div>
         )}
         {activeTab === 'rl-sim' && (

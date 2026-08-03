@@ -2,7 +2,9 @@ import { create } from 'zustand';
 
 type Tool = 'paint' | 'erase' | 'fill' | 'inspect';
 type Panel = 'editor' | 'generator' | 'gboost' | 'production';
-export type TabId = 'editor' | 'simulation' | 'generator' | 'gboost' | 'local' | 'play' | 'production' | 'benchmark' | 'pattern-debug' | 'color-balance' | 'pattern-import' | 'rl-sim' | 'solvability' | 'boss-template';
+// ⚠️ 여기에 id 만 추가하면 App.tsx 의 렌더 체인은 default 분기가 없어 **빈 화면**이 된다.
+//    반드시 App.tsx 의 tabs 배열 + `activeTab === '...'` 렌더 분기도 함께 추가할 것.
+export type TabId = 'editor' | 'simulation' | 'generator' | 'gboost' | 'local' | 'play' | 'production' | 'benchmark' | 'pattern-debug' | 'color-balance' | 'pattern-import' | 'rl-sim' | 'solvability' | 'boss-template' | 'level-shapes';
 
 // Generation result for display in result card
 interface GenerationResultInfo {

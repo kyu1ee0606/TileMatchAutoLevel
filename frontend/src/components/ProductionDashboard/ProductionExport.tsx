@@ -8,7 +8,7 @@ import { ProductionStats, ProductionExportConfig, ProductionLevel } from '../../
 import { TileData, LevelJSON } from '../../types';
 import { Button } from '../ui';
 import { useUIStore } from '../../stores/uiStore';
-import { exportProductionLevels, getProductionLevelsByBatch, saveProductionLevel } from '../../storage/productionStorage';
+import { exportProductionLevels, getProductionLevelsByBatch, renameProductionBatch, saveProductionLevel } from '../../storage/productionStorage';
 import { saveLevelSetToStorage, saveLocalLevelToStorage } from '../../storage/levelStorage';
 import { checkGBoostHealth, listFromGBoost, loadFromGBoost, saveToGBoost } from '../../api/gboost';
 import { simulateLevelSkillSweep } from '../../api/rlSim';
@@ -118,20 +118,55 @@ function deployScanLevel(levelNumber: number, lv: unknown): string[] {
   return reasons;
 }
 
+/**
+ * [하드 게이트] **구조적으로 망가진** 레벨만 차단한다. 난이도 판정은 여기서 보지 않는다.
+ *
+ * 예전엔 `verification_passed === false` / `rl_classification === 'unclearable_suspect'` /
+ * `predicted_clear_rate === 0` 을 차단 사유로 썼다. 이건 전부 **RL 봇 시뮬 판정**이지
+ * "레벨이 깨지는가"가 아니다. 실측으로 뒤집혔다:
+ *
+ *   Lv710  RL 0.000 → A* PROVEN_SOLVABLE (노드 108개, 81수)
+ *   Lv730  RL 0.000 → A* PROVEN_SOLVABLE (노드 106개, 90수)
+ *   Lv790  RL 0.000 → A* PROVEN_SOLVABLE (노드 818개, 168수)
+ *   Lv1268 RL 0.000 → A* PROVEN_SOLVABLE (노드 171개, 138수)
+ *
+ * A* 가 노드 100~800개 만에 클리어 경로를 찾는 레벨을 "배포 불가"로 막고 있었다(410개).
+ * 봇이 12색/독7칸에서 근시안적으로 집어 자멸하는 것을 레벨 결함으로 오판한 것.
+ *
+ * → 차단은 **되돌릴 수 없는 결함**만: ÷3 위반(매칭 불가 타일 잔존) · 규칙 위반 ·
+ *   헤더 밖 타일 · 격자 상한 초과 · 튜토리얼 기믹 누락 · 해제 불가 사슬 · timea 부족 ·
+ *   A* 가 **불가능을 증명**한 경우.
+ * 난이도 미달은 `findDifficultyWarnings` 로 분리해 경고만 띄운다(배포는 사용자 판단).
+ */
 export function findUndeployableLevels(levels: ProductionLevel[]): Array<{ levelNumber: number; reasons: string[] }> {
   const out: Array<{ levelNumber: number; reasons: string[] }> = [];
   for (const l of levels) {
     const reasons: string[] = [];
-    const m = l.meta as typeof l.meta & { divisibility_violation?: unknown; rule_violations?: unknown };
-    if (m.verification_passed === false) reasons.push('unverified');
-    if (m.rl_classification === 'unclearable_suspect') reasons.push('unclearable');
-    if (m.predicted_clear_rate === 0) reasons.push('clear_rate_0');
+    const m = l.meta as typeof l.meta & {
+      divisibility_violation?: unknown; rule_violations?: unknown; solver_verdict?: string;
+    };
+    // A* 가 '불가능'을 증명한 경우만 클리어 불가로 인정한다(봇 판정 아님).
+    if (m.solver_verdict === 'PROVEN_IMPOSSIBLE') reasons.push('proven_impossible');
     if (m.divisibility_violation !== undefined) reasons.push('div3');
     if (m.rule_violations !== undefined) reasons.push('rule');
     try {
       reasons.push(...deployScanLevel(m.level_number, l.level_json));
     } catch { reasons.push('scan_error'); }   // 스캔 실패 = 배포 불가(fail-CLOSED)
     if (reasons.length) out.push({ levelNumber: m.level_number, reasons });
+  }
+  return out;
+}
+
+/**
+ * [난이도 경고] 배포를 막지는 않지만 확인이 필요한 레벨. RL 시뮬 기반이라 확정 판정이 아니다.
+ * (RL 은 특정 휴리스틱 봇의 클리어율 추정치일 뿐, 클리어 가능 여부의 증명이 아니다.)
+ */
+export function findDifficultyWarnings(levels: ProductionLevel[]): Array<{ levelNumber: number; reason: string }> {
+  const out: Array<{ levelNumber: number; reason: string }> = [];
+  for (const l of levels) {
+    const m = l.meta;
+    if (m.rl_classification === 'unclearable_suspect') out.push({ levelNumber: m.level_number, reason: '봇 클리어 0%' });
+    else if (m.verification_passed === false) out.push({ levelNumber: m.level_number, reason: 'RL 목표 미달' });
   }
   return out;
 }
@@ -247,6 +282,25 @@ export function ProductionExport({
   const [gboostBoardId, setGboostBoardId] = useState('levels');
   const [gboostLevelPrefix, setGboostLevelPrefix] = useState('level_');
   const [gboostStartIndex, setGboostStartIndex] = useState(1);
+  // [무한 레벨] 1~1500 완주 유저용. 원본 501~1500 을 `infinity_1..1000` 으로 **복사 추가**한다.
+  // 오프셋 500 이 10의 배수라 `원본 % 10 === index % 10` → 보스/스페셜/autoCollect 정렬이
+  // 원본과 그대로 일치하므로 보상·자동수집 규칙을 원본 레벨번호 기준으로 적용하면 된다.
+  // off=원본만 · append=원본+무한 · only=무한만(원본 제외)
+  const INFINITY_KEY = 'prod_export_infinity_mode_v1';
+  type InfinityMode = 'off' | 'append' | 'only';
+  const [infinityMode, setInfinityMode] = useState<InfinityMode>(() => {
+    try {
+      const v = localStorage.getItem(INFINITY_KEY);
+      return v === 'append' || v === 'only' ? v : 'off';
+    } catch { return 'off'; }
+  });
+  const infinityEnabled = infinityMode !== 'off';
+  useEffect(() => {
+    try { localStorage.setItem(INFINITY_KEY, infinityMode); } catch { /* ignore */ }
+  }, [infinityMode]);
+  const [infinityPrefix, setInfinityPrefix] = useState('infinity_');
+  const [infinitySourceStart, setInfinitySourceStart] = useState(501);
+  const [infinitySourceEnd, setInfinitySourceEnd] = useState(1500);
   const [gboostHealthy, setGboostHealthy] = useState(false);
 
   // Range selection
@@ -340,7 +394,7 @@ export function ProductionExport({
       try {
         const exportable = await getExportableLevels();
         if (cancelled) return;
-        setPreviewTargetIds(exportable.map(l => `${gboostLevelPrefix}${l.meta.level_number}`));
+        setPreviewTargetIds(buildUploadTargets(exportable).map(t => t.targetId));
       } catch {
         if (!cancelled) setPreviewTargetIds([]);
       } finally {
@@ -349,18 +403,67 @@ export function ProductionExport({
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [batchId, gboostLevelPrefix, useRange, rangeStart, rangeEnd, totalReady]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [batchId, gboostLevelPrefix, useRange, rangeStart, rangeEnd, totalReady,
+      infinityMode, infinityPrefix, infinitySourceStart, infinitySourceEnd]);
 
-  // Get target level ID from actual level number
-  const getTargetLevelId = (levelNumber: number): string => {
-    // gboostStartIndex는 GBoost에서 시작할 번호 (기본 1)
-    // levelNumber는 실제 레벨 번호 (예: 35)
-    // useRange가 활성화되면 레벨 번호를 그대로 사용하거나, 오프셋 적용
-    // 예: 레벨 35를 level_35로 업로드하려면 gboostStartIndex를 레벨번호와 일치시키거나
-    //     또는 레벨 35를 level_1로 업로드하려면 오프셋 계산 필요
-    // 현재 로직: 레벨 번호를 ID에 직접 반영 (더 직관적)
-    return `${gboostLevelPrefix}${levelNumber}`;
+  /**
+   * [배포 표시] GBoost 업로드에 성공하면 배치 이름 끝에 마커를 남긴다.
+   *
+   * 왜: 어떤 배치가 실제 게임에 올라간 건지 이름만 봐선 알 수 없었다(실측: GBoost 보드가
+   * 여러 배치 혼합 상태였고, 올라간 배치를 찾으려고 randSeed 지문 대조를 해야 했다).
+   * 재업로드해도 마커가 누적되지 않도록 **기존 마커를 지우고 새로 붙인다**(멱등).
+   */
+  const DEPLOY_MARK = /\s*\[배포[^\]]*\]\s*$/;
+  const stampDeployedName = async (uploaded: number, mode: InfinityMode) => {
+    try {
+      const base = (batchName || '').replace(DEPLOY_MARK, '').trimEnd();
+      const now = new Date();
+      const ts = `${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} `
+        + `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+      const kind = mode === 'only' ? '무한만' : mode === 'append' ? '원본+무한' : '원본';
+      const next = `${base} [배포 ${ts} · ${gboostBoardId} · ${kind} ${uploaded}]`;
+      await renameProductionBatch(batchId, next);
+      addNotification('info', `배치 이름에 배포 표시 추가: ${next}`);
+    } catch (e) {
+      // 이름 표시는 부가 기능 — 실패해도 업로드 결과에 영향 주지 않는다.
+      console.warn('[export] 배포 마커 갱신 실패:', e);
+    }
   };
+
+  /**
+   * [업로드 대상] 원본 + (옵션) 무한 사본.
+   * 반환 항목의 `targetId` 가 GBoost 업로드 키이고, `sourceLevel` 은 보상/자동수집 규칙에
+   * 쓰는 원본 레벨번호다(무한 사본도 원본 기준을 그대로 쓴다 — 위 주석의 정렬 근거 참조).
+   */
+  /**
+   * 업로드 대상 목록.
+   *
+   * `slotNumber` = **게임에서 실제로 몇 번째 레벨인가**. 원본은 레벨 번호 그대로,
+   * 무한 사본은 `infinity_N` 의 N(=1부터) 이다.
+   * autoCollect 처럼 '10의 배수마다' 같은 위치 기반 규칙은 원본 번호가 아니라 이 값으로 판정해야 한다.
+   * 지금은 sourceStart=501 이라 500 오프셋이 10의 배수여서 둘이 우연히 일치하지만,
+   * 시작점을 505 등으로 바꾸면 어긋난다(Lv510 → infinity_6 인데 원본 기준으론 10배수로 판정).
+   */
+  const buildUploadTargets = (levels: ProductionLevel[]): Array<{
+    targetId: string; level: ProductionLevel; sourceLevel: number; slotNumber: number; isInfinity: boolean;
+  }> => {
+    const out = infinityMode === 'only' ? [] : levels.map(l => ({
+      targetId: `${gboostLevelPrefix}${l.meta.level_number}`,
+      level: l, sourceLevel: l.meta.level_number, slotNumber: l.meta.level_number, isInfinity: false,
+    }));
+    if (infinityEnabled) {
+      const src = levels
+        .filter(l => l.meta.level_number >= infinitySourceStart && l.meta.level_number <= infinitySourceEnd)
+        .sort((a, b) => a.meta.level_number - b.meta.level_number);
+      src.forEach((l, i) => out.push({
+        targetId: `${infinityPrefix}${i + 1}`,
+        level: l, sourceLevel: l.meta.level_number, slotNumber: i + 1, isInfinity: true,
+      }));
+    }
+    return out;
+  };
+
 
   // JSON 파일 내보내기
   const handleExportJson = async () => {
@@ -376,6 +479,14 @@ export function ProductionExport({
     try {
       const _all = await getProductionLevelsByBatch(batchId);
       _exportSet = _all.filter(l => l.meta.status === 'approved' || l.meta.status === 'exported');
+      // [무한 모드 정합] `exportProductionLevels` 는 only=true 일 때 원본을 버리고
+      // sourceStart~sourceEnd 사본만 내보낸다. 게이트도 **같은 세트**를 봐야 한다 —
+      // 안 그러면 내보내지도 않는 구간(예: Lv1~500)의 결함으로 차단당한다.
+      // append 모드는 원본 전체 + 사본이라 필터가 필요 없다(사본 소스가 원본의 부분집합).
+      if (infinityEnabled && infinityMode === 'only') {
+        _exportSet = _exportSet.filter(
+          l => l.meta.level_number >= infinitySourceStart && l.meta.level_number <= infinitySourceEnd);
+      }
     } catch { /* 조회 실패 시에만 진행(서버 게이트가 최종 방어) */ }
     if (_exportSet) {
       const _bad = findUndeployableLevels(_exportSet);   // 순수함수 — try 밖에서 평가(fail-CLOSED)
@@ -394,6 +505,11 @@ export function ProductionExport({
         include_meta: includeMeta,
         filename_pattern: filenamePattern,
         output_dir: '',
+        // [무한 레벨] 켜져 있으면 원본 뒤에 infinity_* 사본을 덧붙인다(원본은 불변).
+        infinity: infinityEnabled
+          ? { enabled: true, only: infinityMode === 'only', prefix: infinityPrefix,
+              sourceStart: infinitySourceStart, sourceEnd: infinitySourceEnd }
+          : undefined,
       };
 
       const result = await exportProductionLevels(batchId, config);
@@ -523,15 +639,26 @@ export function ProductionExport({
       // 번호로 만들었기 때문에 batch에 레벨 7만 있어도 ID가 level_1로 표시되어
       // 실제 업로드 대상(level_7)과 불일치 → 사용자 혼란.
       const exportableForCheck = await getExportableLevels();
-      const targetIds: ConflictInfo[] = exportableForCheck.map(l => ({
-        targetId: getTargetLevelId(l.meta.level_number),
-        levelNumber: l.meta.level_number,
+      // [무한 모드 정합] 충돌 검사는 **실제 업로드 대상과 같은 소스**(buildUploadTargets)를 써야 한다.
+      // 예전엔 항상 `level_{번호}` 로 대상을 만들고 서버도 `level_` 프리픽스로만 조회했다
+      // → '무한만' 모드에서 실제 업로드는 `infinity_*` 인데 검사는 `level_*` 를 보게 되어
+      //   기존 level_1..1500 전부를 충돌로 오판 → **불필요한 백업 1500건**이 돌았다.
+      //   (게다가 업로드 루프의 skip 판정은 infinity_N 을 level_N 셋과 비교해 항상 빗나감)
+      const uploadTargetsForCheck = buildUploadTargets(exportableForCheck);
+      const targetIds: ConflictInfo[] = uploadTargetsForCheck.map(t => ({
+        targetId: t.targetId,
+        levelNumber: t.sourceLevel,
       }));
 
-      // Get existing levels from server (fetch more than needed to ensure all conflicts are detected)
+      // 조회 프리픽스도 모드에 맞춘다(원본만 / 무한만 / 둘 다).
+      const prefixes = Array.from(new Set(
+        uploadTargetsForCheck.map(t => (t.isInfinity ? infinityPrefix : gboostLevelPrefix))));
       const fetchLimit = Math.max(targetIds.length + 100, 2000);
-      const existingLevels = await listFromGBoost(gboostBoardId, gboostLevelPrefix, fetchLimit);
-      const existingIds = new Set(existingLevels.levels.map(l => l.id));
+      const existingIds = new Set<string>();
+      for (const px of prefixes) {
+        const res = await listFromGBoost(gboostBoardId, px, fetchLimit);
+        res.levels.forEach(l => existingIds.add(l.id));
+      }
 
       // Find conflicts
       const conflicts = targetIds.filter(t => existingIds.has(t.targetId));
@@ -550,8 +677,50 @@ export function ProductionExport({
     }
   };
 
+  /**
+   * 업로드 대상이 배포 게이트를 통과하는지 **미리** 본다.
+   *
+   * 예전엔 게이트가 handleUpload 안에만 있어서, 1500건 백업을 다 돌린 **뒤에야** 차단됐다
+   * (실측: level_1~1500 백업 GET 1500건 완료 → 게이트 거부 → config 화면 복귀).
+   * 백업은 수 분이 걸리고 되돌릴 수도 없으니, 시작 전에 같은 판정을 돌려 막는다.
+   */
+  const preflightBlocked = async (): Promise<boolean> => {
+    try {
+      const lv = await getExportableLevels();
+      const targets = buildUploadTargets(lv);
+      const gate = [...new Map(targets.map(t => [t.level.meta.level_number, t.level])).values()];
+      const bad = findUndeployableLevels(gate);
+      if (bad.length > 0) {
+        const nums = bad.slice(0, 12).map(b => `${b.levelNumber}(${b.reasons[0]})`).join(', ');
+        addNotification('error',
+          `❌ 업로드 차단 — 배포 불가 ${bad.length}개 포함 (예: ${nums}${bad.length > 12 ? '…' : ''}). 백업 전에 중단했습니다. 재검증/재생성 후 업로드하세요.`);
+        setGboostPhase('config');
+        return true;
+      }
+      // 난이도 경고는 **막지 않는다** — RL 은 봇 시뮬 추정치라 확정 판정이 아니다.
+      // 다만 규모가 크면 모르고 올리는 일이 없도록 확인만 받는다.
+      const warn = findDifficultyWarnings(gate);
+      if (warn.length > 0) {
+        const nums = warn.slice(0, 10).map(w => `${w.levelNumber}(${w.reason})`).join(', ');
+        if (!window.confirm(
+          `⚠️ 난이도 경고 ${warn.length}개 (전체 ${gate.length}개 중)\n\n`
+          + `${nums}${warn.length > 10 ? ' …' : ''}\n\n`
+          + `RL 봇 기준 목표에 못 미치는 레벨입니다. 클리어 불가가 확정된 것은 아닙니다\n`
+          + `(A* 완전탐색으로 클리어 경로가 확인된 사례 다수).\n\n`
+          + `그대로 업로드할까요?`)) {
+          setGboostPhase('config');
+          return true;
+        }
+      }
+    } catch (e) {
+      console.warn('[export] preflight 실패(계속 진행):', e);
+    }
+    return false;
+  };
+
   // Backup and upload
   const handleBackupAndUpload = async () => {
+    if (await preflightBlocked()) return;
     if (backupBeforeOverwrite && conflictingLevels.length > 0) {
       setBackupProgress({ current: 0, total: conflictingLevels.length });
 
@@ -574,6 +743,11 @@ export function ProductionExport({
         }
         setBackupProgress({ current: i + 1, total: conflictingLevels.length });
       }
+      // [필수] 진행률을 0으로 되돌린다. 예전엔 1500/1500 이 그대로 남아
+      //   ① "백업 진행 중… 1500/1500" 이 계속 떠 있고
+      //   ② `disabled={backupProgress.total > 0}` 때문에 덮어쓰기 버튼이 **영구 비활성화**됐다.
+      // 업로드가 게이트에 막혀 config 로 돌아오면 사용자는 아무것도 누를 수 없는 상태가 된다.
+      setBackupProgress({ current: 0, total: 0 });
     }
 
     await handleUpload();
@@ -596,7 +770,16 @@ export function ProductionExport({
 
       // [배포 하드게이트] 여기가 **실제 게임 배포 경로**다. 기존엔 JSON 내보내기에만 게이트가 있어
       // 업로드로는 클리어 불가/규칙 위반 레벨이 그대로 나갔다. 순수함수라 fail-CLOSED.
-      const _undeployable = findUndeployableLevels(exportableLevels);
+      // [무한 모드 정합] 게이트 대상은 **실제로 올라가는 레벨**이어야 한다. 예전엔
+      // exportableLevels(배치 전체)를 그대로 검사해서, '무한만' 모드처럼 일부 구간만 올릴 때
+      // 업로드 대상이 아닌 레벨의 결함까지 차단 사유로 잡혔다(예: 501~1500만 올리는데
+      // Lv11~500 의 미검증이 카운트됨). buildUploadTargets 로 좁힌 뒤 레벨 번호로 중복 제거한다
+      // (append 모드는 같은 레벨이 level_N / infinity_N 두 번 나오므로).
+      const _uploadTargets = buildUploadTargets(exportableLevels);
+      const _gateLevels = [...new Map(
+        _uploadTargets.map(t => [t.level.meta.level_number, t.level])).values()];
+      // (프리플라이트에서 이미 걸렀지만, 다른 진입 경로를 위해 이중 방어로 남긴다)
+      const _undeployable = findUndeployableLevels(_gateLevels);
       if (_undeployable.length > 0) {
         const nums = _undeployable.slice(0, 12).map(b => `${b.levelNumber}(${b.reasons[0]})`).join(', ');
         addNotification('error', `❌ 업로드 차단 — 배포 불가 ${_undeployable.length}개 포함 (예: ${nums}${_undeployable.length > 12 ? '…' : ''}). 재검증/재생성 후 업로드하세요.`);
@@ -661,27 +844,35 @@ export function ProductionExport({
       };
 
       // Decide autoCollectCount (암호화) per level based on UI mode (upload payload only).
-      const resolveAutoCollect = (levelNumber: number): number | null => {
+      // [중요] 판정 기준은 **게임 내 위치(slotNumber)** 다. 무한 사본은 원본 레벨 번호가 아니라
+      // infinity_N 의 N 을 쓴다 — 플레이어가 보는 건 무한 모드의 N번째 레벨이지 원본 번호가 아니다.
+      // 예전엔 sourceLevel 로 판정했는데, sourceStart=501(오프셋 500=10배수)일 때만 우연히 맞았다.
+      // 시작점을 505 로 바꾸면 Lv510(10배수)이 infinity_6 에 들어가 무한 모드의 6번째가 autoCollect 를
+      // 갖고, 정작 10번째(infinity_10=Lv514)는 못 갖는 어긋남이 생긴다.
+      const resolveAutoCollect = (slotNumber: number): number | null => {
         if (autoCollectMode === 'preserve') return null; // do not override
-        // multiples10: 10·20·30… 레벨은 설정값, 나머지는 0 (해제)
-        const isMultipleOf10 = levelNumber > 0 && levelNumber % 10 === 0;
+        // multiples10: 10·20·30… 번째 레벨은 설정값, 나머지는 0 (해제)
+        const isMultipleOf10 = slotNumber > 0 && slotNumber % 10 === 0;
         return isMultipleOf10 ? Math.max(0, Math.floor(autoCollectValue)) : 0;
       };
 
-      for (let i = 0; i < exportableLevels.length; i++) {
-        const level = exportableLevels[i];
-        const targetId = getTargetLevelId(level.meta.level_number);
+      // 원본 + (옵션) 무한 사본. 무한 사본은 targetId 만 다르고 페이로드/규칙은 원본과 동일.
+      const uploadTargets = buildUploadTargets(exportableLevels);
+      for (let i = 0; i < uploadTargets.length; i++) {
+        const { targetId, level, slotNumber } = uploadTargets[i];
 
         // overwrite=false이고 충돌이 있으면 건너뛰기
         if (!overwrite && conflictIds.has(targetId)) {
           skippedCount++;
-          setGboostProgress({ current: i + 1, total: exportableLevels.length });
+          setGboostProgress({ current: i + 1, total: uploadTargets.length });
           continue;
         }
 
         // 업로드 페이로드에만 rewardCoin / autoCollectCount 주입 (저장본은 그대로 둠)
-        const overrideCoin = resolveRewardCoin(level.meta.level_number, level.level_json);
-        const overrideAutoCollect = resolveAutoCollect(level.meta.level_number);
+        // rewardCoin 의 보스/특수 등급도 '게임 내 위치' 기반이라 같은 기준을 쓴다
+        // (원본 번호로 매기면 무한 모드에서 보스 보상이 엉뚱한 자리에 붙는다).
+        const overrideCoin = resolveRewardCoin(slotNumber, level.level_json);
+        const overrideAutoCollect = resolveAutoCollect(slotNumber);
         let uploadJson: LevelJSON = level.level_json;
         if (overrideCoin !== null || overrideAutoCollect !== null) {
           uploadJson = { ...level.level_json };
@@ -703,11 +894,13 @@ export function ProductionExport({
           failCount++;
         }
 
-        setGboostProgress({ current: i + 1, total: exportableLevels.length });
+        setGboostProgress({ current: i + 1, total: uploadTargets.length });
       }
 
       setUploadResult({ success: successCount, failed: failCount, skipped: skippedCount });
       setGboostPhase('complete');
+      // 실제로 올라간 게 있을 때만 표시(전부 스킵/실패면 배포로 치지 않는다)
+      if (successCount > 0) await stampDeployedName(successCount, infinityMode);
 
       if (failCount === 0 && skippedCount === 0) {
         addNotification('success', `${successCount}개 레벨을 GBoost에 업로드했습니다`);
@@ -932,6 +1125,65 @@ export function ProductionExport({
                       className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-white"
                     />
                   </div>
+                </div>
+
+                {/* [무한 레벨] 1~1500 완주 유저용 사본 — 같은 보드에 infinity_* 로 추가 업로드 */}
+                <div className="space-y-2 p-2 bg-purple-900/15 rounded border border-purple-800/40">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-sm text-white font-medium">♾️ 무한 레벨</span>
+                    {([
+                      ['off', '원본만', '무한 사본 없음(기존 동작)'],
+                      ['append', '원본 + 무한', '원본 뒤에 사본을 덧붙임'],
+                      ['only', '무한만', '원본 제외, 사본만 내보냄'],
+                    ] as Array<[InfinityMode, string, string]>).map(([m, label, tip]) => (
+                      <button key={m} onClick={() => setInfinityMode(m)} title={tip}
+                        className={`px-2 py-1 rounded text-xs border transition-colors ${
+                          infinityMode === m
+                            ? 'bg-purple-600 border-purple-500 text-white'
+                            : 'bg-gray-700 border-gray-600 text-gray-300 hover:border-gray-500'
+                        }`}>
+                        {label}
+                      </button>
+                    ))}
+                    {infinityEnabled && (
+                      <span className="text-xs text-gray-400">
+                        원본 {infinitySourceStart}~{infinitySourceEnd} → {infinityPrefix}1~{infinityPrefix}
+                        {Math.max(0, infinitySourceEnd - infinitySourceStart + 1)}
+                      </span>
+                    )}
+                  </div>
+                  {infinityEnabled && (
+                    <>
+                      <div className="grid grid-cols-3 gap-2">
+                        <div>
+                          <label className="block text-[11px] text-gray-400 mb-1">ID 프리픽스</label>
+                          <input type="text" value={infinityPrefix}
+                            onChange={(e) => setInfinityPrefix(e.target.value)}
+                            className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-xs text-white" />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-gray-400 mb-1">원본 시작</label>
+                          <input type="number" value={infinitySourceStart} min={1}
+                            onChange={(e) => setInfinitySourceStart(Math.max(1, parseInt(e.target.value) || 1))}
+                            className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-xs text-white" />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-gray-400 mb-1">원본 끝</label>
+                          <input type="number" value={infinitySourceEnd} min={1}
+                            onChange={(e) => setInfinitySourceEnd(Math.max(1, parseInt(e.target.value) || 1))}
+                            className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-xs text-white" />
+                        </div>
+                      </div>
+                      <p className="text-[11px] text-purple-300">
+                        {infinityMode === 'only'
+                          ? '⚠️ 무한 사본만 업로드/저장합니다 — 원본(level_*)은 포함되지 않습니다.'
+                          : '원본은 그대로 두고 같은 보드에 사본을 덧붙입니다.'}
+                        {(infinitySourceStart - 1) % 10 === 0
+                          ? ' 오프셋이 10의 배수라 보스(10배수)·스페셜(끝자리9)·autoCollect 위치가 원본과 그대로 정렬됩니다.'
+                          : ' ⚠️ 시작−1 이 10의 배수가 아니라 보스/자동수집 위치가 원본과 어긋납니다(권장: 501).'}
+                      </p>
+                    </>
+                  )}
                 </div>
 
                 {/* Range Selection */}
@@ -1249,7 +1501,9 @@ export function ProductionExport({
                   {overwrite ? (
                     <Button
                       onClick={handleBackupAndUpload}
-                      disabled={backupProgress.total > 0}
+                      // 백업이 '진행 중'일 때만 잠근다. total>0 로 잠그면 백업이 끝난 뒤에도
+                      // 진행률이 남아 버튼이 영구 비활성화된다(위 setBackupProgress 리셋과 한 쌍).
+                      disabled={backupProgress.total > 0 && backupProgress.current < backupProgress.total}
                       className="flex-1"
                     >
                       {backupBeforeOverwrite ? '백업 후 덮어쓰기' : '덮어쓰기'}

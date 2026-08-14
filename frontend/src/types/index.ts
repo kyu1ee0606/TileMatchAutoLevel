@@ -109,6 +109,16 @@ export interface GenerationParams {
   size_diversity_start_level?: number;
   // [유닛 조립] 바닥 주패턴 + 위층 소형 유닛 조립(sparse 해결·타겟 도달). use_reverse_generation 병용.
   unit_assembly?: boolean;
+  // [등껍질 침식] custom_patterns 의 turtle 태그 패턴 id(예 '0_6x6'). 그 모양을 바닥 1층으로
+  // 두고 완전받침 침식으로 위층을 쌓는다. 층수=침식 깊이(난이도 등급 상한 무시).
+  turtle_pattern_id?: string;
+  // [층수 상한 스위치] false면 난이도 등급 층수 클램프를 끄고 min_layers 를 층수로 사용(수동 지정).
+  enforce_layer_cap?: boolean;
+  // [층 크기 순환] 층별 패턴 채움 크기의 **이전 층 대비 델타** 배열. 길이 = 층수-1.
+  // 미지정이면 백엔드 기본 [-1,-1,...] (한 층씩 축소하다 4에서 정지 → 같은 4x4 층 무한 반복).
+  // 예: 7→6→5→7→6→5 를 원하면 [-1,-1,+2,-1,-1].
+  // 주의: 헤더 격자는 짝홀 교대(짝수층 S / 홀수층 S-1) 고정이라 홀수층은 S-1 로 클램프됨.
+  layer_steps?: number[];
   use_reverse_generation?: boolean;
   // [보스 생성기] 10의 배수 보스 전용: 그리드 선언 최대 8, 5~6층, 레이어별 화려한 대칭
   // 템플릿 레시피(level_number 결정적 로테이션). 목표 클리어율 절반은 RL 검증에서 별도 적용.

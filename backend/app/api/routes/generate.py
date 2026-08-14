@@ -1324,6 +1324,10 @@ def _generate_level_impl(
         layer_steps=getattr(request, "layer_steps", None),
         concentric_deep=getattr(request, "concentric_deep", False),
         unit_assembly=getattr(request, "unit_assembly", False),
+        # [등껍질 침식] 지정 시 generate() 최상단에서 전용 경로로 위임(층수=침식 깊이).
+        turtle_pattern_id=getattr(request, "turtle_pattern_id", None),
+        # [층수 상한 스위치] False면 등급 클램프를 건너뛰고 min_layers 를 층수로 사용(수동 지정).
+        enforce_layer_cap=getattr(request, "enforce_layer_cap", True),
         layer_tile_configs=layer_tile_configs,
         layer_obstacle_configs=layer_obstacle_configs,
         layer_pattern_configs=layer_pattern_configs,

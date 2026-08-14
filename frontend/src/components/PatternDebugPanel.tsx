@@ -7,6 +7,8 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import apiClient from '../api/client';
+import { TurtleBaseLibrary } from './TurtleBaseLibrary';
+import { FixedLevelsPanel } from './FixedLevelsPanel';
 import { PatternSynthModal } from './PatternSynthModal';
 import { getPatternByIndex } from '../constants/patterns';
 import GameBoard from './GamePlayer/GameBoard';
@@ -1082,6 +1084,12 @@ export function PatternDebugPanel() {
       <p className="text-sm text-gray-400">
         패턴을 선택 → 비교 확인 → 그리드 클릭/드래그로 편집 → 복사하여 공유
       </p>
+
+      {/* [초반 고정] 1~31 튜토리얼 구간 고정 레벨 (보스 10·20·30 은 읽기전용) */}
+      <FixedLevelsPanel />
+
+      {/* [등껍질] 침식 스택 바닥 라이브러리 — 서브보스 자동 배정 후보 풀 */}
+      <TurtleBaseLibrary />
 
       {/* [유닛 조립] 소형 유닛 라이브러리 (unit_assembly 위층 조립에 사용) */}
       <div className="bg-gray-800/50 rounded p-2">

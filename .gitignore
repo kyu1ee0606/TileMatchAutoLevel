@@ -55,3 +55,6 @@ backend/data/production/
 backend/data/patterns.db
 backend/data/patterns.db-wal
 backend/data/patterns.db-shm
+
+# 야간 조사 job 런타임 상태 (실행 시마다 덮어씀)
+backend/data/night_study.json

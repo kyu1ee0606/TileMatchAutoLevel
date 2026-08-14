@@ -39,6 +39,48 @@ def _path(batch_id: str) -> str:
     return os.path.join(_STORE_DIR, f"{_safe_id(batch_id)}.json")
 
 
+# ── 배치 목록 인덱스 ──────────────────────────────────────────────────────────
+# 목록 API 는 이름/개수/버전만 필요한데, 예전엔 배치 파일 전체를 json.load 했다.
+# 실측: 파일 360개 · 총 1.3GB → 목록 1회에 22~95초. 프론트 axios 타임아웃(30s)을 넘겨
+# "서버 목록 조회 실패: timeout of 30000ms exceeded" 로 터졌고, 앱 마운트마다 발생했다.
+# → (mtime, size) 로 유효성을 판정하는 사이드카 인덱스를 두고, 바뀐 파일만 파싱한다.
+_INDEX_PATH = os.path.join(_STORE_DIR, "_index.json")
+
+
+def _load_index() -> Dict[str, Any]:
+    try:
+        with open(_INDEX_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_index(idx: Dict[str, Any]) -> None:
+    fd, tmp = tempfile.mkstemp(dir=_STORE_DIR, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(idx, f, ensure_ascii=False)
+        os.replace(tmp, _INDEX_PATH)
+    except Exception:  # noqa: BLE001
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def _index_entry(batch_id: str, batch: Dict[str, Any], level_count: int,
+                 saved_at: float, version: int, fp: str) -> Dict[str, Any]:
+    st = os.stat(fp)
+    return {
+        "batch_id": batch_id,
+        "name": (batch or {}).get("name"),
+        "level_count": level_count,
+        "saved_at": saved_at,
+        "size_bytes": st.st_size,
+        "version": version,
+        "_mtime": st.st_mtime,
+    }
+
+
 class SaveBatchRequest(BaseModel):
     batch_id: str = Field(..., description="배치 고유 ID")
     batch: Dict[str, Any] = Field(..., description="배치 메타(opaque)")
@@ -98,13 +140,21 @@ def _enforce_divisibility_gate(levels: List[Dict[str, Any]]) -> List[int]:
             bad = {t: c for t, c in counts.items() if c % 3 != 0}
         except Exception:
             continue
+        m = l.setdefault("meta", {})
         if bad:
-            m = l.setdefault("meta", {})
             m["verification_passed"] = False
             m["divisibility_violation"] = bad
             ln = m.get("level_number")
             if isinstance(ln, int):
                 flagged.append(ln)
+        elif "divisibility_violation" in m:
+            # [낙인 해제] 예전엔 위반을 찍기만 하고 **해소돼도 지우지 않았다**. 그래서 레벨을
+            # 고친 뒤에도 메타에 표식이 남아 배포 게이트가 계속 차단했다
+            # (실측: ÷3 복구 완료 후 19개가 실제 위반 0건인데 'div3' 사유로 업로드 차단).
+            # 게이트는 이 필드를 보고 판단하므로, 스캔이 해소도 반영해야 멱등이 성립한다.
+            m.pop("divisibility_violation", None)
+            # verification_passed 는 되살리지 않는다 — 난이도 판정은 별개이고,
+            # ÷3 이 풀렸다고 목표 난이도를 만족한다는 뜻은 아니다. 재검증이 확정한다.
     return flagged
 
 
@@ -181,6 +231,8 @@ def _scan_rule_violations(lj: Dict[str, Any], level_number: Optional[int]) -> Di
       bomb_range         : bomb_N 이 기획 3~5 밖 (시뮬 클램프와 불일치 → 난이도 왜곡)
       tutorial_missing   : 기믹 언락 첫 스테이지인데 해당 기믹 부재 (학습 기회 상실)
       timea_tight        : 제한시간이 가장 촉박한 티어 예산보다도 부족 (물리적 클리어 불가)
+      oversized_grid     : 층 헤더 col/row 가 8 초과 (디바이스 가독성 한계 — 타일이 너무 작아짐)
+      gimmick_unlock_violation : 해당 레벨에서 미해금 기믹이 배치됨
     """
     out: Dict[str, Any] = {}
     try:
@@ -272,6 +324,63 @@ def _scan_rule_violations(lj: Dict[str, Any], level_number: Optional[int]) -> Di
     except Exception:  # noqa: BLE001
         pass
 
+    # 5) 선언 격자 초과 — 층 헤더 col/row 가 디바이스 가독성 상한(8)을 넘음
+    #    `_scan_header_oob` 는 '타일이 헤더 밖인가'만 보고 **헤더 자체가 큰 것**은 못 잡는다.
+    #    실측: 타운팝 원본 템플릿 73건이 10x10 선언으로 출고됨(여백이 없어 크롭 불가한 D타입인데
+    #    규격 게이트가 보스 슬롯에만 걸려 있었다). 10칸 격자는 타일이 너무 작아 플레이 불가.
+    try:
+        _MAX_DECLARED = 8
+        worst = 0
+        for i in range(n_layers):
+            ld = lj.get(f"layer_{i}")
+            if not isinstance(ld, dict):
+                continue
+            try:
+                worst = max(worst, int(ld.get("col")), int(ld.get("row")))
+            except (TypeError, ValueError):
+                continue
+        if worst > _MAX_DECLARED:
+            out["oversized_grid"] = {"declared": worst, "max": _MAX_DECLARED}
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 6) 기믹 언락 위반 — 해당 레벨에서 아직 해금되지 않은 기믹이 배치됨
+    #    라우트는 필터하지만 생성기를 직접 호출하는 경로(후처리 스크립트 등)는 우회 가능했다.
+    #    실측: 서브보스 149개 중 23개 위반(curtain 23·unknown 18·grass 7·link 4·chain 2·ice 2).
+    #    저장 경계에서 잡으면 생성 경로와 무관하게 전 배치가 보호된다.
+    try:
+        if level_number is not None:
+            from ...models.leveling_config import PROFESSIONAL_GIMMICK_UNLOCK as _G
+            unlock = {g: int(c.unlock_level) for g, c in _G.items()}
+
+            def _norm(a: str) -> str:
+                a = str(a)
+                for pre in ("link", "curtain", "bomb", "teleport"):
+                    if a.startswith(pre):
+                        return pre
+                return a
+
+            used: Dict[str, int] = {}
+            for i in range(n_layers):
+                for td in ((lj.get(f"layer_{i}") or {}).get("tiles") or {}).values():
+                    if not (isinstance(td, list) and td):
+                        continue
+                    tt = str(td[0])
+                    if tt.startswith("craft_"):
+                        used["craft"] = used.get("craft", 0) + 1
+                    elif tt.startswith("stack_"):
+                        used["stack"] = used.get("stack", 0) + 1
+                    if len(td) > 1 and td[1]:
+                        g = _norm(td[1])
+                        used[g] = used.get(g, 0) + 1
+            bad = {g: {"count": c, "unlock": unlock[g]}
+                   for g, c in used.items()
+                   if g in unlock and level_number < unlock[g]}
+            if bad:
+                out["gimmick_unlock_violation"] = bad
+    except Exception:  # noqa: BLE001
+        pass
+
     return out
 
 
@@ -351,6 +460,14 @@ def save_batch(batch_id: str, req: SaveBatchRequest) -> SaveBatchResponse:
         if os.path.exists(tmp):
             os.remove(tmp)
         raise
+    # 인덱스 갱신 — 다음 목록 조회가 이 파일을 재파싱하지 않도록(저장 직후가 가장 흔한 경로)
+    try:
+        _idx = _load_index()
+        _idx[bid] = _index_entry(bid, req.batch, len(req.levels), saved_at, new_version, _path(bid))
+        _save_index(_idx)
+    except Exception:  # noqa: BLE001
+        pass  # 인덱스는 캐시일 뿐 — 실패해도 목록 조회가 재파싱으로 복구
+
     return SaveBatchResponse(ok=True, batch_id=bid, level_count=len(req.levels),
                              saved_at=saved_at, version=new_version,
                              divisibility_flagged=len(flagged),
@@ -363,26 +480,58 @@ def save_batch(batch_id: str, req: SaveBatchRequest) -> SaveBatchResponse:
 
 @router.get("/batches", response_model=List[BatchSummary])
 def list_batches() -> List[BatchSummary]:
-    """저장된 배치 요약 목록(최신 저장순)."""
+    """저장된 배치 요약 목록(최신 저장순).
+
+    인덱스 캐시 기반 — (mtime, size) 가 일치하면 파일을 열지 않는다.
+    바뀐/새 파일만 파싱하므로 정상 상태에선 디렉터리 stat 스캔 비용만 든다.
+    """
     _ensure_dir()
+    idx = _load_index()
     out: List[BatchSummary] = []
+    seen: set = set()
+    dirty = False
+
     for fn in os.listdir(_STORE_DIR):
-        if not fn.endswith(".json"):
+        if not fn.endswith(".json") or fn == "_index.json":
             continue
         fp = os.path.join(_STORE_DIR, fn)
+        bid = fn[:-5]
+        seen.add(bid)
         try:
-            with open(fp, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            out.append(BatchSummary(
-                batch_id=data.get("batch_id", fn[:-5]),
-                name=(data.get("batch") or {}).get("name"),
-                level_count=len(data.get("levels") or []),
-                saved_at=data.get("saved_at", os.path.getmtime(fp)),
-                size_bytes=os.path.getsize(fp),
-                version=int(data.get("version", 0)),
-            ))
-        except Exception:
+            st = os.stat(fp)
+        except OSError:
             continue
+        e = idx.get(bid)
+        if not (isinstance(e, dict) and e.get("_mtime") == st.st_mtime
+                and e.get("size_bytes") == st.st_size):
+            # 캐시 미스(신규·수정) → 이 파일만 파싱해 인덱스 갱신
+            try:
+                with open(fp, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:  # noqa: BLE001
+                continue
+            e = _index_entry(
+                data.get("batch_id", bid), data.get("batch") or {},
+                len(data.get("levels") or []),
+                data.get("saved_at", st.st_mtime),
+                int(data.get("version", 0)), fp)
+            idx[bid] = e
+            dirty = True
+        out.append(BatchSummary(
+            batch_id=e["batch_id"], name=e.get("name"),
+            level_count=int(e.get("level_count") or 0),
+            saved_at=float(e.get("saved_at") or 0.0),
+            size_bytes=int(e.get("size_bytes") or 0),
+            version=int(e.get("version") or 0),
+        ))
+
+    # 삭제된 배치의 인덱스 항목 정리
+    for stale in [k for k in idx if k not in seen]:
+        idx.pop(stale, None)
+        dirty = True
+    if dirty:
+        _save_index(idx)
+
     out.sort(key=lambda b: b.saved_at, reverse=True)
     return out
 

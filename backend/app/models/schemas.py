@@ -119,6 +119,17 @@ class GenerateRequest(BaseModel):
         default=False,
         description="유닛 조립: 바닥 큰층=주 패턴 / 위 작은층=밀도 높은 소형 유닛(3·6·9) 조립. 위층 sparse(타일 미달) 해결·타겟 도달·floating 0. use_reverse_generation과 병용 권장."
     )
+    turtle_pattern_id: Optional[str] = Field(
+        default=None,
+        description="등껍질 침식: custom_patterns.json 의 turtle 태그 패턴 id(예 '0_6x6'). "
+                    "그 모양을 바닥 1층으로 두고 완전받침 침식으로 위층을 쌓는다. 층수=침식 깊이(상한 무시)."
+    )
+    enforce_layer_cap: bool = Field(
+        default=True,
+        description="층수 상한 적용 여부. False면 난이도 등급 클램프(A:3~4/B:4~6/C:6~8/D:7~10)와 "
+                    "max_layers 클램프를 건너뛰고 min_layers 를 층수로 그대로 쓴다(수동 층수 지정). "
+                    "기본 True = 기존 동작."
+    )
     layer_tile_configs: Optional[List[LayerTileConfig]] = Field(
         default=None,
         description="Per-layer tile count settings. Unspecified layers auto-distribute remaining tiles."

@@ -138,6 +138,9 @@ class RLSimRequest(BaseModel):
     )
     seed: int = Field(default=DEFAULT_BASE_SEED, description="공통 난수 기준 시드")
     max_moves: Optional[int] = Field(default=None, description="이동 수 제한 (생략 시 레벨 값)")
+    # 예측이 전 구간 0 일 때 A* 로 대조할지. 비용(최대 8초)이 있어 기본은 끔 —
+    # 순차검증처럼 레벨당 여러 번 부르는 경로에서 켜면 전체가 느려진다.
+    check_solver_on_zero: bool = Field(default=False)
     target_difficulty: Optional[float] = Field(
         default=None, ge=0.0, le=1.0,
         description="목표난이도. 지정 시 예측클리어율을 목표곡선과 비교해 통과여부 산출."
@@ -197,6 +200,10 @@ class RLSimResult(BaseModel):
     target_clear_rate: Optional[float] = None   # 목표곡선 기대 클리어율 0~1
     clear_rate_gap: Optional[float] = None       # predicted - target (양수=목표보다 쉬움)
     verification_passed: Optional[bool] = None   # |gap|<=tol AND not unclearable
+    # [RL 신뢰도] 봇 예측이 구조와 어긋나는 레벨 표시. 난이도 판단에서 이 값을 쓰면 안 된다.
+    rl_unreliable: bool = False
+    rl_unreliable_reason: Optional[str] = None
+    solver_verdict: Optional[str] = None          # 대조에 쓴 A* 판정(측정했을 때만)
     skill_curve: List[SkillCurvePoint]
     total_rollouts: int
     elapsed_ms: int
@@ -303,6 +310,40 @@ def simulate_level_skill_sweep(request: RLSimRequest) -> RLSimResult:
         result["target_clear_rate"] = target
         result["clear_rate_gap"] = gap
         result["verification_passed"] = passed
+
+    # [RL 신뢰도 판정] 봇 예측이 0 에 붙었는데 레벨 구조는 멀쩡한 경우를 표시한다.
+    #
+    # 근거(야간 A* 전수판정 1467개): RL 예측 0% 인 246개가 **전부** PROVEN_SOLVABLE 이었고,
+    # 반대로 진짜 불가(PROVEN_IMPOSSIBLE) 18개는 전부 RL>0 이었다. 즉 RL 의 0% 는
+    # 클리어 가능성과 상관이 없다 — 봇이 독(7칸)을 못 다루는 고색상 레벨에서 나오는 값이다.
+    # 그 결과 배치의 22.1%(311개)가 예측 0 동률이 되어 난이도 서열 자체가 사라졌다.
+    #
+    # 여기서는 **추가 비용 없이 얻을 수 있는 신호만** 쓴다(A* 호출은 비싸므로 요청 시에만).
+    # 판정 결과는 상위(게이트·순차검증)가 "이 레벨의 RL 값은 난이도 판단에 쓰지 않는다"로 소비한다.
+    pcr = result.get("predicted_clear_rate", 0.0)
+    max_cr = result.get("max_clear_rate", 0.0)
+    cls = result.get("classification")
+    # [조건 확장] 예전엔 `pcr < 0.01` 만 봤다. 그런데 unclearable_suspect 로 분류되면서도
+    # pcr 이 0.01~0.05 인 레벨이 많아 플래그를 못 받고 재생성 루프로 갔다
+    # (실측: 순차검증 1회에 generate 5442 건 — 측정 814건 대비 6.7배).
+    # 분류가 unclearable_suspect 면 pcr 값과 무관하게 대조 대상이다. 그게 이 플래그의 존재 이유다.
+    suspect = pcr < 0.01 or cls == "unclearable_suspect"
+    if suspect:
+        if max_cr >= 0.05:
+            # 최고 실력 구간에선 깨는데 인구평균이 0 → 곡선이 극단으로 몰린 것(봇 한계 징후)
+            result["rl_unreliable"] = True
+            result["rl_unreliable_reason"] = f"인구평균 {pcr:.3f} 인데 최고 클리어율 {max_cr:.2f}"
+        elif request.check_solver_on_zero:
+            # 전 구간 0 — A* 로 실제 클리어 가능성을 확인해 봇 한계인지 진짜 결함인지 가른다.
+            try:
+                from ...core.solver import solve_level
+                sv = solve_level(request.level_json, node_budget=200000, time_budget_s=8.0)
+                result["solver_verdict"] = sv["verdict"]
+                if sv["verdict"] == "PROVEN_SOLVABLE":
+                    result["rl_unreliable"] = True
+                    result["rl_unreliable_reason"] = "RL 전구간 0 이나 A* 가 클리어 경로 확인"
+            except Exception:  # noqa: BLE001 — 대조 실패는 판정 보류일 뿐 막지 않는다
+                logger.exception("[rl-sim] 솔버 대조 실패")
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
     return RLSimResult(elapsed_ms=elapsed_ms, **result)

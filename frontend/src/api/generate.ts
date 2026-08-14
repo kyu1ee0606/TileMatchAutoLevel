@@ -5,6 +5,9 @@ export interface GenerateRequest {
   target_difficulty: number;
   grid_size?: [number, number];
   max_layers?: number;
+  // [수동 층수] 백엔드 GenerationParams.min_layers. **기존엔 매핑이 없어 전송되지 않았다** —
+  // enforce_layer_cap=false 일 때 층수를 결정하는 값이라 반드시 함께 보내야 한다.
+  min_layers?: number;
   tile_types?: string[];
   tile_type_profile?: string;  // 레벨별 타일 종류 수(V) 분포 프로파일. undefined=baseline
   obstacle_types?: string[];
@@ -33,6 +36,12 @@ export interface GenerateRequest {
   size_diversity_start_level?: number;
   // [유닛 조립] 바닥 주패턴 + 위층 소형 유닛 조립(sparse 해결). use_reverse_generation 병용 권장.
   unit_assembly?: boolean;
+  // [등껍질 침식] 화이트리스트 패턴 id. 지정 시 백엔드가 전용 경로로 생성(층수=침식 깊이).
+  turtle_pattern_id?: string;
+  // [층수 상한 스위치] false면 등급 클램프 해제 → min_layers 가 층수가 된다.
+  enforce_layer_cap?: boolean;
+  // [층 크기 순환] 층별 패턴 채움 크기 델타(길이=층수-1). 백엔드 GenerationParams.layer_steps.
+  layer_steps?: number[];
   // [보스 생성기] 그리드≤8·5~6층·레시피 로테이션 (백엔드 boss_mode)
   boss_mode?: boolean;
 }
@@ -56,12 +65,18 @@ export async function generateLevel(
     level_number?: number;  // Current level number for unlock checking
     use_reverse_generation?: boolean;  // [역생성] concrete 솔버블 보장
     reverse_generation_max_open?: number;
+    /**
+     * 취소 신호. 순차검증 '중지'가 **이미 날아간 요청까지** 끊으려면 필요하다.
+     * 없으면 중지를 눌러도 진행 중인 생성(후보 15개)이 다 끝날 때까지 기다린다.
+     */
+    signal?: AbortSignal;
   }
 ): Promise<GenerationResult> {
   const request: GenerateRequest = {
     target_difficulty: params.target_difficulty,
     grid_size: params.grid_size,
     max_layers: params.max_layers,
+    min_layers: params.min_layers,
     tile_types: params.tile_types,
     tile_type_profile: params.tile_type_profile,
     obstacle_types: params.obstacle_types,
@@ -76,6 +91,12 @@ export async function generateLevel(
     size_diversity_start_level: params.size_diversity_start_level,
     // [유닛 조립]
     unit_assembly: params.unit_assembly,
+    // [등껍질 침식]
+    turtle_pattern_id: params.turtle_pattern_id,
+    // [수동 층수]
+    enforce_layer_cap: params.enforce_layer_cap,
+    // [층 크기 순환]
+    layer_steps: params.layer_steps,
     // Auto gimmick selection
     auto_select_gimmicks: gimmickOptions?.auto_select_gimmicks,
     available_gimmicks: gimmickOptions?.available_gimmicks,
@@ -96,6 +117,7 @@ export async function generateLevel(
 
   const response = await apiClient.post<GenerationResult>('/generate', request, {
     timeout: timeoutMs,
+    signal: gimmickOptions?.signal,
   });
   return response.data;
 }

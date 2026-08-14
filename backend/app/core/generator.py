@@ -1,4 +1,5 @@
 """Level generator engine with difficulty targeting."""
+import copy
 import logging
 import random
 import time
@@ -1031,6 +1032,25 @@ class LevelGenerator:
         """
         start_time = time.time()
 
+        # [초반 고정 레벨] 1~31 중 저장소에 등록된 레벨은 **그대로** 출고한다.
+        # 튜토리얼 구간은 배치마다 모양이 바뀌면 학습 흐름이 흔들려 고정이 필요하다.
+        # 보스(10·20·30)는 저장 대상이 아니라 여기서 안 걸린다(보스 템플릿이 정본).
+        # 안전 tail(÷3 보장 → _finalize_level)만 태워 저장 이후의 규칙 변경에도 대응한다.
+        if params.level_number is not None:
+            _fx = self._load_fixed_level(params.level_number)
+            if _fx is not None:
+                return self._finish_fixed_level(_fx, params, start_time)
+
+        # [등껍질 침식] 모양이 층수·타일수를 결정하므로 절차생성의 층수/타일수/골 배치 기계를
+        # 통과시키면 안 된다(실측: 골 출구 강제가 스택을 관통해 구멍을 뚫어 ÷3·받침이 동시에 깨짐).
+        # 템플릿 경로와 동일한 꼬리(t0 배정 → 튜토리얼 보장 → ÷3 → _finalize_level)만 태운다.
+        # 실패(없는 id·깊이<2) 시 None → 마커 지우고 아래 일반 경로로 폴백.
+        if getattr(params, "turtle_pattern_id", None):
+            _tres = self._generate_turtle(params, start_time)
+            if _tres is not None:
+                return _tres
+            params.turtle_pattern_id = None
+
         # [BOSS_MODE] 보스 전용 파라미터 오버라이드 — 그리드 상한 8(선언), 층수 5~6,
         # 대칭/화려 템플릿 레시피(auto-mix에서 level_number 결정적 적용), 기믹 강도 상향.
         if getattr(params, "boss_mode", False):
@@ -1498,9 +1518,23 @@ class LevelGenerator:
         level = self._strip_orphaned_link_tiles(level)
 
         # [INNER_DIVERSIFY] craft/stack 내부 명시 다양화 bake — 필드 전량 명시 레벨에서
-        # 내부가 단색 3뭉치로 확정되는 게임 세트분배 문제 해소. 타입 카운트는 순열 불변(÷3 보존)
-        # 이므로 위 ÷3 보정/검증 결과에 영향 없음. 반드시 모든 타일 변형 단계 이후 마지막에 실행.
+        # 내부가 단색 3뭉치로 확정되는 게임 세트분배 문제 해소.
+        # ⚠️ "타입 카운트 순열 불변이라 ÷3 보존"은 **key 슬롯이 없을 때만** 참이다.
+        #   분배기는 unlockTile>0 이면 배정에 "key"를 섞는데, key 는 매칭 대상이 아니다.
+        #   ÷3 게이트(1405줄)는 컨테이너 내부를 't0 N개 = 매칭타일 N개'로 세는데, bake 가 그중
+        #   일부를 key 로 굳히면 매칭 대상이 줄어 ÷3 이 사후에 깨진다. 아무도 재검사하지 않았다.
+        #   실측: 야간 A* 전수판정에서 PROVEN_IMPOSSIBLE 18개가 **전부** 이 경로였다
+        #        (예: Lv336 stack_n=[5,'t9_t9_key_t9_key'] → key 2개 → 매칭 46개(%3=1)).
+        # → bake 결과를 게임 정본 카운터(solver._clearability_type_counts)로 재검증하고,
+        #   깨졌으면 bake 를 **되돌린다**. 다양화는 미관 최적화라 클리어가능성보다 우선할 수 없다.
+        _pre_bake = copy.deepcopy(level)
         level = self._diversify_container_inner_tiles(level)
+        if not self._clearability_ok(level):
+            if self._clearability_ok(_pre_bake):
+                logger.warning("[INNER_DIVERSIFY] bake 후 ÷3 위반 → bake 롤백(다양화 포기, 클리어가능 우선)")
+                level = _pre_bake
+            else:
+                logger.error("[INNER_DIVERSIFY] bake 전에도 ÷3 위반 — 상위 ÷3 게이트 결함 의심")
 
         # [grass 홀짝착각방지] 모든 좌표/타일 변형 단계 '이후' 최종 실행 — 짝수 층차(같은 홀짝) 0오프셋으로
         # 다른 층 타일이 grass 이웃 자리에 겹쳐보여 착각 유발하는 grass 속성 일괄 제거. (모든 배치경로 공통.)
@@ -1539,6 +1573,474 @@ class LevelGenerator:
             generation_time_ms=generation_time_ms,
             playability_warning=getattr(self, "_last_playability_warning", False),
             estimated_clear_rate=getattr(self, "_last_estimated_clear_rate", 1.0),
+        )
+
+    # ── [등껍질 침식] 완전받침 침식 스택 ─────────────────────────────────────────
+    # 모델: 선정된 '두꺼운' 모양을 **바닥 1층**으로 두고, 위층은 자기가 덮는 하위 칸이
+    # **전부** 있을 때만 생성한다(all-조건). 홀짝 교대 격자(짝수층 S, 홀수층 S-1)에서
+    # 2층마다 테두리 한 겹이 벗겨져 거북등껍질 실루엣이 된다.
+    #
+    # 게임의 valid_support_mask 는 any-조건(하위 1개만 덮어도 배치 가능)이라 위층이 **넓어진다**.
+    # 침식에는 반드시 all-조건을 써야 한다 — 오프셋 자체는 정본(get_cover_offsets) 그대로.
+    #
+    # 실측(실험 스크립트 exp_turtle_select.py): custom_patterns 474개 중 깊이≥4·총타일≤130
+    # 조건을 만족한 49개 전부 격자위반 0 / ÷3 위반 0 / floating 0 / avg봇 클리어 0.82~1.00.
+    TURTLE_MAX_LAYERS = 12
+
+    @staticmethod
+    def _turtle_peel_stack(base_cells: Set[Tuple[int, int]], base_col: int
+                           ) -> List[Tuple[int, int, Set[Tuple[int, int]]]]:
+        """바닥 1층에서 시작해 다 깎일 때까지. 반환 [(layer_idx, col, cells)]."""
+        from .unit_templates import get_cover_offsets
+        out: List[Tuple[int, int, Set[Tuple[int, int]]]] = [(0, base_col, set(base_cells))]
+        cur, cur_layer, cur_col = set(base_cells), 0, base_col
+        idx = 1
+        while idx < LevelGenerator.TURTLE_MAX_LAYERS:
+            ucol = base_col - (idx % 2)
+            if ucol < 1:
+                break
+            offs = get_cover_offsets(cur_layer, idx, cur_col, ucol)
+            nxt = {(ux, uy)
+                   for ux in range(ucol) for uy in range(ucol)
+                   if all((ux - dx, uy - dy) in cur for dx, dy in offs)}
+            if not nxt:
+                break
+            out.append((idx, ucol, nxt))
+            cur, cur_layer, cur_col = nxt, idx, ucol
+            idx += 1
+        return out
+
+    @classmethod
+    def load_turtle_pattern(cls, pattern_id: str) -> Optional[Tuple[Set[Tuple[int, int]], int]]:
+        """등껍질 바닥 모양 조회 → (셀집합, 격자크기). 없으면 None.
+
+        조회 순서:
+          1) `turtle_bases` 전용 라이브러리 (id 가 `tb_` 로 시작) — 사용자가 패턴 디버그 탭에서
+             등록한 등껍질 전용 바닥. 기존 49종도 여기로 복사돼 있다.
+          2) `custom_patterns.json` 키(예 "0_6x6") — 하위호환(기존 배치의 스탬프가 이 형식).
+        """
+        if str(pattern_id).startswith("tb_"):
+            try:
+                from . import turtle_bases as _TB
+                e = _TB.get_base(pattern_id)
+                if e:
+                    g = int(e.get("grid") or 0)
+                    cs = _TB.parse_cells(e.get("cells") or [], g)
+                    if cs:
+                        return cs, g
+            except Exception:  # noqa: BLE001
+                pass
+            return None
+        import json as json_mod
+        import os
+        _this_dir = os.path.dirname(os.path.abspath(__file__))
+        pattern_file = os.path.normpath(os.path.join(_this_dir, "..", "..", "data", "custom_patterns.json"))
+        try:
+            mtime = os.path.getmtime(pattern_file)
+            if cls._custom_patterns_cache is None or mtime > cls._custom_patterns_mtime:
+                with open(pattern_file, "r") as f:
+                    cls._custom_patterns_cache = json_mod.load(f)
+                cls._custom_patterns_mtime = mtime
+        except (FileNotFoundError, json_mod.JSONDecodeError, OSError):
+            return None
+        entry = (cls._custom_patterns_cache or {}).get(pattern_id)
+        if not isinstance(entry, dict):
+            return None
+        try:
+            g = int(entry.get("grid_size"))
+        except (TypeError, ValueError):
+            return None
+        cells: Set[Tuple[int, int]] = set()
+        for p in entry.get("positions") or []:
+            try:
+                x, y = map(int, str(p).split("_"))
+            except ValueError:
+                continue
+            if 0 <= x < g and 0 <= y < g:
+                cells.add((x, y))
+        return (cells, g) if cells else None
+
+    def _build_turtle_layers(self, level: Dict[str, Any],
+                             stack: List[Tuple[int, int, Set[Tuple[int, int]]]]
+                             ) -> List[Tuple[int, str]]:
+        """침식 스택을 level_json 층으로 기록. 타입은 t0(뒤 파이프라인이 배정)."""
+        all_positions: List[Tuple[int, str]] = []
+        for (li, col, cells) in stack:
+            tiles: Dict[str, Any] = {}
+            for (x, y) in sorted(cells):
+                pos = f"{x}_{y}"
+                tiles[pos] = ["t0", ""]
+                all_positions.append((li, pos))
+            level[f"layer_{li}"] = {"col": str(col), "row": str(col),
+                                    "num": str(len(tiles)), "tiles": tiles}
+        level["layer"] = len(stack)
+        logger.info(f"[TURTLE] {len(stack)}층 침식 스택, 총 {len(all_positions)} 타일 "
+                    f"({[len(c) for _, _, c in stack]})")
+        return all_positions
+
+    # 난이도 → 컨테이너 개수. 컨테이너는 (a) 수집 순서를 강제하고 (b) 내부 타일을 뒤로 미뤄
+    # 도크 압박을 키운다 → 등껍질처럼 기믹 없는 순수 매치 레벨의 유일한 난이도 레버.
+    TURTLE_CONTAINER_BY_DIFFICULTY: List[Tuple[float, int]] = [
+        (0.20, 0),   # S: 순수 매치
+        (0.40, 1),
+        (0.60, 2),
+        (0.80, 3),
+        (1.01, 4),
+    ]
+    TURTLE_CONTAINER_INNER = 3      # 컨테이너 1개가 뱉는 내부 타일 수(÷3 유지에 유리)
+
+    def _turtle_place_containers(self, level: Dict[str, Any],
+                                 stack: List[Tuple[int, int, Set[Tuple[int, int]]]],
+                                 params: "GenerationParams", rng) -> None:
+        """[등껍질] craft/stack 컨테이너 배치.
+
+        제약:
+          - craft 는 **같은 층 인접 빈칸**으로 출력한다 → 꽉 찬 아래층엔 놓을 수 없다.
+            (절차생성의 골 배치는 자리가 없으면 전 층을 관통해 구멍을 뚫는다 = 스택 파괴.
+             그래서 여기서 직접, 출력칸이 확보되는 셀에만 놓는다.)
+          - stack 은 제자리 누적(방향=시각 오프셋)이라 빈칸 불필요.
+          - 언락 레벨 미만이면 해당 타입 제외.
+        """
+        ln = params.level_number
+        unlock = self.TUTORIAL_UNLOCK_LEVELS or {}
+        # TUTORIAL_UNLOCK_LEVELS 는 {level: gimmick} 형태 → 역인덱스로 최소 레벨 조회
+        min_lv = {}
+        for lv, gm in unlock.items():
+            if gm not in min_lv:
+                min_lv[gm] = int(lv)
+        pool: List[str] = []
+        if ln is None or ln >= min_lv.get("craft", 11):
+            pool.append("craft")
+        if ln is None or ln >= min_lv.get("stack", 21):
+            pool.append("stack")
+        if not pool:
+            return
+
+        diff = float(getattr(params, "target_difficulty", 0.5) or 0.5)
+        want = 0
+        for cap, cnt in self.TURTLE_CONTAINER_BY_DIFFICULTY:
+            if diff < cap:
+                want = cnt
+                break
+        if want <= 0:
+            return
+
+        DIRS = {"e": (1, 0), "w": (-1, 0), "s": (0, 1), "n": (0, -1)}
+        gcnt = level.setdefault("goalCount", {})
+        placed = 0
+        # 위층부터(픽 가능·빈칸 많음) 훑는다. 꼭대기 1~2칸 층은 건너뛰고 중간층 위주.
+        for (li, col, _cells) in reversed(stack):
+            if placed >= want:
+                break
+            ld = level.get(f"layer_{li}") or {}
+            tmap = ld.get("tiles") or {}
+            if len(tmap) < 4:            # 너무 작은 층은 컨테이너로 덮으면 층이 사라짐
+                continue
+            cand = [p for p, t in tmap.items()
+                    if isinstance(t, list) and len(t) >= 2 and t[0] == "t0" and not t[1]]
+            rng.shuffle(cand)
+            for pos in cand:
+                if placed >= want:
+                    break
+                x, y = map(int, pos.split("_"))
+                ctype = rng.choice(pool)
+                if ctype == "stack":
+                    full = f"stack_{rng.choice(list(DIRS))}"
+                else:
+                    valid = [d for d, (dc, dr) in DIRS.items()
+                             if 0 <= x + dc < col and 0 <= y + dr < col
+                             and f"{x+dc}_{y+dr}" not in tmap]
+                    if not valid:
+                        continue
+                    full = f"craft_{rng.choice(valid)}"
+                tmap[pos] = [full, "", [self.TURTLE_CONTAINER_INNER]]
+                gcnt[full] = gcnt.get(full, 0) + self.TURTLE_CONTAINER_INNER
+                placed += 1
+            ld["num"] = str(len(tmap))
+        if placed:
+            logger.info(f"[TURTLE] 컨테이너 {placed}개 배치 (난이도 {diff:.2f}, 목표 {want})")
+
+    def _turtle_total_tiles(self, level: Dict[str, Any]) -> int:
+        """매치 대상 타일 총수 = 일반 타일 + 컨테이너 내부 타일(컨테이너 셀 자체는 제외)."""
+        total = 0
+        for i in range(int(level.get("layer") or 0)):
+            for tile in ((level.get(f"layer_{i}") or {}).get("tiles") or {}).values():
+                if not (isinstance(tile, list) and tile):
+                    continue
+                tt = str(tile[0])
+                if tt.startswith("craft_") or tt.startswith("stack_"):
+                    inner = tile[2] if len(tile) > 2 else None
+                    if isinstance(inner, list) and inner:
+                        try:
+                            total += int(inner[0])
+                        except (TypeError, ValueError):
+                            pass
+                else:
+                    total += 1
+        return total
+
+    def _turtle_pad_div3(self, level: Dict[str, Any],
+                         stack: List[Tuple[int, int, Set[Tuple[int, int]]]],
+                         params: "GenerationParams", rng) -> None:
+        """[등껍질] ÷3 부족분을 **타일 추가**로 메운다(삭제 금지).
+
+        추가 위치는 난이도 레버:
+          - 쉬움(diff<0.5): **꼭대기 층** — 바로 집을 수 있어 부담이 없다
+          - 어려움:        **바닥 층**  — 끝까지 파고들어야 나오므로 압박이 커진다
+        추가 셀 조건: 같은 층 그리드 안 + 기존 셀과 4방 인접(실루엣 유지) + 아래층 받침 존재.
+        """
+        need = (3 - self._turtle_total_tiles(level) % 3) % 3
+        if need == 0:
+            return
+        diff = float(getattr(params, "target_difficulty", 0.5) or 0.5)
+        order = list(range(int(level.get("layer") or 0) - 1, -1, -1)) if diff < 0.5 \
+            else list(range(int(level.get("layer") or 0)))
+
+        from .unit_templates import get_cover_offsets
+        added = 0
+        for li in order:
+            if added >= need:
+                break
+            ld = level.get(f"layer_{li}") or {}
+            tmap = ld.get("tiles") or {}
+            if not tmap:
+                continue
+            try:
+                col = int(ld.get("col"))
+            except (TypeError, ValueError):
+                continue
+            occupied = set()
+            for p in tmap:
+                try:
+                    occupied.add(tuple(map(int, p.split("_"))))
+                except ValueError:
+                    continue
+            below = level.get(f"layer_{li-1}") if li > 0 else None
+            lower: Set[Tuple[int, int]] = set()
+            offs = ()
+            if isinstance(below, dict):
+                for p in (below.get("tiles") or {}):
+                    try:
+                        lower.add(tuple(map(int, p.split("_"))))
+                    except ValueError:
+                        continue
+                try:
+                    offs = get_cover_offsets(li - 1, li, int(below.get("col")), col)
+                except (TypeError, ValueError):
+                    offs = ()
+            cand = []
+            for (x, y) in occupied:
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nx, ny = x + dx, y + dy
+                    if not (0 <= nx < col and 0 <= ny < col) or (nx, ny) in occupied:
+                        continue
+                    if li > 0 and offs and not any((nx - ox, ny - oy) in lower for ox, oy in offs):
+                        continue      # 받침 없음 → floating 유발이라 제외
+                    cand.append((nx, ny))
+            if not cand:
+                continue
+            rng.shuffle(cand)
+            for (nx, ny) in cand:
+                if added >= need:
+                    break
+                pos = f"{nx}_{ny}"
+                if pos in tmap:
+                    continue
+                tmap[pos] = ["t0", ""]
+                occupied.add((nx, ny))
+                added += 1
+            ld["num"] = str(len(tmap))
+        where = "꼭대기" if diff < 0.5 else "바닥"
+        logger.info(f"[TURTLE] ÷3 패딩 {added}/{need}개 추가 ({where} 우선)")
+
+    def _turtle_strip_impossible_attrs(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """이웃이 없어 영원히 해제 불가한 chain(좌우)/grass(4방) 속성 제거.
+        보스 템플릿 경로와 동일 규칙 — 등껍질은 층마다 실루엣이 급히 줄어 가장자리에서 자주 발생."""
+        for li in range(int(level.get("layer") or 0)):
+            tiles = ((level.get(f"layer_{li}") or {}).get("tiles") or {})
+            for pos, tile in tiles.items():
+                if not (isinstance(tile, list) and len(tile) >= 2):
+                    continue
+                if tile[1] not in ("chain", "grass"):
+                    continue
+                try:
+                    x, y = map(int, pos.split("_"))
+                except ValueError:
+                    continue
+                nbrs = ((1, 0), (-1, 0)) if tile[1] == "chain" else ((1, 0), (-1, 0), (0, 1), (0, -1))
+                if not any(f"{x+dx}_{y+dy}" in tiles for dx, dy in nbrs):
+                    tile[1] = ""
+        return level
+
+    @staticmethod
+    def _load_fixed_level(level_number: int) -> Optional[Dict[str, Any]]:
+        """[초반 고정 레벨] 저장소 조회. 미등록/범위밖/보스면 None."""
+        try:
+            from . import fixed_levels as _FX
+            e = _FX.get_fixed(level_number)
+            return copy.deepcopy(e["level_json"]) if e else None
+        except Exception:  # noqa: BLE001 — 저장소 문제로 생성이 멈추면 안 된다
+            return None
+
+    def _finish_fixed_level(self, level: Dict[str, Any], params: "GenerationParams",
+                            start_time: float) -> "GenerationResult":
+        """고정 레벨을 안전 tail 만 태워 반환. 모양·타일타입·기믹은 **저장본 그대로**."""
+        level["_fixed_level"] = True          # [재생성 보존] 이 마커로 모드 유지
+        # [모양 보존] 고정 레벨은 사람이 그린 모양이 정본이라 ÷3 보정이 타일을 지우면 안 된다.
+        # 이 플래그를 켜야 _finalize_divisibility_guarantee 가 '삭제' 대신
+        # '컨테이너(craft/stack) 내부 개수 조정' 경로를 타고, _finalize_level 의
+        # 피라미드 클램프/재중앙정렬도 건너뛴다. (실측: 28개 중 13개가 t0 총합 비÷3 →
+        # 플래그 없이는 매 생성마다 일반 t0 타일 1~2개가 사라져 저장본과 모양이 달라졌다.)
+        level["_preserve_pattern"] = True
+        level = self._finalize_divisibility_guarantee(level)
+        level = self._finalize_level(level)
+        report = get_analyzer().analyze(level)
+        # [클리어율] 예전엔 estimated_clear_rate=1.0 / playability_warning=False 를 **하드코딩**해
+        # UI가 어떤 고정 레벨이든 "클리어 예상 100%" 로 표시했다(측정한 적 없는 값).
+        # 절차 경로와 동일한 읽기전용 퀵체크를 태워 실제 봇 클리어율을 돌려준다.
+        # _quick_deadlock_check 는 시뮬레이션만 하고 레벨을 바꾸지 않아 모양 보존과 충돌하지 않는다.
+        # 측정 실패 시엔 낙관값(1.0) 대신 None 대신 0.0 을 쓰지 않고 1.0 폴백 — 고정본은 사람이
+        # 검수한 모양이라 측정 불가 하나로 배포를 막을 이유가 없고, 최종 판정은 RL 순차검증이 한다.
+        clear_rate, warn = 1.0, False
+        try:
+            chk = self._quick_deadlock_check(level)
+            clear_rate = float(chk.get("clear_rate", 1.0))
+            warn = bool(chk.get("has_deadlock", False))
+        except Exception as ex:  # noqa: BLE001 — 측정 실패로 생성이 멈추면 안 된다
+            logger.warning(f"[FIXED_LEVEL] Lv{params.level_number} 클리어율 측정 실패: {ex}")
+        logger.info(f"[FIXED_LEVEL] Lv{params.level_number} 고정 레벨 사용 "
+                    f"(층 {level.get('layer')}, grade {report.grade}, clear_rate {clear_rate:.2f})")
+        return GenerationResult(
+            level_json=level,
+            actual_difficulty=report.score / 100.0,
+            grade=report.grade,
+            generation_time_ms=int((time.time() - start_time) * 1000),
+            playability_warning=warn,
+            estimated_clear_rate=clear_rate,
+        )
+
+    @staticmethod
+    def filter_gimmicks_by_unlock(types: Optional[List[str]],
+                                  level_number: Optional[int]) -> List[str]:
+        """[언락 강제] 해당 레벨에서 아직 해금되지 않은 기믹을 제거한다.
+
+        정본은 `models.leveling_config.PROFESSIONAL_GIMMICK_UNLOCK`.
+        라우트(`select_gimmicks_with_unlock_probability`)가 이미 필터하지만 **생성기 자체엔
+        방어가 없었다** → 라우트를 우회하는 호출자(후처리 스크립트 등)가 그대로 통과시켰다.
+        실측: 서브보스 149개 중 23개가 언락 위반(curtain 23·unknown 18·grass 7·link 4·chain 2·ice 2).
+        여기서 한 번 더 거르면 호출자가 무엇을 넘기든 위반이 불가능하다.
+        """
+        if not types:
+            return []
+        if level_number is None:
+            return list(types)
+        try:
+            from ..models.leveling_config import PROFESSIONAL_GIMMICK_UNLOCK as _G
+            unlock = {g: int(c.unlock_level) for g, c in _G.items()}
+        except Exception:  # noqa: BLE001
+            return list(types)
+        out = [t for t in types if level_number >= unlock.get(str(t), 0)]
+        dropped = [t for t in types if t not in out]
+        if dropped:
+            logger.info(f"[UNLOCK_FILTER] Lv{level_number}: 미해금 기믹 제외 {dropped}")
+        return out
+
+    def _generate_turtle(self, params: "GenerationParams", start_time: float
+                         ) -> Optional["GenerationResult"]:
+        """[등껍질 침식] 전용 생성 경로. 실패 시 None(호출자가 일반 경로로 폴백).
+
+        절차생성 기계(층수 계산·타일수 타겟·골 출구 배치)를 **쓰지 않는다**. 모양이 층수와
+        타일수를 결정하고, 타입은 템플릿 경로와 같은 꼬리에서 배정된다:
+            t0 랜덤 색 → _ensure_tutorial_unlock_gimmick → _finalize_divisibility_guarantee
+            → _finalize_level
+        """
+        import random as _r
+
+        pid = params.turtle_pattern_id
+        loaded = self.load_turtle_pattern(pid)
+        if not loaded:
+            logger.warning(f"[TURTLE] 패턴 없음: {pid} → 일반 경로 폴백")
+            return None
+        cells, base = loaded
+        stack = self._turtle_peel_stack(cells, base)
+        if len(stack) < 2:
+            logger.warning(f"[TURTLE] {pid}: 침식 깊이 {len(stack)} < 2 → 일반 경로 폴백")
+            return None
+
+        tile_types = params.tile_types
+        if not tile_types and params.level_number:
+            tile_types = get_tile_types_for_level(params.level_number)
+        if not tile_types:
+            tile_types = self.DEFAULT_TILE_TYPES
+        seed = params.level_number if params.level_number is not None else 0
+
+        level: Dict[str, Any] = {
+            "layer": len(stack),
+            "row": str(base), "col": str(base),
+            # useTileCount = 클라이언트가 t0 를 몇 가지 색으로 분배할지. **len(tile_types) 아님** —
+            # 레벨 대부분은 tile_types 가 ['t0'] 뿐이라 len 을 쓰면 1색 = 전부 매치되는 무의미 레벨이 된다
+            # (실측: 커버리지 스윕에서 전 난이도 clear 1.00 으로 붙어버림).
+            "useTileCount": (get_use_tile_count_for_level(params.level_number, params.tile_type_profile)
+                             if params.level_number is not None
+                             else max(1, len([t for t in tile_types if t != "t0"])) or 6),
+            # randSeed 는 클라이언트 t0 색분배 시드. 프로덕션 관행(1400/1500 레벨)이
+            # random.randint(1, 999999) 이므로 동일 규약을 따른다. level_number 를 그대로
+            # 쓰면 값이 작고 레벨마다 고정돼 색 배치가 결정적이 된다.
+            "randSeed": _r.randint(1, 999999),
+            "autoCollectCount": 0,
+        }
+        positions = self._build_turtle_layers(level, stack)
+        level["_preserve_pattern"] = True        # 침식 모양 보존(피라미드 클램프/재배치 금지)
+        level["_pattern_locked_positions"] = {p for _, p in positions}
+        level["_turtle_peel"] = True             # [재생성 보존] 재생성이 이 마커로 모드 유지
+        level["_turtle_pattern_id"] = pid
+
+        rng = _r.Random(seed)
+
+        # ① 컨테이너(craft/stack) 배치 — 난이도 레버 겸 타일수 조절 수단.
+        #    피라미드는 아래층이 꽉 차 있어 출력칸(같은 층 인접 빈칸)이 없다 → 위층에만 놓는다.
+        self._turtle_place_containers(level, stack, params, rng)
+
+        # ② ÷3 패딩 — **삭제 대신 추가**. 꼭대기(쉬움) 또는 바닥(어려움)에 1~2개 덧댄다.
+        #    (기존 _finalize_divisibility_guarantee 는 타일을 지워 꼭대기 층을 통째로 비우기도 했다.)
+        self._turtle_pad_div3(level, stack, params, rng)
+
+        for i in range(int(level.get("layer") or 0)):
+            for tile in ((level.get(f"layer_{i}") or {}).get("tiles") or {}).values():
+                if isinstance(tile, list) and tile and tile[0] == "t0":
+                    tile[0] = rng.choice(tile_types)
+
+        # ③ 속성 기믹(ice/chain/grass/...) — 호출자가 obstacle_types 를 넘긴 경우만.
+        #    [언락 강제] 호출자가 무엇을 넘기든 미해금 기믹은 여기서 제거(방어선).
+        _allowed = self.filter_gimmicks_by_unlock(params.obstacle_types, params.level_number)
+        if _allowed:
+            try:
+                _p = copy.copy(params)
+                _p.obstacle_types = _allowed
+                level = self._add_obstacles(level, _p)
+            except Exception as ex:  # noqa: BLE001
+                logger.warning(f"[TURTLE] 기믹 배치 스킵: {ex}")
+            # 이웃이 없어 영원히 못 푸는 chain/grass 정리(보스 경로와 동일 규칙)
+            level = self._turtle_strip_impossible_attrs(level)
+
+        level = self._ensure_tutorial_unlock_gimmick(level, params.level_number)
+        level = self._finalize_divisibility_guarantee(level)
+        level = self._finalize_level(level)
+        # ÷3 보정이 꼭대기(1~2타일) 층을 통째로 비울 수 있다 → 빈 상위층 제거(층수 재계산).
+        n = int(level.get("layer") or 0)
+        while n > 1 and not ((level.get(f"layer_{n-1}") or {}).get("tiles") or {}):
+            level.pop(f"layer_{n-1}", None)
+            n -= 1
+        level["layer"] = n
+
+        report = get_analyzer().analyze(level)
+        return GenerationResult(
+            level_json=level,
+            actual_difficulty=report.score / 100.0,
+            grade=report.grade,
+            generation_time_ms=int((time.time() - start_time) * 1000),
+            playability_warning=False,
+            estimated_clear_rate=1.0,
         )
 
     def _build_concentric_layers(self, level: Dict[str, Any], active_layers: List[int],
@@ -1822,76 +2324,161 @@ class LevelGenerator:
             """중심축 한쪽 폭. 홀수 그리드는 중앙열을 비워 대칭축으로 쓴다."""
             return (gc - 1) // 2 if gc % 2 == 1 else gc // 2
 
-        def _slot_grid(gc, s):
-            """한쪽 영역을 s×s 슬롯으로 분할한 좌상단 좌표들."""
-            half = _half_width(gc)
-            out = []
-            for oy in range(0, gc - s + 1, s):
-                for ox in range(0, half - s + 1, s):
-                    out.append((ox, oy))
-            return out
+        def _is_slab(cs):
+            """의미없는 통짜/막대 실루엣인가 — 유닛∪미러 결과에 적용.
 
-        def _place_slot_symmetric(mask, gc, want_slots):
-            """[v3] 한쪽 s×s 슬롯에 서로 다른 모양의 유닛을 배치하고 좌우 미러.
+            - 폭 4↑ 꽉 찬 직사각형: 통짜 덮개(예: R3x2+미러 = 6×2)
+            - 높이 1 · 폭 5↑: 가로 막대(예: I3_h+미러 = `###.###`)
+            """
+            xs = [x for x, _ in cs]
+            ys = [y for _, y in cs]
+            w = max(xs) - min(xs) + 1
+            h = max(ys) - min(ys) + 1
+            if h == 1 and w >= 5:
+                return True
+            return len(cs) == w * h and w >= 4
 
-            - 슬롯 크기 s ≤ 한쪽 폭 → 중앙을 가로지르는 통짜 배치 불가
-            - 슬롯끼리 겹치지 않음(격자 분할)
-            - 같은 층에 같은 모양 재사용 금지(시각적 다양성)
+        def _place_slot_symmetric(mask, gc, want_slots, avoid_names=frozenset()):
+            """[v3.1] 유닛의 **정사각 바운딩박스**를 슬롯으로 보고 좌우대칭 배치.
+
+            v3 결함(실측): 슬롯 원점을 `range(0, half-s+1, s)` 로 잡아 half=3·s=3/2 모두
+            ox=0 만 나왔다 → 유닛이 항상 최외곽 열에 고정 → 미러하면 양 끝 두 덩어리 =
+            바운딩박스가 매번 전폭인 '가로 직사각형' 실루엣만 반복. 또 첫 크기에서 하나라도
+            놓이면 즉시 return 해 크기 혼합이 없었고, 중앙축 배치 경로가 아예 없었다.
+
+            v3.1 규칙(사용자 모델 유지):
+              1) 유닛 슬롯 = 자기 바운딩박스 정사각(3×2 유닛 → 3×3). 슬롯끼리 겹침 금지.
+                 (미러 슬롯도 함께 예약해 반대편 침범 차단)
+              2) 슬롯 원점은 **자유 좌표(step 1)** — 격자 배수 제약 제거 → 가로/세로 위치 다양화
+              3) 홀수 그리드는 중앙축에 **자기대칭 유닛 1개** 배치 가능 → '양 날개'만 나오는 단조로움 제거
+              4) 유닛∪미러가 폭4↑ 통짜 직사각형이면 거부(예: R3x2+미러 = 6×2 슬래브)
+              5) 같은 층 같은 모양 금지 + 바로 아래층에서 쓴 모양 회피(avoid_names) → 층간 다양성
+            반환: (배치셀, 사용한 유닛 이름들)
             """
             placed: Set[Tuple[int, int]] = set()
+            used_names: Set[str] = set()
             if not mask:
-                return placed
+                return placed, used_names
             half = _half_width(gc)
             if half < 2:
-                return placed
-            # 슬롯 크기: 큰 것부터 시도(모양이 또렷) — 슬롯이 부족하면 작은 크기로
-            for s in range(min(half, 3), 1, -1):
-                slots = _slot_grid(gc, s)
-                if not slots:
-                    continue
-                _r.shuffle(slots)
-                usable = [u for u in ALL_UNITS if _bbox(u) <= s]
-                if not usable:
-                    continue
-                used_names = set()
-                got = 0
-                for (ox, oy) in slots:
-                    if got >= want_slots:
-                        break
-                    cands = [u for u in usable if u.name not in used_names]
-                    if not cands:
-                        break
-                    _r.shuffle(cands)
-                    for unit in cands:
-                        # 슬롯 안에서 중앙 정렬
-                        px = ox + (s - unit.w) // 2
-                        py = oy + (s - unit.h) // 2
-                        pc = unit.placed(px, py)
-                        if not (pc <= mask) or (pc & placed):
-                            continue
-                        mc = {(gc - 1 - x, y) for (x, y) in pc}
-                        if mc & placed:
-                            continue
-                        placed |= pc | mc          # 좌우 대칭 확정
-                        used_names.add(unit.name)
+                return placed, used_names
+            odd = (gc % 2 == 1)
+            boxes: List[Tuple[int, int, int]] = []   # (x, y, size) 점유 슬롯
+
+            def _box_free(px, py, b):
+                return all(not (px < bx + bb and bx < px + b and py < by + bb and by < py + b)
+                           for (bx, by, bb) in boxes)
+
+            def _cands(b, axis_mode):
+                """bbox=b 유닛의 유효 배치 후보 전수. axis_mode=중앙축 자기대칭 배치."""
+                out = []
+                for u in ALL_UNITS:
+                    if _bbox(u) != b or u.name in used_names or u.name in avoid_names:
+                        continue
+                    if axis_mode:
+                        if not odd or b % 2 == 0:
+                            continue          # 중앙축에 딱 맞으려면 홀수 박스만 가능
+                        xs = [gc // 2 - (b - 1) // 2]
+                    else:
+                        xs = list(range(0, half - b + 1))
+                    for px in xs:
+                        for py in range(0, gc - b + 1):
+                            pc = u.placed(px + (b - u.w) // 2, py + (b - u.h) // 2)
+                            if not (pc <= mask):
+                                continue
+                            mc = {(gc - 1 - x, y) for (x, y) in pc}
+                            if axis_mode:
+                                if mc != pc:          # 자기대칭 아닌 유닛은 축에 못 놓음
+                                    continue
+                                if (pc & placed) or not _box_free(px, py, b):
+                                    continue
+                                out.append((u, px, py, b, pc))
+                            else:
+                                if (mc & pc) or ((pc | mc) & placed):
+                                    continue
+                                mbx = gc - b - px      # 미러 슬롯 좌상단 x
+                                if not _box_free(px, py, b) or not _box_free(mbx, py, b):
+                                    continue
+                                if _is_slab(pc | mc):
+                                    continue
+                                out.append((u, px, py, b, pc | mc))
+                return out
+
+            sizes = list(range(min(half, 4), 1, -1))   # 큰 박스 우선(모양이 또렷)
+            got = 0
+            # 중앙축 유닛(홀수 그리드) — 절반 확률로 시도. 성공 시 슬롯 1개 소비.
+            if odd and _r.random() < 0.55:
+                for b in sizes:
+                    pool = _cands(b, True)
+                    if pool:
+                        u, px, py, bb, cs = _r.choice(pool)
+                        placed |= cs
+                        boxes.append((px, py, bb))
+                        used_names.add(u.name)
                         got += 1
                         break
-                if got:
-                    return placed
-            return placed
+            # 좌우 짝 유닛 — want 만큼. 큰 박스부터 후보가 있는 크기를 사용(조기 return 없음).
+            while got < want_slots:
+                pool = []
+                for b in sizes:
+                    pool = _cands(b, False)
+                    if pool:
+                        break
+                if not pool:
+                    break
+                u, px, py, bb, cs = _r.choice(pool)
+                placed |= cs
+                boxes.append((px, py, bb))
+                boxes.append((gc - bb - px, py, bb))
+                used_names.add(u.name)
+                got += 1
+            return placed, used_names
+
+        def _silhouette_score(cs):
+            """층 실루엣의 '볼거리' 점수. 1행/1열 막대와 통짜 사각형을 밀어낸다."""
+            if not cs:
+                return -1.0
+            xs = [x for x, _ in cs]
+            ys = [y for _, y in cs]
+            w = max(xs) - min(xs) + 1
+            h = max(ys) - min(ys) + 1
+            if h == 1 or w == 1:
+                return 0.0                      # 막대 — 최하점(다른 후보 없으면만 채택)
+            fill = len(cs) / float(w * h)
+            if fill >= 0.95:
+                return 0.1                      # 통짜 직사각형
+            # 세로로도 퍼지고(h≥2) 채움이 과하지 않을수록 좋음
+            s = min(2.0, h * 0.35 + (1.0 - abs(fill - 0.5)) * 0.8)
+            if w >= h * 2.5:
+                s -= 0.35        # 납작한 가로형(폭≫높이) 감점 — "가로 직사각형" 인상 억제
+            return s
 
         # ── 바닥층 = 주 패턴(디자인 모양 유지) ──
         l0 = active_layers[0]
         pos_map[l0] = _aesthetic(_gcol(l0))
 
         # ── 위층 = 슬롯 기반 대칭 유닛층 ──
+        _prev_names: Set[str] = set()
         for i, layer_idx in enumerate(active_layers[1:]):
             gc = _gcol(layer_idx)
             below = active_layers[active_layers.index(layer_idx) - 1]
             mask = valid_support_mask(pos_map[below], below, layer_idx, _gcol(below), gc, gc)
             # 위로 갈수록 슬롯 수를 줄여 탑 실루엣(자연 수렴). 최소 1개는 유지.
             want = max(1, _r.randint(smin, smax) - (i // 2))
-            pos_map[layer_idx] = _place_slot_symmetric(mask, gc, want)
+            # [실루엣 품질] 유닛 하나하나는 합법이어도 **합집합**이 1행 막대/통짜가 될 수 있다
+            # (예: 중앙축 I3_h + 좌우 짝 → `#####`). 층 단위로 K회 뽑아 최고 점수를 채택.
+            best, best_names, best_score = set(), set(), -1.0
+            for _try in range(6):
+                cand, cnames = _place_slot_symmetric(mask, gc, want, avoid_names=_prev_names)
+                if not cand and _prev_names:
+                    cand, cnames = _place_slot_symmetric(mask, gc, want)
+                score = _silhouette_score(cand)
+                if score > best_score:
+                    best, best_names, best_score = cand, cnames, score
+                if best_score >= 1.0:      # 충분히 좋은 실루엣이면 조기 종료
+                    break
+            pos_map[layer_idx], _names = best, best_names
+            _prev_names = _names
 
 
         # [floating 정화] 상위 타일이 하위 미덮으면 하위에 지지셀(그림자) 추가 → floating 0 보장.
@@ -3245,8 +3832,16 @@ class LevelGenerator:
             total_target = sum(layer_tile_counts.values())
         else:
             # Determine layers from active_layer_count or calculate based on difficulty
+            # [층수 상한 스위치] enforce_layer_cap=False 면 max_layers 클램프를 건너뛴다
+            # (등껍질 침식처럼 '모양이 층수를 결정'하는 모드용).
+            _cap_on = bool(getattr(params, "enforce_layer_cap", True)) \
+                and not getattr(params, "turtle_pattern_id", None)
             if params.active_layer_count is not None:
-                active_layer_count = min(params.active_layer_count, params.max_layers)
+                active_layer_count = (min(params.active_layer_count, params.max_layers)
+                                      if _cap_on else params.active_layer_count)
+            elif not _cap_on:
+                # 상한 미적용인데 개수 지정도 없음 → 등급 클램프 대신 params 범위만 사용
+                active_layer_count = max(1, params.min_layers)
             else:
                 # Tile Buster style layer count based on difficulty:
                 # - S grade (0-0.2): 2-3 layers (tutorial, simple)
@@ -8417,8 +9012,26 @@ class LevelGenerator:
                 level[upper_layer_key]["tiles"] = {}
                 upper_tiles = level[upper_layer_key]["tiles"]
 
+            # [OOB_FIX] 차단 타일은 **그 층의 헤더(col/row) 안**에만 놓아야 한다.
+            # 기존엔 경계 검사가 아예 없어 홀짝 교대로 격자 크기가 다른 층(짝수 S, 홀수 S-1)에서
+            # 유효 좌표를 그대로 옮겨 적어 x/y == S-1 이 홀수층에선 범위 밖이 됐다.
+            # 게임은 x >= col 타일을 조용히 스폰하지 않는다(TileLayer/TileRow) → 클리어 불가.
+            # 실측: 등껍질 생성 240회 중 11회(4.6%) `L1:7_3>=7` 위반이 여기서 발생. 음수도 차단.
+            try:
+                _lc = int(level[upper_layer_key].get("col"))
+                _lr = int(level[upper_layer_key].get("row"))
+            except (TypeError, ValueError):
+                continue  # 헤더 불명 → 차단 타일 생성 포기(잘못된 좌표 쓰기보다 안전)
+
+            def _in_board(p: str) -> bool:
+                try:
+                    _x, _y = map(int, p.split('_'))
+                except ValueError:
+                    return False
+                return 0 <= _x < _lc and 0 <= _y < _lr
+
             # Try to add blocking tile at the exact position first
-            if pos not in upper_tiles:
+            if pos not in upper_tiles and _in_board(pos):
                 # Create a new blocking tile (random type, no gimmick)
                 blocking_tile_type = random.choice(tile_types_list)
                 self._place_tile(upper_tiles, pos, blocking_tile_type, "")
@@ -8435,7 +9048,7 @@ class LevelGenerator:
                         f"{col}_{row+1}",  # down
                     ]
                     for adj_pos in adjacent_positions:
-                        if adj_pos not in upper_tiles:
+                        if adj_pos not in upper_tiles and _in_board(adj_pos):
                             blocking_tile_type = random.choice(tile_types_list)
                             self._place_tile(upper_tiles, adj_pos, blocking_tile_type, "")
                             blocked_count += 1
@@ -12837,8 +13450,300 @@ class LevelGenerator:
             level = self._strip_confusing_grass(level)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[GRASS] strip 실패(무시): {exc}")
+        # [CONTAINER_ONLY_COLOR] 컨테이너 안에만 존재하는 색 제거. 타입 라벨만 바꾸므로
+        # td[1](속성)과 마찬가지로 ÷3·모양에 영향이 없어 여기(공통 tail)에 둔다.
+        try:
+            level = self._repair_container_only_types(level)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[CONTAINER_ONLY_COLOR] 보정 실패(무시): {exc}")
+        # [CLEARABILITY 최종 게이트] 모든 경로(절차·템플릿·보스·등껍질·고정·튜너)가 지나는 이 tail
+        # 에서 **게임 정본 카운터**로 per-type ÷3 을 마지막으로 확인·복구한다.
+        #
+        # 왜 여기인가: 야간 A* 전수판정에서 PROVEN_IMPOSSIBLE 18개가 나왔는데 전부 ÷3 위반이었고,
+        #   생성기 자체 게이트(`_finalize_divisibility_guarantee`)는 통과시킨 상태였다. 원인은
+        #   두 판정기가 컨테이너를 다르게 세는 것 — 생성기는 개수(td[2][0])만, 솔버는 baked 내부의
+        #   실타입과 key 를 구분해서 센다. 게다가 그 18개는 '필드 t0 + baked 컨테이너' 조합이라
+        #   현재 generate() 경로로는 나올 수 없는 형태였다(bake 는 field_t0>0 이면 스킵) →
+        #   generate() 안에만 방어선을 두면 그 미지의 경로를 못 막는다.
+        try:
+            level = self._repair_clearability(level)
+        except Exception as exc:  # noqa: BLE001 — 복구 실패로 생성을 막지는 않는다
+            logger.warning(f"[CLEARABILITY] 최종 복구 실패(무시): {exc}")
+        # [GOAL_COUNT 정합] 선언된 목표(goalCount)와 보드의 실제 컨테이너를 일치시킨다.
+        #
+        # 보드에 없는 목표가 선언돼 있으면 **타일을 다 치워도 클리어가 안 된다**.
+        #   실측 Lv480: goalCount {stack_w:3, stack_e:3} 인데 보드엔 stack_w 뿐 →
+        #   봇이 96타일을 전부 제거하고도 clear_rate 0.00. goalCount 에서 stack_e 만 빼면 1.00.
+        # 생성 중 컨테이너가 배치됐다가 후속 단계(경계 트림·피라미드·÷3 삭제·OOB 제거)에서
+        # 사라졌는데 goalCount 가 갱신되지 않아 생긴다.
+        # A* 도 RL 도 이 결함을 못 짚는다(A*=UNCERTAIN, RL=원인 불명의 0%) → 여기서 직접 막는다.
+        try:
+            level = self._repair_goal_count(level)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[GOAL_COUNT] 정합 복구 실패(무시): {exc}")
         level["max_moves"] = self._calculate_max_moves(level)
         level = self._apply_timea(level)
+        return level
+
+    @staticmethod
+    def _repair_goal_count(level: Dict[str, Any]) -> Dict[str, Any]:
+        """goalCount 를 보드의 실제 컨테이너 배출량으로 재계산한다.
+
+        goalCount 는 '수집해야 할 타일 수'이고 컨테이너 내부 개수의 합과 같아야 한다.
+        - 보드에 없는 타입 → 제거 (없으면 영원히 달성 불가 = 클리어 불가)
+        - 개수가 다른 타입 → 보드 실제값으로 교정
+        컨테이너가 하나도 없으면 goalCount 는 빈 dict 가 된다.
+        """
+        num_layers = int(level.get("layer", 0) or 0)
+        board: Dict[str, int] = {}
+        # layer 필드가 실제 층수보다 작게 적힌 레벨이 있어 +1 까지 훑는다(빈 상위층 잔재 대응).
+        for i in range(num_layers + 1):
+            ld = level.get(f"layer_{i}")
+            tiles = ld.get("tiles") if isinstance(ld, dict) else None
+            if not isinstance(tiles, dict):
+                continue
+            for td in tiles.values():
+                if not (isinstance(td, list) and td and isinstance(td[0], str)):
+                    continue
+                t = td[0]
+                if not (t.startswith("craft_") or t.startswith("stack_")):
+                    continue
+                cnt = 0
+                if len(td) > 2 and isinstance(td[2], list) and td[2]:
+                    try:
+                        cnt = int(td[2][0])
+                    except (TypeError, ValueError):
+                        cnt = 0
+                board[t] = board.get(t, 0) + cnt
+
+        cur = level.get("goalCount")
+        cur = dict(cur) if isinstance(cur, dict) else {}
+        clean = {k: v for k, v in board.items() if v > 0}
+        if cur != clean:
+            ghost = {k: v for k, v in cur.items() if v and k not in clean}
+            diff = {k: (v, clean.get(k)) for k, v in cur.items() if k in clean and clean[k] != v}
+            if ghost:
+                logger.error(
+                    f"[GOAL_COUNT] 보드에 없는 목표 제거(클리어 불가 방지): {ghost} — goalCount → {clean}")
+            elif diff:
+                logger.warning(f"[GOAL_COUNT] 개수 교정 {diff} — goalCount → {clean}")
+            level["goalCount"] = clean
+        return level
+
+    def _repair_clearability(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """정본 카운터로 per-type ÷3 을 확인하고, 깨졌으면 **baked 컨테이너 내부 라벨**로 복구한다.
+
+        복구 수단을 baked 내부 슬롯으로 한정하는 이유: 모양(타일 위치)과 필드 색 배치는 이 시점에
+        이미 확정이라 건드리면 다른 규칙(대칭·기믹·언락·헤더)이 깨진다. 반면 컨테이너 내부 문자열은
+        런타임 스폰 타입일 뿐이라 라벨만 바꿔도 부작용이 없다.
+
+        2단계로 고친다:
+          A. **총합** — 매칭 총수가 ÷3 이 아니면 라벨 교체로는 절대 못 고친다(교체는 총합 불변).
+             원인은 대개 `key` 개수다. key 는 매칭 대상이 아니고 정본 규약이 `unlockTile × 3` 인데,
+             분배 결과를 부분만 bake 하면 이 개수가 어긋난다(실측 Lv336: unlockTile=1 인데 key 2개
+             → 매칭 46개 %3=1). key↔매칭 슬롯을 바꿔 총합을 ÷3 으로 만들고, 이때 key 개수가
+             규약값에 가까워지는 방향을 우선한다.
+          B. **타입별** — 잉여(count%3)를 가진 슬롯들을 모아 **3개씩 한 타입에 몰아준다**.
+             받는 타입은 3 증가라 나머지가 그대로다(0 유지). 잉여 총합은 총합이 ÷3 이므로 항상 ÷3.
+             (잉여를 한 개씩 다른 타입에 넘기면 받는 쪽이 다시 깨진다 — 반드시 3단위로 옮긴다.)
+        """
+        from .solver import _clearability_type_counts
+
+        def baked_slots() -> List[Tuple[List[Any], int, str]]:
+            """(td[2] 배열, 슬롯 인덱스, 현재 라벨) — key 슬롯도 포함해서 돌려준다."""
+            out: List[Tuple[List[Any], int, str]] = []
+            for i in range(int(level.get("layer", 0) or 0)):
+                ld = level.get(f"layer_{i}")
+                tiles = ld.get("tiles") if isinstance(ld, dict) else None
+                if not isinstance(tiles, dict):
+                    continue
+                for td in tiles.values():
+                    if not (isinstance(td, list) and td and isinstance(td[0], str)):
+                        continue
+                    if not (td[0].startswith("craft_") or td[0].startswith("stack_")):
+                        continue
+                    if not (len(td) > 2 and isinstance(td[2], list) and len(td[2]) > 1
+                            and isinstance(td[2][1], str) and td[2][1]):
+                        continue
+                    for k, part in enumerate(td[2][1].split("_")):
+                        out.append((td[2], k, part))
+            return out
+
+        def relabel(arr: List[Any], k: int, dest: str) -> None:
+            parts = arr[1].split("_")
+            parts[k] = dest
+            arr[1] = "_".join(parts)
+
+        counts = _clearability_type_counts(level)
+        if not any(c % 3 for c in counts.values()):
+            return level
+        before = {t: c for t, c in counts.items() if c % 3}
+
+        slots = baked_slots()
+        if not slots:
+            logger.error(f"[CLEARABILITY] ÷3 위반 {before} — baked 컨테이너가 없어 복구 불가")
+            self._last_playability_warning = True
+            return level
+
+        # ── A. 총합 ÷3 (key 개수 조정) ──────────────────────────────────────
+        total = sum(counts.values())
+        if total % 3:
+            unlock = int(level.get("unlockTile", level.get("xUnlockTile", 0)) or 0)
+            key_target = unlock * 3
+            key_slots = [(a, k) for a, k, p in slots if p == "key"]
+            tile_slots = [(a, k, p) for a, k, p in slots if p.startswith("t") and p[1:].isdigit()]
+            need_less = total % 3                      # 매칭을 이만큼 줄이면 ÷3
+            need_more = 3 - need_less                  # 또는 이만큼 늘리면 ÷3
+            # key 를 규약값(unlockTile×3)에 가깝게 만드는 방향을 우선한다.
+            grow_key = len(key_slots) + need_less <= key_target or not key_slots
+            if grow_key and len(tile_slots) >= need_less:
+                # 매칭 슬롯 → key : 매칭 총수 need_less 감소
+                for a, k, _p in tile_slots[:need_less]:
+                    relabel(a, k, "key")
+            elif len(key_slots) >= need_more:
+                # key → 매칭 : 매칭 총수 need_more 증가. 받는 타입은 아래 B 단계가 정리한다.
+                dest = next(iter(counts), "t1")
+                for a, k in key_slots[:need_more]:
+                    relabel(a, k, dest)
+            else:
+                logger.error(f"[CLEARABILITY] 매칭 총합 {total} 비÷3 — 조정 가능한 슬롯 부족 {before}")
+                self._last_playability_warning = True
+                return level
+            counts = _clearability_type_counts(level)
+
+        # ── B. 타입별 ÷3 (잉여를 3개씩 한 타입에 몰아주기) ──────────────────
+        counts = _clearability_type_counts(level)
+        rem = {t: c % 3 for t, c in counts.items() if c % 3}
+        if rem:
+            slots = baked_slots()
+            by_type: Dict[str, List[Tuple[List[Any], int]]] = {}
+            for a, k, p in slots:
+                if p.startswith("t") and p[1:].isdigit():
+                    by_type.setdefault(p, []).append((a, k))
+            # 잉여 슬롯 수집 — 타입 t 에서 rem[t] 개
+            surplus: List[Tuple[List[Any], int]] = []
+            short: List[str] = []
+            for t, r in rem.items():
+                avail = by_type.get(t, [])
+                take = min(r, len(avail))
+                surplus.extend(avail[:take])
+                if take < r:
+                    short.append(t)
+            if short:
+                logger.error(f"[CLEARABILITY] 잉여 타입 {short} 의 baked 슬롯 부족 — 복구 불가 {before}")
+                self._last_playability_warning = True
+                return level
+            # 3개씩 묶어 한 타입에 몰아준다(받는 타입은 +3 이라 나머지 불변)
+            dest_pool = [t for t, c in counts.items() if c % 3 == 0 and c > 0] or list(counts)
+            for i in range(0, len(surplus) - len(surplus) % 3, 3):
+                dest = dest_pool[(i // 3) % len(dest_pool)]
+                for a, k in surplus[i:i + 3]:
+                    relabel(a, k, dest)
+
+        after = _clearability_type_counts(level)
+        left = {t: c for t, c in after.items() if c % 3}
+        if left:
+            logger.error(f"[CLEARABILITY] 복구 미완 — 잔여 위반 {left} (시작 {before})")
+            self._last_playability_warning = True
+        else:
+            logger.warning(f"[CLEARABILITY] ÷3 위반 복구 완료: {before} → 해소")
+        return level
+
+    @staticmethod
+    def _clearability_ok(level: Dict[str, Any]) -> bool:
+        """게임 정본 기준 per-type ÷3 판정. **솔버와 같은 카운터**를 쓴다.
+
+        생성기에는 자체 카운터(`_finalize_divisibility_guarantee._internal` 등)가 있는데,
+        그건 컨테이너를 '개수'로만 세어 baked 내부의 key/실타입을 구분하지 못한다.
+        판정기가 둘로 갈리면 생성기는 통과시키고 솔버는 불가 판정하는 사태가 난다
+        (실측: PROVEN_IMPOSSIBLE 18개 전부 이 불일치였다). 출고 직전 검증은 솔버 것으로 통일한다.
+        """
+        try:
+            from .solver import _clearability_type_counts
+            return not any(c % 3 for c in _clearability_type_counts(level).values())
+        except Exception:  # noqa: BLE001 — 판정 불가 시 막지 않는다(상위 게이트가 최종 방어)
+            logger.exception("[CLEARABILITY] 판정 실패")
+            return True
+
+    def _repair_container_only_types(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """[CONTAINER_ONLY_COLOR] **필드에 한 장도 없고 컨테이너 내부에만 있는 색**을 없앤다.
+
+        왜 치명적인가 (실측 Lv280 `boss_L280_138c_4L`):
+          useTileCount=9 인데 실제 색은 13종. 차이 4종(t7·t8·t14·t15)이 전부 컨테이너
+          내부에만 존재했고, 그것도 서로 다른 컨테이너에 1개씩 흩어져 있었다.
+            t7  : craft_n(L0 1_4) / craft_s(L2 6_3) / craft_s(L3 6_0) 에 1개씩
+          t7 3장을 맞추려면 컨테이너 3개를 전부 연 뒤 그 사이 t7 을 독에 붙들고 있어야 한다.
+          t8·t14·t15 도 같아서 **독 7칸 중 4칸이 반영구 점유** → 남은 3칸으로 9색을 처리해야
+          하니 곧바로 오버플로. 봇 클리어율 0.00 (168타일 중 106에서 사망).
+          이 4종만 필드색으로 치환하면 **0.00 → 1.00** (다른 건 아무것도 안 바꿈).
+
+        발생 경로: `_diversify_container_inner_tiles` 가 게임 분배기(assign_t0_tiles)로
+        내부 타입을 정하는데, 분배기는 '필드에 존재하는 색' 제약이 없어 새 색을 만들어낸다.
+        분배기 자체(게임 정본 포트)를 손대면 인게임과 어긋나므로, 출고 tail 에서 라벨만 고친다.
+
+        안전성: 고아 색의 총 개수는 곧 컨테이너 내부 개수이고, 분배기 불변식상 ÷3 이다.
+        ÷3 인 덩어리를 통째로 다른 색으로 옮기므로 per-type ÷3 이 양쪽 다 보존된다.
+        필드 t0 가 있으면 색이 런타임에 정해져 '필드에 없는 색' 판정이 불가능 → 건드리지 않는다.
+        """
+        num_layers = int(level.get("layer", 0) or 0)
+        field_counts: Dict[str, int] = {}
+        inner_slots: List[Tuple[List, int]] = []   # (td[2] 리스트, 슬롯 인덱스)
+        inner_counts: Dict[str, int] = {}
+        has_field_t0 = False
+
+        for i in range(num_layers):
+            layer = level.get(f"layer_{i}")
+            tiles = layer.get("tiles") if isinstance(layer, dict) else None
+            if not isinstance(tiles, dict):
+                continue
+            for _pos, td in tiles.items():
+                if not (isinstance(td, list) and td and isinstance(td[0], str)):
+                    continue
+                tt = td[0]
+                if tt == "t0":
+                    has_field_t0 = True
+                elif tt.startswith("craft_") or tt.startswith("stack_"):
+                    if len(td) > 2 and isinstance(td[2], list) and len(td[2]) > 1 \
+                            and isinstance(td[2][1], str) and td[2][1]:
+                        parts = td[2][1].split("_")
+                        for k, p in enumerate(parts):
+                            if p.startswith("t") and p[1:].isdigit():
+                                inner_counts[p] = inner_counts.get(p, 0) + 1
+                                inner_slots.append((td[2], k))
+                elif tt.startswith("t") and tt[1:].isdigit():
+                    field_counts[tt] = field_counts.get(tt, 0) + 1
+
+        if has_field_t0 or not inner_counts or not field_counts:
+            return level
+
+        orphans = [t for t in inner_counts if t not in field_counts]
+        if not orphans:
+            return level
+
+        # 필드에 많은 색부터 라운드로빈 — 한 색만 비대해지는 것 방지
+        dests = sorted(field_counts, key=lambda t: (-field_counts[t], int(t[1:])))
+        remap: Dict[str, str] = {}
+        di = 0
+        for t in sorted(orphans, key=lambda x: int(x[1:])):
+            if inner_counts[t] % 3:
+                # 불변식 위반(분배기 이상) — 옮기면 ÷3 이 깨지므로 손대지 않는다
+                logger.error(
+                    f"[CONTAINER_ONLY_COLOR] {t} 내부 {inner_counts[t]}개가 비÷3 — 보정 생략")
+                continue
+            remap[t] = dests[di % len(dests)]
+            di += 1
+        if not remap:
+            return level
+
+        for arr, k in inner_slots:
+            parts = arr[1].split("_")
+            if parts[k] in remap:
+                parts[k] = remap[parts[k]]
+                arr[1] = "_".join(parts)
+
+        logger.info(
+            f"[CONTAINER_ONLY_COLOR] 컨테이너 전용 색 {len(remap)}종 치환 "
+            f"({', '.join(f'{a}({inner_counts[a]})→{b}' for a, b in remap.items())})")
         return level
 
     def _strip_orphaned_link_tiles(self, level: Dict[str, Any]) -> Dict[str, Any]:
@@ -14281,6 +15186,16 @@ class LevelGenerator:
                 except (TypeError, ValueError):
                     continue  # 헤더 불명 → 이 층은 슬롯 소스에서 제외
                 used = set(tiles.keys())
+
+                # [모양 보존] 후보를 '실루엣을 덜 망가뜨리는' 순으로 정렬해서 고른다.
+                # 기존엔 인접 빈칸을 **발견 순서 그대로** 집어서, 하트 같은 대칭 실루엣의
+                # 바깥으로 튀어나온 자리에 1~2개가 얹혔다(실측: 8_7x7 템플릿 y=5 `...#...`
+                # → 생성 결과 `.#.#...`, 좌우대칭 깨짐 = "이가 빠진/튀어나온" 인상).
+                # 우선순위:
+                #   0) 대칭 짝 자리 — 이 칸의 좌우 미러에 타일이 있으면 채워서 대칭 복원
+                #   1) 실루엣 내부 구멍 — 4방이 전부 타일(밖으로 안 튀어나옴)
+                #   2) 이웃이 많은 칸 — 덜 돌출
+                cand: List[Tuple[Tuple[int, int, int], Tuple[int, str]]] = []
                 for pos in list(used):
                     p = pos.split("_")
                     if len(p) != 2:
@@ -14290,11 +15205,24 @@ class LevelGenerator:
                         nx, ny = x + dx, y + dy
                         npos = f"{nx}_{ny}"
                         key = (li, npos)
-                        if 0 <= nx < lc and 0 <= ny < lr and npos not in used and key not in seen_global:
-                            seen_global.add(key)
-                            found.append((li, npos))
-                            if len(found) >= need:
-                                return found
+                        if not (0 <= nx < lc and 0 <= ny < lr):
+                            continue
+                        if npos in used or key in seen_global:
+                            continue
+                        seen_global.add(key)
+                        nbrs = sum(1 for ax, ay in ((-1, 0), (1, 0), (0, -1), (0, 1))
+                                   if f"{nx+ax}_{ny+ay}" in used)
+                        # 대칭 점수: 0=대칭 유지, 1=대칭 깨짐
+                        #  - 중앙열 칸은 미러가 자기 자신 → 넣어도 대칭 유지(자기대칭)
+                        #  - 미러 자리에 이미 타일이 있으면 채워서 좌우 짝 완성
+                        mirror = f"{lc - 1 - nx}_{ny}"
+                        sym = 0 if (mirror == npos or mirror in used) else 1
+                        cand.append(((sym, -(1 if nbrs >= 4 else 0), -nbrs), (li, npos)))
+                cand.sort(key=lambda c: c[0])
+                for _score, slot in cand:
+                    found.append(slot)
+                    if len(found) >= need:
+                        return found
             return found
 
         def _scan():
@@ -14336,6 +15264,30 @@ class LevelGenerator:
         if rc:
             handled = False
             if preserve_pattern:
+                # [1순위] 컨테이너(craft/stack)가 있으면 **타일을 하나도 더하거나 빼지 않고**
+                # concrete 타일 rc개를 t0 로 relabel 한다. 위치·기믹은 그대로라 실루엣이 완전 보존되고,
+                # 넘어간 rc개는 t0 총합에 합류해 Step 3 이 컨테이너 내부 개수로 흡수한다.
+                # (인접칸 추가는 없던 자리에 타일이 생겨 모양이 변하므로 컨테이너가 없을 때만 쓴다.)
+                _, _, _conts = _scan()
+                if _conts:
+                    moved = 0
+                    # 잉여가 큰 타입부터 → Step 2 relabel 부담을 줄인다
+                    for tt in sorted(c_pos, key=lambda t: (-(c_counts[t] % 3), -c_counts[t])):
+                        while c_pos[tt] and moved < rc:
+                            li, pos = c_pos[tt].pop()
+                            cur = level.get(f"layer_{li}", {}).get("tiles", {}).get(pos)
+                            if isinstance(cur, list) and cur:
+                                cur[0] = "t0"
+                                moved += 1
+                        if moved >= rc:
+                            break
+                    if moved >= rc:
+                        logger.info(
+                            f"[FINALIZE_DIV] Pattern mode: relabeled {moved} concrete→t0 for ÷3 "
+                            "(shape untouched, absorbed by container internals)")
+                        level = self._sync_layer_num_fields(level)
+                        handled = True
+            if preserve_pattern and not handled:
                 # 패턴 모드: 삭제 대신 인접 빈칸에 concrete 타일 추가(모양 보존). Step2 relabel이 per-type 마무리.
                 need = 3 - rc
                 slots = _adjacent_empty_slots(need)
@@ -14371,20 +15323,24 @@ class LevelGenerator:
         if rt:
             handled = False
             if preserve_pattern:
-                # 패턴 모드: regular t0 삭제 대신 컨테이너 내부 t0를 (3-rt) 증가 → 시각 타일 무변경.
-                target = None
-                for _, _, td in containers:
-                    if len(td) > 2 and isinstance(td[2], list) and td[2]:
-                        target = td
-                        break
-                if target is not None:
+                # 패턴 모드: regular t0 삭제 대신 컨테이너 내부 t0 개수를 (3-rt) 증가 → 시각 타일 무변경.
+                # 한 컨테이너에 몰아넣지 않고 내부 개수가 적은 것부터 1씩 분산한다(스택 하나만
+                # 비정상적으로 두꺼워지는 것 방지). need 는 1 또는 2 라 컨테이너 1~2개만 건드린다.
+                targets = [td for _, _, td in containers
+                           if len(td) > 2 and isinstance(td[2], list) and td[2]]
+                if targets:
                     need = 3 - rt
-                    target[2][0] = _internal(target) + need
+                    targets.sort(key=_internal)
+                    for i in range(need):
+                        td = targets[i % len(targets)]
+                        td[2][0] = _internal(td) + 1
                     gc: Dict[str, int] = {}
                     for _, _, td in containers:
                         gc[td[0]] = gc.get(td[0], 0) + _internal(td)
                     level["goalCount"] = gc
-                    logger.info(f"[FINALIZE_DIV] Pattern mode: +{need} to container internal for t0 ÷3 (shape preserved)")
+                    logger.info(
+                        f"[FINALIZE_DIV] Pattern mode: +{need} to container internals for t0 ÷3 "
+                        f"(shape preserved, goalCount={gc})")
                     level = self._sync_layer_num_fields(level)
                     handled = True
             if not handled:

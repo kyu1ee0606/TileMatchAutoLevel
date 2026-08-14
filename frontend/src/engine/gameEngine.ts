@@ -1595,7 +1595,6 @@ export class GameEngine {
         for (const [adjX, adjY] of horizontalPositions) {
           const adjPosKey = getPositionKey(adjX, adjY);
           const adjTile = layerTiles.get(adjPosKey);
-          // 인접 타일이 있고, 선택 안됐고, 장애물이 없거나 frog만 있으면 clearable
           if (adjTile && !adjTile.picked) {
             // CRITICAL: stack_*/craft_* 박스는 직접 선택할 수 없으므로 clearable neighbor가 아님
             // 박스에서 스폰된 타일(isStackTile/isCraftTile)은 선택 가능하므로 제외하지 않음
@@ -1604,11 +1603,16 @@ export class GameEngine {
               continue; // 박스는 clearable neighbor로 간주하지 않음
             }
 
-            const adjAttr = adjTile.effectType;
-            if (adjAttr === TileEffectType.NONE || adjAttr === TileEffectType.FROG) {
-              hasClearableNeighbor = true;
-              break;
-            }
+            // [수정] 예전엔 이웃의 기믹이 NONE/FROG 일 때만 clearable 로 쳤다. 그래서 이웃이
+            // 얼음·잔디·커튼이면 "체인 해제 불가"로 오판해 **첫 클릭에서 바로 실패**했다
+            // (실측: 체인 3_4 의 유일한 좌우 이웃 2_4 가 ice → 아무 타일이나 집어도 즉시 게임오버.
+            //  checkGameState 는 클릭한 타일이 아니라 보드 전체를 훑기 때문).
+            // 얼음(3회 인접매치)·잔디(2회)·커튼(토글)은 전부 **결국 제거되는** 기믹이라
+            // clearable 이웃이 맞다. 게임(TileEffect.CheckEffectTileCanUncover: 기믹 종류를
+            // 보지 않고 `CheckRemainNearTile(true) < 1`)과 백엔드 봇(_check_chain_impossible:
+            // `neighbor and not neighbor.picked`)도 종류를 안 본다 — 셋을 일치시킨다.
+            hasClearableNeighbor = true;
+            break;
           }
         }
 

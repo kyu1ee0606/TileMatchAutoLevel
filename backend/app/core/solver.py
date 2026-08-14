@@ -333,3 +333,174 @@ def solve_level_task(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"level_number": args.get("level_number"), "error": str(exc),
                 "verdict": "UNCERTAIN", "reason": f"오류: {exc}",
                 "nodes_expanded": 0, "moves_to_clear": None, "divisibility_violation": None}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 실수 내성(robustness) — A* 기반 객관 난이도 눈금
+#
+# 왜 필요한가:
+#   난이도 판정을 RL 봇 시뮬(predicted_clear_rate)에 의존해 왔는데, 이 값은 봇 휴리스틱의
+#   강약에 좌우된다(실측: RL 전 구간 0.000 인 Lv710 을 A* 는 108노드로 해결). 반면 solve_level
+#   은 "풀리는가"만 답하는 이진값이라 난이도 눈금이 못 된다.
+#
+#   실수 내성은 그 사이를 메운다: **각 시점에서 아무 수나 뒀을 때 여전히 클리어 가능한 수의 비율**.
+#     1.0 = 무슨 수를 둬도 클리어 (아주 쉬움)
+#     0.05 = 20수 중 1수만 정답 (극악)
+#   봇의 판단력이 아니라 레벨 구조만으로 정해지므로 봇 편향이 없다.
+#
+# 비용:
+#   결정지점 × 합법수 × solve_level 1회. 81타일/합법수 7이면 ~570회 호출.
+#   그래서 표본 파라미터(max_depth / move_cap)로 상한을 둔다 — 전수 측정이 아니라
+#   **RL 눈금을 검증·보정하기 위한 기준자** 용도.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _solvable_from_state(sim: "BotSimulator", state, node_budget: int, time_budget_s: float) -> Optional[bool]:
+    """주어진 중간 상태에서 클리어 가능한지. True/False/None(예산초과 미확정)."""
+    if _remaining_count(state) == 0:
+        return True
+    visited = {_state_signature(state)}
+    counter = 0
+    heap: List[Tuple] = [(_remaining_count(state), 0, counter, state, 0)]
+    nodes = 0
+    t0 = time.monotonic()
+    no_limit = time_budget_s <= 0
+    while heap and nodes < node_budget:
+        if not no_limit and nodes % 256 == 0 and (time.monotonic() - t0) > time_budget_s:
+            return None
+        _, _, _, cur, _d = heapq.heappop(heap)
+        nodes += 1
+        moves = sim._get_available_moves(cur)
+        if not moves:
+            continue
+        moves.sort(key=lambda m: (not m.will_match,))
+        for move in moves:
+            child = _copy_state(sim, cur)
+            ct = child.tiles.get(move.layer_idx, {}).get(move.position)
+            if ct is None:
+                continue
+            try:
+                sim._apply_move(child, replace(move, tile_state=ct))
+            except Exception:  # noqa: BLE001
+                continue
+            sim._is_game_over(child)
+            if child.cleared:
+                return True
+            if child.failed:
+                continue
+            sig = _state_signature(child)
+            if sig in visited:
+                continue
+            visited.add(sig)
+            counter += 1
+            heapq.heappush(heap, (_remaining_count(child), 0, counter, child, _d + 1))
+    if nodes >= node_budget:
+        return None
+    return False   # 상태공간 소진 → 이 지점에서는 클리어 불가 확정
+
+
+def measure_robustness(
+    level_json: Dict[str, Any],
+    max_depth: int = 40,
+    move_cap: int = 8,
+    node_budget: int = 20000,
+    time_budget_s: float = 2.0,
+) -> Dict[str, Any]:
+    """실수 내성 측정. 클리어 경로를 따라가며 각 시점의 '안전한 수 비율'을 잰다.
+
+    진행 방식: 안전한 수 중 하나를 골라 실제로 진행한다(안전수가 없으면 종료).
+    안전수 우선 진행이므로 **클리어 경로 위의 난이도**를 재는 것이고, 이는
+    "정답을 아는 플레이어가 겪는 선택 압박"에 해당한다.
+
+    Args:
+        max_depth: 측정할 결정지점 수 상한(비용 상한). 0=제한 없음
+        move_cap: 한 지점에서 평가할 합법수 상한(많으면 앞쪽 will_match 우선)
+    """
+    sim = BotSimulator()
+    total_raw = 0
+    for i in range(int(level_json.get("layer", 0) or 0)):
+        ld = level_json.get(f"layer_{i}")
+        if isinstance(ld, dict) and isinstance(ld.get("tiles"), dict):
+            total_raw += len(ld["tiles"])
+    lvl = dict(level_json)
+    lvl["max_moves"] = total_raw + 100
+    try:
+        state = sim._create_initial_state(lvl, lvl["max_moves"])
+        sim._precompute_blocking_map(state)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": f"초기상태 생성 실패: {exc}"}
+
+    started = time.monotonic()
+    points: List[Dict[str, Any]] = []
+    depth = 0
+    uncertain_hits = 0
+    unmeasured = 0
+    while True:
+        if max_depth and depth >= max_depth:
+            break
+        moves = sim._get_available_moves(state)
+        if not moves:
+            break
+        moves.sort(key=lambda m: (not m.will_match,))
+        evaluated = moves[:move_cap] if move_cap else moves
+        safe_children = []
+        safe = 0
+        unsafe = 0
+        for move in evaluated:
+            child = _copy_state(sim, state)
+            ct = child.tiles.get(move.layer_idx, {}).get(move.position)
+            if ct is None:
+                continue
+            try:
+                sim._apply_move(child, replace(move, tile_state=ct))
+            except Exception:  # noqa: BLE001
+                continue
+            sim._is_game_over(child)
+            if child.cleared:
+                safe += 1
+                safe_children.append(child)
+                continue
+            if child.failed:
+                unsafe += 1
+                continue
+            v = _solvable_from_state(sim, child, node_budget, time_budget_s)
+            if v is None:
+                uncertain_hits += 1
+                continue          # 미확정은 안전/위험 어느 쪽으로도 세지 않는다
+            if v:
+                safe += 1
+                safe_children.append(child)
+            else:
+                unsafe += 1
+        # [중요] 비율의 분모는 '평가한 수'가 아니라 **결론이 난 수**여야 한다.
+        # 예산 초과(None)를 위험수로 세면 예산이 빡빡할 때 비율이 0으로 붕괴한다
+        # (실측: Lv504 가 6개 전부 미확정인데 ratio 0.0 으로 기록됨 → 최난이도로 오판).
+        n_conclusive = safe + unsafe
+        if n_conclusive == 0:
+            # 이 지점은 측정 불가 — 기록하지 않고, 진행만 시도한다(안전수 후보도 없음)
+            unmeasured += 1
+            break
+        points.append({"depth": depth, "legal_moves": len(moves),
+                       "evaluated": len(evaluated), "conclusive": n_conclusive, "safe": safe,
+                       "ratio": round(safe / n_conclusive, 4)})
+        if not safe_children:
+            break                  # 안전수 없음 → 여기서 종료(막다른 지점)
+        state = safe_children[0]   # 안전수 하나 골라 진행
+        if state.cleared:
+            break
+        depth += 1
+
+    ratios = [p["ratio"] for p in points]
+    return {
+        "ok": True,
+        "total_tiles": total_raw,
+        "use_tile_count": int(level_json.get("useTileCount") or 0),
+        "points_measured": len(points),
+        # 평균 안전수 비율 = 주 지표. 낮을수록 어렵다.
+        "safe_move_ratio": round(sum(ratios) / len(ratios), 4) if ratios else None,
+        "min_safe_ratio": round(min(ratios), 4) if ratios else None,
+        "avg_legal_moves": round(sum(p["legal_moves"] for p in points) / len(points), 2) if points else 0,
+        "uncertain_evals": uncertain_hits,
+        "unmeasured_points": unmeasured,
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+        "points": points,
+    }

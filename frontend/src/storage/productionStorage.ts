@@ -346,7 +346,7 @@ export async function getProductionLevelsByBatch(
       let results = request.result.map((r: { batch_id: string; meta: ProductionLevelMeta; level_json: LevelJSON }) => ({
         meta: r.meta,
         level_json: r.level_json,
-      })) as ProductionLevel[];
+      }));
 
       // Filter by status
       if (options?.status) {
@@ -398,7 +398,7 @@ export async function getPlaytestQueue(
         .map((r: { meta: ProductionLevelMeta; level_json: LevelJSON }) => ({
           meta: r.meta,
           level_json: r.level_json,
-        })) as ProductionLevel[];
+        }));
 
       // Sort by priority (lower = higher priority)
       results.sort((a, b) => a.meta.playtest_priority - b.meta.playtest_priority);
@@ -680,17 +680,48 @@ export async function exportProductionLevels(
 ): Promise<Blob | { files: Array<{ name: string; data: Blob }> }> {
   // Get all levels and filter to approved/exported
   const allLevels = await getProductionLevelsByBatch(batchId);
-  const exportableLevels = allLevels.filter(
+  let exportableLevels = allLevels.filter(
     l => l.meta.status === 'approved' || l.meta.status === 'exported'
   );
+
+  // [무한 레벨] 원본은 그대로 두고 사본을 **뒤에 덧붙인다**.
+  //   infinity_{index} = 원본 (sourceStart + index - 1)
+  // 사본은 원본과 동일한 level_json 을 쓰되 meta 에 출처를 남긴다(추적·재현용).
+  // 원본이 배포 게이트를 통과한 것만 대상이므로 사본도 자동으로 통과 상태다.
+  if (config.infinity?.enabled) {
+    const { prefix, sourceStart, sourceEnd, only } = config.infinity;
+    const src = exportableLevels
+      .filter(l => l.meta.level_number >= sourceStart && l.meta.level_number <= sourceEnd)
+      .sort((a, b) => a.meta.level_number - b.meta.level_number);
+    const copies = src.map((l, i) => ({
+      ...l,
+      meta: {
+        ...l.meta,
+        infinity_id: `${prefix}${i + 1}`,
+        infinity_index: i + 1,
+        infinity_source_level: l.meta.level_number,
+      },
+    }));
+    // only=true 면 원본을 빼고 사본만 내보낸다(무한 레벨 단독 배포용).
+    exportableLevels = only ? copies : exportableLevels.concat(copies);
+  }
 
   if (config.format === 'json_split') {
     // Split into individual files
     const files = exportableLevels.map(level => {
-      const filename = config.filename_pattern
-        .replace('{number}', String(level.meta.level_number))
-        .replace('{number:04d}', String(level.meta.level_number).padStart(4, '0'))
-        .replace('{grade}', level.meta.grade);
+      // 무한 사본은 원본 레벨번호가 아니라 infinity id 로 파일명을 만든다(원본과 충돌 방지)
+      const infId = level.meta.infinity_id;
+      const idx = level.meta.infinity_index;
+      const filename = infId
+        ? config.filename_pattern
+            .replace('{number}', infId)
+            .replace('{number:04d}', String(idx ?? 0).padStart(4, '0'))
+            .replace('{grade}', level.meta.grade)
+            .replace(/^level_/, `${infId.replace(/\d+$/, '')}`)
+        : config.filename_pattern
+            .replace('{number}', String(level.meta.level_number))
+            .replace('{number:04d}', String(level.meta.level_number).padStart(4, '0'))
+            .replace('{grade}', level.meta.grade);
 
       const data = config.include_meta
         ? { meta: level.meta, level: level.level_json }

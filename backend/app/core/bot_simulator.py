@@ -4198,12 +4198,20 @@ class BotSimulator:
             base_depth = 5
 
         # Dock state adjustment
+        # [독압박 심화] 예전엔 위험할 때도 상한이 6이었다. 그런데 초반(타일>120)엔 base_depth 가 2라
+        # 위험해도 3까지밖에 못 본다. 색 종류가 독 칸수를 넘는 레벨은 초반부터 독이 차므로 이 구간이
+        # 승부처인데 거기서 얕게 보다가 자멸했다. 독에 서로 다른 색이 많이 쌓였을수록 깊게 본다.
+        dock_colors = len({t.tile_type for t in state.dock_tiles})
         if dock_size <= 2:
             # Safe dock - can afford less depth (less critical decisions)
             return max(2, base_depth - 1)
-        elif dock_size >= 5:
+        if dock_colors >= 5 or dock_size >= 6:
+            return min(8, base_depth + 3)
+        if dock_size >= 5:
             # Dangerous dock - need more careful analysis
             return min(6, base_depth + 1)
+        if dock_colors >= 4:
+            return min(6, base_depth + 2)
 
         return base_depth
 
@@ -4222,13 +4230,26 @@ class BotSimulator:
         if len(sorted_moves) == 1:
             return sorted_moves
 
-        # If there are matching moves, prioritize them strongly
+        dock_size = len(state.dock_tiles)
+
+        # [독압박 예외] "지금 매치되는 수가 있으면 그것만 본다"는 근시안이다. 색 종류가 독 칸수를
+        # 넘는 레벨에선 '지금 매치'보다 '나중에 3개째가 올 색을 담는가'가 승부를 가른다. 그 판단을
+        # 아예 못 하게 막고 있어서, 실제로는 풀리는 레벨을 봇이 0%로 예측해 왔다.
+        #   실측(야간 A* 전수판정): RL 예측 0% 인 246개가 **전부** PROVEN_SOLVABLE.
+        #   V별 RL 0.31(V6)→0.007(V9)→0.000(V13) 로 붕괴하는데 A* 실수내성은 0.98→0.81→0.76 로 완만.
+        #   그 결과 배치의 22.1%(311개)가 예측 0 으로 동률이 되어 난이도 서열 자체가 사라졌다
+        #   (Lv1200~1399 는 71%가 동률).
+        # → 독이 실제로 압박받을 때만 비매치 수까지 후보에 넣는다. 평시엔 기존 동작 유지(속도 보존).
+        dock_colors = len({t.tile_type for t in state.dock_tiles})
+        dock_pressure = dock_size >= 4 or dock_colors >= 4
         matching_moves = [m for m in sorted_moves if m.will_match]
-        if matching_moves:
+        if matching_moves and not dock_pressure:
             # Only consider matching moves (max 3)
             return matching_moves[:3]
-
-        dock_size = len(state.dock_tiles)
+        if matching_moves and dock_pressure:
+            # 매치 수는 우선하되, 비매치 상위 수도 함께 평가해 독 정리를 선택지에 남긴다.
+            others = [m for m in sorted_moves if not m.will_match][:4]
+            return (matching_moves[:3] + others) or sorted_moves[:3]
         best_score = sorted_moves[0].score
 
         # Determine max candidates based on dock danger

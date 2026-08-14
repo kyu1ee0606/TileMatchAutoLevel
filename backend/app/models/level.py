@@ -186,6 +186,15 @@ class GenerationParams:
     # 중앙 축소 = 거북등껍질 코히어런트 스택. 각층=아래층의 중앙 부분집합 → 홀짝 커버 정합, peel 클리어.
     # 상위층 무작위 흩어짐 제거(유저 피드백). use_reverse_generation과 병용해 타입 솔버블화.
     concentric_deep: bool = False
+    # [층수 상한 스위치] False면 난이도 등급 기반 층수 클램프(A:3~4/B:4~6/C:6~8/D:7~10)와
+    # active_layer_count 의 max_layers 클램프를 **건너뛴다**. '모양이 층수를 결정하는' 생성모드
+    # (등껍질 침식)용 — 침식 깊이가 등급 상한보다 크거나 작을 수 있기 때문.
+    # 기본 True = 기존 동작 유지.
+    enforce_layer_cap: bool = True
+    # [등껍질 침식] custom_patterns.json 의 두꺼운 모양 키(예: "0_6x6"). 지정하면 그 모양을
+    # **바닥 1층**으로 두고 완전받침 침식으로 위층을 다 깎일 때까지 쌓는다(거북등껍질).
+    # 층수 = 침식 깊이 → enforce_layer_cap 은 자동 False 취급.
+    turtle_pattern_id: Optional[str] = None
     # [유닛 조립] 바닥 큰층=주 패턴 / 위 작은층=밀도 높은 소형 유닛(3·6·9) 조립.
     # 위층 sparse(타일 미달) 해결 + 다양성. 받침(valid_mask) 규칙으로 floating 0.
     # use_reverse_generation 과 병용해 타입 솔버블화(÷3·클리어가능).

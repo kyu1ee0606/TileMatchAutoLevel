@@ -1663,6 +1663,356 @@ async def boss_templates_list():
     return {"boss_templates": _load_boss_templates()}
 
 
+class FixedLevelSaveRequest(_BaseModel):
+    level_json: Dict[str, Any] = _Field(..., description="완성 레벨 JSON(그대로 출고)")
+    note: str = _Field(default="", description="메모")
+
+
+@router.get("/debug/fixed-levels")
+async def fixed_levels_list():
+    """[초반 고정 레벨] 1~31 슬롯 상태. 보스(10·20·30)는 readonly + 보스템플릿 미리보기 동봉."""
+    from ...core import fixed_levels as FX
+    slots = FX.list_slots()
+    # 보스 슬롯은 저장소에 없다 → 정본(보스 템플릿)에서 모양만 끌어와 '확인'용으로 채운다.
+    bosses = _load_boss_templates()
+    for it in slots:
+        if not it["readonly"]:
+            continue
+        n = it["level"]
+        tpl = next((t for t in bosses.values()
+                    if isinstance(t, dict)
+                    and int(t.get("level_min") or 0) <= n <= int(t.get("level_max") or 0)), None)
+        if not tpl:
+            continue
+        it["boss_template_id"] = tpl.get("id")
+        it["layer_count"] = int(tpl.get("layer_count") or len(tpl.get("layers") or []))
+        it["layers"] = [{"col": int(l.get("col") or 0),
+                         "cells": [str(p) for p in (l.get("positions") or [])]}
+                        for l in (tpl.get("layers") or [])]
+        it["total_tiles"] = sum(len(l["cells"]) for l in it["layers"])
+    return {"slots": slots, "range": [FX.RANGE_START, FX.RANGE_END],
+            "boss_levels": list(FX.BOSS_LEVELS)}
+
+
+@router.get("/debug/fixed-levels/{level_number}")
+async def fixed_level_get(level_number: int):
+    """고정 레벨 원본 JSON 조회(에디터 불러오기용)."""
+    from ...core import fixed_levels as FX
+    if FX.is_boss(level_number):
+        raise HTTPException(status_code=403, detail="보스 슬롯 — 보스 템플릿이 정본(읽기 전용)")
+    e = FX.get_fixed(level_number)
+    if not e:
+        raise HTTPException(status_code=404, detail="fixed_level_not_found")
+    return {"level": level_number, **e}
+
+
+@router.post("/debug/fixed-levels/{level_number}/validate")
+async def fixed_level_validate(level_number: int, req: FixedLevelSaveRequest):
+    """[에디터 실시간 검증] 저장 없이 규칙 위반만 돌려준다.
+
+    저장 후에야 문제를 알면 되돌리기 번거로우므로, 그리는 중에 같은 판정기를 태운다.
+    판정기는 배포 게이트와 **동일한 것**(격자/÷3/헤더OOB/기믹규칙)을 재사용한다.
+    """
+    import copy as _copy
+    from ...core import fixed_levels as FX
+    from ...core import level_shapes as LS
+    from ...core.generator import LevelGenerator
+    from ...core.solver import _clearability_type_counts
+    from .production_store import _scan_header_oob, _scan_rule_violations
+
+    if FX.is_boss(level_number):
+        raise HTTPException(status_code=403, detail="보스 슬롯 — 읽기 전용")
+
+    lj = _copy.deepcopy(req.level_json)
+    issues: List[Dict[str, Any]] = []
+
+    # 생성 시 실제로 태우는 tail 을 그대로 적용해 '출고 형태' 로 판정한다.
+    finalized = None
+    try:
+        gen = LevelGenerator()
+        finalized = gen._finalize_divisibility_guarantee(_copy.deepcopy(lj))
+        finalized = gen._finalize_level(finalized)
+    except Exception as ex:  # noqa: BLE001
+        issues.append({"kind": "pipeline", "msg": f"마무리 파이프라인 실패: {type(ex).__name__}: {ex}"})
+    target = finalized if finalized is not None else lj
+
+    for v in (LS.assert_in_board(target) or [])[:8]:
+        issues.append({"kind": "board", "msg": f"격자 규칙 위반: {v}"})
+    for v in (_scan_header_oob(target) or [])[:8]:
+        issues.append({"kind": "header_oob", "msg": f"헤더 밖 타일: {v}"})
+    try:
+        bad = {t: c for t, c in _clearability_type_counts(target).items() if c % 3}
+        if bad:
+            issues.append({"kind": "div3", "msg": f"÷3 위반(클리어 불가): {bad}"})
+    except Exception:  # noqa: BLE001
+        pass
+    for k, detail in (_scan_rule_violations(target, level_number) or {}).items():
+        issues.append({"kind": k, "msg": f"{k}: {detail}"})
+
+    # 선언 격자 상한(디바이스 가독성)
+    worst = 0
+    for i in range(int(target.get("layer") or 0)):
+        ld = target.get(f"layer_{i}") or {}
+        try:
+            worst = max(worst, int(ld.get("col")), int(ld.get("row")))
+        except (TypeError, ValueError):
+            continue
+    if worst > 8:
+        issues.append({"kind": "oversized_grid", "msg": f"선언 격자 {worst} > 8"})
+
+    n = int(target.get("layer") or 0)
+    return {
+        "ok": len(issues) == 0,
+        "issues": issues,
+        "summary": {
+            "layer_count": n,
+            "total_tiles": sum(len((target.get(f"layer_{i}") or {}).get("tiles") or {}) for i in range(n)),
+            "per_layer": [len((target.get(f"layer_{i}") or {}).get("tiles") or {}) for i in range(n)],
+            "max_moves": target.get("max_moves"),
+        },
+        # 마무리 파이프라인이 타일을 더하거나 뺐을 수 있어 최종본을 함께 돌려준다(에디터 반영용)
+        "finalized": target,
+    }
+
+
+@router.put("/debug/fixed-levels/{level_number}")
+async def fixed_level_put(level_number: int, req: FixedLevelSaveRequest):
+    """고정 레벨 저장. 보스 슬롯은 403."""
+    from ...core import fixed_levels as FX
+    try:
+        entry = FX.put_fixed(level_number, req.level_json, source="manual", note=req.note)
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "level": level_number, "updated_at": entry["updated_at"]}
+
+
+@router.delete("/debug/fixed-levels/{level_number}")
+async def fixed_level_delete(level_number: int):
+    """고정 해제(다시 절차생성으로 돌아감). 보스 슬롯은 403."""
+    from ...core import fixed_levels as FX
+    try:
+        ok = FX.delete_fixed(level_number)
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    if not ok:
+        raise HTTPException(status_code=404, detail="fixed_level_not_found")
+    return {"ok": True, "level": level_number}
+
+
+@router.post("/debug/fixed-levels/seed-from-batch")
+async def fixed_levels_seed(batch_id: str, overwrite: bool = False,
+                            levels: Optional[str] = None):
+    """[시드] 기존 배치의 1~31 레벨을 고정 저장소로 이관.
+
+    Lv1~3 은 이미 생성기 하드코딩 고정 레이아웃이 적용된 상태라, 그 산출물을 그대로 올려두면
+    '현재 출고본 == 고정본' 이 된다. levels 미지정 시 1~31 전체(보스 제외).
+    """
+    import json as _json
+    import os as _os
+    from ...core import fixed_levels as FX
+
+    _here = _os.path.dirname(_os.path.abspath(__file__))
+    fp = _os.path.normpath(_os.path.join(_here, "..", "..", "..", "data", "production", f"{batch_id}.json"))
+    if not _os.path.exists(fp):
+        raise HTTPException(status_code=404, detail=f"batch_not_found: {batch_id}")
+    with open(fp, "r", encoding="utf-8") as f:
+        batch = _json.load(f)
+    by_ln = {int(l.get("meta", {}).get("level_number", -1)): l for l in (batch.get("levels") or [])}
+
+    want = ([int(x) for x in levels.split(",") if x.strip().isdigit()]
+            if levels else list(range(FX.RANGE_START, FX.RANGE_END + 1)))
+    done, skipped = [], []
+    for n in want:
+        if not FX.is_in_range(n) or FX.is_boss(n):
+            skipped.append({"level": n, "why": "범위 밖 또는 보스 슬롯"})
+            continue
+        if not overwrite and FX.get_fixed(n):
+            skipped.append({"level": n, "why": "이미 고정됨(overwrite=false)"})
+            continue
+        lv = by_ln.get(n)
+        if not lv or not lv.get("level_json"):
+            skipped.append({"level": n, "why": "배치에 해당 레벨 없음"})
+            continue
+        FX.put_fixed(n, lv["level_json"], source="seed",
+                     note=f"batch:{batch_id}")
+        done.append(n)
+    return {"ok": True, "seeded": done, "skipped": skipped,
+            "count": len(done), "batch_id": batch_id}
+
+
+class TurtleBaseSaveRequest(_BaseModel):
+    id: Optional[str] = _Field(default=None, description="미지정 시 자동 생성(tb_<timestamp>)")
+    name: str = _Field(default="", description="표시 이름")
+    grid: int = _Field(..., ge=5, le=9, description="바닥층 격자(신규 등록 권장: 7 또는 8)")
+    cells: List[str] = _Field(default_factory=list, description="바닥층 채움 좌표 'x_y'")
+    enabled: bool = _Field(default=True)
+
+
+@router.get("/debug/turtle-bases")
+async def turtle_bases_list(enabled_only: bool = False):
+    """[등껍질 바닥 라이브러리] 목록 + 층별 침식 미리보기 좌표."""
+    from ...core import turtle_bases as TB
+    items = TB.list_bases(enabled_only=enabled_only)
+    return {"turtle_bases": items, "count": len(items),
+            "limits": {"min_depth": TB.MIN_DEPTH, "max_total": TB.MAX_TOTAL,
+                       "effective_max_total": TB.EFFECTIVE_MAX_TOTAL,
+                       "max_overhead": TB.TURTLE_MAX_OVERHEAD,
+                       "allowed_grids": list(TB.ALLOWED_GRIDS)}}
+
+
+@router.post("/debug/turtle-bases/preview")
+async def turtle_bases_preview(req: TurtleBaseSaveRequest):
+    """[등껍질 바닥] **저장 없이** 침식 결과만 계산. 에디터 실시간 미리보기용.
+
+    (미리보기를 위해 임시 엔트리를 저장했다 지우면 저장소가 오염되고 동시 편집 시 꼬인다.)
+    """
+    from ...core import turtle_bases as TB
+    meta = TB.compute_turtle_meta(req.cells, req.grid)
+    cs = TB.parse_cells(req.cells, req.grid)
+    stack = TB.peel_stack(cs, req.grid)
+    return {
+        "turtle": meta,
+        "invalid": TB.validate(req.cells, req.grid),
+        "layers": [{"col": col, "cells": [f"{x}_{y}" for (x, y) in sorted(c)]}
+                   for (_li, col, c) in stack],
+    }
+
+
+@router.post("/debug/turtle-bases")
+async def turtle_bases_save(req: TurtleBaseSaveRequest):
+    """[등껍질 바닥] 추가/수정. 침식 깊이·타일 예산·격자 규칙을 저장 전에 검증."""
+    import time as _t
+    from ...core import turtle_bases as TB
+    why = TB.validate(req.cells, req.grid)
+    if why:
+        raise HTTPException(status_code=400, detail={"invalid": why,
+                                                     "meta": TB.compute_turtle_meta(req.cells, req.grid)})
+    bid = req.id or f"tb_{int(_t.time()*1000)}"
+    entry = TB.put_base(bid, name=req.name or bid, grid=req.grid,
+                        cells=req.cells, enabled=req.enabled, source="manual")
+    return {"ok": True, "base": entry}
+
+
+@router.delete("/debug/turtle-bases/{base_id}")
+async def turtle_bases_delete(base_id: str):
+    from ...core import turtle_bases as TB
+    if not TB.delete_base(base_id):
+        raise HTTPException(status_code=404, detail="base_not_found")
+    return {"ok": True, "id": base_id}
+
+
+@router.post("/debug/turtle-bases/{base_id}/measure")
+async def turtle_bases_measure(base_id: str, iterations: int = 120):
+    """[등껍질 바닥] 난이도 실측 — V(색 종류) 6/9/12 에서 봇 클리어율.
+
+    측정 프로토콜은 `scripts/measure_turtle_difficulty.py` 와 동일:
+    기믹·컨테이너 없이 1회 생성 → useTileCount 만 바꿔가며 시뮬 → randSeed=0 +
+    honor_zero_seed 로 **매 iteration 다른 색분배**(고정 시드는 실수율 낮은 봇이
+    배치 하나에 all-or-nothing 이 되어 사다리가 역전된다).
+    """
+    import copy as _copy
+    import random as _rnd
+    from ...core import turtle_bases as TB
+    from ...core.bot_simulator import BotSimulator
+    from ...models.bot_profile import BotType, get_profile
+    from ...core.generator import LevelGenerator, get_tile_types_for_level
+
+    entry = TB.get_base(base_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="base_not_found")
+
+    grid = int(entry.get("grid") or 8)
+    cells = TB.parse_cells(entry.get("cells") or [], grid)
+    stack = TB.peel_stack(cells, grid)
+    if len(stack) < 2:
+        raise HTTPException(status_code=400, detail="침식 깊이 부족")
+
+    gen = LevelGenerator()
+    level: Dict[str, Any] = {"layer": len(stack), "row": str(grid), "col": str(grid),
+                             "useTileCount": 6, "randSeed": 0, "autoCollectCount": 0}
+    gen._build_turtle_layers(level, stack)
+    level = gen._finalize_divisibility_guarantee(level)
+    level = gen._finalize_level(level)
+
+    sim = BotSimulator()
+    by_v: Dict[str, Any] = {}
+    avgs: List[float] = []
+    for v in (6, 9, 12):
+        lj = _copy.deepcopy(level)
+        lj["useTileCount"] = v
+        lj["randSeed"] = 0
+        rates = {}
+        for key, bt in (("avg", BotType.AVERAGE), ("cas", BotType.CASUAL)):
+            r = sim.simulate_with_profile(
+                lj, get_profile(bt), iterations=max(20, min(300, iterations)),
+                max_moves=int(lj.get("max_moves") or 0) or None,
+                seed=0, honor_zero_seed=True)
+            rates[key] = round(float(getattr(r, "clear_rate", 0.0) or 0.0), 3)
+        by_v[str(v)] = rates
+        avgs.append(rates["avg"])
+    diff = {"ref": "turtle_base", "by_v": by_v,
+            "coef": round(1.0 - sum(avgs) / len(avgs), 3)}
+    TB.set_difficulty(base_id, diff)
+    return {"ok": True, "id": base_id, "difficulty": diff}
+
+
+@router.get("/debug/turtle-patterns")
+async def turtle_patterns_list():
+    """[등껍질] 침식 스택 생성이 가능한 화이트리스트 패턴 목록.
+
+    `custom_patterns.json` 엔트리 중 `turtle` 메타가 붙은 것만(= 침식 깊이≥4·총타일≤130).
+    난이도 계수(coef)와 V별 실측 클리어율(by_v)을 함께 내려 프론트가 슬롯에 맞는
+    모양을 고를 수 있게 한다. positions 는 페이로드 절감을 위해 제외.
+    """
+    import json as _json
+    import os as _os
+
+    _here = _os.path.dirname(_os.path.abspath(__file__))
+    _path = _os.path.normpath(_os.path.join(_here, "..", "..", "..", "data", "custom_patterns.json"))
+    try:
+        with open(_path, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+    except (FileNotFoundError, _json.JSONDecodeError) as e:
+        raise HTTPException(status_code=500, detail=f"custom_patterns 읽기 실패: {e}")
+
+    out = []
+    for pid, entry in (data or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        t = entry.get("turtle")
+        if not isinstance(t, dict):
+            continue
+        # [미리보기] 침식 스택을 층별 셀 좌표로 함께 내려 프론트가 실제 모양을 그릴 수 있게 한다.
+        # (id·타일수만으론 어떤 모양인지 알 수 없다는 피드백 반영. 좌표는 순수 계산이라
+        #  저장소를 키우지 않고 요청 시 재생성 — 49개 × ~110셀로 페이로드도 작다.)
+        layers = []
+        try:
+            g = int(entry.get("grid_size"))
+            cells = set()
+            for p in entry.get("positions") or []:
+                x, y = map(int, str(p).split("_"))
+                if 0 <= x < g and 0 <= y < g:
+                    cells.add((x, y))
+            for (_li, col, cs) in LevelGenerator._turtle_peel_stack(cells, g):
+                layers.append({"col": col, "cells": [f"{x}_{y}" for (x, y) in sorted(cs)]})
+        except (TypeError, ValueError):
+            layers = []
+        out.append({
+            "id": pid,
+            "base": t.get("base"),
+            "depth": t.get("depth"),
+            "total": t.get("total"),
+            "per_layer": t.get("per_layer"),
+            "coef": (t.get("difficulty") or {}).get("coef"),
+            "by_v": (t.get("difficulty") or {}).get("by_v"),
+            "layers": layers,
+        })
+    out.sort(key=lambda e: (e.get("coef") is None, e.get("coef") or 0, e["id"]))
+    return {"turtle_patterns": out, "count": len(out)}
+
+
 @router.delete("/debug/boss-template/{template_id}")
 async def boss_template_delete(template_id: str):
     """보스 템플릿 삭제."""
@@ -3775,4 +4125,73 @@ async def generate_from_level_shape(request: LevelShapeGenerateRequest):
         "shape_id": request.shape_id,
         "min_level": min_lv,
         "tier": entry.get("tier"),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [÷3 위반 복구] 이미 저장된 레벨의 클리어가능성만 고친다 — 모양·난이도는 건드리지 않는다.
+#
+# 왜 필요한가: 야간 A* 전수판정에서 PROVEN_IMPOSSIBLE 18개가 나왔는데 전부 ÷3 위반이었다.
+#   원인은 `key`(매칭 대상 아님, 규약 unlockTile×3)가 컨테이너 내부에 부분 bake 되면서
+#   매칭 총수가 ÷3 에서 어긋난 것(예: Lv336 unlockTile=1 인데 key 2개 → 매칭 46개 %3=1).
+#   재생성하면 모양이 통째로 바뀌어 재검증 부담이 크고 난이도도 튄다. 컨테이너 내부 라벨만
+#   고치면 위치·기믹·색 배치가 전부 보존되므로 이쪽이 안전하다.
+# ─────────────────────────────────────────────────────────────────────────────
+class RepairClearabilityItem(_BaseModel):
+    level_number: int
+    level_json: Dict[str, Any]
+
+
+class RepairClearabilityRequest(_BaseModel):
+    levels: List[RepairClearabilityItem]
+
+
+class RepairClearabilityResultItem(_BaseModel):
+    level_number: int
+    changed: bool                      # 실제로 고쳤는가(원래 정상이면 False)
+    ok_before: bool
+    ok_after: bool
+    violations_before: Dict[str, int]
+    violations_after: Dict[str, int]
+    level_json: Optional[Dict[str, Any]] = None   # changed=True 일 때만 반환
+    error: Optional[str] = None
+
+
+@router.post("/analyze/repair-clearability")
+def repair_clearability(request: RepairClearabilityRequest) -> Dict[str, Any]:
+    """레벨 묶음의 per-type ÷3 위반을 컨테이너 내부 라벨 조정으로 복구."""
+    import copy as _copy
+    from ...core.generator import LevelGenerator
+    from ...core.solver import _clearability_type_counts
+
+    gen = LevelGenerator()
+    out: List[RepairClearabilityResultItem] = []
+    for item in request.levels:
+        try:
+            before = _clearability_type_counts(item.level_json)
+            vb = {t: c for t, c in before.items() if c % 3}
+            if not vb:
+                out.append(RepairClearabilityResultItem(
+                    level_number=item.level_number, changed=False,
+                    ok_before=True, ok_after=True,
+                    violations_before={}, violations_after={}))
+                continue
+            fixed = gen._repair_clearability(_copy.deepcopy(item.level_json))
+            after = _clearability_type_counts(fixed)
+            va = {t: c for t, c in after.items() if c % 3}
+            out.append(RepairClearabilityResultItem(
+                level_number=item.level_number, changed=not va,
+                ok_before=False, ok_after=not va,
+                violations_before=vb, violations_after=va,
+                level_json=fixed if not va else None))
+        except Exception as exc:  # noqa: BLE001 — 한 레벨 실패가 전체를 막지 않는다
+            out.append(RepairClearabilityResultItem(
+                level_number=item.level_number, changed=False,
+                ok_before=False, ok_after=False,
+                violations_before={}, violations_after={}, error=str(exc)[:200]))
+    return {
+        "results": [r.model_dump() for r in out],
+        "repaired": sum(1 for r in out if r.changed),
+        "already_ok": sum(1 for r in out if r.ok_before),
+        "failed": sum(1 for r in out if not r.ok_after and not r.ok_before),
     }

@@ -1,7 +1,7 @@
 {
   "boss_10_20_57_3L": {
     "id": "boss_10_20_57_3L",
-    "name": "10\ub808\ubca8 \ubcf4\uc2a4 - \uace0\uc591\uc774",
+    "name": "10레벨 보스 - 고양이",
     "level_min": 10,
     "level_max": 10,
     "layers": [
@@ -124,7 +124,7 @@
   },
   "boss_20_20_99_3L": {
     "id": "boss_20_20_99_3L",
-    "name": "20\ub808\ubca8 \ubcf4\uc2a4 - \ud3b8\uc9c0\uc9c0",
+    "name": "20레벨 보스 - 편지지",
     "level_min": 20,
     "level_max": 20,
     "layers": [
@@ -266,7 +266,7 @@
   },
   "boss_30_30_45_3L": {
     "id": "boss_30_30_45_3L",
-    "name": "30\ub808\ubca8 \ubcf4\uc2a4 - \ubca4\uce58",
+    "name": "30레벨 보스 - 벤치",
     "level_min": 30,
     "level_max": 30,
     "layers": [
@@ -380,7 +380,7 @@
   },
   "boss_40_40_78_3L": {
     "id": "boss_40_40_78_3L",
-    "name": "40\ub808\ubca8 \ubcf4\uc2a4 - \ucc3b\uc794",
+    "name": "40레벨 보스 - 찻잔",
     "level_min": 40,
     "level_max": 40,
     "layers": [
@@ -520,7 +520,7 @@
   },
   "boss_L10_92c_4L": {
     "id": "boss_L10_92c_4L",
-    "name": "50\ub808\ubca8 \ubcf4\uc2a4 - \ucea3\uce90\uc2ac,\ucea3\ud0c0\uc6cc",
+    "name": "50레벨 보스 - 캣캐슬,캣타워",
     "level_min": 50,
     "level_max": 50,
     "layers": [
@@ -662,7 +662,7 @@
   },
   "boss_L60_69c_4L": {
     "id": "boss_L60_69c_4L",
-    "name": "60\ub808\ubca8 \ubcf4\uc2a4 - \uc824\ub9ac,\uace0\uc591\uc774",
+    "name": "60레벨 보스 - 젤리,고양이",
     "level_min": 60,
     "level_max": 60,
     "layers": [
@@ -782,7 +782,7 @@
   },
   "boss_L70_94c_5L": {
     "id": "boss_L70_94c_5L",
-    "name": "70\ub808\ubca8 \ubcf4\uc2a4 - \ud3bc\uce5c \ucc45",
+    "name": "70레벨 보스 - 펼친 책",
     "level_min": 70,
     "level_max": 70,
     "layers": [
@@ -916,7 +916,7 @@
   },
   "boss_L80_129c_5L": {
     "id": "boss_L80_129c_5L",
-    "name": "80\ub808\ubca8 \ubcf4\uc2a4 - \uc6b0\uccb4\ud1b5",
+    "name": "80레벨 보스 - 우체통",
     "level_min": 80,
     "level_max": 80,
     "layers": [
@@ -1103,7 +1103,7 @@
   },
   "boss_L90_93c_5L": {
     "id": "boss_L90_93c_5L",
-    "name": "90\ub808\ubca8 \ubcf4\uc2a4 - \ud754\ub4e4\uc758\uc790",
+    "name": "90레벨 보스 - 흔들의자",
     "level_min": 90,
     "level_max": 90,
     "layers": [
@@ -1255,7 +1255,7 @@
   },
   "boss_L100_96c_5L": {
     "id": "boss_L100_96c_5L",
-    "name": "100\ub808\ubca8 \ubcf4\uc2a4 - \uc561\uc790+\ud558\ud2b8",
+    "name": "100레벨 보스 - 액자+하트",
     "level_min": 100,
     "level_max": 100,
     "layers": [
@@ -1425,7 +1425,7 @@
   },
   "boss_L110_81c_4L": {
     "id": "boss_L110_81c_4L",
-    "name": "110\ub808\ubca8 \ubcf4\uc2a4 - \uc9d1",
+    "name": "110레벨 보스 - 집",
     "level_min": 110,
     "level_max": 110,
     "layers": [
@@ -1566,7 +1566,7 @@
   },
   "boss_L120_84c_4L": {
     "id": "boss_L120_84c_4L",
-    "name": "120\ub808\ubca8 \ubcf4\uc2a4 - \uc30d\ub465\uc774 \ud654\ubd84",
+    "name": "120레벨 보스 - 쌍둥이 화분",
     "level_min": 120,
     "level_max": 120,
     "layers": [
@@ -1707,7 +1707,7 @@
   },
   "boss_L130_72c_5L": {
     "id": "boss_L130_72c_5L",
-    "name": "130\ub808\ubca8 \ubcf4\uc2a4 - \uc774\uc911\ubb38",
+    "name": "130레벨 보스 - 이중문",
     "level_min": 130,
     "level_max": 130,
     "layers": [
@@ -1835,7 +1835,7 @@
   },
   "boss_L140_73c_3L": {
     "id": "boss_L140_73c_3L",
-    "name": "140\ub808\ubca8 \ubcf4\uc2a4 - \ub465\uadfc \ud50c\ub77c\uc2a4\ud06c",
+    "name": "140레벨 보스 - 둥근 플라스크",
     "level_min": 140,
     "level_max": 140,
     "layers": [
@@ -1952,7 +1952,7 @@
   },
   "boss_L150_6c_3L": {
     "id": "boss_L150_6c_3L",
-    "name": "150\ub808\ubca8 \ubcf4\uc2a4 - \ucc9c\uce6d",
+    "name": "150레벨 보스 - 천칭",
     "level_min": 150,
     "level_max": 150,
     "layers": [
@@ -2114,7 +2114,7 @@
   },
   "boss_L160_102c_4L": {
     "id": "boss_L160_102c_4L",
-    "name": "160\ub808\ubca8 \ubcf4\uc2a4 - \uc2dc\ud5d8\uad00 \uc138\ud2b8",
+    "name": "160레벨 보스 - 시험관 세트",
     "level_min": 160,
     "level_max": 160,
     "layers": [
@@ -2276,7 +2276,7 @@
   },
   "boss_L170_93c_4L": {
     "id": "boss_L170_93c_4L",
-    "name": "170\ub808\ubca8 \ubcf4\uc2a4 - \ub79c\ub364",
+    "name": "170레벨 보스 - 랜덤",
     "level_min": 170,
     "level_max": 170,
     "layers": [
@@ -2426,7 +2426,7 @@
   },
   "boss_L180_48c_3L": {
     "id": "boss_L180_48c_3L",
-    "name": "180\ub808\ubca8 \ubcf4\uc2a4 - \uacc4\ub2e8\uc2dd \uc120\ubc18",
+    "name": "180레벨 보스 - 계단식 선반",
     "level_min": 180,
     "level_max": 180,
     "layers": [
@@ -2466,7 +2466,26 @@
         "layer": 1,
         "col": 7,
         "row": 7,
-        "positions": [],
+        "positions": [
+          "1_0",
+          "0_1",
+          "2_2",
+          "1_2",
+          "3_2",
+          "4_2",
+          "5_2",
+          "6_1",
+          "5_0",
+          "4_0",
+          "3_0",
+          "2_0",
+          "2_3",
+          "3_4",
+          "3_5",
+          "4_3",
+          "4_6",
+          "2_6"
+        ],
         "gimmicks": {}
       },
       {
@@ -2507,7 +2526,7 @@
   },
   "boss_L190_122c_4L": {
     "id": "boss_L190_122c_4L",
-    "name": "190\ub808\ubca8 \ubcf4\uc2a4 -\ub79c\ub364",
+    "name": "190레벨 보스 -랜덤",
     "level_min": 190,
     "level_max": 190,
     "layers": [
@@ -2711,7 +2730,7 @@
   },
   "boss_L200_114c_4L": {
     "id": "boss_L200_114c_4L",
-    "name": "200\ub808\ubca8 \ubcf4\uc2a4 - \uc720\ub9ac \ubc30\uc591 \uc0c1\uc790",
+    "name": "200레벨 보스 - 유리 배양 상자",
     "level_min": 200,
     "level_max": 200,
     "layers": [
@@ -2724,7 +2743,6 @@
           "3_0",
           "4_0",
           "5_0",
-          "6_0",
           "1_1",
           "6_1",
           "1_2",
@@ -2750,8 +2768,7 @@
           "3_7",
           "4_7",
           "5_7",
-          "6_7",
-          "1_0"
+          "6_7"
         ],
         "gimmicks": {
           "3_2": "unknown",
@@ -2797,7 +2814,8 @@
           "3_6",
           "4_6",
           "5_6",
-          "6_6"
+          "6_6",
+          "2_3"
         ],
         "gimmicks": {
           "2_6": "grass",
@@ -2811,12 +2829,10 @@
         "col": 8,
         "row": 8,
         "positions": [
-          "1_0",
           "2_0",
           "3_0",
           "4_0",
           "5_0",
-          "6_0",
           "1_1",
           "6_1",
           "1_2",
@@ -2901,7 +2917,7 @@
   },
   "boss_L210_110c_4L": {
     "id": "boss_L210_110c_4L",
-    "name": "210\ub808\ubca8 \ubcf4\uc2a4 - \uc5ec\uc655 \ub09c\ucd08",
+    "name": "210레벨 보스 - 여왕 난초",
     "level_min": 210,
     "level_max": 210,
     "layers": [
@@ -3067,7 +3083,7 @@
   },
   "boss_L220_99c_4L": {
     "id": "boss_L220_99c_4L",
-    "name": "220\ub808\ubca8 \ubcf4\uc2a4 - \ucc3b\uc8fc\uc804\uc790",
+    "name": "220레벨 보스 - 찻주전자",
     "level_min": 220,
     "level_max": 220,
     "layers": [
@@ -3229,7 +3245,7 @@
   },
   "boss_L230_97c_4L": {
     "id": "boss_L230_97c_4L",
-    "name": "230\ub808\ubca8 \ubcf4\uc2a4 - \uc18c\ud30c",
+    "name": "230레벨 보스 - 소파",
     "level_min": 230,
     "level_max": 230,
     "layers": [
@@ -3386,7 +3402,7 @@
   },
   "boss_L240_133c_4L": {
     "id": "boss_L240_133c_4L",
-    "name": "240\ub808\ubca8 \ubcf4\uc2a4 - \uba85\ud654 \uc561\uc790",
+    "name": "240레벨 보스 - 명화 액자",
     "level_min": 240,
     "level_max": 240,
     "layers": [
@@ -3637,7 +3653,7 @@
   },
   "boss_L250_106c_4L": {
     "id": "boss_L250_106c_4L",
-    "name": "250\ub808\ubca8 \ubcf4\uc2a4 - \uc870\uac01\uc0c1 \ubd84\uc218",
+    "name": "250레벨 보스 - 조각상 분수",
     "level_min": 250,
     "level_max": 250,
     "layers": [
@@ -3797,7 +3813,7 @@
   },
   "boss_L260_102c_4L": {
     "id": "boss_L260_102c_4L",
-    "name": "260\ub808\ubca8 \ubcf4\uc2a4 - \uc0c8 \ub450 \ub9c8\ub9ac",
+    "name": "260레벨 보스 - 새 두 마리",
     "level_min": 260,
     "level_max": 260,
     "layers": [
@@ -3975,7 +3991,7 @@
   },
   "boss_L270_94c_4L": {
     "id": "boss_L270_94c_4L",
-    "name": "270\ub808\ubca8 \ubcf4\uc2a4 - \ub300\ud615 \uaf43 \uc544\uce58",
+    "name": "270레벨 보스 - 대형 꽃 아치",
     "level_min": 270,
     "level_max": 270,
     "layers": [
@@ -4155,7 +4171,7 @@
   },
   "boss_L280_138c_4L": {
     "id": "boss_L280_138c_4L",
-    "name": "280\ub808\ubca8 \ubcf4\uc2a4 - \uae08\ube5b \uac10\uc0ac\ud328",
+    "name": "280레벨 보스 - 금빛 감사패",
     "level_min": 280,
     "level_max": 280,
     "layers": [
@@ -4375,7 +4391,7 @@
   },
   "boss_L290_114c_4L": {
     "id": "boss_L290_114c_4L",
-    "name": "290\ub808\ubca8 \ubcf4\uc2a4 - \uc790\uac08 \uc5f0\ubabb\ubc14\ub2e5",
+    "name": "290레벨 보스 - 자갈 연못바닥",
     "level_min": 290,
     "level_max": 290,
     "layers": [
@@ -4573,7 +4589,7 @@
   },
   "boss_L300_101c_4L": {
     "id": "boss_L300_101c_4L",
-    "name": "300\ub808\ubca8 \ubcf4\uc2a4 - \ub300\ub098\ubb34 \ubb3c\uae38",
+    "name": "300레벨 보스 - 대나무 물길",
     "level_min": 300,
     "level_max": 300,
     "layers": [
@@ -4742,7 +4758,7 @@
   },
   "boss_L310_106c_4L": {
     "id": "boss_L310_106c_4L",
-    "name": "310\ub808\ubca8 \ubcf4\uc2a4 - \ub79c\ub364",
+    "name": "310레벨 보스 - 랜덤",
     "level_min": 310,
     "level_max": 310,
     "layers": [
@@ -4924,7 +4940,7 @@
   },
   "boss_L320_112c_4L": {
     "id": "boss_L320_112c_4L",
-    "name": "320\ub808\ubca8 \ubcf4\uc2a4 - \uac70\ub300 \uc218\ub828\uc78e",
+    "name": "320레벨 보스 - 거대 수련잎",
     "level_min": 320,
     "level_max": 320,
     "layers": [
@@ -5108,7 +5124,7 @@
   },
   "boss_L330_112c_4L": {
     "id": "boss_L330_112c_4L",
-    "name": "330\ub808\ubca8 \ubcf4\uc2a4 - \uc5f0\uaf43\uad70\ub77d",
+    "name": "330레벨 보스 - 연꽃군락",
     "level_min": 330,
     "level_max": 330,
     "layers": [
@@ -5304,7 +5320,7 @@
   },
   "boss_L340_125c_4L": {
     "id": "boss_L340_125c_4L",
-    "name": "340\ub808\ubca8 \ubcf4\uc2a4 - \ubc14\uc704 \ub3d9\uad74",
+    "name": "340레벨 보스 - 바위 동굴",
     "level_min": 340,
     "level_max": 340,
     "layers": [
@@ -5491,7 +5507,7 @@
   },
   "boss_L350_84c_4L": {
     "id": "boss_L350_84c_4L",
-    "name": "350\ub808\ubca8 \ubcf4\uc2a4 - \uc218\ubcc0 \uac08\ub300\ubc2d",
+    "name": "350레벨 보스 - 수변 갈대밭",
     "level_min": 350,
     "level_max": 350,
     "layers": [
@@ -5652,7 +5668,7 @@
   },
   "boss_L360_90c_5L": {
     "id": "boss_L360_90c_5L",
-    "name": "360\ub808\ubca8 \ubcf4\uc2a4 - \ubaa9\uc870 \uc120\ucc29\uc7a5",
+    "name": "360레벨 보스 - 목조 선착장",
     "level_min": 360,
     "level_max": 360,
     "layers": [
@@ -5792,7 +5808,7 @@
   },
   "boss_L370_119c_5L": {
     "id": "boss_L370_119c_5L",
-    "name": "370\ub808\ubca8 \ubcf4\uc2a4 - \ub2ec\ube5b \uc218\uc911\uc870\uba85",
+    "name": "370레벨 보스 - 달빛 수중조명",
     "level_min": 370,
     "level_max": 370,
     "layers": [
@@ -5978,7 +5994,7 @@
   },
   "boss_L380_102c_5L": {
     "id": "boss_L380_102c_5L",
-    "name": "380\ub808\ubca8 \ubcf4\uc2a4 - \ud1b5\ub098\ubb34 \uc9d5\uac80\ub2e4\ub9ac",
+    "name": "380레벨 보스 - 통나무 징검다리",
     "level_min": 380,
     "level_max": 380,
     "layers": [

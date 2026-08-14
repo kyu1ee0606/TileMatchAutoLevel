@@ -41,6 +41,15 @@ export interface RLSimResult {
   clear_rate_gap: number | null;
   /** |gap|<=tol AND not unclearable_suspect */
   verification_passed: boolean | null;
+  /**
+   * [RL 신뢰도] 봇 예측이 레벨 구조와 어긋나 **난이도 판단에 쓰면 안 되는** 레벨.
+   * 근거(야간 A* 전수판정 1467개): RL 예측 0% 인 246개가 전부 PROVEN_SOLVABLE 이었고,
+   * 진짜 불가 18개는 전부 RL>0 이었다 — RL 의 0% 는 클리어 가능성과 무관하다.
+   */
+  rl_unreliable?: boolean;
+  rl_unreliable_reason?: string | null;
+  /** 대조에 쓴 A* 판정 (check_solver_on_zero=true 로 요청했을 때만) */
+  solver_verdict?: string | null;
   skill_curve: SkillCurvePoint[];
   total_rollouts: number;
   elapsed_ms: number;
@@ -84,7 +93,15 @@ export interface RLSimRequest {
   skill_std?: number;
   /** [보스 난이도] 목표 클리어율 배율. 보스=0.5(목표 절반 → 더 어려워야 통과). 생략=1.0 */
   target_clear_rate_scale?: number;
+  /**
+   * 예측이 전 구간 0 일 때 A* 로 대조할지(최대 8초 추가). 기본 false.
+   * 켜면 '봇 한계'와 '진짜 결함'을 구분해 `rl_unreliable` 을 채운다.
+   */
+  check_solver_on_zero?: boolean;
 }
+
+/** 요청 취소용 — 본문에 실리지 않고 axios 옵션으로만 쓴다. */
+export interface RLSimCallOptions { signal?: AbortSignal }
 
 export interface RLSimBatchRequest {
   levels: { level_number: number; level_json: LevelJSON }[];
@@ -99,10 +116,14 @@ export async function getRLSimConfig(): Promise<RLSimConfig> {
   return response.data;
 }
 
-export async function simulateLevelSkillSweep(request: RLSimRequest): Promise<RLSimResult> {
-  // 스킬 스윕은 레벨에 따라 수십 초 걸릴 수 있어 기본 30s 타임아웃을 늘림
+export async function simulateLevelSkillSweep(
+  request: RLSimRequest, options?: RLSimCallOptions,
+): Promise<RLSimResult> {
+  // 스킬 스윕은 레벨에 따라 수십 초 걸릴 수 있어 기본 30s 타임아웃을 늘림.
+  // signal 을 받으면 중지 시 진행 중인 스윕도 즉시 끊는다(안 그러면 최대 300초를 기다린다).
   const response = await apiClient.post<RLSimResult>('/rl-sim/level', request, {
     timeout: 300000,
+    signal: options?.signal,
   });
   return response.data;
 }

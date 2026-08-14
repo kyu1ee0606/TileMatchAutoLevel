@@ -8,7 +8,8 @@ import { Button } from '../ui';
 import { useUIStore } from '../../stores/uiStore';
 import { generateLevel, enhanceLevel } from '../../api/generate';
 import apiClient from '../../api/client';
-import { analyzeAutoPlay, fixCentering, analyzeSolvability } from '../../api/analyze';
+import { NightStudyPanel } from '../NightStudyPanel';
+import { analyzeAutoPlay, fixCentering } from '../../api/analyze';
 import { simulateLevelSkillSweep } from '../../api/rlSim';
 import GamePlayer from '../GamePlayer';
 import GameBoard from '../GamePlayer/GameBoard';
@@ -50,7 +51,7 @@ import {
   renameProductionBatch,
   recalculateBatchCounts,
 } from '../../storage/productionStorage';
-import { syncBidirectional, pushBatchToServer, registerAutoSync, setConflictHandler, setDivisibilityWarningHandler, SyncConflictError } from '../../storage/productionServerSync';
+import { syncBidirectional, pushBatchToServer, registerAutoSync, setConflictHandler, setDivisibilityWarningHandler, SyncConflictError, listServerBatches, pullBatchToLocal } from '../../storage/productionServerSync';
 import { ProductionExport } from './ProductionExport';
 import { BatchApprovalPanel } from './BatchApprovalPanel';
 import { BatchVerifyPanel } from './BatchVerifyPanel';
@@ -531,6 +532,163 @@ function findLevelsWithWrongTileCount(levels: ProductionLevel[]): ProductionLeve
 
 type DashboardTab = 'overview' | 'generate' | 'verify' | 'test' | 'playtest' | 'review' | 'export';
 
+// [등껍질 침식] GET /debug/turtle-patterns 응답 항목.
+// coef = 1 − mean(avg봇 클리어율)  … 클수록 어려움. by_v = 색 종류(V)별 실측 클리어율.
+// (총타일수는 난이도와 **역방향**이라 정렬/선택 기준으로 쓰면 안 된다 — 타일수÷V 가 실난이도)
+interface TurtlePatternInfo {
+  id: string;
+  base: number;
+  depth: number;
+  total: number;
+  per_layer?: number[];
+  coef?: number;
+  by_v?: Record<string, { avg: number; cas: number }>;
+  // [미리보기] 침식 스택의 층별 셀. col = 그 층의 격자 크기(짝수층 S, 홀수층 S-1).
+  layers?: Array<{ col: number; cells: string[] }>;
+}
+
+/**
+ * [서브보스] 끝자리 5 레벨(단, 5는 제외) — 15, 25, …, 1495 = 149개.
+ * 보스(10배수)·튜토리얼 언락 레벨(11,21,31,41,51,81,111,151,191,241,291,391,441)과 겹치지 않음(검증 완료).
+ */
+export const isSubBossLevel = (n: number) => n % 10 === 5 && n > 5;
+
+/**
+ * [서브보스] 레벨에 맞는 등껍질 패턴 선택.
+ *
+ * 선택 근거(실측): `turtle.difficulty.by_v` 는 **기믹·컨테이너 없이** 잰 값이라 실제 생성보다 쉽다.
+ * 그대로 목표에 맞추면 기믹이 얹히며 클리어 0 으로 떨어진다 → 목표보다 `MARGIN` 만큼
+ * **더 쉬운** 패턴을 고른다. 마진 스윕 실측: 0.00→5/15, 0.25→9/15, 0.45→9/15 (0.25 채택).
+ * 후보 K개 중 레벨번호로 결정적 회전 → 같은 레벨 재생성 시 동일 모양, 레벨끼리는 다양.
+ */
+const SUBBOSS_PICK_MARGIN = 0.25;
+// 후보 K — 고정 10이면 149레벨이 상위 13종만 돌려써 상위 7종이 69% 를 차지했다(실측).
+// 풀 크기에 비례시켜 라이브러리를 늘릴수록 다양성이 자동으로 따라오게 한다.
+const subBossPickK = (poolSize: number) => Math.max(10, Math.round(poolSize / 3));
+export function pickTurtleForLevel(
+  levelNumber: number,
+  targetDifficulty: number,
+  useTileCount: number,
+  patterns: TurtlePatternInfo[],
+): string | undefined {
+  if (patterns.length === 0) return undefined;
+  const want = Math.min(0.98, Math.max(0.15, 1.05 - targetDifficulty) - 0.10 + SUBBOSS_PICK_MARGIN);
+  const scored: Array<[number, string]> = [];
+  for (const p of patterns) {
+    const byv = p.by_v;
+    if (!byv) continue;
+    const keys = Object.keys(byv).map(Number).sort((a, b) => a - b);
+    if (keys.length === 0) continue;
+    // 측정 V 그리드(6/9/12)에서 이 레벨의 V 에 가장 가까운 값 사용
+    const k = keys.reduce((best, cur) => Math.abs(cur - useTileCount) < Math.abs(best - useTileCount) ? cur : best, keys[0]);
+    scored.push([Math.abs(byv[String(k)].avg - want), p.id]);
+  }
+  if (scored.length === 0) return undefined;
+  scored.sort((a, b) => a[0] - b[0]);
+  const top = scored.slice(0, subBossPickK(scored.length)).map(e => e[1]);
+  return top[Math.floor(levelNumber / 10) % top.length];
+}
+
+/**
+ * [서브보스 생성 정책 — 확장 지점]
+ * 서브보스에 적용할 생성 옵션을 **여기 한 곳에서만** 결정한다.
+ * 지금은 등껍질 패턴만 지정한다. 추후 '층 크기 순환'이 쓸 만해지면
+ * 이 반환값에 `manualLayerCount` / `sizeCycle` 필드를 추가하는 것으로 확장된다
+ * (호출부는 그대로 — 옵션 객체를 그대로 넘기기만 함).
+ */
+export function subBossPlan(
+  levelNumber: number,
+  targetDifficulty: number,
+  useTileCount: number,
+  patterns: TurtlePatternInfo[],
+): { turtlePatternId: string } | null {
+  if (!isSubBossLevel(levelNumber)) return null;
+  const pid = pickTurtleForLevel(levelNumber, targetDifficulty, useTileCount, patterns);
+  return pid ? { turtlePatternId: pid } : null;
+}
+
+/**
+ * [서브보스] 레벨 번호 → 색 종류 수(V). 백엔드 `get_use_tile_count_for_level` 의 LEVEL_CONFIG_TABLE 미러.
+ * 패턴 선택에만 쓰이므로 근사로 충분(정확한 값은 백엔드가 최종 적용).
+ */
+export function approxUseTileCount(levelNumber: number): number {
+  const T: Array<[number, number]> = [[3, 4], [10, 5], [30, 6], [60, 8], [100, 9], [225, 9],
+    [600, 10], [1125, 11], [1500, 12]];
+  for (const [maxLv, v] of T) if (levelNumber <= maxLv) return v;
+  return 13;
+}
+
+/**
+ * [층 크기 순환] 준비된 템플릿 크기 3종(base / base-1 / base-2)을 층마다 돌려 쓴다.
+ *
+ * 왜: 기본값은 델타 -1 고정이라 채움 크기가 base→…→4 로 줄다 **4에서 멈추고**, 그 위로는
+ * 같은 4x4 층이 무한 반복된다(실측: 9층 요청 시 상위 6개 층이 전부 4x4 12타일 동일).
+ *
+ * 배치 규칙 — 헤더 격자는 게임 규칙상 짝홀 교대(짝수층 S / 홀수층 S-1) 고정이고,
+ * **작은 모양을 큰 헤더에 중앙정렬 배치하는 건 가능**하지만 그 반대는 불가능하다.
+ * 따라서 수용력에 맞춰 나눈다:
+ *   짝수층(헤더 S)   → S 와 S-2 를 교대   (큰 층이 주기적으로 재등장)
+ *   홀수층(헤더 S-1) → S-1 고정
+ * 결과: S, S-1, S-2, S-1, S, S-1, S-2, ...  (주기 4, 세 크기 모두 사용)
+ *
+ * 반환 steps 는 백엔드 `layer_steps` 형식(이전 층 대비 델타, 길이 = 층수-1).
+ */
+function buildCycleSteps(base: number, layerCount: number): { sizes: number[]; steps: number[] } {
+  if (base < 6 || layerCount < 2) return { sizes: [], steps: [] };
+  const sizes: number[] = [];
+  let bigTurn = true;                       // 짝수층에서 큰 크기(S) 차례인지
+  for (let i = 0; i < layerCount; i++) {
+    if (i % 2 === 0) {                      // 짝수층: 헤더 S → S 또는 S-2
+      sizes.push(bigTurn ? base : base - 2);
+      bigTurn = !bigTurn;
+    } else {                                // 홀수층: 헤더 S-1 → S-1 고정
+      sizes.push(base - 1);
+    }
+  }
+  const steps = sizes.slice(1).map((v, i) => v - sizes[i]);
+  return { sizes, steps };
+}
+
+/**
+ * [등껍질 미리보기] 침식 스택을 겹쳐 그린 미니 실루엣.
+ * 각 층을 **같은 물리 크기**로 정규화해 겹치면 실제 인게임 적층과 같은 인상이 난다
+ * (홀수층은 격자가 1 작아 반 칸 안쪽으로 들어가므로 offset 0.5칸 보정).
+ * 위층일수록 밝게 → 깎여 올라간 깊이가 한눈에 보인다.
+ */
+function TurtlePreview({ pattern, size = 56 }: { pattern: TurtlePatternInfo; size?: number }) {
+  const layers = pattern.layers || [];
+  if (layers.length === 0) return null;
+  const base = layers[0].col;          // 짝수층(가장 큰 격자) 기준
+  const unit = size / base;
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="rounded bg-gray-900/60">
+      {layers.map((L, li) => {
+        // 홀수층(col = base-1)은 짝수층 격자의 교차점에 놓이므로 반 칸 이동
+        const off = ((base - L.col) / 2) * unit;
+        const opacity = 0.28 + (0.72 * li) / Math.max(1, layers.length - 1);
+        return (
+          <g key={li} opacity={opacity}>
+            {L.cells.map(c => {
+              const [x, y] = c.split('_').map(Number);
+              return (
+                <rect
+                  key={c}
+                  x={off + x * unit + unit * 0.08}
+                  y={off + y * unit + unit * 0.08}
+                  width={unit * 0.84}
+                  height={unit * 0.84}
+                  rx={unit * 0.2}
+                  fill="#34d399"
+                />
+              );
+            })}
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
 interface ProductionDashboardProps {
   onLevelSelect?: (level: ProductionLevel) => void;
 }
@@ -619,8 +777,21 @@ const TUTORIAL_MAX_LEVEL = 10;
 const RL_CLEAR_TOL = 0.12; // 백엔드 CLEAR_RATE_TOLERANCE 와 동일
 function rlVerificationPassed(
   levelNumber: number,
-  rl: { verification_passed: boolean | null; classification: string; clear_rate_gap: number | null },
+  rl: { verification_passed: boolean | null; classification: string; clear_rate_gap: number | null;
+        rl_unreliable?: boolean },
 ): boolean {
+  // [RL 신뢰 불가] 봇 예측이 레벨 구조와 어긋난 경우 — 이 값으로 낙제시키면 안 된다.
+  //
+  // 근거(야간 A* 전수판정 1467개):
+  //   RL 예측 0% 인 246개  → **전부** PROVEN_SOLVABLE (클리어 경로 존재)
+  //   진짜 불가 18개       → **전부** RL>0 (RL 은 0 이라고 안 했음)
+  // 즉 RL 의 0% 는 클리어 가능성과 무관하며, 봇이 독(7칸)을 못 다루는 고색상 레벨에서 나온다.
+  // 이 배치는 87%가 V>=11 이라 그 구간 전체가 예측 0 동률로 뭉개진다.
+  //
+  // 예전엔 `unclearable_suspect` 를 순차검증 대상에서 통째로 뺐는데(임시 우회), 그건 진짜 결함까지
+  // 같이 눈감는 방식이었다. 이제는 백엔드가 레벨별로 신뢰 가능 여부를 판정하므로
+  // **신뢰 불가로 판정된 것만** 통과 처리한다. 클리어 가능성은 A* 게이트가 따로 책임진다.
+  if (rl.rl_unreliable) return true;
   if (rl.classification === 'unclearable_suspect') return false;
   if (levelNumber <= TUTORIAL_MAX_LEVEL) {
     return (rl.clear_rate_gap ?? 0) >= -RL_CLEAR_TOL; // 너무어려움(gap<<0)만 실패
@@ -748,6 +919,41 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
   //   중앙 가로지르는 통짜 배치가 되던 문제 수정 → 난이도는 '슬롯 개수'로만 조절.
   //   → 기본값은 **OFF 유지**(수동 토글 정책). 사용자가 켜면 이 키에 저장돼 유지된다.
   //   키를 다시 올리지 말 것 — 올리면 사용자가 켜둔 설정이 리셋된다.
+  // [서브보스 등껍질] 끝자리 5 레벨(5 제외)을 등껍질 침식 스택으로 생성. 기본 OFF.
+  // 실측: 프로덕션 기준선 avg봇 0.310 대비 등껍질 0.402 로 우위, 구조 위반 0.
+  const SUBBOSS_TURTLE_KEY = 'prod_subboss_turtle_v1';
+  const [subBossTurtle, setSubBossTurtle] = useState<boolean>(() => {
+    try { return localStorage.getItem(SUBBOSS_TURTLE_KEY) === '1'; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(SUBBOSS_TURTLE_KEY, subBossTurtle ? '1' : '0'); } catch { /* ignore */ }
+  }, [subBossTurtle]);
+  // 서브보스 배정용 등껍질 패턴 목록. 생성 루프(콜백) 안에서 읽으므로 ref 로 보관해
+  // stale closure 를 피한다. 토글이 켜질 때만 1회 로드.
+  const turtlePatternsRef = useRef<TurtlePatternInfo[]>([]);
+  useEffect(() => {
+    if (!subBossTurtle || turtlePatternsRef.current.length > 0) return;
+    // [후보 풀] 등껍질 **전용 라이브러리**를 쓴다(기존 49종은 여기로 복사돼 있고,
+    // 패턴 디버그 탭에서 추가한 바닥이 즉시 후보로 합류 → 다양성이 늘어난다).
+    // 난이도 미측정(coef 없음) 항목은 목표 매칭이 불가하므로 자동 배정에서 제외.
+    apiClient.get('/debug/turtle-bases?enabled_only=true')
+      .then(r => {
+        turtlePatternsRef.current = ((r.data?.turtle_bases || []) as Array<{
+          id: string; grid: number;
+          turtle?: { depth: number; total: number; per_layer: number[] };
+          difficulty?: { by_v?: Record<string, { avg: number; cas: number }>; coef?: number };
+          layers?: Array<{ col: number; cells: string[] }>;
+        }>)
+          .filter(b => b.difficulty?.coef !== undefined && b.turtle)
+          .map(b => ({
+            id: b.id, base: b.grid,
+            depth: b.turtle!.depth, total: b.turtle!.total, per_layer: b.turtle!.per_layer,
+            coef: b.difficulty!.coef, by_v: b.difficulty!.by_v, layers: b.layers,
+          }));
+      })
+      .catch(() => { /* 목록 없으면 서브보스 등껍질 미적용(일반 경로) */ });
+  }, [subBossTurtle]);
+
   const UNIT_ASSEMBLY_KEY = 'prod_unit_assembly_v2';
   const [unitAssembly, setUnitAssembly] = useState<boolean>(() => {
     try { return localStorage.getItem(UNIT_ASSEMBLY_KEY) === '1'; } catch { return false; }
@@ -957,12 +1163,23 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
           .filter(t => t.measured_difficulty != null && !takenTemplateIds.has(t.template_id))
           .sort((a, b) => (a.measured_difficulty || 0) - (b.measured_difficulty || 0));
 
+        // [크롭본 전용] 배정은 **미리 크롭·검증된 사본(lp_)** 만 사용한다. 원본 폴백 금지.
+        //
+        // 폴백이 있던 시절의 실측(1500레벨 배치):
+        //   원본 배정 77레벨 → 선언격자 {10:72, 9:1, 8:1, 손상:3}  (크롭본 134레벨은 전부 ≤8)
+        //   원본 73종은 타일이 10칸 폭에 꽉 차 **여백 크롭으로는 8 이하 불가**(D타입).
+        //   생성 시점의 crop_max_dim 요청도 "크롭 불가"로 반환돼 10x10 이 그대로 출고됐고,
+        //   이를 막는 게이트는 보스 슬롯에만 있었다.
+        //   게다가 원본 경로는 minLv=0 이라 기믹 해금 필터까지 무력화돼 curtain/frog/bomb
+        //   조기 등장 8건이 함께 발생했다(원본 211개 중 101개가 해금 전 기믹 보유).
+        // → 크롭본이 없는 템플릿은 '쓸 수 없는 것'이므로 후보에서 제외한다.
+        const skippedNoCrop: string[] = [];
         for (const tpl of sortedTpls) {
           const diff = tpl.measured_difficulty!;
-          // 크롭본이 있으면 그것을 쓴다(인게임 규격 통과분). min_level = 기믹 해금 요구 레벨.
           const shape = shapeBySource.get(tpl.template_id);
-          const assignId = shape ? shape.id : tpl.template_id;
-          const minLv = shape ? (shape.min_level ?? 0) : 0;
+          if (!shape) { skippedNoCrop.push(tpl.template_id); continue; }
+          const assignId = shape.id;
+          const minLv = shape.min_level ?? 0;
           let bestSlot: typeof slots[number] | null = null;
           let bestGap = Infinity;
           for (const slot of slots) {
@@ -979,6 +1196,11 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             autoAssignWarnings.push(
               `${tpl.name || tpl.template_id}: 배치 가능 슬롯 없음${minLv > 0 ? ` (기믹 해금 Lv${minLv}+ 필요)` : ''} — 미배치`);
           }
+        }
+        if (skippedNoCrop.length > 0) {
+          autoAssignWarnings.push(
+            `크롭본(lp_) 없는 원본 템플릿 ${skippedNoCrop.length}종 제외 — 인게임 규격(선언격자 ≤${MAX_PLAYABLE_GRID}) 미달. ` +
+            `층별 패턴 탭에서 크롭 임포트하면 후보에 합류합니다.`);
         }
         // 보스 슬롯: effectiveAssignments 미설정 → 전용 보스 템플릿(regen) 또는 boss_mode 절차생성(8/7)
 
@@ -1212,9 +1434,12 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
                 crop_max_dim: MAX_PLAYABLE_GRID,
               });
               const levelJson = tplResp.data.level_json;
-              // 보스인데 크롭해도 >8(D타입) → 템플릿 폐기, 절차생성 폴백
-              if (isBossTemplate && maxDeclaredGridDim(levelJson) > MAX_PLAYABLE_GRID) {
-                throw new Error(`boss template ${templateId} uncroppable (>${MAX_PLAYABLE_GRID}) → 절차생성 폴백`);
+              // [규격 게이트] 크롭해도 >8(D타입)이면 템플릿 폐기 → 절차생성 폴백.
+              // 예전엔 `isBossTemplate &&` 조건이 붙어 있어 **일반 레벨은 10x10 이 그대로 통과**했다
+              // (실측 73건). 배정 단계에서 이미 크롭본만 쓰지만, 수동 배정·구배치 재생성 등
+              // 다른 경로로 들어올 수 있으므로 최종 방어선으로 남긴다.
+              if (maxDeclaredGridDim(levelJson) > MAX_PLAYABLE_GRID) {
+                throw new Error(`template ${templateId} uncroppable (>${MAX_PLAYABLE_GRID}) → 절차생성 폴백`);
               }
               const generationTime = Date.now() - tplStartTime;
 
@@ -1356,6 +1581,12 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             // - 사이클 첫 레벨 (1, 11, 21...): 특정 타일 세트 (t1-t5, t6-t10, t11-t15)
             // - 나머지 레벨: t0 (클라이언트에서 런타임 결정)
 
+            // [서브보스 등껍질] 끝자리 5(5 제외) + 토글 ON → 등껍질 침식 스택으로 생성.
+            // 정책은 subBossPlan() 한 곳에만 있다(추후 층 순환 확장 시 그 함수만 수정).
+            const sbPlan = subBossTurtle
+              ? subBossPlan(levelNumber, targetDifficulty, approxUseTileCount(levelNumber), turtlePatternsRef.current)
+              : null;
+
             const params: GenerationParams = {
               target_difficulty: targetDifficulty,
               grid_size: isBossLevel ? [7, 7] : gridSize, // 보스: 백엔드가 (7,7)→선언 최대 8 사용
@@ -1373,6 +1604,9 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
               size_diversity_start_level: sizeDiversityStartLevel > 0 ? sizeDiversityStartLevel : undefined,
               // [유닛 조립] 바닥 주패턴 + 위층 소형 유닛 조립(sparse 해결·타겟 도달). reverse_generation 병용.
               ...genModeFields(levelNumber, unitAssembly),
+              // [서브보스 등껍질] 지정 시 백엔드가 전용 경로로 위임(층수=침식 깊이).
+              // 유닛 조립은 등껍질과 배타 → 함께 오면 등껍질 우선(백엔드 generate() 최상단 분기).
+              ...(sbPlan ? { turtle_pattern_id: sbPlan.turtlePatternId, unit_assembly: undefined } : {}),
               // [보스 생성기] 그리드≤8·5~6층·화려한 레시피. 목표 클리어율 절반은 RL 검증에서 적용.
               boss_mode: isBossLevel || undefined,
             };
@@ -2092,11 +2326,16 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
                 onChange={(e) => setSelectedBatchId(e.target.value)}
                 className="flex-1 px-3 py-1 bg-gray-700 border border-gray-600 rounded text-sm text-white"
               >
-                {batches.map((batch) => (
-                  <option key={batch.id} value={batch.id}>
-                    {batch.name} ({batch.generated_count + batch.playtest_count}/{batch.total_levels})
-                  </option>
-                ))}
+                {/* [정렬] IndexedDB getAll() 은 **키(=id 문자열) 순**으로 돌려준다.
+                    배치가 300개 넘게 쌓인 상태라 방금 만든 배치가 목록 중간에 파묻혀
+                    "리스트에 없다"로 보인다 → 생성 최신순으로 뒤집어 맨 위에 오게 한다. */}
+                {[...batches]
+                  .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+                  .map((batch) => (
+                    <option key={batch.id} value={batch.id}>
+                      {batch.name} ({batch.generated_count + batch.playtest_count}/{batch.total_levels})
+                    </option>
+                  ))}
               </select>
               {selectedBatch && (
                 <>
@@ -2106,6 +2345,49 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
                     onClick={startRename}
                   >
                     이름변경
+                  </Button>
+                  {/* [서버→로컬 가져오기] 서버(로컬 파일)에만 있는 배치를 즉시 목록에 반영.
+                      자동 동기화는 탭 마운트 때 1회뿐이라, 서버측에서 만든 배치(예: 후처리 스크립트
+                      산출물)는 새로고침 전까지 안 보인다. 이 버튼이 그 간극을 메운다. */}
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={async () => {
+                      try {
+                        const serverList = await listServerBatches();
+                        const localIds = new Set(batches.map(b => b.id));
+                        // 서버엔 레거시 배치가 수백 개 쌓여 있고 각 1500레벨(4~5MB)이라
+                        // 전부 pull 하면 수 분이 걸리거나 중간에 멈춘다 → **최신순 + 상한**.
+                        const missing = serverList
+                          .filter(sb => !localIds.has(sb.batch_id) && (sb.level_count ?? 0) > 0)
+                          .sort((a, b) => (b.saved_at ?? 0) - (a.saved_at ?? 0));
+                        if (missing.length === 0) {
+                          addNotification('info', '서버에 새 배치 없음');
+                          return;
+                        }
+                        const MAX_PULL = 5;
+                        const take = missing.slice(0, MAX_PULL);
+                        let pulled = 0;
+                        let lastErr = '';
+                        for (const sb of take) {
+                          try { await pullBatchToLocal(sb.batch_id); pulled++; }
+                          catch (e) { lastErr = (e as Error)?.message || String(e); }
+                        }
+                        setBatches(await listProductionBatches());
+                        if (pulled > 0) {
+                          const rest = missing.length - take.length;
+                          addNotification('success',
+                            `서버에서 ${pulled}개 가져옴 (최신순)${rest > 0 ? ` · 남은 ${rest}개는 다시 눌러 가져오기` : ''}`);
+                        } else {
+                          addNotification('error', `가져오기 실패: ${lastErr || '원인 불명'}`);
+                        }
+                      } catch (e) {
+                        addNotification('error', `서버 목록 조회 실패: ${(e as Error)?.message || ''}`);
+                      }
+                    }}
+                    title="서버(로컬 파일)에만 있는 배치를 목록으로 가져오기"
+                  >
+                    ⬇️ 서버 가져오기
                   </Button>
                   <Button
                     variant="secondary"
@@ -2204,6 +2486,8 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             sizeDiversityStartLevel={sizeDiversityStartLevel}
             onSizeDiversityStartLevelChange={setSizeDiversityStartLevel}
             unitAssembly={unitAssembly}
+            subBossTurtle={subBossTurtle}
+            onSubBossTurtleChange={setSubBossTurtle}
             onUnitAssemblyChange={setUnitAssembly}
             rlSkillMean={rlSkillMean}
             onRlSkillMeanChange={setRlSkillMean}
@@ -2603,6 +2887,8 @@ function GenerateTab({
   sizeDiversityStartLevel,
   onSizeDiversityStartLevelChange,
   unitAssembly,
+  subBossTurtle,
+  onSubBossTurtleChange,
   onUnitAssemblyChange,
   rlSkillMean,
   onRlSkillMeanChange,
@@ -2635,6 +2921,8 @@ function GenerateTab({
   sizeDiversityStartLevel: number;
   onSizeDiversityStartLevelChange: (value: number) => void;
   unitAssembly: boolean;
+  subBossTurtle: boolean;
+  onSubBossTurtleChange: (v: boolean) => void;
   onUnitAssemblyChange: (value: boolean) => void;
   rlSkillMean: number;
   onRlSkillMeanChange: (value: number) => void;
@@ -2872,6 +3160,29 @@ function GenerateTab({
                 <span className="block text-yellow-400 mt-1">
                   ⚠️ craft/stack 컨테이너와 비결정 기믹(frog/teleport/bomb/curtain)은 제외됩니다.
                   기믹이 솔버블을 깨면 자동으로 단계적 제거(chain/link→ice/grass→plain) 후 봇클리어 확정된 것만 적용.
+                </span>
+              )}
+            </p>
+          </div>
+
+          {/* [서브보스 등껍질] 끝자리 5 레벨(5 제외) 전용 생성 모드 */}
+          <div className="bg-gray-700/40 rounded-lg p-3">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={subBossTurtle}
+                onChange={(e) => onSubBossTurtleChange(e.target.checked)}
+              />
+              <span className="text-sm text-white font-medium">🐢 서브보스 등껍질 생성</span>
+              <span className="text-xs text-gray-400">(끝자리 5, 5레벨 제외 — 15/25/…/1495, 총 149개)</span>
+            </label>
+            <p className="text-xs text-gray-400 mt-1.5">
+              해당 레벨을 <span className="text-emerald-400">등껍질 침식 스택</span>으로 생성합니다.
+              바닥 모양을 한 겹씩 깎아 위층을 쌓아 층수·타일수는 모양이 결정하며, 레벨의 색 종류(V)에서
+              실측한 클리어율로 목표에 맞는 모양을 자동 선택합니다.
+              {subBossTurtle && (
+                <span className="block text-emerald-400 mt-1">
+                  실측 24표본: 평균 avg봇 0.402 (현행 프로덕션 기준선 0.310) · 격자/÷3/floating 위반 0 · 총타일 66~120
                 </span>
               )}
             </p>
@@ -3827,10 +4138,182 @@ function TestTab({
     }
   }, [levels, batchId, addNotification, onStatsUpdate, rlSkillMean]);
 
+  /**
+   * [일괄 자동 튜닝] RL 미통과 레벨을 **재생성 없이** 색→기믹 스윕으로 목표에 근접시킨다.
+   *
+   * 백엔드 `/tune/auto` 는 있었지만 프론트에서 호출하는 곳이 하나도 없어 쓸 수가 없었다.
+   * 재생성은 모양이 통째로 바뀌고 비용도 크다 — 튜너가 살릴 수 있는 것부터 걷어내면
+   * 재생성 대상이 줄어든다.
+   *
+   * 대상에서 `unclearable_suspect` 는 **제외**한다. 표본 24개 실측에서 unclearable 12개는
+   * 튜닝 후에도 클리어율 0.0~0.036 으로 하나도 못 살렸다(비unclearable 은 12개 중 6개 회복).
+   * 클리어율 0 은 색·기믹 문제가 아니라 층수·구조 문제라 재생성만이 답이다.
+   *
+   * 저장 시 verified/match_score 를 비워 **재검증 대상**으로 되돌린다 — 튜너 예측을 그대로
+   * 통과로 인정하면 순차검증과 이중잣대가 된다.
+   */
+  const [isAutoTuning, setIsAutoTuning] = useState(false);
+  const [autoTuneProgress, setAutoTuneProgress] = useState({ done: 0, total: 0, improved: 0 });
+  const autoTuneStopRef = useRef(false);
+
+  const autoTuneTargets = useMemo(() => levels.filter(l =>
+    l.meta.verification_passed === false
+    && l.meta.rl_classification !== 'unclearable_suspect'
+    && typeof l.meta.target_difficulty === 'number'), [levels]);
+
+  /**
+   * [÷3 위반 복구] 클리어 불가(매칭타입 ÷3 위반) 레벨을 **재생성 없이** 고친다.
+   *
+   * 야간 A* 전수판정에서 PROVEN_IMPOSSIBLE 18개가 나왔고 전부 ÷3 위반이었다. 원인은
+   * `key`(매칭 대상 아님, 규약 unlockTile×3)가 컨테이너 내부에 부분 bake 되면서 매칭 총수가
+   * ÷3 에서 어긋난 것(Lv336: unlockTile=1 인데 key 2개 → 매칭 46개 %3=1).
+   * 재생성하면 모양이 통째로 바뀌어 재검증 부담이 크고 난이도도 튄다. 백엔드가 **컨테이너 내부
+   * 라벨만** 조정하므로 위치·기믹·색 배치가 전부 보존된다 → 난이도 목표도 유지된다.
+   */
+  const [isRepairing, setIsRepairing] = useState(false);
+  const [repairProgress, setRepairProgress] = useState({ done: 0, total: 0, fixed: 0 });
+
+  const handleRepairClearability = useCallback(async () => {
+    if (levels.length === 0) return;
+    setIsRepairing(true);
+    setRepairProgress({ done: 0, total: levels.length, fixed: 0 });
+    let fixed = 0, alreadyOk = 0, failed = 0, cleared = 0;
+    const failedLv: number[] = [];
+    try {
+      // 청크로 나눠 보낸다 — 1500레벨 JSON 을 한 번에 실으면 요청이 과대해진다.
+      const CHUNK = 40;
+      for (let i = 0; i < levels.length; i += CHUNK) {
+        const slice = levels.slice(i, i + CHUNK);
+        const resp = await apiClient.post('/analyze/repair-clearability', {
+          levels: slice.map(l => ({ level_number: l.meta.level_number, level_json: l.level_json })),
+        });
+        const r = resp.data as {
+          results: Array<{ level_number: number; changed: boolean; ok_before: boolean; ok_after: boolean;
+                           violations_before: Record<string, number>; level_json?: LevelJsonLike; error?: string }>;
+        };
+        const toSave: ProductionLevel[] = [];
+        for (const item of r.results) {
+          if (item.ok_before) {
+            alreadyOk++;
+            // [낙인 해제] 레벨은 멀쩡한데 메타에 옛 위반 표식이 남아 배포 게이트가 계속 막는 경우.
+            // 표식은 '찍기만 하고 해소돼도 안 지우는' 구조였다(서버 _enforce_divisibility_gate).
+            // 서버 쪽은 고쳤지만 **정본은 프론트 IndexedDB** 라 여기서도 지워야 실제로 풀린다
+            // (실측: ÷3 복구 완료 후에도 19개가 'div3' 사유로 업로드 차단).
+            const src0 = slice.find(l => l.meta.level_number === item.level_number);
+            const stale = (src0?.meta as { divisibility_violation?: unknown } | undefined)?.divisibility_violation;
+            if (src0 && stale !== undefined) {
+              const cleaned = { ...src0.meta } as ProductionLevelMeta & { divisibility_violation?: unknown };
+              delete cleaned.divisibility_violation;
+              toSave.push({ meta: cleaned, level_json: src0.level_json });
+              cleared++;
+            }
+            continue;
+          }
+          if (!item.changed || !item.level_json) {
+            failed++; failedLv.push(item.level_number);
+            console.warn(`[repair] Lv.${item.level_number} 복구 실패`, item.violations_before, item.error);
+            continue;
+          }
+          const src = slice.find(l => l.meta.level_number === item.level_number);
+          if (!src) continue;
+          toSave.push({
+            meta: {
+              ...src.meta,
+              status_updated_at: new Date().toISOString(),
+              // 모양·난이도는 그대로지만 타일 구성이 바뀌었으니 재검증 대상으로 되돌린다.
+              verified: false, verification_passed: undefined, match_score: undefined,
+            },
+            level_json: item.level_json as ProductionLevel['level_json'],
+          });
+          fixed++;
+        }
+        if (toSave.length) await saveProductionLevels(batchId, toSave);
+        setRepairProgress({ done: Math.min(i + CHUNK, levels.length), total: levels.length, fixed });
+      }
+      loadLevels();
+      onStatsUpdate();
+      addNotification(failed === 0 ? 'success' : 'warning',
+        `÷3 복구: 수정 ${fixed} · 낙인해제 ${cleared} · 원래정상 ${alreadyOk} · 실패 ${failed}`
+        + (failedLv.length ? ` (실패 예: ${failedLv.slice(0, 8).join(', ')})` : ''));
+    } catch (e) {
+      addNotification('error', `÷3 복구 실패: ${(e as Error).message}`);
+    } finally {
+      setIsRepairing(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [levels, batchId, addNotification, onStatsUpdate]);
+
+  const handleAutoTuneBatch = useCallback(async () => {
+    if (autoTuneTargets.length === 0) return;
+    autoTuneStopRef.current = false;
+    setIsAutoTuning(true);
+    setAutoTuneProgress({ done: 0, total: autoTuneTargets.length, improved: 0 });
+    let improved = 0, skipped = 0, failed = 0;
+    const CONC = 3;   // 백엔드가 레벨×스킬포인트로 이미 프로세스풀을 쓴다 — 과도한 동시성은 역효과
+    const queue = [...autoTuneTargets];
+    const worker = async () => {
+      while (queue.length && !autoTuneStopRef.current) {
+        const level = queue.shift();
+        if (!level) break;
+        const ln = level.meta.level_number;
+        try {
+          const resp = await apiClient.post('/tune/auto', {
+            level_json: level.level_json,
+            level_number: ln,
+            target_difficulty: level.meta.target_difficulty,
+            target_clear_rate_scale: bossTargetScale(ln) ?? 1.0,
+            skill_mean: rlSkillMean,
+            tolerance: RL_CLEAR_TOL,
+            try_gimmick: true,
+          });
+          const r = resp.data as {
+            tuned: boolean; close: boolean; lever: string; best_level_json: LevelJsonLike;
+            predicted_clear_rate: number; original_predicted: number; target_clear_rate: number;
+          };
+          // 개선이 없으면 저장하지 않는다 — 무의미한 쓰기로 검증 상태만 날리는 걸 막는다.
+          const before = Math.abs(r.original_predicted - r.target_clear_rate);
+          const after = Math.abs(r.predicted_clear_rate - r.target_clear_rate);
+          if (!r.tuned || after >= before) { skipped++; }
+          else {
+            await saveProductionLevels(batchId, [{
+              meta: {
+                ...level.meta,
+                generated_at: new Date().toISOString(),
+                status_updated_at: new Date().toISOString(),
+                verified: false, verification_passed: undefined, match_score: undefined,
+                regen_attempts: (level.meta.regen_attempts || 0) + 1,
+              },
+              level_json: r.best_level_json as ProductionLevel['level_json'],
+            }]);
+            improved++;
+          }
+        } catch (e) {
+          failed++;
+          console.warn(`[autotune] Lv.${ln} 실패:`, e);
+        }
+        setAutoTuneProgress(p => ({ ...p, done: p.done + 1, improved }));
+      }
+    };
+    await Promise.all(Array.from({ length: CONC }, worker));
+    loadLevels();
+    onStatsUpdate();
+    addNotification(improved > 0 ? 'success' : 'warning',
+      `일괄 자동 튜닝: 개선 ${improved} · 변화없음 ${skipped} · 실패 ${failed}`
+      + ' — 개선분은 재검증 대상입니다.');
+    setIsAutoTuning(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoTuneTargets, batchId, rlSkillMean, addNotification, onStatsUpdate]);
+
   // ── 3단 다이얼: 기믹 강도(중간폭) — 모양·색 고정, 속성기믹 밀도만 조정 ──
   // 다이얼 조정 시 in-memory로 selectedLevel.level_json 교체 → 보드 즉시 재렌더(저장은 [적용]).
   const [gimmickIntensity, setGimmickIntensity] = useState<number>(50); // 0~100: 기믹 밀도
   const [colorSpread, setColorSpread] = useState<number>(50);           // 0~100: 색 뭉침(0)↔흩어짐(100)
+  // [다이얼 격리] 각 다이얼을 **실제로 움직였는지**. 안 움직인 다이얼의 튜너는 호출하지 않는다.
+  // 예전엔 색만 움직여도 /tune/gimmick 을 항상 태워서, 슬라이더가 중립(50)이어도 기믹이
+  // 새로 배치됐다(강도 0.5 재적용 = 재배치. 중립값이 항등이 아님). 반대로 기믹만 움직여도
+  // /tune/color 가 색을 다시 뿌렸다. 두 다이얼이 서로를 덮어쓰던 문제.
+  const gimmickTouchedRef = useRef(false);
+  const colorTouchedRef = useRef(false);
   const [gimmickPred, setGimmickPred] = useState<number | null>(null);  // 조정본 예측 클리어율
   const [clusterIndex, setClusterIndex] = useState<number | null>(null); // 색 뭉침 지표 −1~+1 (join-count)
   const [gimmickBusy, setGimmickBusy] = useState(false);
@@ -3850,6 +4333,8 @@ function TestTab({
     };
     setGimmickIntensity(50);
     setColorSpread(50);
+    gimmickTouchedRef.current = false;
+    colorTouchedRef.current = false;
     setGimmickPred(null);
     setClusterIndex(null);
     setDialDirty(false);
@@ -3868,28 +4353,46 @@ function TestTab({
     if (!selectedLevel || !base || base.level !== selectedLevel.meta.level_number) return;
     setGimmickBusy(true);
     try {
-      // 1) 기믹 강도 (disk base 기준, 결정적)
-      const g = await apiClient.post('/tune/gimmick', {
-        level_json: base.json,
-        level_number: selectedLevel.meta.level_number,
-        intensity: Math.max(0, Math.min(1, intensityPct / 100)),
-        skill_mean: rlSkillMean,
-        evaluate: false,
-      });
-      let lj = (g.data as { best_level_json: LevelJsonLike }).best_level_json;
-      // 2) 색 스프레드 (기믹 결과 위에; 색은 td0만 → 기믹과 직교, ÷3 보존)
-      const c = await apiClient.post('/tune/color', {
-        level_json: lj,
-        spread: Math.max(0, Math.min(1, spreadPct / 100)),
-        skill_mean: rlSkillMean,
-        evaluate,
-      });
-      const cd = c.data as { best_level_json: LevelJsonLike; predicted_clear_rate: number; cluster_index: number };
-      lj = cd.best_level_json;
+      // 1) 기믹 강도 — **기믹 다이얼을 실제로 움직였을 때만** 적용.
+      //    중립(50)이라고 항등이 아니라 강도 0.5로 '재배치'하므로, 색만 만졌는데도
+      //    기존 기믹이 랜덤하게 갈아엎히는 문제가 있었다.
+      let lj = base.json;
+      if (gimmickTouchedRef.current) {
+        const g = await apiClient.post('/tune/gimmick', {
+          level_json: base.json,
+          level_number: selectedLevel.meta.level_number,
+          intensity: Math.max(0, Math.min(1, intensityPct / 100)),
+          skill_mean: rlSkillMean,
+          evaluate: false,
+        });
+        lj = (g.data as { best_level_json: LevelJsonLike }).best_level_json;
+      }
+      // 2) 색 스프레드 — 마찬가지로 색 다이얼을 움직였을 때만. (색은 td0, 기믹은 td1 이라
+      //    서로 직교하지만, 안 만진 쪽까지 매번 재적용하면 배치가 계속 흔들린다.)
+      let pred: number | null = null;
+      if (colorTouchedRef.current) {
+        const c = await apiClient.post('/tune/color', {
+          level_json: lj,
+          spread: Math.max(0, Math.min(1, spreadPct / 100)),
+          skill_mean: rlSkillMean,
+          evaluate,
+        });
+        const cd = c.data as { best_level_json: LevelJsonLike; predicted_clear_rate: number; cluster_index: number };
+        lj = cd.best_level_json;
+        setClusterIndex(typeof cd.cluster_index === 'number' ? cd.cluster_index : null);
+        if (evaluate) pred = cd.predicted_clear_rate;
+      } else if (evaluate) {
+        // 색을 안 건드렸으면 예측만 따로 측정한다(색 튜너가 겸하던 역할).
+        const s = await apiClient.post('/rl-sim/level', {
+          level_json: lj,
+          target_difficulty: selectedLevel.meta.target_difficulty,
+          skill_mean: rlSkillMean,
+        });
+        pred = (s.data as { predicted_clear_rate: number }).predicted_clear_rate;
+      }
       setSelectedLevel(prev => prev ? { ...prev, level_json: lj as ProductionLevel['level_json'] } : prev);
-      setDialDirty(true);
-      setClusterIndex(typeof cd.cluster_index === 'number' ? cd.cluster_index : null);
-      if (evaluate) setGimmickPred(cd.predicted_clear_rate);
+      setDialDirty(gimmickTouchedRef.current || colorTouchedRef.current);
+      if (pred !== null) setGimmickPred(pred);
     } catch (e) {
       addNotification('error', `다이얼 조정 실패: ${(e as Error).message}`);
     } finally {
@@ -3936,6 +4439,10 @@ function TestTab({
         level_json: base.json,
         tile_count: n,
         evaluate: false,
+        // [±2 제한] 백엔드가 level_number 의 정본 그래프값 기준으로 ±2 로 클램프한다.
+        // 안 넘기면 '현재 useTileCount' 기준이라 반복 호출 시 2씩 계속 밀려난다.
+        level_number: selectedLevel.meta.level_number,
+        tile_type_profile: tileTypeProfile === 'baseline' ? undefined : tileTypeProfile,
       });
       const r = resp.data as { best_level_json: LevelJsonLike; tile_count: number; color_types: number };
       await saveProductionLevels(batchId, [{
@@ -3949,8 +4456,12 @@ function TestTab({
         },
         level_json: r.best_level_json as ProductionLevel['level_json'],
       }]);
-      addNotification('success',
-        `Lv.${selectedLevel.meta.level_number} 사용 타일 ${r.color_types}종 적용 (재검증 대상). 종류↑=어려움.`);
+      // [고정 레벨 경고] 1~31 고정본은 저장소가 정본이라, 여기서 바꿔도 다음 재생성 때
+      // 저장본 값으로 되돌아간다. 영구 반영하려면 패턴 디버그 → 초반 고정 레벨에서 저장해야 한다.
+      const isFixed = !!(r.best_level_json as { _fixed_level?: boolean })._fixed_level;
+      addNotification(isFixed ? 'warning' : 'success',
+        `Lv.${selectedLevel.meta.level_number} 사용 타일 ${r.color_types}종 적용 (재검증 대상). 종류↑=어려움.`
+        + (isFixed ? ' ⚠️ 고정 레벨 — 재생성하면 저장본 값으로 되돌아갑니다(패턴 디버그에서 저장 필요).' : ''));
       loadLevels();
       onStatsUpdate();
     } catch (e) {
@@ -4063,6 +4574,7 @@ function TestTab({
           target_difficulty: lvl.meta.target_difficulty,
           skill_mean: rlSkillMean,
           target_clear_rate_scale: bossTargetScale(ln),
+          check_solver_on_zero: true,
         });
         if (cancelled) return;
         const predicted = rl.predicted_clear_rate;
@@ -4074,7 +4586,16 @@ function TestTab({
           rl_classification: rl.classification,
           luck_suspect: rl.luck_suspect,
           verified: true,
+          // [필수] match_score 를 같이 갱신한다. 예전엔 verification_passed 만 새로 쓰고
+          // match_score 는 **생성 당시 값을 그대로 뒀다** → 낡은 고득점 + 새 미통과가 공존.
+          // 순차탭은 match_score 로 대상을 고르므로 "전부 통과"로 보이는데 배포 게이트는
+          // verification_passed 로 막아 두 화면 숫자가 어긋났다
+          // (실측: Lv437 저장 match 94.4 / pcr 0.4758 인데 재측정 pcr 0.092).
+          match_score: Math.max(0, 100 - Math.abs((rl.clear_rate_gap ?? predicted - target) * 100) * 2),
           verification_passed: rlVerificationPassed(ln, rl) && maxDeclaredGridDim(lvl.level_json) <= MAX_PLAYABLE_GRID,
+          rl_unreliable: rl.rl_unreliable === true,
+          rl_unreliable_reason: rl.rl_unreliable_reason ?? undefined,
+          solver_verdict: rl.solver_verdict ?? undefined,
         };
         await saveProductionLevels(batchId, [{ meta: { ...lvl.meta, ...patch }, level_json: lvl.level_json }]);
         setLevels(prev => prev.map(l => l.meta.level_number === ln ? { ...l, meta: { ...l.meta, ...patch } } : l));
@@ -4203,6 +4724,10 @@ function TestTab({
         target_difficulty: selectedLevel.meta.target_difficulty,
         skill_mean: rlSkillMean,
         target_clear_rate_scale: bossTargetScale(selectedLevel.meta.level_number),
+          // 예측이 전 구간 0 이면 A* 로 대조 — 봇 한계인지 진짜 결함인지 가른다.
+          // 이걸 안 켜면 A* 가 클리어 경로를 찾는 레벨도 '즉시 실패'로 표시된다
+          // (실측: 수동 플레이로는 클리어되는데 검증만 누르면 실패).
+          check_solver_on_zero: true,
       });
       const predicted = rl.predicted_clear_rate;
       const target = rl.target_clear_rate ?? 0;
@@ -4217,9 +4742,15 @@ function TestTab({
         autoplay_grade: rl.classification,
         balance_status: balance,
         bot_stats: [],
-        recommendations: rl.classification === 'unclearable_suspect'
-          ? ['최고 실력으로도 클리어 불가 — 재생성 필요']
-          : [],
+        recommendations: rl.rl_unreliable
+          // A* 가 클리어 경로를 찾았는데 봇만 0% → 레벨 결함이 아니라 봇 한계다.
+          // 예전 문구('재생성 필요')는 멀쩡한 레벨을 버리게 만든다.
+          ? [`⚠️ RL 신뢰 불가 — ${rl.rl_unreliable_reason || ''}`
+             + (rl.solver_verdict ? ` (A*: ${rl.solver_verdict})` : '')
+             + ' · 봇 한계이며 레벨 결함이 아닙니다']
+          : rl.classification === 'unclearable_suspect'
+            ? ['최고 실력으로도 클리어 불가 — 재생성 필요']
+            : [],
         predicted_clear_rate: predicted,
         target_clear_rate: target,
         clear_rate_gap: rl.clear_rate_gap ?? predicted - target,
@@ -4239,6 +4770,9 @@ function TestTab({
         match_score: matchScore,
         verified: true,
         verification_passed: rlVerificationPassed(selectedLevel.meta.level_number, rl) && maxDeclaredGridDim(selectedLevel.level_json) <= MAX_PLAYABLE_GRID,
+        rl_unreliable: rl.rl_unreliable === true,
+        rl_unreliable_reason: rl.rl_unreliable_reason ?? undefined,
+        solver_verdict: rl.solver_verdict ?? undefined,
         actual_difficulty: (typeof rl.difficulty_score === 'number') ? rl.difficulty_score : Math.max(0, Math.min(1, 1 - predicted)),
       };
 
@@ -4385,6 +4919,14 @@ function TestTab({
     const offsetByLn = new Map<number, number>();           // 측정 gap 기반 난이도 조준(재생성에 전달, 누적)
     const forceNoTemplateByLn = new Set<number>();          // 템플릿 언클리어러블 → 일반생성 강제
     const bestByLn = new Map<number, { snapshot: { level_json: ProductionLevel['level_json']; meta: ProductionLevelMeta }; absGap: number; isClearable: boolean }>();
+    // [튜너 우선] 미달 레벨은 재생성 전에 색·기믹 스윕(/tune/auto)을 **1회** 먼저 시도한다.
+    //   비용: 튜너 2.7~5.9초 1회 vs 재생성 왕복(후보3 생성 + 재측정) 3~5초 × 최대 5라운드.
+    //   효과: 표본 24개 실측에서 비unclearable 12개 중 6개가 튜닝만으로 목표 밴드 진입.
+    //   부수효과 없음: 모양·÷3·기믹언락·OOB 가 그대로라 재검사 부담이 없다(재생성은 전부 새로 통과해야 함).
+    // 클리어불가(unclearable_suspect)는 제외 — 실측상 12개 전부 튜닝 후에도 0.0~0.036 이었다.
+    const tunedByLn = new Set<number>();                    // 레벨당 튜너 1회만(무한 루프 방지)
+    const clsByLn = new Map<number, string>();              // 최근 측정 분류(튜너 대상 판정용)
+    const lastJsonByLn = new Map<number, ProductionLevel['level_json']>();  // 최근 측정에 쓴 json
     let _completed = 0;
 
     // 동시성 풀 헬퍼 — concurrency개 워커가 큐에서 꺼내 처리. (측정=2, 재생성=8)
@@ -4394,7 +4936,17 @@ function TestTab({
         while (q.length > 0 && !signal.aborted) {
           const ln = q.shift();
           if (ln === undefined) break;
-          try { await fn(ln); } catch (e) { console.error('[seq] 처리 실패', ln, e); }
+          try { await fn(ln); }
+          catch (e) {
+            // 중지로 인한 취소는 '실패'가 아니다 — 콘솔을 에러로 채우지 않는다.
+            // (axios 는 signal abort 시 CanceledError/ERR_CANCELED 를 던진다)
+            const name = (e as { name?: string; code?: string })?.name;
+            const code = (e as { code?: string })?.code;
+            if (signal.aborted || name === 'CanceledError' || name === 'AbortError' || code === 'ERR_CANCELED') {
+              return;   // 이 워커 종료 — 남은 큐는 폐기
+            }
+            console.error('[seq] 처리 실패', ln, e);
+          }
         }
       });
       await Promise.all(workers);
@@ -4441,20 +4993,23 @@ function TestTab({
           seed: round,  // 라운드별 시드 → 재측정 독립성
           skill_mean: rlSkillMean,
           target_clear_rate_scale: bossTargetScale(currentLevel.meta.level_number),
-        });
+          // 예측이 전 구간 0 이면 A* 로 대조해 '봇 한계'인지 '진짜 결함'인지 가른다.
+          // 최대 8초가 더 들지만, 이걸 안 하면 멀쩡한 레벨을 5라운드 내내 재생성하며 낭비한다
+          // (실측: 재생성된 unclearable 88개가 88개 전부 실패).
+          check_solver_on_zero: true,
+        }, { signal });
         const predicted = rl.predicted_clear_rate;
         const target = rl.target_clear_rate ?? 0;
         const gapPp = (rl.clear_rate_gap ?? predicted - target) * 100;
         const matchScore = Math.max(0, 100 - Math.abs(gapPp) * 2);
 
-        // 솔버 앵커: RL 언클리어러블 오탐을 A* 완전탐색으로 구제
-        let solverClearable = false;
-        if (rl.classification === 'unclearable_suspect') {
-          try {
-            const sv = await analyzeSolvability(currentLevel.level_json, { nodeBudget: 200000, timeBudgetS: 6 });
-            if (sv.verdict === 'PROVEN_SOLVABLE') solverClearable = true;
-          } catch { /* 구제 안 함 */ }
-        }
+        // [솔버 앵커 제거] 예전엔 unclearable 판정마다 A* 완전탐색(최대 6초)을 돌려 오탐을 구제하려 했다.
+        // 그런데 이 값은 **통과 판정에 쓰이지 않는다** — `rlVerificationPassed` 는 classification 이
+        // unclearable_suspect 면 solverClearable 과 무관하게 false 다. 쓰이는 곳은 best-of-N 스냅샷
+        // 선택과 forceNoTemplate 판단뿐이고, 그건 이미 측정된 max_clear_rate 로 대체 가능하다.
+        // 실측: solvability 318회 호출(호출당 최대 6초) 동안 구제로 통과된 레벨 0개,
+        //      재생성된 unclearable 88개도 88개 전부 unclearable 유지. 순수 낭비라 제거.
+        const solverClearable = false;
 
         const direction: 'too_easy' | 'too_hard' | 'ok' = rl.classification === 'unclearable_suspect'
           ? 'too_hard' : Math.abs(gapPp) <= 5 ? 'ok' : gapPp > 0 ? 'too_easy' : 'too_hard';
@@ -4477,12 +5032,18 @@ function TestTab({
         if (ruleViol.length) console.warn(`[seq] Lv.${levelNumber} 규칙 위반 → 실패 처리: ${ruleViol.join(', ')}`);
         const isPassed = rlVerificationPassed(levelNumber, rl) && gridDim <= MAX_PLAYABLE_GRID && ruleViol.length === 0;
 
+        clsByLn.set(levelNumber, rl.classification);
+        lastJsonByLn.set(levelNumber, currentLevel.level_json);
         const measuredDifficulty = (typeof rl.difficulty_score === 'number') ? rl.difficulty_score : Math.max(0, Math.min(1, 1 - predicted));
         const rlMeta = {
           verification_method: 'rl' as const, predicted_clear_rate: predicted, target_clear_rate: target,
           clear_rate_gap: rl.clear_rate_gap ?? undefined, rl_classification: rl.classification,
           luck_suspect: rl.luck_suspect, match_score: matchScore, verified: true,
           verification_passed: isPassed, actual_difficulty: measuredDifficulty,
+          // RL 신뢰도 — 리스트/게이트가 "이 레벨의 난이도 값은 못 믿는다"를 알 수 있게 남긴다
+          rl_unreliable: rl.rl_unreliable === true,
+          rl_unreliable_reason: rl.rl_unreliable_reason ?? undefined,
+          solver_verdict: rl.solver_verdict ?? undefined,
         };
 
         // best-of-N (라운드 간): 솔버블 우선 → gap 최소. 최종 미달 시 최근접 버전 보관용.
@@ -4516,14 +5077,71 @@ function TestTab({
       }
     };
 
-    // ── 재생성 전용(측정 없음) ── 실패 레벨을 1회 재생성. 다음 라운드가 재측정. (동시 8 = gen pool 8코어)
+    /**
+     * 미달 레벨 1회 개선. **튜너 우선 → 안 되면 재생성.** 다음 라운드가 재측정한다.
+     *
+     * 순서를 이렇게 두는 이유:
+     *   ① 싸다 — 튜너 1회(2.7~5.9s) < 재생성 왕복(3~5s) × 최대 5라운드
+     *   ② 모양이 안 바뀐다 — ÷3/기믹언락/헤더OOB/그리드상한을 이미 통과한 상태가 유지된다.
+     *      재생성은 그 검사를 전부 다시 통과해야 하고, 층수·타일수도 달라져 난이도가 크게 튄다.
+     *   ③ 되돌릴 여지가 있다 — 튜너가 실패하면 그 다음 라운드에서 재생성으로 넘어간다.
+     * 레벨당 1회만 시도한다(tunedByLn) — 같은 레버를 반복해봐야 같은 결과다.
+     */
     const regenOneLevel = async (levelNumber: number): Promise<void> => {
       if (signal.aborted) return;
+
+      const cls = clsByLn.get(levelNumber);
+      const srcJson = lastJsonByLn.get(levelNumber);
+      const lvlMeta = levels.find(l => l.meta.level_number === levelNumber)?.meta;
+      if (cls && cls !== 'unclearable_suspect' && srcJson && lvlMeta
+          && !tunedByLn.has(levelNumber) && typeof lvlMeta.target_difficulty === 'number') {
+        tunedByLn.add(levelNumber);
+        setSequentialProgress(prev => ({ ...prev, currentLevel: levelNumber, status: 'regenerating' }));
+        try {
+          const resp = await apiClient.post('/tune/auto', {
+            level_json: srcJson,
+            level_number: levelNumber,
+            target_difficulty: lvlMeta.target_difficulty,
+            target_clear_rate_scale: bossTargetScale(levelNumber) ?? 1.0,
+            skill_mean: rlSkillMean,
+            tolerance: RL_CLEAR_TOL,
+            try_gimmick: true,
+          }, { signal });
+          const r = resp.data as {
+            tuned: boolean; lever: string; best_level_json: LevelJsonLike;
+            predicted_clear_rate: number; original_predicted: number; target_clear_rate: number;
+          };
+          const before = Math.abs(r.original_predicted - r.target_clear_rate);
+          const after = Math.abs(r.predicted_clear_rate - r.target_clear_rate);
+          if (r.tuned && after < before) {
+            // 튜너 예측은 통과로 인정하지 않는다 — 다음 라운드 RL 측정이 확정한다(이중잣대 방지).
+            await saveProductionLevels(batchId, [{
+              meta: {
+                ...lvlMeta,
+                generated_at: new Date().toISOString(),
+                status_updated_at: new Date().toISOString(),
+                verified: false, verification_passed: undefined, match_score: undefined,
+              },
+              level_json: r.best_level_json as ProductionLevel['level_json'],
+            }]);
+            setLevels(prev => prev.map(l => l.meta.level_number === levelNumber
+              ? { ...l, level_json: r.best_level_json as ProductionLevel['level_json'] } : l));
+            console.info(`[seq/tune] Lv.${levelNumber} ${r.lever}: `
+              + `${r.original_predicted.toFixed(3)} → ${r.predicted_clear_rate.toFixed(3)} (목표 ${r.target_clear_rate.toFixed(3)})`);
+            return;   // 재생성 생략 — 다음 라운드가 튜닝본을 측정
+          }
+          console.info(`[seq/tune] Lv.${levelNumber} 개선 없음(${r.lever}) → 재생성으로 전환`);
+        } catch (err) {
+          console.warn(`[seq/tune] Lv.${levelNumber} 튜너 실패 → 재생성으로 전환:`, err);
+        }
+      }
+
       setSequentialProgress(prev => ({ ...prev, currentLevel: levelNumber, status: 'regenerating' }));
       try {
         await handleRegenerateLevel(levelNumber, undefined, undefined, {
           forceNoTemplate: forceNoTemplateByLn.has(levelNumber),
           difficultyOffset: offsetByLn.get(levelNumber) ?? 0,
+          signal,   // 중지 시 진행 중인 후보 생성까지 즉시 취소
         });
       } catch (err) {
         console.error(`재생성 실패 Lv.${levelNumber}:`, err);
@@ -4760,8 +5378,12 @@ function TestTab({
   };
 
   const handleStopSequentialProcess = () => {
+    // abort 는 큐를 막을 뿐 아니라 **진행 중인 HTTP 요청까지 끊는다**(각 API 에 signal 전달).
+    // 예전엔 큐만 막아서, 이미 날아간 RL 스윕(최대 300초)·A* 대조·후보 15개 생성이
+    // 전부 끝날 때까지 중지가 안 먹는 것처럼 보였다.
+    // 측정/재생성 결과는 레벨 단위로 그때그때 저장되므로, 여기까지 끝난 것은 이미 디스크에 있다.
     sequentialAbortRef.current?.abort();
-    addNotification('info', '순차 처리 중지됨');
+    addNotification('info', '순차 처리 중지 — 완료된 레벨까지 저장됨, 진행 중이던 작업은 폐기');
   };
 
   // Calculate match score from bot stats (aligned with backend formula for consistency)
@@ -5003,7 +5625,37 @@ function TestTab({
   const [regenModalLevel, setRegenModalLevel] = useState<number | null>(null);
   const [regenPatternIndex, setRegenPatternIndex] = useState<number | undefined>(undefined);
   const [regenSymmetryMode, setRegenSymmetryMode] = useState<'none' | 'horizontal' | 'vertical' | 'both'>('horizontal');
-  const [regenGenerationMode, setRegenGenerationMode] = useState<'quick' | 'pattern'>('pattern');
+  const [regenGenerationMode, setRegenGenerationMode] = useState<'quick' | 'pattern' | 'turtle'>('pattern');
+  // [등껍질 침식] 화이트리스트 패턴 목록. 재생성 모달과 서브보스 배정이 함께 사용.
+  const [turtlePatterns, setTurtlePatterns] = useState<TurtlePatternInfo[]>([]);
+  const ensureTurtlePatterns = useCallback(async (): Promise<TurtlePatternInfo[]> => {
+    if (turtlePatterns.length > 0) return turtlePatterns;
+    try {
+      // 등껍질 전용 라이브러리(turtle_bases). 모달의 수동 선택은 미측정 항목도 보여준다
+      // (모양만 보고 고를 수 있어야 함) — 자동 배정 쪽에서만 coef 유무로 거른다.
+      const r = await apiClient.get('/debug/turtle-bases');
+      const list = ((r.data?.turtle_bases || []) as Array<{
+        id: string; grid: number;
+        turtle?: { depth: number; total: number; per_layer: number[] };
+        difficulty?: { by_v?: Record<string, { avg: number; cas: number }>; coef?: number };
+        layers?: Array<{ col: number; cells: string[] }>;
+      }>)
+        .filter(b => !!b.turtle)
+        .map(b => ({
+          id: b.id, base: b.grid,
+          depth: b.turtle!.depth, total: b.turtle!.total, per_layer: b.turtle!.per_layer,
+          coef: b.difficulty?.coef, by_v: b.difficulty?.by_v, layers: b.layers,
+        })) as TurtlePatternInfo[];
+      setTurtlePatterns(list);
+      return list;
+    } catch { return []; }
+  }, [turtlePatterns]);
+  const [regenTurtleId, setRegenTurtleId] = useState<string | undefined>(undefined);
+  // [수동 층수] 켜면 난이도 등급 층수 클램프(A:3~4/B:4~6/C:6~8/D:7~10)를 끄고 이 값을 층수로 쓴다.
+  const [regenManualLayers, setRegenManualLayers] = useState(false);
+  const [regenLayerCount, setRegenLayerCount] = useState(6);
+  // [층 크기 순환] 켜면 채움 크기를 base→base-1→base-2 반복. 유닛 조립과는 배타(유닛은 크기 무시).
+  const [regenSizeCycle, setRegenSizeCycle] = useState(false);
 
   // Per-level regeneration progress tracking
   const [regenProgressMap, setRegenProgressMap] = useState<Map<number, {
@@ -5036,17 +5688,34 @@ function TestTab({
     setRegenPatternIndex(undefined); // 자동 선택으로 초기화
     setRegenSymmetryMode(defaultSymmetry);
     setRegenGenerationMode('pattern'); // 기본값: 패턴 생성
+    setRegenTurtleId(undefined);
+    setRegenManualLayers(false);
+    setRegenSizeCycle(false);
+    setRegenLayerCount(Math.max(2, Math.min(12, Number((level.level_json as { layer?: number } | undefined)?.layer) || 6)));
     setRegenModalOpen(true);
+    // [등껍질] 목록 지연 로드(1회). 실패해도 다른 모드는 정상 동작해야 하므로 조용히 무시.
+    void ensureTurtlePatterns();
   };
 
   // 모달에서 재생성 실행
   const handleRegenFromModal = async () => {
     if (regenModalLevel === null) return;
     setRegenModalOpen(false);
+    // 등껍질 모드: 패턴/대칭 선택은 무의미(모양이 층수·배치를 전부 결정) → id만 넘긴다
+    if (regenGenerationMode === 'turtle' && regenTurtleId) {
+      await handleRegenerateLevel(regenModalLevel, undefined, undefined, { turtlePatternId: regenTurtleId });
+      return;
+    }
     // 빠른 생성 모드: 패턴 인덱스 없이 자동 선택 (각 레이어 다른 패턴)
     // 패턴 생성 모드: 선택한 패턴 인덱스 사용 (모든 레이어 동일한 위치)
     const patternIndexToUse = regenGenerationMode === 'quick' ? undefined : regenPatternIndex;
-    await handleRegenerateLevel(regenModalLevel, patternIndexToUse, regenSymmetryMode);
+    await handleRegenerateLevel(regenModalLevel, patternIndexToUse, regenSymmetryMode,
+      (regenManualLayers || regenSizeCycle)
+        ? {
+            manualLayerCount: regenManualLayers ? regenLayerCount : undefined,
+            sizeCycle: regenSizeCycle,
+          }
+        : undefined);
   };
 
   const handleRegenerateLevel = async (
@@ -5056,7 +5725,16 @@ function TestTab({
     // [v16 피드백제어] difficultyOffset: 순차검증이 측정 gap으로 계산한 난이도 조정값.
     // 양수=더 어렵게(타일종류↑/층↑), 음수=더 쉽게. 표 대신 측정→조정으로 목표 수렴.
     // newShape: 저장된 pattern_index·템플릿 무시하고 '다른 랜덤 모양'으로 재생성 (모양 다이얼 변주).
-    options?: { forceNoTemplate?: boolean; difficultyOffset?: number; newShape?: boolean }
+    // turtlePatternId: [등껍질 침식] 지정하면 그 모양을 바닥 1층으로 두고 침식 스택으로 생성.
+    //   층수·타일수는 모양이 결정(난이도 등급 상한 무시) → 후보 N개 탐색 없이 1회 생성.
+    // manualLayerCount: [수동 층수] 지정하면 난이도 등급 층수 클램프를 끄고(enforce_layer_cap=false)
+    //   이 값을 층수로 그대로 쓴다. 템플릿/보스 경로는 모양이 층수를 갖고 있어 해당 없음.
+    // sizeCycle: [층 크기 순환] 채움 크기를 base→base-1→base-2 반복(layer_steps 로 전달).
+    //   유닛 조립은 채움 크기를 쓰지 않으므로 이 옵션과 함께면 **유닛을 강제로 끈다**.
+    options?: { forceNoTemplate?: boolean; difficultyOffset?: number; newShape?: boolean;
+                turtlePatternId?: string; manualLayerCount?: number; sizeCycle?: boolean;
+                // 순차검증 '중지' 가 진행 중인 후보 생성까지 끊도록 전달받는다.
+                signal?: AbortSignal }
   ) => {
     const level = levels.find(l => l.meta.level_number === levelNumber);
     if (!level) return;
@@ -5082,6 +5760,111 @@ function TestTab({
         console.warn(`[regen] Lv.${levelNumber}: target_difficulty=${rawTargetDifficulty}을 [0.01, 0.99] 범위로 클램프 (백엔드 ge=0.0/le=1.0 보호).`);
       }
       const targetScore = targetDifficulty * 100;
+
+      // [초반 고정 보존] 마커 `_fixed_level` 이 있으면 **항상** 고정본으로 되돌린다.
+      // 등껍질(`_turtle_peel`)·보스(`_boss_template_id`)와 같은 모드 보존 규약.
+      // 이게 없으면: 고정 재생성으로 만든 Lv1~31 이 재검증에서 미달 판정될 때 아래
+      // `meta.template_id` 분기(from-template)가 걸려 **일반 템플릿 모양으로 갈아엎힌다**.
+      // forceNoTemplate/newShape 도 무시한다 — 백엔드 generate() 가 level_number 로 무조건
+      // 고정본을 반환하므로 어차피 탈출 불가고, 여기서만 다른 경로를 타면 프론트/백 불일치가 난다.
+      // (고정본이 계속 미달이면 모양 자체를 패턴 디버그 에디터에서 고쳐야 한다.)
+      if ((level.level_json as { _fixed_level?: boolean } | undefined)?._fixed_level) {
+        const gen = await generateLevel(
+          { target_difficulty: targetDifficulty, grid_size: [7, 7] },
+          {
+            level_number: levelNumber,
+            gimmick_unlock_levels: currentBatch.gimmick_unlock_levels || PROFESSIONAL_GIMMICK_UNLOCK_LEVELS,
+            signal: options?.signal,   // 중지 시 진행 중인 생성도 즉시 취소
+          });
+        const levelJson = gen.level_json;
+        if (!(levelJson as { _fixed_level?: boolean })._fixed_level) {
+          throw new Error(`Lv.${levelNumber} 고정본 미적용 — 저장소에서 고정 해제됐는지 확인`);
+        }
+        applyProductionTileVisuals(levelJson, levelNumber);
+        setRegenProgressMap(prev => new Map(prev).set(levelNumber, { status: 'saving' }));
+        await saveProductionLevels(batchId, [{
+          meta: {
+            ...level.meta,
+            generated_at: new Date().toISOString(),
+            status_updated_at: new Date().toISOString(),
+            actual_difficulty: gen.actual_difficulty ?? level.meta.actual_difficulty,
+            grade: (gen.grade || level.meta.grade) as DifficultyGrade,
+            regen_attempts: (level.meta.regen_attempts || 0) + 1,
+            match_score: undefined, verified: false, verification_passed: undefined,
+            // 고정본은 템플릿 소유가 아니다. 남겨두면 다음 재생성이 from-template 분기를 타서
+            // 고정 모양을 잃는다(이 분기가 먼저 걸리긴 하지만, 메타 정합성도 맞춰둔다).
+            template_id: undefined,
+          },
+          level_json: levelJson,
+        }]);
+        setRegenProgressMap(prev => new Map(prev).set(levelNumber, { status: 'done' }));
+        addNotification('success', `Lv.${levelNumber} 고정본 재적용 (모양 그대로)`);
+        loadLevels();
+        onStatsUpdate();
+        return;
+      }
+
+      // [서브보스 등껍질 보존] 원본이 등껍질로 만들어졌으면(마커 `_turtle_peel`) 재생성도 등껍질로.
+      // 보스가 `_boss_template_id` 로 모드를 보존하는 것과 같은 규약 — 없으면 순차검증 재생성이
+      // 일반 절차생성으로 되돌려 서브보스 지정이 1회성으로 날아간다.
+      // 사용자가 모달에서 명시 선택(turtlePatternId)했거나 forceNoTemplate/newShape 면 그쪽이 우선.
+      let turtleId = options?.turtlePatternId;
+      if (!turtleId && !options?.forceNoTemplate && !options?.newShape
+          && (level.level_json as { _turtle_peel?: boolean } | undefined)?._turtle_peel) {
+        const prev = (level.level_json as { _turtle_pattern_id?: string } | undefined)?._turtle_pattern_id;
+        if (prev) {
+          turtleId = prev;
+        } else if (isSubBossLevel(levelNumber)) {
+          const list = await ensureTurtlePatterns();
+          turtleId = pickTurtleForLevel(levelNumber, targetDifficulty, approxUseTileCount(levelNumber), list);
+        }
+      }
+
+      // [등껍질 침식] 모양이 층수/타일수를 결정하므로 후보 탐색(15개 생성 후 점수 비교)이
+      // 무의미 → 1회 생성 후 바로 저장. 봇 측정은 일괄 테스트/순차검증에 맡긴다
+      // (보스 템플릿 분기와 동일 규약).
+      if (turtleId) {
+        const gen = await generateLevel(
+          {
+            target_difficulty: targetDifficulty,
+            grid_size: [7, 7],           // 백엔드가 패턴 base로 덮어씀(형식상 필수값)
+            turtle_pattern_id: turtleId,
+            obstacle_types: [],          // 자동 선택(gimmickOptions)에 위임
+          },
+          {
+            auto_select_gimmicks: true,
+            available_gimmicks: ['craft', 'stack', 'chain', 'frog', 'ice', 'grass', 'link', 'bomb', 'curtain', 'teleport', 'unknown'],
+            gimmick_intensity: Math.min(1.5, 0.4 + targetDifficulty),
+            gimmick_unlock_levels: currentBatch.gimmick_unlock_levels || PROFESSIONAL_GIMMICK_UNLOCK_LEVELS,
+            level_number: levelNumber,
+            signal: options?.signal,
+          }
+        );
+        const levelJson = gen.level_json;
+        if (!(levelJson as { _turtle_peel?: boolean })._turtle_peel) {
+          throw new Error(`등껍질 생성 실패 — 패턴 ${turtleId} 가 침식 불가(백엔드가 일반 경로로 폴백)`);
+        }
+        applyProductionTileVisuals(levelJson, levelNumber);
+        setRegenProgressMap(prev => new Map(prev).set(levelNumber, { status: 'saving' }));
+        await saveProductionLevels(batchId, [{
+          meta: {
+            ...level.meta,
+            generated_at: new Date().toISOString(),
+            actual_difficulty: gen.actual_difficulty ?? level.meta.actual_difficulty,
+            grade: (gen.grade || level.meta.grade) as DifficultyGrade,
+            status_updated_at: new Date().toISOString(),
+            regen_attempts: (level.meta.regen_attempts || 0) + 1,
+            match_score: undefined, verified: false, verification_passed: undefined,
+          },
+          level_json: levelJson,
+        }]);
+        setRegenProgressMap(prev => new Map(prev).set(levelNumber, { status: 'done' }));
+        const nl = Number((levelJson as { layer?: number }).layer || 0);
+        addNotification('success', `Lv.${levelNumber} 등껍질 재생성 (${turtleId}, ${nl}층)`);
+        loadLevels();
+        onStatsUpdate();
+        return;
+      }
 
       // [보스 템플릿] level_json._boss_template_id 있으면(보스 템플릿 생성분) from-boss-template로
       // 재생성 — 기존 적용 모양+useTileCount(그래프)+기믹 자동. 보스는 패턴/대칭(자동 모양) 선택을
@@ -5292,6 +6075,17 @@ function TestTab({
       let maxLayers = Math.min(10, 3 + Math.floor(targetDifficulty * 7));
       if (isEarlyLevel) { minLayers = 2; maxLayers = Math.min(4, maxLayers); }
       else if (isBossLevel) { minLayers = Math.max(3, Math.floor(2 + targetDifficulty * 2)); maxLayers = Math.min(10, 4 + Math.floor(targetDifficulty * 6)); }
+      // [수동 층수] 지정 시 위 계산을 덮어쓰고 백엔드 등급 클램프도 끈다(enforce_layer_cap=false).
+      // 백엔드는 상한 미적용일 때 min_layers 를 층수로 그대로 쓴다.
+      const manualLayers = options?.manualLayerCount;
+      if (manualLayers) { minLayers = manualLayers; maxLayers = Math.max(manualLayers, maxLayers); }
+      // [층 크기 순환] 짝수층 헤더 = cols+1 이 기준 크기(S). 층수는 수동값 없으면 현재 층수 사용.
+      const cycleLayerCount = manualLayers
+        ?? Number((level.level_json as { layer?: number } | undefined)?.layer)
+        ?? minLayers;
+      const cycle = options?.sizeCycle
+        ? buildCycleSteps(gridSize[0] + 1, cycleLayerCount)
+        : { sizes: [], steps: [] };
 
       // [v16 피드백제어] 순차검증이 측정한 gap으로 난이도 조준. 난이도함수가 고차원(타일종류·배치·층·기믹)
       // 이라 표(feed-forward)로 불가 → 측정→조정(closed-loop)으로 수렴. offset 0이면 백엔드 자동(무개입).
@@ -5339,6 +6133,10 @@ function TestTab({
                 grid_size: isBossLevel ? [7, 7] : gridSize, // 보스: 선언 최대 8 (디바이스 제약)
                 min_layers: isBossLevel ? 5 : minLayers,
                 max_layers: isBossLevel ? 6 : maxLayers,
+                // [수동 층수] 등급 클램프 해제 → min_layers 가 곧 층수
+                enforce_layer_cap: manualLayers ? false : undefined,
+                // [층 크기 순환] 채움 크기 델타. 유닛 조립은 채움 크기를 안 쓰므로 함께 못 씀.
+                layer_steps: cycle.steps.length ? cycle.steps : undefined,
                 // 피드백 offset 있으면 조준한 타일종류, 없으면 백엔드 자동선택
                 tile_types: steeredTileTypes,
                 obstacle_types: [],
@@ -5353,6 +6151,9 @@ function TestTab({
                 pattern_index: isBossLevel ? undefined : patternIndex,
                 // [유닛 조립] 토글 OR 원본 마커(공유 헬퍼) → 토글 꺼져도 원본 모드 보존.
                 ...genModeFields(levelNumber, unitAssembly, level.level_json as { _unit_assembly?: boolean } | undefined),
+                // [층 크기 순환 + 유닛 배타] 유닛 조립은 층별 채움 크기를 무시하고 자체 슬롯 배치를
+                // 하므로 순환이 무의미해진다 → 순환을 켜면 유닛을 강제로 끈다(원본 마커도 무시).
+                ...(options?.sizeCycle ? { unit_assembly: undefined } : {}),
                 // [보스 생성기]
                 boss_mode: isBossLevel || undefined,
               },
@@ -5362,6 +6163,8 @@ function TestTab({
                 gimmick_intensity: gimmickIntensity,
                 gimmick_unlock_levels: currentBatch.gimmick_unlock_levels || PROFESSIONAL_GIMMICK_UNLOCK_LEVELS,
                 level_number: levelNumber,
+                // 후보 15개(3×5라운드)가 도는 구간 — 중지 시 여기가 안 끊기면 체감 지연이 가장 크다.
+                signal: options?.signal,
               }
             ).catch((err: any) => {
               // Surface the first generate failure per regen so we don't silently lose visibility.
@@ -5826,6 +6629,115 @@ function TestTab({
     if (result) addNotification('success', `저장된 미달 레벨 일괄 재생성 완료: ${result.successCount}개 성공, ${result.failCount}개 실패`);
   };
 
+  /**
+   * [초반 고정 재생성] 1~31 구간을 고정 포맷으로 다시 만든다.
+   *
+   * 슬롯별 소스:
+   *   보스(10·20·30) → 전용 보스 템플릿(from-boss-template)
+   *   고정 등록됨      → 저장된 고정본 그대로 (생성기가 `generate()` 최상단에서 위임)
+   *   미등록          → 건드리지 않음 (임의로 절차생성하면 기존 검증 결과가 날아간다)
+   *
+   * 고정 레벨은 모양이 이미 확정이라 후보 N개 탐색이 무의미 → 슬롯당 1회 생성.
+   */
+  const [isFixedRegenerating, setIsFixedRegenerating] = useState(false);
+  const [fixedSlotCount, setFixedSlotCount] = useState<{ fixed: number; boss: number } | null>(null);
+  // 진행률: 이 작업은 순차검증 탭에 있는데 regenProgressMap 진행바는 저품질 재생성 패널 전용이라
+  // 여기선 안 보인다 → 버튼 라벨에 직접 done/total 을 띄운다.
+  const [fixedRegenProgress, setFixedRegenProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 });
+
+  useEffect(() => {
+    apiClient.get('/debug/fixed-levels')
+      .then(r => {
+        const slots = (r.data?.slots || []) as Array<{ level: number; readonly: boolean; fixed: boolean }>;
+        setFixedSlotCount({
+          fixed: slots.filter(s => !s.readonly && s.fixed).length,
+          boss: slots.filter(s => s.readonly).length,
+        });
+      })
+      .catch(() => setFixedSlotCount(null));
+  }, []);
+
+  const handleRegenerateFixedRange = async () => {
+    setIsFixedRegenerating(true);
+    let ok = 0, fail = 0, skip = 0;
+    try {
+      const r = await apiClient.get('/debug/fixed-levels');
+      const slots = (r.data?.slots || []) as Array<{ level: number; readonly: boolean; fixed: boolean }>;
+      const currentBatch = await getProductionBatch(batchId);
+      const unlockLevels = currentBatch?.gimmick_unlock_levels || PROFESSIONAL_GIMMICK_UNLOCK_LEVELS;
+
+      const actionable = slots.filter(s =>
+        levels.some(l => l.meta.level_number === s.level) && (s.readonly || s.fixed));
+      setFixedRegenProgress({ done: 0, total: actionable.length });
+
+      for (const slot of slots) {
+        const ln = slot.level;
+        const level = levels.find(l => l.meta.level_number === ln);
+        if (!level) { skip++; continue; }
+        if (!slot.readonly && !slot.fixed) { skip++; continue; }   // 미등록은 보존
+        setRegenProgressMap(prev => new Map(prev).set(ln, { status: 'generating' }));
+        try {
+          const td = Math.min(0.99, Math.max(0.01, Number(level.meta.target_difficulty) || 0.1));
+          let levelJson: LevelJSON;
+          let grade = level.meta.grade;
+          let actual = level.meta.actual_difficulty;
+          if (slot.readonly) {
+            const resp = await apiClient.post('/generate/from-boss-template', {
+              level_number: ln, target_difficulty: td,
+              tile_type_profile: tileTypeProfile === 'baseline' ? undefined : tileTypeProfile,
+              apply_gimmicks: true, gimmick_unlock_levels: unlockLevels,
+            });
+            levelJson = resp.data.level_json;
+            grade = (resp.data.grade || grade) as DifficultyGrade;
+            actual = resp.data.actual_difficulty ?? actual;
+          } else {
+            // 고정본은 generate() 가 level_number 로 알아서 위임한다(후보 탐색 불필요).
+            const gen = await generateLevel(
+              { target_difficulty: td, grid_size: [7, 7] },
+              { level_number: ln, gimmick_unlock_levels: unlockLevels });
+            levelJson = gen.level_json;
+            grade = (gen.grade || grade) as DifficultyGrade;
+            actual = gen.actual_difficulty ?? actual;
+            if (!(levelJson as { _fixed_level?: boolean })._fixed_level) {
+              throw new Error('고정본 미적용 — 저장소 확인 필요');
+            }
+          }
+          applyProductionTileVisuals(levelJson, ln);
+          await saveProductionLevels(batchId, [{
+            meta: {
+              ...level.meta,
+              generated_at: new Date().toISOString(),
+              status_updated_at: new Date().toISOString(),
+              actual_difficulty: actual, grade,
+              regen_attempts: (level.meta.regen_attempts || 0) + 1,
+              match_score: undefined, verified: false, verification_passed: undefined,
+              // [중요] 이전 절차/템플릿 생성분의 `template_id` 가 남아있으면, 이후 순차검증
+              // 재생성이 from-template 분기를 타서 방금 심은 고정 모양을 덮어쓴다. 여기서 끊는다.
+              // (보스는 `_boss_template_id` 를 level_json 에 갖고 있어 meta 없이도 복원된다.)
+              template_id: undefined,
+            },
+            level_json: levelJson,
+          }]);
+          setRegenProgressMap(prev => new Map(prev).set(ln, { status: 'done' }));
+          ok++;
+        } catch (e) {
+          setRegenProgressMap(prev => new Map(prev).set(ln, {
+            status: 'failed', error: (e as Error).message }));
+          fail++;
+        }
+        setFixedRegenProgress(p => ({ ...p, done: p.done + 1 }));
+      }
+      loadLevels();
+      onStatsUpdate();
+      addNotification(fail === 0 ? 'success' : 'warning',
+        `초반 고정 재생성: 성공 ${ok} · 실패 ${fail} · 건너뜀(미등록) ${skip}`);
+    } catch {
+      addNotification('error', '고정 레벨 목록 조회 실패 (백엔드 확인)');
+    } finally {
+      setIsFixedRegenerating(false);
+    }
+  };
+
   // Batch regenerate selected levels only
   const handleRegenerateSelected = async () => {
     if (selectedRegenLevels.size === 0) {
@@ -6136,6 +7048,9 @@ function TestTab({
   // Level selection view
   return (
     <div className="flex flex-col gap-4 h-[calc(100vh-250px)] min-h-[600px]">
+      {/* [야간 연구] A* 기반 난이도 판정 검증 — 백엔드 스레드에서 장시간 실행 */}
+      <NightStudyPanel batchId={batchId} />
+
       {/* Test Mode Tabs */}
       <div className="flex gap-2 bg-gray-800 p-2 rounded-lg">
         <button
@@ -6191,8 +7106,19 @@ function TestTab({
         const untestedLevels = levels.filter(l => !l.meta.match_score || l.meta.match_score === 0);
         // 동적 컷오프 사용 — handleSequentialProcess 와 동일 기준이어야 통과/실패 표시가 일치한다.
         // [v16] verification_passed가 true면(튜토리얼 1~10 쉬움 허용 포함) 실패로 안 잡음.
+        // [RL 신뢰 불가 제외] 예전엔 `unclearable_suspect` 를 통째로 뺐다(임시 우회). 그건 진짜
+        // 결함까지 같이 눈감는 방식이었고, 실제로 그 안에 ÷3 위반 18개가 섞여 있었다.
+        // 이제는 백엔드가 레벨별로 신뢰 여부를 판정하므로(A* 대조 포함) **신뢰 불가로 확인된 것만**
+        // 뺀다. 아직 판정 전인 레벨은 정상적으로 검증 대상에 들어가 A* 대조를 받는다.
+        const unclearableLevels = levels.filter(l =>
+          l.meta.rl_unreliable === true && l.meta.verification_passed !== true);
         const failedLevels = levels.filter(l => {
           if (l.meta.verification_passed === true) return false; // 통과(튜토리얼 예외 포함)
+          if (l.meta.rl_unreliable === true) return false;       // RL 값 신뢰 불가 → 조준 대상 아님
+          // [게이트 정합] RL 이 명시적으로 미통과로 판정했으면 match_score 와 무관하게 대상이다.
+          // 예전엔 match_score 만 봐서, RL 미통과인데 점수가 높은 레벨이 순차탭에 안 잡혔다
+          // → "순차검증 전부 통과"인데 내보내기는 400개 차단되는 불일치.
+          if (l.meta.verification_passed === false) return true;
           return l.meta.match_score !== undefined &&
             l.meta.match_score > 0 &&
             l.meta.match_score < computeSequentialPassThreshold(l.meta.target_difficulty);
@@ -6200,13 +7126,24 @@ function TestTab({
         const targetLevels = [...untestedLevels, ...failedLevels].sort((a, b) => a.meta.level_number - b.meta.level_number);
         const allSelected = targetLevels.length > 0 && targetLevels.every(l => selectedSequentialLevels.has(l.meta.level_number));
 
-        return targetLevels.length > 0 || isSequentialProcessing ? (
+        // 이전엔 targetLevels(미측정+미달)가 있을 때만 패널을 그렸다. 그러면 전 레벨이 통과한 뒤엔
+        // 패널 자체가 사라져 보스 재생성/재검증·초반 고정 재생성처럼 "통과 여부와 무관한" 도구까지
+        // 접근 불가가 된다 → 배치에 레벨이 있으면 항상 그린다. 순차 처리 버튼은 targetLevels 로 disable.
+        return levels.length > 0 || isSequentialProcessing ? (
           <div className="bg-gray-800 rounded-lg p-4 space-y-3">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-medium text-white">🔄 순차 자동 처리</h3>
               <span className="text-xs text-gray-400">
                 미측정: <span className="text-blue-400 font-medium">{untestedLevels.length}개</span>
                 {' / '}미달: <span className="text-orange-400 font-medium">{failedLevels.length}개</span>
+                {unclearableLevels.length > 0 && (
+                  <>
+                    {' / '}
+                    <span className="text-amber-400 font-medium" title="봇 예측이 레벨 구조와 어긋나 난이도 판단에 쓸 수 없는 레벨(A* 대조로 확인). 클리어 가능성은 배포 게이트가 A* 로 따로 검사한다.">
+                      RL 신뢰불가 {unclearableLevels.length}개 제외
+                    </span>
+                  </>
+                )}
               </span>
             </div>
 
@@ -6344,6 +7281,112 @@ function TestTab({
                 title="보스 템플릿이 준비된 보스 레벨만 RL 순차검증."
               >
                 🏰 템플릿 준비분만 재검증 ({levels.filter(l => isBossTplReady(l.meta.level_number)).length})
+              </Button>
+            </div>
+
+            {/*
+              [초반 고정 1~31] 고정 등록 슬롯 + 보스(10·20·30)를 정본 포맷으로 다시 찍어낸다.
+              보스 행과 같은 규약: 왼쪽=재생성, 오른쪽=RL 순차재검증(재생성분은 verified=false 가 되므로 필요).
+              미등록 슬롯은 손대지 않는다 — 임의 절차생성하면 기존 검증 결과가 날아간다.
+            */}
+            <div className="flex items-center gap-2">
+              <Button
+                onClick={() => {
+                  const f = fixedSlotCount?.fixed ?? 0;
+                  const b = fixedSlotCount?.boss ?? 0;
+                  if (f + b === 0) {
+                    addNotification('info', '등록된 고정 레벨이 없습니다. 패턴 디버그 → 초반 고정 레벨에서 먼저 등록하세요.');
+                    return;
+                  }
+                  if (!window.confirm(
+                    `초반 1~31 구간을 고정 포맷으로 다시 생성합니다.\n\n` +
+                    `· 고정 등록 ${f}개 → 저장된 모양 그대로\n` +
+                    `· 보스 ${b}개 → 보스 템플릿에서 재생성\n` +
+                    `· 미등록 슬롯은 건드리지 않음\n\n` +
+                    `대상 레벨의 검증 결과는 초기화됩니다. 진행할까요?`)) return;
+                  void handleRegenerateFixedRange();
+                }}
+                disabled={isSequentialProcessing || bossRegen.running || isFixedRegenerating || levels.length === 0}
+                size="sm"
+                className="flex-1 bg-sky-700 hover:bg-sky-600"
+                title="Lv1~31 중 고정 등록된 슬롯 + 보스(10·20·30)만 재생성. 미등록 슬롯은 보존."
+              >
+                {isFixedRegenerating ? (
+                  <><span className="animate-spin mr-1">⟳</span>
+                    초반 고정 재생성 중... {fixedRegenProgress.done}/{fixedRegenProgress.total}</>
+                ) : fixedSlotCount ? (
+                  `🔒 초반 고정 재생성 (고정 ${fixedSlotCount.fixed} + 보스 ${fixedSlotCount.boss})`
+                ) : (
+                  '🔒 초반 고정 재생성 (1~31)'
+                )}
+              </Button>
+              <Button
+                onClick={() => handleSequentialProcess(
+                  levels.filter(l => l.meta.level_number >= 1 && l.meta.level_number <= 31)
+                    .map(l => l.meta.level_number))}
+                disabled={isSequentialProcessing || bossRegen.running || isFixedRegenerating
+                  || levels.filter(l => l.meta.level_number >= 1 && l.meta.level_number <= 31).length === 0}
+                size="sm"
+                className="flex-1 bg-sky-900 hover:bg-sky-800"
+                title="Lv1~31 구간만 RL 순차재검증."
+              >
+                🔒 초반 재검증 ({levels.filter(l => l.meta.level_number >= 1 && l.meta.level_number <= 31).length})
+              </Button>
+            </div>
+
+            {/* [일괄 자동 튜닝] 재생성 전에 색·기믹 스윕으로 살릴 수 있는 것부터 걷어낸다 */}
+            <div className="flex items-center gap-2">
+              {isAutoTuning ? (
+                <Button onClick={() => { autoTuneStopRef.current = true; }} variant="danger" size="sm" className="flex-1">
+                  ⏹ 튜닝 정지 ({autoTuneProgress.done}/{autoTuneProgress.total} · 개선 {autoTuneProgress.improved})
+                </Button>
+              ) : (
+                <Button
+                  onClick={() => {
+                    if (!window.confirm(
+                      `RL 미통과 ${autoTuneTargets.length}개를 재생성 없이 색·기믹 스윕으로 조정합니다.\n\n`
+                      + `· 모양·÷3 은 그대로, 색 배치와 기믹 밀도만 바뀝니다\n`
+                      + `· 클리어 불가(unclearable) 레벨은 제외 — 튜닝으로 안 살아납니다\n`
+                      + `· 개선된 레벨은 재검증 대상으로 되돌아갑니다\n\n`
+                      + `표본 실측 기준 회복률 약 50%. 진행할까요?`)) return;
+                    void handleAutoTuneBatch();
+                  }}
+                  disabled={isSequentialProcessing || bossRegen.running || isFixedRegenerating
+                    || autoTuneTargets.length === 0}
+                  size="sm"
+                  className="flex-1 bg-teal-700 hover:bg-teal-600"
+                  title="RL 미통과 레벨(unclearable 제외)을 /tune/auto 로 일괄 조정. 모양 유지, 재생성 아님."
+                >
+                  🎚️ 일괄 자동 튜닝 ({autoTuneTargets.length})
+                </Button>
+              )}
+              <span className="text-[10px] text-gray-500 flex-1">
+                클리어불가 {levels.filter(l => l.meta.rl_classification === 'unclearable_suspect').length}개는
+                튜닝 대상 아님 — 재생성 필요
+              </span>
+            </div>
+
+            {/* [÷3 복구] 매칭타입 3배수 위반 = 진짜 클리어 불가. 재생성 없이 컨테이너 라벨만 고친다 */}
+            <div className="flex items-center gap-2">
+              <Button
+                onClick={() => {
+                  if (!window.confirm(
+                    `배치 전체(${levels.length}개)를 검사해 매칭타입 ÷3 위반 레벨을 복구합니다.\n\n`
+                    + `· 모양·기믹·색 배치는 그대로 — 컨테이너 내부 라벨만 조정\n`
+                    + `· 위반 없는 레벨은 건드리지 않음\n`
+                    + `· 수정된 레벨만 재검증 대상으로 표시\n\n`
+                    + `÷3 위반은 A* 가 즉시 '클리어 불가'로 판정하는 유일한 확정 결함입니다.`)) return;
+                  void handleRepairClearability();
+                }}
+                disabled={isSequentialProcessing || bossRegen.running || isRepairing || levels.length === 0}
+                size="sm"
+                className="flex-1 bg-rose-800 hover:bg-rose-700"
+                title="매칭타입 ÷3 위반(=클리어 불가) 복구. 모양 불변, 컨테이너 내부 라벨만 변경."
+              >
+                {isRepairing
+                  ? <><span className="animate-spin mr-1">⟳</span>
+                      ÷3 복구 중... {repairProgress.done}/{repairProgress.total} (수정 {repairProgress.fixed})</>
+                  : `🧩 ÷3 위반 복구 (전체 ${levels.length} 검사)`}
               </Button>
             </div>
 
@@ -7926,7 +8969,7 @@ function TestTab({
                     type="range" min={0} max={100} step={5}
                     value={gimmickIntensity}
                     disabled={gimmickBusy}
-                    onChange={(e) => setGimmickIntensity(Number(e.target.value))}
+                    onChange={(e) => { gimmickTouchedRef.current = true; setGimmickIntensity(Number(e.target.value)); }}
                     onPointerUp={() => recomputeDials(gimmickIntensity, colorSpread, true)}
                     onKeyUp={() => recomputeDials(gimmickIntensity, colorSpread, true)}
                     className="flex-1 accent-purple-500"
@@ -7941,7 +8984,7 @@ function TestTab({
                     type="range" min={0} max={100} step={5}
                     value={colorSpread}
                     disabled={gimmickBusy}
-                    onChange={(e) => setColorSpread(Number(e.target.value))}
+                    onChange={(e) => { colorTouchedRef.current = true; setColorSpread(Number(e.target.value)); }}
                     onPointerUp={() => recomputeDials(gimmickIntensity, colorSpread, true)}
                     onKeyUp={() => recomputeDials(gimmickIntensity, colorSpread, true)}
                     className="flex-1 accent-teal-500"
@@ -7954,16 +8997,37 @@ function TestTab({
                 </div>
 
                 {/* 4) 사용 타일 종류 수 — 입력 + 적용 (종류↑=어려움). 재타이핑=디스크 커밋(재검증 대상) */}
+                {/* [±2 제한 표시] 백엔드가 레벨 정본 그래프값 ±2 로 클램프한다. 범위를 안 보여주면
+                    13 을 넣었는데 12 가 돌아와 버그처럼 보인다(실측 문의). 입력 자체를 범위로 막고,
+                    허용 구간을 옆에 적어 왜 그 값인지 알 수 있게 한다. */}
+                {(() => {
+                  // 백엔드 클램프 기준과 동일하게 계산 — TILE_TYPE_PROFILE_CURVES 는
+                  // generator.py 의 LEVEL_CONFIG_TABLE/TILE_TYPE_PROFILES 미러다.
+                  const curve = TILE_TYPE_PROFILE_CURVES[tileTypeProfile] ?? TILE_TYPE_PROFILE_CURVES.baseline;
+                  const baseV = vAtLevel(curve, selectedLevel.meta.level_number);
+                  const lo = baseV ? Math.max(2, baseV - 2) : 2;
+                  const hi = baseV ? baseV + 2 : 15;
+                  return (
                 <div className="flex items-center gap-2">
                   <span className="w-14 text-[10px] text-gray-400">타일 종류</span>
                   <input
-                    type="number" min={2} max={12} step={1}
+                    type="number" min={lo} max={hi} step={1}
                     value={tileCountInput}
                     disabled={gimmickBusy}
-                    onChange={(e) => setTileCountInput(Number(e.target.value) || 2)}
+                    onChange={(e) => {
+                      const v = Number(e.target.value) || lo;
+                      setTileCountInput(Math.max(lo, Math.min(hi, v)));
+                    }}
                     className="w-16 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-xs text-white"
                   />
-                  <span className="text-[9px] text-gray-500">종 (많을수록 어려움)</span>
+                  <span className="text-[9px] text-gray-500">
+                    종 (많을수록 어려움)
+                    {baseV > 0 && (
+                      <span className="text-amber-400" title={`레벨 정본 그래프값 ${baseV} 기준 ±2 로 제한됩니다. 더 어렵게 하려면 기믹 강도·색 분산을 쓰거나, 이 구간의 난이도 설계(useTileCount 테이블)를 바꿔야 합니다.`}>
+                        {' '}· 허용 {lo}~{hi} (기준 {baseV})
+                      </span>
+                    )}
+                  </span>
                   <button
                     onClick={applyTileCount}
                     disabled={gimmickBusy}
@@ -7972,6 +9036,8 @@ function TestTab({
                     {gimmickBusy ? '⟳' : '적용'}
                   </button>
                 </div>
+                  );
+                })()}
 
                 {/* 상태 표시 */}
                 <div className="flex items-center justify-between text-[9px]">
@@ -8044,6 +9110,14 @@ function TestTab({
                       )}
                       {selectedLevel.meta.luck_suspect && (
                         <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-900/50 text-amber-400" title="실력과 무관하게 운에 좌우되는 레벨 의심">🎲 운빨의심</span>
+                      )}
+                      {selectedLevel.meta.rl_unreliable && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-900/60 text-amber-300"
+                          title={`봇 예측을 난이도 판단에 쓸 수 없는 레벨 — ${selectedLevel.meta.rl_unreliable_reason || ''}`
+                                 + (selectedLevel.meta.solver_verdict ? ` / A*: ${selectedLevel.meta.solver_verdict}` : '')
+                                 + '\n클리어 가능성은 배포 게이트가 A* 로 따로 검사합니다.'}>
+                          ⚠️ RL신뢰불가
+                        </span>
                       )}
                       {passed !== undefined && (
                         <span className={`text-xs font-bold px-2 py-0.5 rounded ${passed ? 'bg-green-900/50 text-green-400' : 'bg-red-900/50 text-red-400'}`}>
@@ -8567,7 +9641,7 @@ function TestTab({
                   <label className="block text-sm font-medium text-gray-300 mb-2">
                     생성 모드
                   </label>
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-3 gap-2">
                     <button
                       onClick={() => setRegenGenerationMode('quick')}
                       className={`flex items-center gap-2 px-3 py-3 rounded-lg border transition-colors ${
@@ -8596,13 +9670,110 @@ function TestTab({
                         <div className="text-xs opacity-75">일관된 타일 배치</div>
                       </div>
                     </button>
+                    {/* [등껍질 침식] 화이트리스트 패턴이 있을 때만 노출 */}
+                    <button
+                      onClick={() => setRegenGenerationMode('turtle')}
+                      disabled={turtlePatterns.length === 0}
+                      className={`flex items-center gap-2 px-3 py-3 rounded-lg border transition-colors ${
+                        regenGenerationMode === 'turtle'
+                          ? 'bg-emerald-600 border-emerald-500 text-white'
+                          : turtlePatterns.length === 0
+                            ? 'bg-gray-800 border-gray-700 text-gray-500 cursor-not-allowed'
+                            : 'bg-gray-700 border-gray-600 text-gray-300 hover:border-gray-500'
+                      }`}
+                    >
+                      <span className="text-xl">🐢</span>
+                      <div className="text-left">
+                        <div className="text-sm font-medium">등껍질</div>
+                        <div className="text-xs opacity-75">
+                          {turtlePatterns.length === 0 ? '목록 없음' : `침식 스택 ${turtlePatterns.length}종`}
+                        </div>
+                      </div>
+                    </button>
                   </div>
                   <p className="text-xs text-gray-400 mt-2">
                     {regenGenerationMode === 'quick'
                       ? '⚡ 각 레이어가 독립적인 패턴으로 생성됩니다.'
-                      : '✨ 모든 레이어가 동일한 타일 위치를 공유합니다.'}
+                      : regenGenerationMode === 'turtle'
+                        ? '🐢 바닥 모양을 한 겹씩 깎아 위층을 쌓습니다. 층수·타일수는 모양이 결정하며 층수 상한을 무시합니다.'
+                        : '✨ 모든 레이어가 동일한 타일 위치를 공유합니다.'}
                   </p>
                 </div>
+
+                {/* [등껍질] 패턴 선택 — coef 오름차순(쉬움→어려움). 총타일수는 난이도와
+                    역방향(타일수÷색종류가 실난이도)이라 coef 를 기준으로 고르게 한다. */}
+                {regenGenerationMode === 'turtle' && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-2">
+                      등껍질 모양 <span className="text-xs text-gray-500">(coef 낮을수록 쉬움 · 실측값)</span>
+                    </label>
+                    <div className="max-h-64 overflow-y-auto grid grid-cols-2 gap-1.5 pr-1">
+                      {turtlePatterns.map(tp => {
+                        const sel = regenTurtleId === tp.id;
+                        const v = tp.by_v?.['9'];
+                        return (
+                          <button
+                            key={tp.id}
+                            onClick={() => setRegenTurtleId(tp.id)}
+                            className={`px-2 py-2 rounded-lg border text-left transition-colors flex gap-2 items-center ${
+                              sel
+                                ? 'bg-emerald-600 border-emerald-500 text-white'
+                                : 'bg-gray-700 border-gray-600 text-gray-300 hover:border-gray-500'
+                            }`}
+                          >
+                            <TurtlePreview pattern={tp} size={44} />
+                            <div className="min-w-0">
+                              <div className="text-xs font-medium truncate">{tp.id}</div>
+                              <div className="text-[11px] opacity-75">
+                                {tp.base}×{tp.base} · {tp.depth}층 · {tp.total}타일
+                              </div>
+                              <div className="text-[11px] opacity-60">
+                                coef {tp.coef?.toFixed(2) ?? '—'}
+                                {v ? ` · V9 ${(v.avg * 100).toFixed(0)}%` : ''}
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {regenTurtleId && (() => {
+                      const sel = turtlePatterns.find(t => t.id === regenTurtleId);
+                      if (!sel) return null;
+                      const base = sel.layers?.[0]?.col ?? sel.base;
+                      return (
+                        <div className="mt-2 bg-gray-900/50 rounded-lg p-2">
+                          <div className="text-xs text-emerald-400 mb-1.5">
+                            층별 타일: {sel.per_layer?.join(' → ')}
+                          </div>
+                          {/* 층을 낱장으로 펼쳐 보여줌 — 겹친 실루엣만으론 각 층 모양이 안 보임 */}
+                          <div className="flex gap-2 flex-wrap items-end">
+                            {(sel.layers || []).map((L, li) => (
+                              <div key={li} className="text-center">
+                                <svg width={44} height={44} viewBox={`0 0 44 44`} className="rounded bg-gray-800">
+                                  {L.cells.map(c => {
+                                    const [x, y] = c.split('_').map(Number);
+                                    const u = 44 / base;
+                                    const off = ((base - L.col) / 2) * u;
+                                    return (
+                                      <rect key={c}
+                                        x={off + x * u + u * 0.08} y={off + y * u + u * 0.08}
+                                        width={u * 0.84} height={u * 0.84} rx={u * 0.2}
+                                        fill="#34d399" />
+                                    );
+                                  })}
+                                </svg>
+                                <div className="text-[10px] text-gray-400 mt-0.5">L{li} · {L.cells.length}</div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })()}
+                    {!regenTurtleId && (
+                      <p className="text-xs text-yellow-400 mt-2">모양을 선택해야 재생성할 수 있습니다.</p>
+                    )}
+                  </div>
+                )}
 
                 {/* Pattern Selection - Only shown in pattern mode */}
                 {regenGenerationMode === 'pattern' && (
@@ -8651,6 +9822,62 @@ function TestTab({
                   </div>
                 )}
 
+                {/* [수동 층수] 등껍질은 모양이 층수를 결정하므로 해당 없음 */}
+                {regenGenerationMode !== 'turtle' && (
+                  <div>
+                    <label className="flex items-center gap-2 text-sm font-medium text-gray-300 mb-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={regenManualLayers}
+                        onChange={e => setRegenManualLayers(e.target.checked)}
+                      />
+                      층수 수동 지정
+                      <span className="text-xs text-gray-500">(난이도 등급 상한 해제)</span>
+                    </label>
+                    {regenManualLayers && (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="range" min={2} max={12} step={1}
+                          value={regenLayerCount}
+                          onChange={e => setRegenLayerCount(Number(e.target.value))}
+                          className="flex-1"
+                        />
+                        <span className="text-sm text-emerald-400 w-12 text-right">{regenLayerCount}층</span>
+                      </div>
+                    )}
+                    <p className="text-xs text-gray-400 mt-1">
+                      {regenManualLayers
+                        ? `⚠️ 등급 상한(A:3~4 / B:4~6 / C:6~8 / D:7~10)을 무시하고 ${regenLayerCount}층으로 생성합니다. 총 타일수는 난이도 기준 그대로라 층당 타일이 얇아질 수 있습니다.`
+                        : '난이도 등급이 층수를 결정합니다(기본).'}
+                    </p>
+
+                    {/* [층 크기 순환] 준비된 템플릿 3크기를 헤더 수용력에 맞춰 돌려 씀 */}
+                    <label className="flex items-center gap-2 text-sm font-medium text-gray-300 mt-3 mb-1 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={regenSizeCycle}
+                        onChange={e => setRegenSizeCycle(e.target.checked)}
+                      />
+                      층 크기 순환
+                      <span className="text-xs text-gray-500">(7 → 6 → 5 돌려쓰기)</span>
+                    </label>
+                    {(() => {
+                      const lc = regenManualLayers
+                        ? regenLayerCount
+                        : Number((levels.find(l => l.meta.level_number === regenModalLevel)?.level_json as { layer?: number } | undefined)?.layer) || 6;
+                      const c = buildCycleSteps(7, lc);   // 짝수층 헤더 = 7 기준
+                      return (
+                        <p className="text-xs text-gray-400">
+                          {regenSizeCycle
+                            ? `채움 크기: ${c.sizes.join(' → ')}  (헤더는 7,6,7,6… 고정. 작은 모양은 중앙정렬)`
+                            : '기본값은 한 층씩 축소하다 4에서 멈춰 같은 4x4 층이 반복됩니다.'}
+                          {regenSizeCycle && ' · 유닛 조립은 자동 OFF'}
+                        </p>
+                      );
+                    })()}
+                  </div>
+                )}
+
                 {/* Symmetry Mode Selection - Only shown in quick mode */}
                 {regenGenerationMode === 'quick' && (
                   <div>
@@ -8686,8 +9913,24 @@ function TestTab({
                   <div className="text-xs text-gray-400 mb-1">선택된 설정</div>
                   <div className="flex items-center gap-3 text-sm flex-wrap">
                     <span className="text-gray-300">
-                      모드: {regenGenerationMode === 'quick' ? '⚡ 빠른 생성' : '✨ 패턴 생성'}
+                      모드: {regenGenerationMode === 'quick' ? '⚡ 빠른 생성'
+                             : regenGenerationMode === 'turtle' ? '🐢 등껍질'
+                             : '✨ 패턴 생성'}
                     </span>
+                    {regenGenerationMode === 'turtle' && (
+                      <>
+                        <span className="text-gray-500">|</span>
+                        <span className="text-gray-300">
+                          모양: {regenTurtleId || '미선택'}
+                        </span>
+                      </>
+                    )}
+                    {regenGenerationMode !== 'turtle' && regenManualLayers && (
+                      <>
+                        <span className="text-gray-500">|</span>
+                        <span className="text-emerald-400">층수: {regenLayerCount} (수동)</span>
+                      </>
+                    )}
                     {regenGenerationMode === 'pattern' && (
                       <>
                         <span className="text-gray-500">|</span>
@@ -8721,7 +9964,14 @@ function TestTab({
                 </button>
                 <button
                   onClick={handleRegenFromModal}
-                  className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-500 transition-colors"
+                  disabled={regenGenerationMode === 'turtle' && !regenTurtleId}
+                  className={`px-4 py-2 text-sm text-white rounded-lg transition-colors ${
+                    regenGenerationMode === 'turtle' && !regenTurtleId
+                      ? 'bg-gray-600 cursor-not-allowed opacity-60'
+                      : regenGenerationMode === 'turtle'
+                        ? 'bg-emerald-600 hover:bg-emerald-500'
+                        : 'bg-blue-600 hover:bg-blue-500'
+                  }`}
                 >
                   재생성 시작
                 </button>

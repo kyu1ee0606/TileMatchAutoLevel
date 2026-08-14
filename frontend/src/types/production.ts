@@ -160,6 +160,12 @@ export interface ProductionLevelMeta {
   clear_rate_gap?: number;                       // predicted - target
   rl_classification?: string;                    // RL 분류 (very_easy~unclearable_suspect)
   luck_suspect?: boolean;                        // 운빨 레벨 의심 (경고)
+  // [RL 신뢰도] 봇 예측이 구조와 어긋나는 레벨. true 면 이 레벨의 RL 값(predicted_clear_rate,
+  // verification_passed)을 난이도 판단·통과 판정에 쓰면 안 된다.
+  // 근거: 야간 A* 전수판정에서 RL 0% 인 246개가 전부 클리어 가능했고, 진짜 불가 18개는 전부 RL>0.
+  rl_unreliable?: boolean;
+  rl_unreliable_reason?: string;
+  solver_verdict?: string;                       // A* 판정 (측정했을 때만)
 
   // [v15.35] 재생성 정보
   regenerated?: boolean;                         // 재생성 여부
@@ -206,6 +212,12 @@ export interface ProductionLevelMeta {
   // 출시 정보
   exported_at?: string;
   export_version?: string;
+
+  // [무한 레벨 사본] 내보내기 시점에만 붙는 표시(저장본에는 없음).
+  // 1~1500 완주 유저용으로 원본 레벨을 `infinity_{index}` 로 복사할 때 출처를 남긴다.
+  infinity_id?: string;            // 예: 'infinity_1'
+  infinity_index?: number;         // 1부터
+  infinity_source_level?: number;  // 복사 원본 레벨 번호
 }
 
 /**
@@ -290,6 +302,27 @@ export interface ProductionExportConfig {
   include_meta: boolean;
   filename_pattern: string;  // e.g., "level_{number:04d}.json"
   output_dir: string;
+  // [무한 레벨] 1~1500 을 다 깬 유저용. 지정하면 원본 레벨을 `infinity_{index}` 로 **복사 추가**한다
+  // (원본 1~1500 내보내기는 그대로 유지). undefined = 미포함.
+  infinity?: InfinityExportConfig;
+}
+
+/**
+ * [무한 레벨 복사 규칙]
+ *   infinity_{index} = 원본 레벨 (sourceStart + index - 1)
+ *   기본값 501~1500 → infinity_1 ~ infinity_1000
+ *
+ * 오프셋(sourceStart-1 = 500)이 10의 배수라 `원본레벨 % 10 === index % 10` 이 성립한다.
+ * → 보스(10배수)·스페셜(끝자리9) 위치와 autoCollect 대상이 원본과 그대로 정렬되므로
+ *   보상/자동수집 규칙을 **원본 레벨번호 기준으로 그대로** 적용하면 된다(별도 보정 불필요).
+ */
+export interface InfinityExportConfig {
+  enabled: boolean;
+  /** true = **무한 사본만** 내보낸다(원본 제외). false = 원본 뒤에 사본을 덧붙인다. */
+  only: boolean;
+  prefix: string;        // 기본 'infinity_'
+  sourceStart: number;   // 기본 501
+  sourceEnd: number;     // 기본 1500
 }
 
 /**

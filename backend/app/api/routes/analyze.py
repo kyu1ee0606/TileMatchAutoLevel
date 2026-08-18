@@ -1604,6 +1604,8 @@ def _save_custom_patterns(data: Dict[str, Any]):
 # ===== [보스 템플릿] 다층 t0 모양 손그림 저장 — 프로덕션 보스(10의 배수) 생성용 =====
 # 사용자가 각 층을 t0로 직접 그려 모양만 잡고(홀짝 8/7 교대), 생성기가 useTileCount(난이도
 # 그래프)+기믹+검증을 오버레이. level_min/max = 이 템플릿이 배정될 레벨 구간(깊이별 분류).
+import asyncio as _asyncio_mod  # noqa: E402  (보스 템플릿 저장 직렬화)
+
 BOSS_TEMPLATES_PATH = os.path.join(os.path.dirname(CUSTOM_PATTERNS_PATH), "boss_templates.json")
 
 
@@ -1617,6 +1619,23 @@ def _load_boss_templates() -> Dict[str, Any]:
 
 def _save_boss_templates(data: Dict[str, Any]):
     _atomic_json_dump(BOSS_TEMPLATES_PATH, data)
+
+
+# [경합 방지] 보스 템플릿 저장은 '파일 전체 읽기 → 수정 → 전체 쓰기'다.
+# 초안 생성은 LLM 때문에 요청 하나가 수 분씩 걸리는데, 그동안 낡은 스냅샷을 들고 있다가
+# 마지막에 통째로 쓰면 그 사이 다른 요청이 저장한 템플릿이 **조용히 사라진다**.
+# (실측: 클라 타임아웃 후 재클릭으로 요청 6건이 겹쳐 Lv410·520~560 6개 유실)
+# → 저장 직전에 디스크를 다시 읽어 **병합**하고, 그 구간만 락으로 직렬화한다.
+_boss_tpl_lock = _asyncio_mod.Lock()
+
+
+async def _merge_save_boss_templates(new_items: Dict[str, Any]) -> int:
+    """디스크 최신본에 new_items 만 얹어 저장. 반환=저장 후 총 개수."""
+    async with _boss_tpl_lock:
+        cur = _load_boss_templates()
+        cur.update(new_items)
+        _save_boss_templates(cur)
+        return len(cur)
 
 
 class BossTemplateLayer(_BaseModel):
@@ -1634,13 +1653,15 @@ class BossTemplateSaveRequest(_BaseModel):
     level_max: int = 1500
     layers: List[BossTemplateLayer]
     created_at: Optional[float] = None  # 클라 타임스탬프(서버 시간 비의존)
+    # [초안] LLM 자동 생성본 = True. 사람이 손봐 확정하면 False.
+    # UI 는 초안을 노란불, 수동 확정본을 초록불로 구분한다.
+    draft: bool = False
 
 
 @router.post("/debug/boss-template-save")
 async def boss_template_save(req: BossTemplateSaveRequest):
     """보스 템플릿 저장/갱신 (id 기준 upsert)."""
-    data = _load_boss_templates()
-    data[req.id] = {
+    rec = {
         "id": req.id,
         "name": req.name or req.id,
         "level_min": int(req.level_min),
@@ -1652,9 +1673,10 @@ async def boss_template_save(req: BossTemplateSaveRequest):
         ],
         "layer_count": len(req.layers),
         "created_at": req.created_at,
+        "draft": bool(req.draft),
     }
-    _save_boss_templates(data)
-    return {"ok": True, "id": req.id, "count": len(data)}
+    n = await _merge_save_boss_templates({req.id: rec})
+    return {"ok": True, "id": req.id, "count": n}
 
 
 @router.get("/debug/boss-templates")
@@ -2016,12 +2038,14 @@ async def turtle_patterns_list():
 @router.delete("/debug/boss-template/{template_id}")
 async def boss_template_delete(template_id: str):
     """보스 템플릿 삭제."""
-    data = _load_boss_templates()
-    if template_id in data:
+    # 삭제도 읽기-수정-쓰기라 같은 락으로 직렬화한다(초안 생성과 겹치면 유실).
+    async with _boss_tpl_lock:
+        data = _load_boss_templates()
+        if template_id not in data:
+            return {"ok": False, "detail": "not_found"}
         del data[template_id]
         _save_boss_templates(data)
-        return {"ok": True, "deleted": template_id}
-    return {"ok": False, "detail": "not_found"}
+    return {"ok": True, "deleted": template_id}
 
 
 # ===== [보스 컨셉 노트] 보스 레벨별 스토리 비트/모양 컨셉 (기획 참조) =====
@@ -2107,6 +2131,254 @@ async def boss_shape_llm(req: BossShapeLLMRequest):
         except Exception as ex:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=f"LLM 오류: {ex}")
     return {"grids": grids, "via": "claude-cli"}
+
+
+# ── 보스 템플릿 일괄 초안 생성 ─────────────────────────────────────────────
+#
+# [규칙 근거] 수동 제작 38개(Lv10~380) 전수 분석 결과 —
+#   scripts/analyze_boss_templates.py
+#
+#   층 수        4층 28/38(74%) · 3층 3 · 5층 7        → 기본 4층
+#   격자         8·7·8·7 이 28/38                      → base 8
+#   총 셀        초반 88 → 후반 106~109 (범위 64~138)   → 레벨 따라 증가
+#   층 채움률    L0 50% · L1 41% · L2 43% · L3 38%
+#   층 관계      인접층 셀수 비 1.00(단조감소 아님),
+#                같은 홀짝끼리 Jaccard 60%·완전동일 25%  → 짝수층끼리·홀수층끼리 닮음
+#   대칭         층 104/156 완전대칭, 템플릿 26/38 이 90%↑ → 좌우대칭 기본
+#   bbox         폭/격자 94%, 117/156 층이 폭 100%       → 격자를 꽉 채움
+#   ÷3           19/38 만 만족                          → 강제 아님(생성기가 보정)
+#
+# 제작 의도(작성자): 층 하나가 모양인 게 아니라 **전 층을 겹쳐 봤을 때** 컨셉 모양이
+# 연상되게 한다. 그래서 같은 실루엣을 8×8 / 7×7 두 벌로 뽑아 짝·홀 층에 교대로 깔고,
+# 짝수층끼리(L0=L2) 홀수층끼리(L1=L3) 같은 그림을 쓴다 — 수동본의 지배적 패턴
+# (30·20·30·20 형태)과 동일하다.
+
+class BossDraftGenerateRequest(_BaseModel):
+    levels: List[int] = _Field(..., description="생성할 보스 레벨(10의 배수) 목록")
+    shapes: Dict[str, str] = _Field(..., description="{레벨: 모양 설명} — 컨셉의 shape 문구")
+    # 수동본 분포는 4층 74%(3층 3 · 5층 7)라 기본은 4층이지만, 실험용으로 넓게 연다.
+    # 상한 10 = 프론트 MAX_LAYERS 와 동일.
+    layer_count: int = _Field(default=4, ge=2, le=10)
+    # base = 바닥(짝수층) 격자. 홀수층은 base-1 (게임 TileGroup.cs:1478).
+    # base 4 면 4·3·4·3… 으로 아주 좁은 보드가 된다.
+    base: int = _Field(default=8, ge=4, le=8, description="바닥(짝수층) 격자")
+    symmetric: bool = True
+    max_retry: int = _Field(default=2, ge=0, le=4, description="품질 게이트 실패 시 재시도")
+    overwrite: bool = _Field(default=False, description="이미 있는 레벨도 덮어쓸지")
+    # [기본 off] 실측 비교 결과 변형이 품질을 개선하지 않았다.
+    #   층별 노출 프로파일  수동본 L0 5% / L1 4% / L2 29% / L3 85%
+    #                      동일복사 L0 0% / L1 0% / L2 25% / L3 100%   ← 더 근접
+    #                      변형     L0 12% ← 바닥이 과다 노출(수동본은 74%가 바닥을 완전히 덮음)
+    # 수동본의 Jaccard 64%는 '테두리를 깎아서'가 아니라 '위층을 안쪽으로 좁게 그려서' 나온 값이라
+    # 침식 방식과 방향이 반대다. 옵션으로만 남긴다.
+    vary_layers: bool = _Field(default=False, description="같은 홀짝 2번째 층을 테두리 침식으로 변형. 기본 off(동일 복사)")
+
+
+# 수동본 실측 채움률 — 짝수층(넓은 격자) 50%, 홀수층 41%.
+# 이 범위를 벗어나면 '모양'이 아니라 '덩어리'가 되어 실루엣이 안 읽힌다.
+_FILL_TARGET = {"even": 0.50, "odd": 0.41}
+_FILL_RANGE = {"even": (0.40, 0.60), "odd": (0.32, 0.52)}
+
+
+def _fill_key(n: int, base: int) -> str:
+    return "even" if n >= base else "odd"
+
+
+async def _llm_grid(description: str, n: int, symmetric: bool, base: int = 8) -> List[str]:
+    """설명 → n×n 0/1 그리드 → positions. boss_shape_llm 과 같은 CLI 경로."""
+    import asyncio as _asyncio
+    import os as _os
+    tgt = _FILL_TARGET[_fill_key(n, base)]
+    target_pct = int(round(tgt * 100))
+    target_cells = int(round(n * n * tgt))
+    cli = _os.environ.get("CLAUDE_CLI_BIN", "claude")
+    sym = "좌우 대칭(left-right symmetric)으로. " if symmetric else ""
+    prompt = (
+        f"{n}x{n} 크기의 0/1 그리드만 출력해. 설명/여분텍스트 없이 {n}줄, 각 줄 {n}자.\n"
+        f"1=채운 타일, 0=빈칸. '{description}'의 알아볼 수 있는 실루엣을 그려.\n"
+        f"{sym}게임 보드용이라 정확히 **{target_pct}% 안팎**({target_cells}칸 정도)만 채워 — "
+        f"너무 꽉 채우면 모양이 안 보인다. 한 덩어리로 이어지게. 오직 0과 1로 된 {n}줄만 출력."
+    )
+    proc = await _asyncio.create_subprocess_exec(
+        cli, "-p", prompt,
+        stdout=_asyncio.subprocess.PIPE, stderr=_asyncio.subprocess.PIPE,
+    )
+    out, err = await _asyncio.wait_for(proc.communicate(), timeout=120)
+    if proc.returncode != 0:
+        raise RuntimeError((err or b"").decode()[:200] or f"exit {proc.returncode}")
+    return _parse_grid(out.decode(), n)
+
+
+def _grid_quality(pos: List[str], n: int, symmetric: bool, base: int = 8) -> Dict[str, Any]:
+    """수동본에서 뽑은 기준으로 채점. 통과해야 초안으로 저장한다."""
+    total = n * n
+    fill = len(pos) / total if total else 0.0
+    S = set(pos)
+    if S:
+        sym = sum(1 for p in S if f"{n - 1 - int(p.split('_')[0])}_{p.split('_')[1]}" in S) / len(S)
+        xs = [int(p.split("_")[0]) for p in S]
+        ys = [int(p.split("_")[1]) for p in S]
+        span = max((max(xs) - min(xs) + 1) / n, (max(ys) - min(ys) + 1) / n)
+    else:
+        sym, span = 0.0, 0.0
+    # 연결성 — 실루엣이 조각조각 흩어지면 모양으로 안 읽힌다(수동본은 덩어리)
+    comp = 0
+    seen = set()
+    for p in S:
+        if p in seen:
+            continue
+        comp += 1
+        stack = [p]
+        seen.add(p)
+        while stack:
+            cx, cy = map(int, stack.pop().split("_"))
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                q = f"{cx+dx}_{cy+dy}"
+                if q in S and q not in seen:
+                    seen.add(q)
+                    stack.append(q)
+    lo, hi = _FILL_RANGE[_fill_key(n, base)]
+    ok = (lo <= fill <= hi) and span >= 0.70 and comp <= 2 and (not symmetric or sym >= 0.80)
+    return {"ok": ok, "fill": round(fill, 3), "sym": round(sym, 3),
+            "span": round(span, 3), "components": comp, "cells": len(pos),
+            "fill_range": [lo, hi]}
+
+
+import random as _random_mod  # noqa: E402  (_vary_shape 결정적 변형용)
+
+
+def _vary_shape(pos: List[str], n: int, seed: int, symmetric: bool = True) -> List[str]:
+    """같은 홀짝의 '두 번째' 층용 변형본 — 실루엣은 유지하고 테두리만 깎는다.
+
+    수동본 실측(L0→L2, 38개):
+        동일 14 · 혼합 19 · 침식 3 · 확장 2
+        Jaccard 평균 64%(중앙값 75%) · L0 대비 +5.1 / -9.6 셀 (L0 평균 31셀)
+        층 채움률도 L0 50% → L2 43% 로 살짝 줄어든다.
+    즉 사람은 같은 그림을 그대로 복사하지 않고 **조금 깎아서** 얹었다.
+    L0=L2 로 완전 복사하면 모든 아래층 타일이 위층에 1:1로 덮여 보드가 평평하게
+    읽히고, 초반에 집을 수 있는 타일이 테두리로만 몰린다.
+
+    구현: 테두리(4방 이웃이 다 차 있지 않은) 셀만 대상으로, 좌우 대칭쌍을 함께
+    제거한다. 내부를 뚫지 않으므로 덩어리가 쪼개지지 않고 모양이 유지된다.
+    """
+    S = set(pos)
+    if len(S) < 8:
+        return list(S)
+    target_remove = max(2, int(round(len(S) * 0.22)))  # 실측 -9.6/31 ≈ 31%, 대칭쌍 단위라 보수적으로
+
+    def boundary(cur):
+        out = []
+        for p in cur:
+            x, y = map(int, p.split("_"))
+            if sum(1 for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                   if f"{x+dx}_{y+dy}" in cur) < 4:
+                out.append(p)
+        return out
+
+    rnd = _random_mod.Random(seed)
+    cur = set(S)
+    removed = 0
+    guard = 0
+    while removed < target_remove and guard < 200:
+        guard += 1
+        b = boundary(cur)
+        if not b:
+            break
+        p = rnd.choice(sorted(b))
+        x, y = map(int, p.split("_"))
+        pair = {p}
+        if symmetric:
+            pair.add(f"{n - 1 - x}_{y}")
+        pair &= cur
+        if len(cur) - len(pair) < len(S) * 0.5:   # 절반 밑으로는 안 깎는다
+            break
+        cur -= pair
+        removed += len(pair)
+    return sorted(cur)
+
+
+@router.post("/debug/boss-draft-generate")
+async def boss_draft_generate(req: BossDraftGenerateRequest):
+    """컨셉 모양 문구 → LLM 실루엣 → 보스 템플릿 **초안**(draft=True) 일괄 저장.
+
+    반자동: 여기서 만든 건 전부 초안이다. UI 가 노란불로 표시하고, 사람이 열어 손본 뒤
+    저장하면 draft=False(초록불)가 된다. 자동 생성 품질이 아직 수동만 못하다는 전제다.
+
+    같은 실루엣을 짝수층(base)·홀수층(base-1) 두 벌로 뽑아 교대로 깔아
+    '전 층을 겹쳐 보면 모양'이 되게 한다(수동본 규칙).
+    """
+    # 커버 판정용 스냅샷(읽기 전용). 저장은 아래 _merge_save_boss_templates 로만 한다.
+    data = _load_boss_templates()
+    new_items: Dict[str, Any] = {}
+    made, skipped, failed = [], [], []
+
+    for lv in sorted(set(int(x) for x in req.levels)):
+        # [중복 방지] 커버 판정은 **디스크 최신본**으로 한다.
+        # 요청 시작 시점 스냅샷만 보면, 다른 생성기(UI 테마 작업 ↔ CLI 배치)가 그 사이에
+        # 같은 레벨을 저장해도 모르고 또 만든다 → 한 레벨에 템플릿 2개.
+        # (실측: Lv540·550·570 이 각각 2개씩 생성됨. tid 에 셀 수가 들어가 id 도 달라 덮이지도 않는다.)
+        # LLM 호출이 레벨당 수십 초라 이 창이 충분히 넓다.
+        data = _load_boss_templates()
+        if not req.overwrite and any(
+            int(t.get("level_min", 0)) <= lv <= int(t.get("level_max", 0))
+            for t in data.values() if isinstance(t, dict)
+        ):
+            skipped.append({"level": lv, "reason": "already_covered"})
+            continue
+
+        desc = (req.shapes.get(str(lv)) or "").strip()
+        if not desc:
+            failed.append({"level": lv, "reason": "no_shape_text"})
+            continue
+
+        sizes = sorted({req.base, req.base - 1}, reverse=True)
+        grids: Dict[int, List[str]] = {}
+        report: Dict[int, Any] = {}
+        try:
+            for n in sizes:
+                best, best_q = None, None
+                for _ in range(req.max_retry + 1):
+                    pos = await _llm_grid(desc, n, req.symmetric, req.base)
+                    q = _grid_quality(pos, n, req.symmetric, req.base)
+                    tgt = _FILL_TARGET[_fill_key(n, req.base)]
+                    if best is None or (q["ok"] and not best_q["ok"]) or \
+                       (q["ok"] == best_q["ok"] and abs(q["fill"] - tgt) < abs(best_q["fill"] - tgt)):
+                        best, best_q = pos, q
+                    if q["ok"]:
+                        break
+                grids[n], report[n] = best or [], best_q
+        except Exception as ex:  # noqa: BLE001 — 한 레벨 실패가 배치를 막지 않는다
+            failed.append({"level": lv, "reason": f"llm_error: {str(ex)[:120]}"})
+            continue
+
+        # 같은 홀짝의 2번째 층부터는 변형본을 쓴다(수동본은 동일 복사가 37%뿐).
+        layers = []
+        seen_parity: Dict[int, int] = {}
+        for i in range(req.layer_count):
+            n = req.base if i % 2 == 0 else req.base - 1
+            base_pos = list(grids.get(n, []))
+            k = seen_parity.get(i % 2, 0)
+            seen_parity[i % 2] = k + 1
+            pos_i = base_pos if (k == 0 or not req.vary_layers) else _vary_shape(base_pos, n, lv * 100 + i, req.symmetric)
+            layers.append({"layer": i, "col": n, "row": n,
+                           "positions": pos_i, "gimmicks": {}})
+
+        total = sum(len(l["positions"]) for l in layers)
+        tid = f"boss_L{lv}_{total}c_{req.layer_count}L"
+        rec = {
+            "id": tid, "name": f"[초안] {desc[:24]}", "level_min": lv, "level_max": lv,
+            "layers": layers, "layer_count": req.layer_count,
+            "created_at": None, "draft": True,
+        }
+        data[tid] = rec        # 같은 요청 안에서의 중복 커버 판정용
+        new_items[tid] = rec
+        # 레벨 하나 끝날 때마다 즉시 병합 저장 — 중간에 끊겨도 그때까지는 남는다.
+        await _merge_save_boss_templates({tid: rec})
+        made.append({"level": lv, "id": tid, "cells": total,
+                     "quality": {str(k): v for k, v in report.items()}})
+
+    return {"made": made, "skipped": skipped, "failed": failed,
+            "counts": {"made": len(made), "skipped": len(skipped), "failed": len(failed)}}
 
 
 @router.get("/debug/boss-concepts")
@@ -4170,20 +4442,34 @@ def repair_clearability(request: RepairClearabilityRequest) -> Dict[str, Any]:
         try:
             before = _clearability_type_counts(item.level_json)
             vb = {t: c for t, c in before.items() if c % 3}
-            if not vb:
-                out.append(RepairClearabilityResultItem(
-                    level_number=item.level_number, changed=False,
-                    ok_before=True, ok_after=True,
-                    violations_before={}, violations_after={}))
-                continue
-            fixed = gen._repair_clearability(_copy.deepcopy(item.level_json))
+
+            # [KEY] ÷3 위반이 없어도 반드시 돈다.
+            #  - _repair_key_gimmick : 색타일에 찍힌 key '속성' 제거. 이게 곧 ÷3 위반의 원인이므로
+            #    _repair_clearability 보다 먼저 돌아야 한다.
+            #  - _repair_unlock_tile : 키 공급량 < unlockTile×3 이면 슬롯이 영영 안 열린다.
+            #    이 결함은 ÷3 카운트에 나타나지 않아서 위 vb 검사만으론 절대 안 잡힌다.
+            fixed = _copy.deepcopy(item.level_json)
+            unlock_before = fixed.get("unlockTile", fixed.get("xUnlockTile", 0))
+            fixed = gen._repair_effect_strings(fixed)
+            fixed = gen._repair_key_gimmick(fixed)
+            fixed = gen._repair_unlock_tile(fixed)
+            fixed = gen._repair_t0_divisibility(fixed)
+            unlock_after = fixed.get("unlockTile", fixed.get("xUnlockTile", 0))
+
             after = _clearability_type_counts(fixed)
+            if {t: c for t, c in after.items() if c % 3}:
+                fixed = gen._repair_clearability(fixed)
+                after = _clearability_type_counts(fixed)
             va = {t: c for t, c in after.items() if c % 3}
+
+            touched = (fixed != item.level_json)
+            ok_before = not vb and unlock_before == unlock_after and not touched
             out.append(RepairClearabilityResultItem(
-                level_number=item.level_number, changed=not va,
-                ok_before=False, ok_after=not va,
+                level_number=item.level_number,
+                changed=touched and not va,
+                ok_before=ok_before, ok_after=not va,
                 violations_before=vb, violations_after=va,
-                level_json=fixed if not va else None))
+                level_json=fixed if (touched and not va) else None))
         except Exception as exc:  # noqa: BLE001 — 한 레벨 실패가 전체를 막지 않는다
             out.append(RepairClearabilityResultItem(
                 level_number=item.level_number, changed=False,

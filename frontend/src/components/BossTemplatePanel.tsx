@@ -7,14 +7,27 @@
  *
  * 저장: 백엔드 /debug/boss-template-save (data/boss_templates.json).
  */
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import apiClient from '../api/client';
 import { useUIStore } from '../stores/uiStore';
 import { PROFESSIONAL_GIMMICK_UNLOCK_LEVELS } from '../types/levelSet';
 
 // 보스 그리드: base 7 → 짝수층 8, 홀수층 7 (게임 홀짝 규칙). 폭 상한 8(디바이스 가독성).
-const BOSS_BASE = 7;
-const layerSize = (layerIdx: number) => (layerIdx % 2 === 0 ? BOSS_BASE + 1 : BOSS_BASE); // 8 / 7
+//
+// [베이스 크기 편집] 예전엔 상수라 모든 보스가 8/7 로 고정이었다. 그런데 실제로 쓰는 칸이
+// 6×6 뿐인 템플릿(Lv130 등 33개)이 많아, 게임에선 바깥 한 줄이 빈 채 타일만 작게 보였다.
+// 이제 base 를 템플릿마다 바꿀 수 있고, **상위 층 크기는 base 에서 자동으로 파생**된다
+// (게임 TileGroup.cs:1478 `i % 2 == 0 ? rowCount : rowCount - 1` 과 동일한 교대 규칙).
+// base = **바닥(layer_0) 크기**. 게임과 같은 정의다:
+//   TileGroup.cs:589   UpdateLayerRowCount(layer, cLevel.xRow)   ← 루트 row = 바닥 크기
+//   TileGroup.cs:1478  LayerSpawn(i % 2 == 0 ? rowCount : rowCount - 1)
+// 즉 짝수층 base, 홀수층 base-1. base 8 이면 8,7,8,7 / base 6 이면 6,5,6,5.
+// (예전엔 이 상수가 '홀수층 크기'라 8×8 템플릿이 입력창에 7 로 보였다.)
+const DEFAULT_BOSS_BASE = 8;
+const BOSS_BASE_MIN = 3;
+const BOSS_BASE_MAX = 8;   // 디바이스 가독성 상한(바닥 8칸)
+/** 층 크기 = base 에서 파생. 짝수층 base, 홀수층 base-1. */
+const sizeOfLayer = (base: number, layerIdx: number) => (layerIdx % 2 === 0 ? base : base - 1);
 const MAX_LAYERS = 10;
 
 interface BossLayer {
@@ -85,6 +98,8 @@ interface SavedBossTemplate {
   level_max: number;
   layer_count: number;
   layers: { layer: number; col: number; row: number; positions: string[]; gimmicks?: Record<string, string> }[];
+  /** LLM 자동 생성 초안. 사람이 손봐 저장하면 false. UI 는 노란불/초록불로 구분. */
+  draft?: boolean;
 }
 
 interface BossConcept {
@@ -289,6 +304,104 @@ export function BossTemplatePanel() {
   const emptyLayer = (): BossLayer => ({ positions: new Set(), gimmicks: new Map() });
   const [layers, setLayers] = useState<BossLayer[]>([emptyLayer(), emptyLayer(), emptyLayer()]);
   const [activeLayer, setActiveLayer] = useState(0);
+  // 베이스 그리드. 상위 층 크기는 여기서 자동 파생된다(짝수 base+1 / 홀수 base).
+  const [bossBase, setBossBase] = useState(DEFAULT_BOSS_BASE);
+  /** 현재 base 기준 층 크기 */
+  const layerSize = useCallback((i: number) => sizeOfLayer(bossBase, i), [bossBase]);
+  /** 격자 안에 들어오는 좌표인가 */
+  const inGrid = useCallback((key: string, i: number) => {
+    const [x, y] = key.split('_').map(Number);
+    const sz = layerSize(i);
+    return Number.isFinite(x) && Number.isFinite(y) && x >= 0 && x < sz && y >= 0 && y < sz;
+  }, [layerSize]);
+  /**
+   * 격자 안 좌표만 — **state 에서는 지우지 않는다.**
+   * base 를 줄이면 밖으로 나간 셀이 화면·저장·집계에서 빠지고(크롭),
+   * 다시 늘리면 그대로 되살아난다. 저장을 눌러야 디스크에 확정된다.
+   */
+  const visibleCells = useCallback(
+    (l: BossLayer, i: number) => [...l.positions].filter(k => inGrid(k, i)),
+    [inGrid],
+  );
+  /** base 를 줄였을 때 잘려나갈 셀 수 */
+  const croppedCount = useMemo(
+    () => layers.reduce((a, l, i) => a + [...l.positions].filter(k => !inGrid(k, i)).length, 0),
+    [layers, inGrid],
+  );
+
+  /**
+   * base 변경 — 모양을 새 격자에 **중앙 정렬**한 뒤 크기를 바꾼다.
+   *
+   * 그냥 크기만 줄이면 좌표는 그대로라 우측·하단이 통째로 잘린다(실측: 8→6 일 때
+   * x=6,7 열과 y=6,7 행이 사라짐). 실제로는 모양이 6×6 안에 다 들어가는데도 그렇다.
+   * 그래서 먼저 옮기고, 그러고도 안 들어가는 것만 자른다.
+   *
+   * 이동량은 **전 층 동일**해야 한다. 층마다 다르게 옮기면 층간 상대좌표가 바뀌어
+   * 블로킹(위층이 아래층을 덮는 관계)이 통째로 달라진다. 게임의 층간 매핑은 격자
+   * 크기로 재계산하지 않고 인덱스 산술만 쓴다:
+   *   DB_Level.cs:748  같은 홀짝  → GetTile(x, y)
+   *   DB_Level.cs:760  위층이 큼  → GetTile(x,y)/(x+1,y)/(x,y+1)/(x+1,y+1)
+   *   DB_Level.cs:781  위층이 작음 → GetTile(x-1,y-1)/(x,y-1)/(x-1,y)/(x,y)
+   *
+   * 격자 밖으로 밀려난 셀은 **state 에서 지우지 않는다** — 표시·저장·집계에서만 빠진다.
+   * 다시 키우면 그대로 되살아난다.
+   */
+  const changeBase = useCallback((next: number) => {
+    const nb = Math.max(BOSS_BASE_MIN, Math.min(BOSS_BASE_MAX, next));
+    setLayers(prev => {
+      // 층별 bbox (셀이 있는 층만)
+      const boxes = prev.map((l, i) => {
+        const ks = [...l.positions];
+        if (!ks.length) return null;
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        for (const k of ks) {
+          const [x, y] = k.split('_').map(Number);
+          if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+          if (x < minX) minX = x; if (x > maxX) maxX = x;
+          if (y < minY) minY = y; if (y > maxY) maxY = y;
+        }
+        return Number.isFinite(minX) ? { g: sizeOfLayer(nb, i), minX, maxX, minY, maxY, ks } : null;
+      }).filter(Boolean) as { g: number; minX: number; maxX: number; minY: number; maxY: number; ks: string[] }[];
+      if (!boxes.length) return prev;
+
+      // 각 층 제약: shift >= -min, shift <= g-1-max. 전 층 교집합의 중앙값을 쓴다.
+      // 교집합이 없으면(격자가 모양보다 작음) 잘리는 셀이 가장 적은 값을 고른다.
+      const pick = (axis: 'x' | 'y'): number => {
+        const lo = Math.max(...boxes.map(b => -(axis === 'x' ? b.minX : b.minY)));
+        const hi = Math.min(...boxes.map(b => b.g - 1 - (axis === 'x' ? b.maxX : b.maxY)));
+        if (lo <= hi) return Math.floor((lo + hi) / 2);
+        let best = lo, bestLoss = Infinity;
+        for (let s = hi; s <= lo; s++) {
+          let loss = 0;
+          for (const b of boxes) {
+            for (const k of b.ks) {
+              const v = Number(k.split('_')[axis === 'x' ? 0 : 1]) + s;
+              if (v < 0 || v >= b.g) loss++;
+            }
+          }
+          if (loss < bestLoss) { bestLoss = loss; best = s; }
+        }
+        return best;
+      };
+      const dx = pick('x'), dy = pick('y');
+      if (dx === 0 && dy === 0) return prev;
+
+      return prev.map(l => {
+        const pos = new Set<string>();
+        const gim = new Map<string, string>();
+        for (const k of l.positions) {
+          const [x, y] = k.split('_').map(Number);
+          pos.add(`${x + dx}_${y + dy}`);
+        }
+        for (const [k, v] of l.gimmicks) {
+          const [x, y] = k.split('_').map(Number);
+          gim.set(`${x + dx}_${y + dy}`, v);   // 기믹도 같이 옮겨야 셀과 어긋나지 않는다
+        }
+        return { positions: pos, gimmicks: gim };
+      });
+    });
+    setBossBase(nb);
+  }, []);
   const [paintMode, setPaintMode] = useState<string>(''); // '' = 모양, 'ice'.. = 기믹, '__erase' = 기믹지움
   const [containerDir, setContainerDir] = useState<string>('e'); // craft/stack 방향(상하좌우)
   const [saved, setSaved] = useState<SavedBossTemplate[]>([]);
@@ -328,6 +441,138 @@ export function BossTemplatePanel() {
     } catch { setConcepts({ ...DEFAULT_CONCEPTS }); }
   }, []);
   useEffect(() => { loadConcepts(); }, [loadConcepts]);
+
+  // ── 초안 생성 ──
+  const [draftBusy, setDraftBusy] = useState(false);
+  const [draftProgress, setDraftProgress] = useState('');
+  const [draftBatchSize, setDraftBatchSize] = useState(5);
+  // 같은 홀짝 2번째 층 변형. 기본 off — 실측상 동일 복사가 수동본 층별 노출 프로파일에 더 가깝다.
+  const [draftVary, setDraftVary] = useState(false);
+  // 초안 층 수. 수동본은 4층이 74% 라 기본 4, 실험용으로 2~MAX_LAYERS 허용.
+  const [draftLayerCount, setDraftLayerCount] = useState(4);
+  const draftStopRef = useRef(false);
+
+  /** 컨셉은 있는데 템플릿이 없는 보스 레벨 */
+  const uncoveredLevels = useMemo(() => (
+    Object.keys(concepts)
+      .map(k => parseInt(k, 10))
+      .filter(n => !isNaN(n) && !saved.some(t => t.level_min <= n && n <= t.level_max))
+      .sort((a, b) => a - b)
+  ), [concepts, saved]);
+
+  /** 현재 보고 있는 테마(5챕터) 안에서 템플릿 없는 레벨 */
+  const themeUncovered = useMemo(
+    () => uncoveredLevels.filter(n => themeOf(n) === themeIndex),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [uncoveredLevels, themeIndex],
+  );
+
+
+  /**
+   * 컨셉의 shape 문구 → LLM 실루엣 → 초안 템플릿 저장.
+   *
+   * 레벨당 LLM 2~4회 호출(8×8·7×7 + 재시도)이라 ~68초 걸린다. 그래서 서버엔
+   * batchSize 단위로만 보내고, 여러 묶음이면 클라에서 순차로 돌리며 진행률을 보여준다.
+   * (110개를 한 요청에 담으면 2시간짜리 요청이 되어 타임아웃·중단 확인 모두 불가.)
+   */
+  const runDraftGeneration = useCallback(async (targets: number[]) => {
+    if (!targets.length) return;
+    const shapes: Record<string, string> = {};
+    for (const n of targets) shapes[String(n)] = concepts[String(n)]?.shape || '';
+    const noShape = targets.filter(n => !shapes[String(n)].trim());
+    if (noShape.length) {
+      addNotification('warning', `모양 문구 비어있음: Lv${noShape.slice(0, 5).join(', ')} — 컨셉표의 '모양'을 채우세요`);
+      return;
+    }
+    draftStopRef.current = false;
+    setDraftBusy(true);
+    let made = 0, failed = 0;
+    const failMsg: string[] = [];
+    try {
+      for (let i = 0; i < targets.length; i += draftBatchSize) {
+        if (draftStopRef.current) break;
+        const chunk = targets.slice(i, i + draftBatchSize);
+        setDraftProgress(`${i}/${targets.length} (Lv${chunk[0]}~)`);
+        const sub: Record<string, string> = {};
+        for (const n of chunk) sub[String(n)] = shapes[String(n)];
+        // [타임아웃] apiClient 기본이 30초인데 레벨당 LLM 2~4회 호출로 ~41초 걸린다.
+        // 그대로 두면 개별 1개조차 끊기고(서버는 계속 돌아 결과만 유실), 5개 묶음은 항상 중단됐다.
+        const res = await apiClient.post('/debug/boss-draft-generate', {
+          levels: chunk, shapes: sub, layer_count: draftLayerCount, base: bossBase,
+          symmetric: true, max_retry: 2, vary_layers: draftVary,
+        }, { timeout: chunk.length * 120_000 + 60_000 });
+        const r = res.data as {
+          counts: { made: number; skipped: number; failed: number };
+          failed: { level: number; reason: string }[];
+        };
+        made += r.counts.made; failed += r.counts.failed;
+        r.failed.forEach(f => failMsg.push(`Lv${f.level}:${f.reason}`));
+        loadSaved();
+      }
+      addNotification(failed ? 'warning' : 'success',
+        `초안 생성 완료 — 성공 ${made} · 실패 ${failed}`
+        + (draftStopRef.current ? ' (중단됨)' : '')
+        + (failMsg.length ? ` (${failMsg.slice(0, 3).join(', ')})` : ''));
+    } catch (e) {
+      addNotification('error', `초안 생성 실패: ${(e as Error).message}`);
+    } finally {
+      setDraftBusy(false);
+      setDraftProgress('');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [concepts, bossBase, draftBatchSize, draftVary, draftLayerCount, addNotification, loadSaved]);
+
+  // ── 검수 네비게이션 ──
+  // 초안 100여 개를 하나씩 보려면 매번 하단 목록까지 스크롤 → [로드] 를 눌러야 했다.
+  // 편집기 상단에서 ◀▶ 로 바로 넘긴다.
+  const [navDraftOnly, setNavDraftOnly] = useState(true);
+  /** 네비게이션 대상 = 레벨 오름차순. '초안만' 이면 draft 만. */
+  const navList = useMemo(() => {
+    const l = [...saved].sort((a, b) => a.level_min - b.level_min);
+    return navDraftOnly ? l.filter(t => t.draft) : l;
+  }, [saved, navDraftOnly]);
+  const navIndex = useMemo(
+    () => navList.findIndex(t => t.id === editingId),
+    [navList, editingId],
+  );
+  const navGo = useCallback((delta: number) => {
+    if (!navList.length) return;
+    // 아직 아무것도 안 열었으면 현재 보스 레벨에 가장 가까운 것부터 시작
+    const from = navIndex >= 0
+      ? navIndex
+      : navList.reduce((best, t, i) =>
+          Math.abs(t.level_min - bossLevel) < Math.abs(navList[best].level_min - bossLevel) ? i : best, 0);
+    const next = navIndex >= 0
+      ? (from + delta + navList.length) % navList.length
+      : from;
+    loadTemplate(navList[next]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navList, navIndex, bossLevel]);
+
+  /**
+   * 검수 확정 → 다음으로.
+   * 저장하면 draft 가 풀려 '초안만' 목록에서 빠진다 → 저장 후 navGo 를 부르면
+   * 인덱스가 -1 이 되어 엉뚱한 항목으로 튄다. **저장 전에 다음 대상을 잡아둔다.**
+   */
+  const confirmAndNext = useCallback(async () => {
+    const nextTpl = navIndex >= 0 && navList.length > 1
+      ? navList[(navIndex + 1) % navList.length]
+      : null;
+    await save();
+    if (nextTpl && nextTpl.id !== editingId) loadTemplate(nextTpl);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navIndex, navList, editingId]);
+
+  // Alt+←/→ 로 넘기기. Alt 를 요구하는 이유: 그리드 편집 중 방향키·입력창 타이핑과 충돌 방지.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.altKey) return;
+      if (e.key === 'ArrowLeft') { e.preventDefault(); navGo(-1); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); navGo(1); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [navGo]);
 
   const setConceptField = (level: string, field: keyof BossConcept, value: string) => {
     setConcepts(prev => ({ ...prev, [level]: { ...(prev[level] || { chapter: '', beat: '', deco: '', shape: '', note: '' }), [field]: value } }));
@@ -389,12 +634,12 @@ export function BossTemplatePanel() {
   };
 
   const estimateDifficulty = async () => {
-    if (layers.every(l => l.positions.size === 0)) { addNotification('warning', '빈 템플릿 — 셀을 찍으세요'); return; }
+    if (layers.every((l, i) => visibleCells(l, i).length === 0)) { addNotification('warning', '빈 템플릿 — 셀을 찍으세요'); return; }
     setEstimating(true); setEstResult(null);
     try {
       const td = productionDifficulty(bossLevel);
       const inlineLayers = layers.map((l, i) => ({
-        layer: i, col: layerSize(i), row: layerSize(i), positions: [...l.positions],
+        layer: i, col: layerSize(i), row: layerSize(i), positions: visibleCells(l, i),
         gimmicks: Object.fromEntries(l.gimmicks),
       }));
       const gen = await apiClient.post('/generate/from-boss-template', {
@@ -408,7 +653,7 @@ export function BossTemplatePanel() {
       setEstResult({
         predicted: rl.data.predicted_clear_rate, target: rl.data.target_clear_rate, cls: rl.data.classification, td,
         useTileCount: gen.data.level_json?.useTileCount ?? 0, tiles: gen.data.tile_count ?? 0,
-        drawn: layers.reduce((a, l) => a + l.positions.size, 0), // 그린 셀 수(생성 전)
+        drawn: layers.reduce((a, l, i) => a + visibleCells(l, i).length, 0), // 그린 셀 수(생성 전, 격자 안만)
         chainStripped: gen.data.chain_stripped ?? 0, // 좌우 이웃없어 무효처리된 체인
         grassStripped: gen.data.grass_stripped ?? 0, // 4방 이웃없어 무효처리된 잔디
         t0: gen.data.t0_count ?? 0, containers: gen.data.container_count ?? 0,
@@ -472,6 +717,7 @@ export function BossTemplatePanel() {
     setName(''); setBossLevel(10);
     setLayers([emptyLayer(), emptyLayer(), emptyLayer()]);
     setActiveLayer(0); setEditingId(null); setPaintMode('');
+    setBossBase(DEFAULT_BOSS_BASE);
   };
 
   // 테두리 1겹 침식(피라미드용): 이웃 4방향 중 하나라도 off면 제거
@@ -513,12 +759,12 @@ export function BossTemplatePanel() {
     } finally { setLlmBusy(false); }
   };
 
-  const totalCells = layers.reduce((a, l) => a + l.positions.size, 0);
+  const totalCells = layers.reduce((a, l, i) => a + visibleCells(l, i).length, 0);
   // [라이브 총타일수] 매치 대상 = 일반셀 1 + 컨테이너 내부(배출). 컨테이너 셀 자체는 제외.
   // 생성 전 추정(÷3 보정 전) — 컨테이너 내부 클릭 증가가 즉시 반영됨.
-  const liveTiles = layers.reduce((a, l) => {
+  const liveTiles = layers.reduce((a, l, li) => {
     let s = 0;
-    for (const pos of l.positions) {
+    for (const pos of visibleCells(l, li)) {
       const c = parseContainer(l.gimmicks.get(pos));
       s += c ? c.inner : 1;  // 컨테이너: 내부만(셀 제외) / 일반: 1
     }
@@ -531,7 +777,7 @@ export function BossTemplatePanel() {
     // (craft는 게임이 배출위치 처리 → 제외.)
     const D: Record<string, [number, number]> = { e: [1, 0], w: [-1, 0], s: [0, 1], n: [0, -1] };
     for (let i = 0; i < layers.length; i++) {
-      const P = layers[i].positions; const sz = layerSize(i);
+      const P = new Set(visibleCells(layers[i], i)); const sz = layerSize(i);
       for (const [pos, g] of layers[i].gimmicks) {
         const c = parseContainer(g); if (!c || c.type !== 'stack') continue;
         if (!P.has(pos)) continue;
@@ -560,9 +806,13 @@ export function BossTemplatePanel() {
       level_min: bossLevel,  // 단일 레벨 = min==max
       level_max: bossLevel,
       layers: layers.map((l, i) => ({
-        layer: i, col: layerSize(i), row: layerSize(i), positions: [...l.positions],
+        // 격자 밖 셀은 저장하지 않는다(크롭 확정). 화면에서 안 보이던 셀이 몰래
+        // 저장돼 다음 로드에서 되살아나면 "줄여서 저장했는데 그대로"가 된다.
+        layer: i, col: layerSize(i), row: layerSize(i), positions: visibleCells(l, i),
         gimmicks: Object.fromEntries(l.gimmicks),
       })),
+      // 편집기에서 저장 = 사람이 확인한 것 → 초안 해제(노란불 → 초록불)
+      draft: false,
     };
     try {
       await apiClient.post('/debug/boss-template-save', body);
@@ -576,12 +826,22 @@ export function BossTemplatePanel() {
 
   const loadTemplate = (t: SavedBossTemplate) => {
     setName(t.name); setBossLevel(t.level_min);
-    const ls: BossLayer[] = t.layers
-      .sort((a, b) => a.layer - b.layer)
-      .map(l => ({
-        positions: new Set(l.positions),
-        gimmicks: new Map(Object.entries((l as { gimmicks?: Record<string, string> }).gimmicks || {})),
-      }));
+    const sorted = [...t.layers].sort((a, b) => a.layer - b.layer);
+    const ls: BossLayer[] = sorted.map(l => ({
+      positions: new Set(l.positions),
+      gimmicks: new Map(Object.entries((l as { gimmicks?: Record<string, string> }).gimmicks || {})),
+    }));
+    // [base 복원] 예전엔 저장된 col/row 를 버리고 상수(7)로 되돌려서, 6 으로 줄여 저장한
+    // 템플릿을 다시 열면 8 로 돌아갔다. 저장값에서 base 를 되돌린다.
+    //   짝수층 col = base, 홀수층 col = base-1
+    const l0 = sorted.find(l => l.layer % 2 === 0);
+    const l1 = sorted.find(l => l.layer % 2 === 1);
+    const restored = l0?.row ?? (l1?.row != null ? l1.row + 1 : undefined);
+    if (restored != null && Number.isFinite(restored)) {
+      setBossBase(Math.max(BOSS_BASE_MIN, Math.min(BOSS_BASE_MAX, restored)));
+    } else {
+      setBossBase(DEFAULT_BOSS_BASE);
+    }
     setLayers(ls.length ? ls : [emptyLayer()]);
     setActiveLayer(0); setEditingId(t.id);
     addNotification('info', `로드: ${t.id}`);
@@ -609,6 +869,51 @@ export function BossTemplatePanel() {
         층마다 다른 모양 가능. 저장 시 <b>지정한 보스 레벨(10의 배수)</b>에 배정됨.
       </div>
 
+      {/* 검수 네비게이션 — ◀▶ 로 템플릿 넘기기 */}
+      <div className="flex items-center gap-2 flex-wrap bg-gray-800 rounded p-2">
+        <button onClick={() => navGo(-1)} disabled={!navList.length}
+          title="이전 템플릿 (Alt+←)"
+          className="px-3 py-1.5 rounded bg-gray-700 hover:bg-gray-600 text-white text-sm disabled:opacity-40">◀</button>
+
+        <div className="flex-1 min-w-[220px] text-center">
+          {navIndex >= 0 && navList[navIndex] ? (
+            <>
+              <span className={navList[navIndex].draft ? 'text-yellow-400' : 'text-emerald-400'}>●</span>
+              <span className="text-white font-medium ml-1">Lv {navList[navIndex].level_min}</span>
+              <span className="text-gray-400 text-xs ml-2">
+                {navIndex + 1} / {navList.length}
+              </span>
+              <div className="text-[11px] text-gray-400 truncate">
+                {concepts[String(navList[navIndex].level_min)]?.shape || '(컨셉 모양 없음)'}
+              </div>
+            </>
+          ) : (
+            <span className="text-xs text-gray-500">
+              {navList.length ? `◀▶ 로 ${navList.length}개 훑어보기` : '대상 없음'}
+            </span>
+          )}
+        </div>
+
+        <button onClick={() => navGo(1)} disabled={!navList.length}
+          title="다음 템플릿 (Alt+→)"
+          className="px-3 py-1.5 rounded bg-gray-700 hover:bg-gray-600 text-white text-sm disabled:opacity-40">▶</button>
+
+        <label className="text-[11px] text-gray-400 flex items-center gap-1 ml-2"
+          title="켜면 검수가 필요한 초안(노란불)만 순회합니다">
+          <input type="checkbox" checked={navDraftOnly} onChange={e => setNavDraftOnly(e.target.checked)} />
+          초안만 ({saved.filter(t => t.draft).length})
+        </label>
+
+        {/* 검수 완료 = 저장(초안 해제) 후 바로 다음으로 */}
+        <button
+          onClick={confirmAndNext}
+          disabled={!editingId || !navList.length}
+          title="저장해 초안을 확정(초록불)하고 다음 템플릿으로"
+          className="px-3 py-1.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white text-xs disabled:opacity-40">
+          ✔ 확정 후 다음
+        </button>
+      </div>
+
       {/* 메타 */}
       <div className="grid grid-cols-3 gap-3 bg-gray-800 rounded p-3">
         <div className="col-span-2">
@@ -629,7 +934,7 @@ export function BossTemplatePanel() {
         {layers.map((l, i) => (
           <button key={i} onClick={() => setActiveLayer(i)}
             className={`px-3 py-1.5 rounded text-xs font-medium ${activeLayer === i ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>
-            L{i} <span className="opacity-70">({layerSize(i)}·{l.positions.size})</span>
+            L{i} <span className="opacity-70">({layerSize(i)}·{visibleCells(l, i).length})</span>
           </button>
         ))}
         <button onClick={addLayer} disabled={layers.length >= MAX_LAYERS}
@@ -653,7 +958,33 @@ export function BossTemplatePanel() {
             <input type="checkbox" checked={llmSymmetric} onChange={e => setLlmSymmetric(e.target.checked)} /> 좌우대칭
           </label>
         </div>
-        <div className="text-[10px] text-gray-500">임의 모양 AI 생성(8×8·7×7). Claude Code CLI 인증 사용(API키 불필요). 호출당 ~수초+토큰 소비.</div>
+        <div className="text-[10px] text-gray-500">임의 모양 AI 생성(현재 베이스 기준 {bossBase}×{bossBase}·{bossBase - 1}×{bossBase - 1}). Claude Code CLI 인증 사용(API키 불필요). 호출당 ~수초+토큰 소비.</div>
+      </div>
+
+      {/* 📐 베이스 그리드 — 상위 층 크기는 여기서 자동 파생(짝수 base+1 / 홀수 base) */}
+      <div className="p-3 bg-gray-800 rounded space-y-1.5">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-sm font-medium text-white">📐 베이스 그리드</span>
+          <input
+            type="number" min={BOSS_BASE_MIN} max={BOSS_BASE_MAX} step={1}
+            value={bossBase}
+            onChange={e => changeBase(Number(e.target.value) || DEFAULT_BOSS_BASE)}
+            className="w-16 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-sm text-white"
+          />
+          <span className="text-[11px] text-gray-400">
+            층 크기 <b className="text-white">{layers.map((_, i) => layerSize(i)).join(' · ')}</b>
+            <span className="text-gray-500"> (짝수층 {bossBase} / 홀수층 {bossBase - 1})</span>
+          </span>
+          {bossBase !== DEFAULT_BOSS_BASE && (
+            <button onClick={() => changeBase(DEFAULT_BOSS_BASE)}
+              className="px-2 py-0.5 rounded text-[10px] bg-gray-700 hover:bg-gray-600 text-gray-200">기본 {DEFAULT_BOSS_BASE} 로</button>
+          )}
+        </div>
+        <div className={`text-[10px] px-1.5 py-1 rounded ${croppedCount > 0 ? 'bg-rose-900/40 text-rose-300' : 'text-gray-500'}`}>
+          {croppedCount > 0
+            ? <>⚠️ 격자 밖으로 나간 셀 <b>{croppedCount}개</b> — 저장·생성·집계에서 빠집니다. <b>다시 키우면 그대로 복원</b>되며, 저장하기 전까지 원본은 그대로입니다.</>
+            : <>줄여도 잘리는 셀 없음. 저장(💾)해야 디스크에 반영됩니다.</>}
+        </div>
       </div>
 
       {/* 그리기 그리드 */}
@@ -791,7 +1122,7 @@ export function BossTemplatePanel() {
           <div className="text-[11px] text-gray-400 mb-2">인게임 미리보기 (홀짝 오프셋 + 층 스택)</div>
           {(() => {
             const CELL = 30;
-            const maxSpan = BOSS_BASE + 1;           // 짝수층 폭(8) 기준 캔버스
+            const maxSpan = bossBase;                // 짝수층(바닥) 폭 기준 캔버스
             const canvas = maxSpan * CELL + CELL;    // 여백
             const cx = canvas / 2, cy = canvas / 2;
             // 게임 좌표: worldX=-(rowCount/2)+0.5+col, worldY=(rowCount/2)-0.5-row (row0=위)
@@ -802,7 +1133,7 @@ export function BossTemplatePanel() {
             layers.forEach((l, li) => {
               const rc = layerSize(li);
               const color = palette[Math.min(li, palette.length - 1)];
-              l.positions.forEach(key => {
+              visibleCells(l, li).forEach(key => {
                 const [xs, ys] = key.split('_');
                 const col = parseInt(xs), row = parseInt(ys);
                 const wx = -(rc / 2) + 0.5 + col;
@@ -905,6 +1236,92 @@ export function BossTemplatePanel() {
             <button onClick={saveConcepts} disabled={!conceptsDirty} className="px-2 py-0.5 rounded text-[11px] bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40">💾 저장</button>
           </div>
         </div>
+
+        {/* 초안 생성 — ① 현재 편집 레벨 개별 ② 템플릿 미입력 전체 */}
+        <div className="mb-2 px-2 py-1.5 rounded bg-gray-900/50 flex items-center gap-2 flex-wrap">
+          <span className="text-[11px] text-gray-300">🪄 초안 자동 생성</span>
+
+          {/* ① 개별 — 편집기에 설정된 보스 레벨 하나만 */}
+          <button
+            onClick={() => runDraftGeneration([bossLevel])}
+            disabled={draftBusy || !concepts[String(bossLevel)]?.shape?.trim()}
+            title={concepts[String(bossLevel)]?.shape
+              ? `Lv${bossLevel} "${concepts[String(bossLevel)].shape}" 로 초안 1개 생성 (이미 있으면 건너뜀)`
+              : `Lv${bossLevel} 컨셉의 '모양' 문구가 비어 있습니다`}
+            className="px-2 py-0.5 rounded text-[11px] bg-amber-700 hover:bg-amber-600 text-white disabled:opacity-40">
+            개별 (Lv{bossLevel})
+          </button>
+
+          {/* ② 현재 테마 — 페이징으로 보고 있는 5챕터 구간만 */}
+          <button
+            onClick={() => {
+              if (!window.confirm(
+                `${themeLabel(themeIndex)} 구간의 템플릿 없는 ${themeUncovered.length}개 레벨\n`
+                + `(Lv${themeUncovered[0]}~Lv${themeUncovered[themeUncovered.length - 1]}) 초안을 만듭니다.\n\n`
+                + `· 예상 ${Math.ceil(themeUncovered.length * 68 / 60)}분 · ${draftBatchSize}개씩 진행\n`
+                + `· 중단해도 그때까지는 저장됩니다`)) return;
+              void runDraftGeneration(themeUncovered);
+            }}
+            disabled={draftBusy || themeUncovered.length === 0}
+            title={`현재 보고 있는 테마(${themeLabel(themeIndex)}) 안에서 템플릿 없는 레벨만 생성`}
+            className="px-2 py-0.5 rounded text-[11px] bg-amber-700 hover:bg-amber-600 text-white disabled:opacity-40">
+            이 테마 ({themeUncovered.length})
+          </button>
+
+          {/* ③ 미입력 전체 — 컨셉은 있는데 템플릿이 없는 레벨 전부 */}
+          <button
+            onClick={() => {
+              if (!window.confirm(
+                `템플릿 없는 ${uncoveredLevels.length}개 레벨의 초안을 만듭니다.\n\n`
+                + `· 레벨당 약 68초 (LLM 2~4회 호출) → 예상 ${Math.ceil(uncoveredLevels.length * 68 / 60)}분\n`
+                + `· ${draftBatchSize}개씩 나눠 진행하며, 중단해도 그때까지는 저장됩니다\n`
+                + `· 결과는 전부 초안(노란불) — 검수 후 저장해야 확정됩니다`)) return;
+              void runDraftGeneration(uncoveredLevels);
+            }}
+            disabled={draftBusy || uncoveredLevels.length === 0}
+            className="px-2 py-0.5 rounded text-[11px] bg-amber-800 hover:bg-amber-700 text-white disabled:opacity-40">
+            미입력 전체 ({uncoveredLevels.length})
+          </button>
+
+          {draftBusy && (
+            <button onClick={() => { draftStopRef.current = true; }}
+              className="px-2 py-0.5 rounded text-[11px] bg-red-800 hover:bg-red-700 text-white">■ 중단</button>
+          )}
+
+          <span className="text-[10px] text-amber-300">
+            {draftBusy ? `생성중… ${draftProgress}` : ''}
+          </span>
+
+          <label className="text-[10px] text-gray-400 flex items-center gap-1 ml-auto">
+            묶음
+            <input type="number" min={1} max={40} value={draftBatchSize} disabled={draftBusy}
+              onChange={e => setDraftBatchSize(Math.max(1, Math.min(40, Number(e.target.value) || 5)))}
+              className="w-12 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white" />
+          </label>
+          <label className="text-[10px] text-gray-400 flex items-center gap-1"
+            title="생성할 층 수. 수동본은 4층이 74%(3층 3 · 5층 7). 층 크기는 위 [📐 베이스 그리드] 값에서 짝수층 base / 홀수층 base-1 로 파생됩니다.">
+            층수
+            <input type="number" min={2} max={MAX_LAYERS} value={draftLayerCount} disabled={draftBusy}
+              onChange={e => setDraftLayerCount(Math.max(2, Math.min(MAX_LAYERS, Number(e.target.value) || 4)))}
+              className="w-12 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white" />
+          </label>
+          <span className="text-[10px] text-gray-500"
+            title="이 조합으로 생성됩니다">
+            → {Array.from({ length: draftLayerCount }, (_, i) => sizeOfLayer(bossBase, i)).join('·')}
+          </span>
+          <label className="text-[10px] text-gray-400 flex items-center gap-1"
+            title="같은 홀짝의 2번째 층을 테두리 침식으로 변형합니다. 기본 off — 실측상 동일 복사가 수동본 층별 노출 프로파일(L0 5%/L1 4%/L2 29%/L3 85%)에 더 가깝습니다.">
+            <input type="checkbox" checked={draftVary} disabled={draftBusy}
+              onChange={e => setDraftVary(e.target.checked)} />
+            층 변형
+          </label>
+        </div>
+        <div className="mb-2 text-[10px] text-gray-500">
+          템플릿 없는 레벨 전체 {uncoveredLevels.length}개
+          {uncoveredLevels.length > 0 && ` (Lv${uncoveredLevels[0]}~${uncoveredLevels[uncoveredLevels.length - 1]})`}
+          {' · '}현재 테마 {themeLabel(themeIndex)} 안 {themeUncovered.length}개
+          {' · '}결과는 <span className="text-yellow-400">●</span> 초안 — 열어서 확인·수정 후 저장하면 <span className="text-emerald-400">●</span> 확정
+        </div>
         {conceptsOpen && (() => {
           const allLevels = Object.keys(concepts).map(k => parseInt(k)).filter(n => !isNaN(n));
           const maxTheme = allLevels.length ? Math.max(...allLevels.map(themeOf), 0) : 0;
@@ -938,14 +1355,21 @@ export function BossTemplatePanel() {
                 {themeLevels.map(n => {
                   const lv = String(n);
                   const c = concepts[lv];
-                  const hasTpl = saved.some(t => t.level_min <= n && n <= t.level_max);
+                  const tpl = saved.find(t => t.level_min <= n && n <= t.level_max);
+                  const hasTpl = !!tpl;
+                  const isDraft = !!tpl?.draft;
                   const inp = (field: keyof BossConcept, w = '') =>
                     <input value={c[field]} onChange={e => setConceptField(lv, field, e.target.value)}
                       className={`bg-gray-700/50 border border-gray-600 rounded px-1 py-0.5 text-[11px] text-white w-full ${w}`} />;
                   return (
                     <tr key={lv} className="border-b border-gray-700/50">
                       <td className="px-1 py-1 font-mono text-purple-300 whitespace-nowrap">
-                        {lv} {hasTpl && <span title="이 레벨 커버하는 템플릿 있음" className="text-emerald-400">●</span>}
+                        {lv} {hasTpl && (
+                          <span
+                            title={isDraft ? '자동 생성 초안 — 확인·수정 후 저장하면 확정' : '수동 확정된 템플릿'}
+                            className={isDraft ? 'text-yellow-400' : 'text-emerald-400'}
+                          >●</span>
+                        )}
                       </td>
                       <td className="px-1 py-1">{inp('chapter')}</td>
                       <td className="px-1 py-1">{inp('beat')}</td>
@@ -955,6 +1379,11 @@ export function BossTemplatePanel() {
                       <td className="px-1 py-1 text-right">
                         <button onClick={() => { setBossLevel(n); addNotification('info', `보스 레벨 ${n}로 설정 — 이 컨셉용 템플릿 그리세요`); }}
                           className="px-1.5 py-0.5 rounded bg-gray-600 hover:bg-gray-500 text-white text-[10px]" title="이 레벨용 템플릿 그리기(배정구간 설정)">그리기</button>
+                        {!hasTpl && (
+                          <button onClick={() => runDraftGeneration([n])} disabled={draftBusy || !c.shape?.trim()}
+                            className="px-1.5 py-0.5 rounded bg-amber-700 hover:bg-amber-600 text-white text-[10px] ml-1 disabled:opacity-40"
+                            title={c.shape ? `"${c.shape}" 로 이 레벨 초안 생성` : "컨셉의 '모양' 문구가 비어 있습니다"}>🪄</button>
+                        )}
                         <button onClick={() => removeConceptRow(lv)} className="px-1 py-0.5 rounded bg-red-800 hover:bg-red-700 text-white text-[10px] ml-1">×</button>
                       </td>
                     </tr>
@@ -962,7 +1391,7 @@ export function BossTemplatePanel() {
                 })}
               </tbody>
             </table>
-            <div className="text-[10px] text-gray-500 mt-1">● = 이 레벨 커버하는 보스 템플릿 있음 · "그리기" = 위 편집기 배정구간을 해당 레벨로 세팅 · ◀▶ = 테마(5챕터) 전환</div>
+            <div className="text-[10px] text-gray-500 mt-1"><span className="text-emerald-400">●</span> 수동 확정 · <span className="text-yellow-400">●</span> 자동 초안(검수 필요) · "그리기" = 위 편집기 배정구간을 해당 레벨로 세팅 · ◀▶ = 테마(5챕터) 전환</div>
           </div>
           );
         })()}
@@ -978,8 +1407,10 @@ export function BossTemplatePanel() {
             {saved.sort((a, b) => a.level_min - b.level_min).map(t => (
               <div key={t.id} className={`flex items-center justify-between px-3 py-2 rounded text-xs ${editingId === t.id ? 'bg-indigo-900/30' : 'bg-gray-700/40'}`}>
                 <div className="flex-1">
-                  <span className="text-white font-medium">{t.name}</span>
+                  <span className={t.draft ? 'text-yellow-400' : 'text-emerald-400'}>●</span>
+                  <span className="text-white font-medium ml-1">{t.name}</span>
                   <span className="text-gray-400 ml-2">Lv {t.level_min} · {t.layer_count}층</span>
+                  {t.draft && <span className="ml-2 px-1 rounded bg-yellow-900/50 text-yellow-300 text-[10px]">초안</span>}
                 </div>
                 <div className="flex gap-1">
                   <button onClick={() => loadTemplate(t)} className="px-2 py-0.5 rounded bg-gray-600 hover:bg-gray-500 text-white">로드</button>

@@ -37,6 +37,26 @@ DEFAULT_TIME_BUDGET_S = 5.0  # 벽시계 제한 — 큰 레벨에서 행 방지(
 UNRELIABLE_GIMMICKS = {"frog", "teleport", "bomb", "curtain", "unknown"}
 
 
+def is_key_tile(tile_type: str, gimmick: str = "") -> bool:
+    """게임의 키타일 판정을 그대로 따른다.
+
+    DB_Level.cs:234
+        isKeyTile => xTileID == "t16"
+                  || xTileID.ToLower() == "key"
+                  || xEffect.ToLower() == "key";
+
+    **기믹(effect)이 "key" 이면 타일 색을 버리고 키타일(tileIDNum=16)로 취급한다.**
+    즉 ["t8","key"] 는 게임에서 t8 이 아니라 키타일이다. 이걸 t8 로 세면
+    에디터만 t8 이 ÷3 이라고 믿고 게임에선 1장 모자라 영구 매칭불가가 된다
+    (실측: Lv111 튜토리얼이 key 를 속성으로 찍어 t7/t8/t11 이 전부 깨졌다).
+    """
+    return (
+        tile_type == "t16"
+        or tile_type.lower() == "key"
+        or (gimmick or "").lower() == "key"
+    )
+
+
 def _clearability_type_counts(level_json: Dict[str, Any]) -> Dict[str, int]:
     """실게임(클라이언트) 분배 기준 매칭타입별(t1~t15) 최종 카운트.
 
@@ -49,6 +69,7 @@ def _clearability_type_counts(level_json: Dict[str, Any]) -> Dict[str, int]:
     from .bot_simulator import TileDistributor
 
     concrete: Dict[str, int] = {}
+    key_count = 0
     t0_count = 0
     for i in range(int(level_json.get("layer", 0) or 0)):
         ld = level_json.get(f"layer_{i}")
@@ -58,6 +79,11 @@ def _clearability_type_counts(level_json: Dict[str, Any]) -> Dict[str, int]:
             if not (isinstance(td, list) and td and isinstance(td[0], str)):
                 continue
             tt = td[0]
+            gim = td[1] if len(td) > 1 and isinstance(td[1], str) else ""
+            # [게임정합] 기믹이 key 면 색이 아니라 키타일 — 매칭타입 카운트에서 제외한다.
+            if is_key_tile(tt, gim):
+                key_count += 1
+                continue
             if tt == "t0":
                 t0_count += 1
             elif tt.startswith("craft_") or tt.startswith("stack_"):
@@ -76,7 +102,9 @@ def _clearability_type_counts(level_json: Dict[str, Any]) -> Dict[str, int]:
                     )
                     if is_baked:
                         for s in baked:
-                            if s != "key":  # key는 unlockTile×3라 ÷3 무관 (게이트도 매칭타입만 검사)
+                            if s == "key":
+                                key_count += 1  # 매칭 카운트엔 안 넣지만 toAdd 균형엔 필요
+                            else:
                                 concrete[s] = concrete.get(s, 0) + 1
                     else:
                         try:
@@ -100,7 +128,13 @@ def _clearability_type_counts(level_json: Dict[str, Any]) -> Dict[str, int]:
             shuffle_tile=level_json.get("xShuffleTile", 0),
             type_imbalance=level_json.get("xTypeImbalance", 0),
             unlock_tile=level_json.get("unlockTile", level_json.get("xUnlockTile", 0)),
-            tile_type_offset=offset, existing_tile_counts=concrete,
+            # [KEY 균형] 게임 GetToAddIndexList(DB_Level.cs:1094)는 indexCountArr[16]까지 세서
+            # **키 개수도 3배수로 맞춘다**. 명시 키가 4장이면 toAdd=[16,16] 이 되어 t0 두 장이
+            # 매칭타일이 아니라 키로 승격된다. 여기서 key 를 빼고 넘기면 분배기가 그 사실을
+            # 모른 채 그 t0 들을 색타일에 배정해 **없는 ÷3 위반을 만든다**
+            # (실측 Lv1102: 게임은 t1=9 정상인데 게이트만 t1=11 위반이라 배포 차단).
+            tile_type_offset=offset,
+            existing_tile_counts=({**concrete, "key": key_count} if key_count else concrete),
         )
         for t in assigns:
             if isinstance(t, str) and t.startswith("t") and t[1:].isdigit():

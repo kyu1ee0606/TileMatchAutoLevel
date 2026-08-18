@@ -7892,14 +7892,25 @@ class LevelGenerator:
             "frog": "frog",
             "grass": "grass",
             "bomb": "bomb",  # Note: bomb needs countdown, handled separately below
-            "curtain": "curtain",
+            # 게임 파서(DB_Level.cs:320)는 "curtain_open"/"curtain_close" 만 인정한다.
+            # 그냥 "curtain" 을 넣으면 else 로 떨어져 TileEffectType.None = **기믹이 사라진다**.
+            "curtain": "curtain_close",
             "unknown": "unknown",
             "link": "link_e",  # Default to east direction for link
             "teleport": "teleporter",  # Client expects "teleporter"
         }
 
-        # craft/stack are tile types, not attributes - skip tutorial gimmick placement
-        if gimmick_type in ("craft", "stack"):
+        # craft/stack/key are tile types, not attributes - skip tutorial gimmick placement
+        #
+        # [key 추가 이유] GIMMICK_ATTRIBUTES 에 "key" 항목이 없어 .get("key","key") 가 "key" 를
+        # 그대로 돌려주고, 그게 tile_data[1](=xEffect)에 찍혔다. 게임은
+        #   DB_Level.cs:234  isKeyTile => ... || xEffect.ToLower() == "key"
+        # 라서 ["t8","key"] 를 t8 이 아니라 **키타일(tileIDNum=16)** 로 읽는다. 결과적으로
+        # 해당 색이 1장씩 증발해 ÷3 이 깨지고 그 색은 영구 매칭불가가 된다
+        # (실측 Lv111: t7 3→2, t8 3→2, t11 6→5 — 6장이 보드에 영원히 남음).
+        # 키타일은 unlockTile(=xUnlockTile) 로 게임이 t0 분배에서 직접 만들므로
+        # 튜토리얼이 속성으로 찍을 대상이 아니다.
+        if gimmick_type in ("craft", "stack", "key"):
             logger.info(f"Tutorial gimmick '{gimmick_type}' is a goal tile type, not an attribute - skipping")
             return level
 
@@ -8196,7 +8207,9 @@ class LevelGenerator:
             "frog": "frog",
             "grass": "grass",
             "bomb": "bomb",  # Note: bomb needs countdown, handled separately
-            "curtain": "curtain",
+            # 게임 파서(DB_Level.cs:320)는 "curtain_open"/"curtain_close" 만 인정한다.
+            # 그냥 "curtain" 을 넣으면 else 로 떨어져 TileEffectType.None = **기믹이 사라진다**.
+            "curtain": "curtain_close",
             "link": "link_e",
             "teleport": "teleporter",  # Client expects "teleporter"
         }
@@ -13456,6 +13469,30 @@ class LevelGenerator:
             level = self._repair_container_only_types(level)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[CONTAINER_ONLY_COLOR] 보정 실패(무시): {exc}")
+        # [KEY_GIMMICK] 색타일에 찍힌 key '속성' 제거. 반드시 ÷3 복구보다 **먼저** 돈다
+        # (이게 색 카운트를 되돌려놓아야 뒤의 ÷3 판정이 올바른 수를 본다).
+        # [EFFECT_STR] 게임 파서가 모르는 기믹 문자열 정규화. key 속성 제거보다 먼저 돈다
+        # (별칭이 key 로 정규화될 여지는 없지만, 문자열 계약을 먼저 세우는 편이 추론이 쉽다).
+        try:
+            level = self._repair_effect_strings(level)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[EFFECT_STR] 정규화 실패(무시): {exc}")
+        try:
+            level = self._repair_key_gimmick(level)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[KEY_GIMMICK] 복구 실패(무시): {exc}")
+        # [UNLOCK_TILE] 키 공급량보다 잠금 슬롯이 많으면 영구히 안 열린다 → unlockTile 하향.
+        # key 속성 제거 뒤에 돌아야 명시 키 수를 정확히 센다.
+        try:
+            level = self._repair_unlock_tile(level)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[UNLOCK_TILE] 복구 실패(무시): {exc}")
+        # [T0_DIV3] t0 총량 ÷3. 게임 분배 루프가 인덱스를 넘기지 않으려면 필수이고,
+        # per-type ÷3(_repair_clearability)의 전제이기도 하므로 그보다 먼저 돈다.
+        try:
+            level = self._repair_t0_divisibility(level)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[T0_DIV3] 복구 실패(무시): {exc}")
         # [CLEARABILITY 최종 게이트] 모든 경로(절차·템플릿·보스·등껍질·고정·튜너)가 지나는 이 tail
         # 에서 **게임 정본 카운터**로 per-type ÷3 을 마지막으로 확인·복구한다.
         #
@@ -13483,6 +13520,251 @@ class LevelGenerator:
             logger.warning(f"[GOAL_COUNT] 정합 복구 실패(무시): {exc}")
         level["max_moves"] = self._calculate_max_moves(level)
         level = self._apply_timea(level)
+        return level
+
+    # 게임 파서 DB_Level.cs:272 GetTileEffectEnum() 이 인정하는 효과 문자열 전체.
+    # **완전일치(소문자)** 이며 목록 밖은 전부 else → TileEffectType.None 으로 조용히 버려진다.
+    # bomb 만 StartsWith("bomb") 이고, 카운트는 spInteger.Parse 가 문자열에서 숫자를 긁는다
+    # (TileEffect.cs:570) — 숫자가 없으면 0 이 되어 첫 클릭에 강제 실패한다.
+    GAME_EFFECT_STRINGS = frozenset({
+        "ice", "link_e", "link_w", "link_s", "link_n", "unknown", "craft",
+        "grass", "chain", "curtain_open", "curtain_close", "frog", "teleporter", "key",
+    })
+    # 에디터가 과거에 흘린 별칭 → 게임이 먹는 정식 문자열
+    EFFECT_ALIASES = {
+        "curtain": "curtain_close",
+        "teleport": "teleporter",
+        "link_east": "link_e", "link_west": "link_w",
+        "link_south": "link_s", "link_north": "link_n",
+    }
+
+    def _repair_effect_strings(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """기믹 문자열을 게임 파서가 먹는 형태로 정규화한다.
+
+        게임은 모르는 문자열을 **조용히** TileEffectType.None 으로 만든다(DB_Level.cs:336).
+        로그도 경고도 없다. 그래서 에디터는 "커튼 17장 배치함"이라고 믿는데 실제 게임엔
+        평범한 타일 17장이 놓인다 — 난이도가 의도와 달라지고, 튜토리얼 레벨이면
+        해당 기믹을 아예 학습하지 못한다.
+
+        실측(출시 배치): `curtain` 17장 / 11레벨. 장애물 배치기는 "curtain_close" 를 제대로
+        쓰는데 **튜토리얼 배치기의 GIMMICK_ATTRIBUTES 맵만** "curtain" 이었다 — key 사건과
+        같은 계통(맵이 게임 파서 계약과 어긋남)이다.
+
+        - 별칭이면 정식 문자열로 교체
+        - 그래도 모르는 문자열이면 제거(""). 게임이 어차피 None 으로 만드니 에디터 모델을
+          게임에 맞추는 쪽이 안전하다 — 그래야 난이도·검증이 실제와 일치한다.
+        타입·위치·개수를 건드리지 않으므로 ÷3 과 모양에 영향이 없다.
+        """
+        fixed, dropped = [], []
+        for i in range(int(level.get("layer", 0) or 0) + 1):
+            ld = level.get(f"layer_{i}")
+            tiles = ld.get("tiles") if isinstance(ld, dict) else None
+            if not isinstance(tiles, dict):
+                continue
+            for pos, td in tiles.items():
+                if not (isinstance(td, list) and len(td) > 1 and isinstance(td[1], str)):
+                    continue
+                e = td[1]
+                if not e:
+                    continue
+                low = e.lower()
+                if low in self.GAME_EFFECT_STRINGS or low.startswith("bomb"):
+                    continue
+                alias = self.EFFECT_ALIASES.get(low)
+                if alias:
+                    td[1] = alias
+                    fixed.append(f"L{i}:{pos} '{e}'→'{alias}'")
+                else:
+                    td[1] = ""
+                    dropped.append(f"L{i}:{pos} '{e}'")
+
+        if fixed:
+            logger.error(f"[EFFECT_STR] 게임 미인식 기믹 문자열 {len(fixed)}개 정규화: {fixed[:6]}")
+        if dropped:
+            logger.error(f"[EFFECT_STR] 정식명 없는 기믹 문자열 {len(dropped)}개 제거: {dropped[:6]}")
+        return level
+
+    def _repair_t0_divisibility(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """t0(런타임 분배 대상) 총 개수를 3배수로 맞춘다 — 컨테이너 내부 개수만 조정.
+
+        게임의 분배 루프(DB_Level.cs:1179/1196)는
+            randomTileIndexList = DistributeTiles(emptyTilesLength / 3, ...)   ← 정수 나눗셈
+            for (i = 0; i < emptyTilesLength; i++) { curIndex = setCount / 3; ... randomTileIndexList[curIndex] }
+        이다. emptyTilesLength 가 3배수가 아니면 마지막 묶음이 리스트 길이를 넘겨
+        **IndexOutOfRangeException** 이 나고, 예외를 피하더라도 그 타입이 3장 미만으로
+        배정돼 영구 매칭불가가 된다.
+        (실측 8/16 배치 Lv558/606/619/628/934/1468 — 전부 `used > len` 이었다.)
+
+        `_finalize_divisibility_guarantee` Step 3 의 비패턴 경로는 '줄이기'만 시도하는데
+            take = min(intern - MIN_GOAL_COUNT, ...)
+        라서 내부 개수가 이미 MIN_GOAL_COUNT 이하인 컨테이너에서는 take<=0 이라
+        아무것도 못 하고 실패 로그만 남겼다. 필드 t0 가 0 이면(전부 컨테이너 안) 특히 그렇다.
+        여기서는 **늘리는 방향**으로 해결한다 — 늘리기는 하한 제약이 없고, 덤으로
+        MIN_GOAL_COUNT 미달 컨테이너도 정상화된다.
+
+        타일 위치·타입·기믹을 건드리지 않으므로 모양이 완전히 보존된다.
+        goalCount 는 뒤따르는 `_repair_goal_count` 가 보드 기준으로 재계산한다.
+        """
+        containers: List[list] = []
+        t0_regular = 0
+        for i in range(int(level.get("layer", 0) or 0) + 1):
+            ld = level.get(f"layer_{i}")
+            tiles = ld.get("tiles") if isinstance(ld, dict) else None
+            if not isinstance(tiles, dict):
+                continue
+            for td in tiles.values():
+                if not (isinstance(td, list) and td and isinstance(td[0], str)):
+                    continue
+                tt = td[0]
+                if tt == "t0":
+                    t0_regular += 1
+                elif tt.startswith("craft_") or tt.startswith("stack_"):
+                    if len(td) > 2 and isinstance(td[2], list) and td[2]:
+                        # baked(내부 타입 문자열 확정)는 개수만 늘리면 문자열과 어긋난다 → 제외
+                        inner = td[2][1] if len(td[2]) > 1 and isinstance(td[2][1], str) else ""
+                        if not inner:
+                            containers.append(td)
+
+        def _n(td: list) -> int:
+            try:
+                return int(td[2][0])
+            except (ValueError, TypeError, IndexError):
+                return 0
+
+        total = t0_regular + sum(_n(td) for td in containers)
+        rt = total % 3
+        if rt == 0 or not containers:
+            return level
+
+        need = 3 - rt
+        # 내부 개수가 적은 컨테이너부터 1씩 분산 — 하나만 비정상적으로 두꺼워지는 것 방지.
+        # MIN_GOAL_COUNT 미달인 것을 우선 채운다.
+        containers.sort(key=_n)
+        for k in range(need):
+            td = containers[k % len(containers)]
+            td[2][0] = _n(td) + 1
+
+        logger.error(
+            f"[T0_DIV3] t0 총량 {total}→{total + need} (컨테이너 내부 +{need}). "
+            f"그대로 두면 게임 분배가 randomTileIndexList 범위를 넘어 IndexOutOfRange"
+        )
+        return self._sync_layer_num_fields(level)
+
+    @staticmethod
+    def _repair_key_gimmick(level: Dict[str, Any]) -> Dict[str, Any]:
+        """색타일에 '속성'으로 찍힌 key 를 제거한다.
+
+        게임은 타일 타입이 아니라 **효과(xEffect)만 봐도** 키타일로 판정한다:
+            DB_Level.cs:234
+                isKeyTile => xTileID == "t16" || xTileID.ToLower() == "key"
+                          || xEffect.ToLower() == "key";
+            DB_Level.cs:257  GetTileIDNum → isKeyTile 이면 16 반환
+
+        그래서 ["t8","key"] 는 게임에서 t8 이 아니라 키타일이다. 에디터는 t8 로 세므로
+        ÷3 이 맞다고 판단하지만 실제 보드에선 t8 이 한 장 모자라 **그 색 전체가 영구
+        매칭불가**가 된다. 실측 Lv111(key 언락 튜토리얼): t7 3→2, t8 3→2, t11 6→5 —
+        6장이 보드에 영원히 남아 클리어 불가. 에디터 A* 는 PROVEN_SOLVABLE 로 통과시켰다.
+
+        키타일 자체는 unlockTile(xUnlockTile)로 게임이 t0 분배에서 만들므로
+        (DB_Level.cs:1173 lockBufferCount → 1179 DistributeTiles specifiedCount),
+        여기서는 **속성만 지워 색을 되돌린다**. 타입·좌표·개수는 건드리지 않으므로
+        모양과 총량이 보존된다.
+
+        타입이 진짜 key 인 타일(["key",...])은 정상이므로 그대로 둔다.
+        """
+        stripped = 0
+        for i in range(int(level.get("layer", 0) or 0) + 1):
+            ld = level.get(f"layer_{i}")
+            tiles = ld.get("tiles") if isinstance(ld, dict) else None
+            if not isinstance(tiles, dict):
+                continue
+            for pos, td in tiles.items():
+                if not (isinstance(td, list) and len(td) > 1 and isinstance(td[0], str)):
+                    continue
+                gim = td[1] if isinstance(td[1], str) else ""
+                if gim.lower() != "key":
+                    continue
+                if td[0].lower() == "key" or td[0] == "t16":
+                    continue  # 진짜 키타일 — 유지
+                td[1] = ""
+                stripped += 1
+
+        if stripped:
+            logger.error(
+                f"[KEY_GIMMICK] 색타일에 찍힌 key 속성 {stripped}개 제거 — "
+                f"게임(isKeyTile)이 색을 무시하고 키타일로 읽어 ÷3 이 깨지는 것을 방지"
+            )
+        return level
+
+    @staticmethod
+    def _repair_unlock_tile(level: Dict[str, Any]) -> Dict[str, Any]:
+        """열 수 없는 잠금 슬롯을 없앤다 — unlockTile 을 실제 키 공급량에 맞춘다.
+
+        게임은 잠긴 독 슬롯 1칸당 키타일 3장을 요구한다(unlockTile × 3).
+        키 공급원은 둘 뿐이다:
+          1) 레벨 JSON 에 박힌 명시 키 (타입 "key"/"t16", 컨테이너 baked 포함)
+          2) t0 분배가 만드는 키 — DB_Level.cs:1179 DistributeTiles(..., lockBufferCount, ...)
+             단 **t0 가 하나도 없으면 분배 자체를 건너뛴다**(DB_Level.cs:1172
+             `if (emptyTilesLength == 0) return;`) → 이 경우 키는 1)뿐이다.
+
+        그래서 t0 == 0 이고 명시 키가 unlockTile×3 에 못 미치면 그 슬롯은 **영원히
+        잠긴 채로 남는다**(실측 Lv1200/1300/1440: unlockTile=2 인데 craft 내부 키 3장뿐).
+        독이 좁아진 채 고정되므로 난이도가 의도와 달라진다.
+
+        모양을 건드리지 않는 유일한 교정은 unlockTile 을 낮추는 것이다.
+        키를 더 넣으면 그 색/총량이 바뀌어 ÷3 이 깨진다.
+        """
+        unlock = int(level.get("unlockTile", level.get("xUnlockTile", 0)) or 0)
+        if unlock <= 0:
+            return level
+
+        explicit_keys = 0
+        t0_count = 0
+        for i in range(int(level.get("layer", 0) or 0) + 1):
+            ld = level.get(f"layer_{i}")
+            tiles = ld.get("tiles") if isinstance(ld, dict) else None
+            if not isinstance(tiles, dict):
+                continue
+            for td in tiles.values():
+                if not (isinstance(td, list) and td and isinstance(td[0], str)):
+                    continue
+                tt = td[0]
+                gim = td[1] if len(td) > 1 and isinstance(td[1], str) else ""
+                if tt == "t0":
+                    t0_count += 1
+                elif tt.lower() == "key" or tt == "t16" or gim.lower() == "key":
+                    explicit_keys += 1
+                elif tt.startswith("craft_") or tt.startswith("stack_"):
+                    si = td[2] if len(td) > 2 else None
+                    if not (isinstance(si, list) and si):
+                        continue
+                    try:
+                        n = int(si[0])
+                    except (ValueError, TypeError):
+                        continue
+                    inner = si[1] if len(si) > 1 and isinstance(si[1], str) else ""
+                    ids = [s for s in inner.split("_") if s] if inner else []
+                    # CTileStackInfo:149 — 개수가 정확히 맞을 때만 baked 로 채택된다
+                    if len(ids) == n:
+                        explicit_keys += sum(1 for s in ids if s.lower() == "key" or s == "t16")
+                    else:
+                        t0_count += n
+
+        if t0_count > 0:
+            return level  # 게임이 t0 분배로 부족분을 만든다
+
+        supported = explicit_keys // 3
+        if supported >= unlock:
+            return level
+
+        level["unlockTile"] = supported
+        if "xUnlockTile" in level:
+            level["xUnlockTile"] = supported
+        logger.error(
+            f"[UNLOCK_TILE] 키 공급 부족 — unlockTile {unlock}→{supported} "
+            f"(명시 키 {explicit_keys}장, t0 없음 → 게임이 키를 추가 생성 못 함). "
+            f"그대로 두면 잠금 슬롯 {unlock - supported}칸이 영구히 안 열린다"
+        )
         return level
 
     @staticmethod
@@ -13596,11 +13878,16 @@ class LevelGenerator:
             need_more = 3 - need_less                  # 또는 이만큼 늘리면 ÷3
             # key 를 규약값(unlockTile×3)에 가깝게 만드는 방향을 우선한다.
             grow_key = len(key_slots) + need_less <= key_target or not key_slots
+            # [키 하한] key 를 매칭으로 되돌릴 때 unlockTile×3 아래로 내려가면 잠금 슬롯이
+            # 영원히 안 열린다. 총합 ÷3 을 맞추려다 레벨을 다른 방식으로 망가뜨리는 셈이라
+            # 이 방향은 여유분(key_target 초과분)이 있을 때만 허용한다.
+            # (실측 Lv1102: unlockTile=2 인데 key 6→3 으로 깎아 슬롯 1칸이 영구 잠김.)
+            can_shrink_key = len(key_slots) >= need_more and (len(key_slots) - need_more) >= key_target
             if grow_key and len(tile_slots) >= need_less:
                 # 매칭 슬롯 → key : 매칭 총수 need_less 감소
                 for a, k, _p in tile_slots[:need_less]:
                     relabel(a, k, "key")
-            elif len(key_slots) >= need_more:
+            elif can_shrink_key:
                 # key → 매칭 : 매칭 총수 need_more 증가. 받는 타입은 아래 B 단계가 정리한다.
                 dest = next(iter(counts), "t1")
                 for a, k in key_slots[:need_more]:

@@ -9,6 +9,7 @@
 (서버는 ProductionLevel/Batch 타입을 미러링하지 않음 — 결합도 최소화).
 """
 import json
+import logging
 import os
 import time
 import tempfile
@@ -16,6 +17,8 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/production", tags=["production-store"])
 
@@ -88,6 +91,17 @@ class SaveBatchRequest(BaseModel):
     # 낙관적 동시성: 클라가 마지막으로 알던 버전. 서버 현재 버전과 다르면 409(다른 브라우저가
     # 먼저 수정). None이면 버전 검사 생략(강제 덮어쓰기 — 최초 저장/수동 강제용).
     base_version: Optional[int] = Field(default=None, description="클라가 마지막으로 안 서버 버전")
+    # [델타 저장] True 면 levels 를 **변경분으로만** 보고 기존 저장본에 병합한다.
+    #
+    # 왜: 예전엔 무조건 전량 교체라, 순차검증처럼 레벨 몇 개만 바뀌는 상황에서도
+    # 클라가 1500레벨(4.9MB)을 매번 IndexedDB 에서 읽어 직렬화해 올렸다(디바운스 4초).
+    # 실측 레벨당 3.3KB · 동시성 10 → 실제 변경분은 33KB 인데 150배를 보내던 셈이고,
+    # 브라우저 힙이 그 주기로 계단식으로 쌓였다(순차검증 중 탭 사망 의심 원인).
+    #
+    # 병합 키는 meta.level_number. 저장본에 없는 번호는 추가된다.
+    # batch(메타)는 부분 전송에서도 **항상 통째로** 교체한다 — 카운터/타임스탬프류라 작고,
+    # 부분 병합하면 오히려 정합이 깨진다.
+    partial: bool = Field(default=False, description="levels 를 변경분으로만 보고 기존본에 병합")
 
 
 class BatchSummary(BaseModel):
@@ -436,6 +450,54 @@ def save_batch(batch_id: str, req: SaveBatchRequest) -> SaveBatchResponse:
         )
     new_version = (cur or 0) + 1
     saved_at = time.time()
+
+    # [델타 병합] 부분 전송이면 기존 저장본을 읽어 level_number 기준으로 갈아끼운다.
+    # 아래 게이트 3종은 전부 레벨 단위 순회라(_enforce_*), 델타에만 적용해도 논리가 성립한다
+    # — 이미 저장된 레벨은 그때 이미 검사받았다.
+    levels_in = req.levels
+    merged_levels: Optional[List[Dict[str, Any]]] = None
+    if req.partial:
+        fp = _path(bid)
+        if not os.path.exists(fp):
+            # 서버에 배치가 없는데 델타만 받으면 나머지 레벨이 통째로 유실된다.
+            raise HTTPException(status_code=409, detail={
+                "message": "서버에 배치가 없습니다 — 최초 저장은 전체(partial=false)여야 합니다",
+            })
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                base_levels: List[Dict[str, Any]] = json.load(f).get("levels") or []
+        except Exception as ex:  # noqa: BLE001
+            # 기존본을 못 읽으면 델타만 남아 1500개가 날아간다 → 저장 자체를 거부한다.
+            raise HTTPException(status_code=409, detail={
+                "message": f"기존 배치를 읽을 수 없어 부분 저장을 거부합니다({type(ex).__name__}) — 전체 저장(partial=false)으로 재시도하세요",
+            })
+
+        def _lnum(l: Dict[str, Any]) -> Any:
+            m = l.get("meta") if isinstance(l, dict) else None
+            return m.get("level_number") if isinstance(m, dict) else None
+
+        by_num: Dict[Any, Dict[str, Any]] = {}
+        order: List[Any] = []
+        for l in base_levels:
+            k = _lnum(l)
+            if k is None:
+                continue
+            if k not in by_num:
+                order.append(k)
+            by_num[k] = l
+        applied = 0
+        for l in levels_in:
+            k = _lnum(l)
+            if k is None:
+                continue
+            if k not in by_num:
+                order.append(k)
+            by_num[k] = l
+            applied += 1
+        merged_levels = [by_num[k] for k in order]
+        # 검증·운영 확인용. uvicorn 기본 설정에서 INFO 는 안 보여 warning 으로 낸다
+        # (델타 저장은 드물지 않지만, 전량 저장으로 잘못 도는 걸 즉시 알아채는 값이 크다).
+        logger.warning(f"[SAVE_PARTIAL] {bid}: 델타 {applied}건 병합 → 총 {len(merged_levels)}개")
     # [안전망] ÷3 게이트 — 생성 경로 무관하게 클리어 불가(÷3 위반) 레벨을 저장 직전 검출·플래그.
     flagged = _enforce_divisibility_gate(req.levels)
     # [안전망] 헤더-OOB 게이트 — 헤더 밖 타일(게임서 잘림→클리어불가) 검출·플래그.
@@ -443,10 +505,13 @@ def save_batch(batch_id: str, req: SaveBatchRequest) -> SaveBatchResponse:
     # [안전망] 규칙 게이트 — 사슬 해제불가 / 폭탄 범위 / 튜토리얼 기믹 누락 / timea 부족.
     # RL 검증은 클리어율만 보므로 규칙 위반은 여기서 잡아 재검증·재생성으로 되돌린다.
     rule_flagged = _enforce_rule_gate(req.levels)
+    # 게이트는 req.levels(델타)에 플래그를 **제자리로** 찍는다. merged_levels 는 같은 dict 를
+    # 참조하므로 플래그가 그대로 반영된다 — 따로 옮길 필요 없다.
+    out_levels = merged_levels if merged_levels is not None else req.levels
     payload = {
         "batch_id": bid,
         "batch": req.batch,
-        "levels": req.levels,
+        "levels": out_levels,
         "saved_at": saved_at,
         "version": new_version,
     }
@@ -463,7 +528,7 @@ def save_batch(batch_id: str, req: SaveBatchRequest) -> SaveBatchResponse:
     # 인덱스 갱신 — 다음 목록 조회가 이 파일을 재파싱하지 않도록(저장 직후가 가장 흔한 경로)
     try:
         _idx = _load_index()
-        _idx[bid] = _index_entry(bid, req.batch, len(req.levels), saved_at, new_version, _path(bid))
+        _idx[bid] = _index_entry(bid, req.batch, len(out_levels), saved_at, new_version, _path(bid))
         _save_index(_idx)
     except Exception:  # noqa: BLE001
         pass  # 인덱스는 캐시일 뿐 — 실패해도 목록 조회가 재파싱으로 복구

@@ -177,13 +177,17 @@ export async function updateProductionBatch(
 }
 
 // 레벨 쓰기 리스너 — 서버 자동 동기화(디바운스 push)용. productionServerSync가 등록한다.
-const _writeListeners = new Set<(batchId: string) => void>();
-export function onLevelsWritten(cb: (batchId: string) => void): void {
+//
+// [델타 동기화] 바뀐 **레벨 번호**를 같이 넘긴다. 예전엔 batchId 만 알려줘서 동기화가
+// "뭐가 바뀌었는지" 알 수 없었고, 그래서 매번 1500레벨(4.9MB)을 통째로 올렸다.
+// 실측: 순차검증 12시간에 PUT 1152회 = 약 5GB 직렬화·전송 → 브라우저 탭 사망.
+const _writeListeners = new Set<(batchId: string, levelNumbers: number[]) => void>();
+export function onLevelsWritten(cb: (batchId: string, levelNumbers: number[]) => void): void {
   _writeListeners.add(cb);
 }
-function _notifyWritten(batchId: string): void {
+function _notifyWritten(batchId: string, levelNumbers: number[]): void {
   for (const cb of _writeListeners) {
-    try { cb(batchId); } catch { /* 리스너 오류 무시 */ }
+    try { cb(batchId, levelNumbers); } catch { /* 리스너 오류 무시 */ }
   }
 }
 
@@ -207,7 +211,7 @@ export async function saveProductionLevel(
     const request = store.put(record);
 
     request.onerror = () => reject(request.error);
-    request.onsuccess = () => { _notifyWritten(batchId); resolve(); };
+    request.onsuccess = () => { _notifyWritten(batchId, [level.meta.level_number]); resolve(); };
   });
 }
 
@@ -216,7 +220,17 @@ export async function saveProductionLevel(
  */
 export async function saveProductionLevels(
   batchId: string,
-  levels: ProductionLevel[]
+  levels: ProductionLevel[],
+  opts?: {
+    /**
+     * 쓰기 알림을 내지 않는다 → 서버 push 가 예약되지 않는다.
+     *
+     * 서버에서 내려받아 로컬에 반영하는 pull 경로에 쓴다. 그 경우 로컬 = 서버라
+     * 되돌려 보낼 게 없는데, 알림을 내면 1500개가 전부 '변경됨'으로 찍혀 곧바로
+     * 전량 push 가 나가는 에코 루프가 된다.
+     */
+    silent?: boolean;
+  }
 ): Promise<void> {
   const database = await initProductionDB();
 
@@ -244,7 +258,9 @@ export async function saveProductionLevels(
       request.onsuccess = () => {
         completed++;
         if (completed === levels.length && !hasError) {
-          _notifyWritten(batchId);
+          if (!opts?.silent) {
+            _notifyWritten(batchId, levels.map(l => l.meta.level_number));
+          }
           resolve();
         }
       };
@@ -324,6 +340,50 @@ export async function getProductionLevelNumbersByBatch(batchId: string): Promise
 /**
  * 배치의 모든 레벨 조회
  */
+/**
+ * 지정한 레벨 번호만 조회 — 델타 push 전용.
+ *
+ * 스토어 keyPath 가 ['batch_id', 'meta.level_number'] 복합키라 번호별 직접 조회가 된다.
+ * getProductionLevelsByBatch 는 1500개를 전부 커서 순회해 메모리에 올리는데,
+ * 실제로 바뀐 건 보통 10개 안팎이다. 이 함수가 델타 동기화의 메모리 절감 핵심이다.
+ *
+ * 없는 번호는 조용히 건너뛴다(삭제됐거나 아직 안 만들어진 레벨).
+ */
+export async function getProductionLevelsByNumbers(
+  batchId: string,
+  levelNumbers: number[]
+): Promise<ProductionLevel[]> {
+  if (levelNumbers.length === 0) return [];
+  const database = await initProductionDB();
+
+  return new Promise((resolve, reject) => {
+    const tx = database.transaction(STORES.LEVELS, 'readonly');
+    const store = tx.objectStore(STORES.LEVELS);
+    const out: ProductionLevel[] = [];
+    let pending = levelNumbers.length;
+    let failed = false;
+
+    for (const n of levelNumbers) {
+      const req = store.get([batchId, n]);
+      req.onerror = () => {
+        if (failed) return;
+        failed = true;
+        reject(req.error);
+      };
+      req.onsuccess = () => {
+        if (failed) return;
+        const rec = req.result as (ProductionLevel & { batch_id?: string }) | undefined;
+        if (rec) {
+          const { batch_id: _omit, ...level } = rec;
+          void _omit;
+          out.push(level as ProductionLevel);
+        }
+        if (--pending === 0) resolve(out);
+      };
+    }
+  });
+}
+
 export async function getProductionLevelsByBatch(
   batchId: string,
   options?: {

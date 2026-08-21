@@ -37,6 +37,7 @@ import {
   initProductionDB,
   createProductionBatch,
   getProductionBatch,
+  putBatchRaw,
   updateProductionBatch,
   listProductionBatches,
   saveProductionLevels,
@@ -260,6 +261,10 @@ const VISUAL_POOL = 15; // 비주얼 스프라이트 풀 t1~t15
 // RL 검증(초기/순차/재생성) 전 경로에서 target_clear_rate_scale로 백엔드에 전달.
 // [보스 목표 클리어율 스케일] 레벨대별 완화. 초반(10~30)은 언락 기믹 부족+튜토리얼이라
 // 살짝만 어렵게(×0.75). 40~100 ×0.65. 110+ 본격 보스 ×0.5.
+/** 보스 레벨(10의 배수) 판정 — 난이도 레버 정책이 일반 레벨과 다르다. */
+const isBossLv = (levelNumber: number | undefined): boolean =>
+  !!levelNumber && levelNumber > 0 && levelNumber % 10 === 0;
+
 const bossTargetScale = (levelNumber: number | undefined): number | undefined => {
   if (!levelNumber || levelNumber <= 0 || levelNumber % 10 !== 0) return undefined;
   if (levelNumber <= 30) return 0.75;
@@ -1084,6 +1089,8 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
         difficulty_end: presetConfig.difficulty_end,
         use_sawtooth: presetConfig.use_sawtooth,
         gimmick_unlock_levels: PROFESSIONAL_GIMMICK_UNLOCK_LEVELS,
+        // 생성에 쓴 V 곡선을 배치에 박는다 — 나중에 난이도 다이얼의 ±2 클램프 기준이 된다.
+        tile_type_profile: tileTypeProfile,
       });
 
       setBatches(prev => [batch, ...prev]);
@@ -1977,7 +1984,8 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
       setBatches(updatedBatches);
 
       // 서버(로컬 파일)에 자동 저장 → 같은 컴퓨터의 다른 브라우저에서도 접근 가능
-      pushBatchToServer(activeBatchId).catch(() => { /* 서버 미가동 시 무시 */ });
+      // 방금 배치를 통째로 만든 직후 → 전량 전송(델타로 보내봐야 어차피 전부다).
+      pushBatchToServer(activeBatchId, { full: true }).catch(() => { /* 서버 미가동 시 무시 */ });
 
       addNotification(
         'success',
@@ -2081,6 +2089,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
           difficulty_end: presetConfig.difficulty_end,
           use_sawtooth: presetConfig.use_sawtooth,
           gimmick_unlock_levels: PROFESSIONAL_GIMMICK_UNLOCK_LEVELS,
+          tile_type_profile: tileTypeProfile,
         });
         setBatches(prev => [batch, ...prev]);
         setSelectedBatchId(batch.id);
@@ -2394,7 +2403,8 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
                     size="sm"
                     onClick={async () => {
                       try {
-                        const ok = await pushBatchToServer(selectedBatch.id);
+                        // 수동 저장은 '어긋났을 때 맞추는' 복구 수단 → 항상 전량.
+                        const ok = await pushBatchToServer(selectedBatch.id, { full: true });
                         addNotification(ok ? 'success' : 'warning',
                           ok ? '서버(로컬 파일)에 저장됨 — 다른 브라우저에서도 접근 가능' : '저장할 배치 없음');
                       } catch (e) {
@@ -3959,6 +3969,27 @@ function TestTab({
   const [filter, setFilter] = useState<LevelStatus | 'all' | 'low_match' | 'untested'>('all');
   const [searchQuery, setSearchQuery] = useState('');
 
+  /**
+   * 이 배치를 **실제로 만든** V 곡선.
+   *
+   * 예전엔 전역 UI 설정(localStorage 의 tileTypeProfile)만 봤다. 그래서 hard_steep 으로
+   * 만든 배치인데도 다이얼의 '타일 종류' ±2 클램프가 baseline 기준으로 걸렸다
+   * (실측 Lv550: 현재 12 인데 baseline 기준 8~12 라 더 못 올림. hard_steep 기준이면 10~14).
+   * 배치에 박힌 값이 정본이고, 없으면(구배치) 전역 설정 → baseline 순으로 폴백한다.
+   */
+  const [batchTileProfile, setBatchTileProfile] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const b = await getProductionBatch(batchId);
+        if (alive) setBatchTileProfile(b?.tile_type_profile ?? null);
+      } catch { /* 조회 실패 시 폴백 사용 */ }
+    })();
+    return () => { alive = false; };
+  }, [batchId]);
+  const effTileProfile = batchTileProfile ?? tileTypeProfile;
+
   // Test mode: manual (play), auto_single (bot sim for selected), auto_batch (batch bot sim)
   const [testMode, setTestMode] = useState<'manual' | 'auto_single' | 'auto_batch'>('manual');
 
@@ -4432,7 +4463,13 @@ function TestTab({
   const applyTileCount = useCallback(async () => {
     const base = gimmickBaseRef.current;
     if (!selectedLevel || !base || base.level !== selectedLevel.meta.level_number) return;
-    const n = Math.max(2, Math.min(12, Math.round(tileCountInput)));
+    // [상한] 예전엔 12 로 하드코딩돼 있어, hard_steep 배치(Lv550 기준 12 → 허용 14)에서
+    // 13·14 를 넣어도 여기서 잘려나갔다. 배치 곡선의 그래프값 ±2 를 상한으로 쓴다.
+    const _baseV = vAtLevel(
+      TILE_TYPE_PROFILE_CURVES[effTileProfile] ?? TILE_TYPE_PROFILE_CURVES.baseline,
+      selectedLevel.meta.level_number,
+    );
+    const n = Math.max(2, Math.min(_baseV + 2, Math.round(tileCountInput)));
     setGimmickBusy(true);
     try {
       const resp = await apiClient.post('/tune/tilecount', {
@@ -4442,7 +4479,8 @@ function TestTab({
         // [±2 제한] 백엔드가 level_number 의 정본 그래프값 기준으로 ±2 로 클램프한다.
         // 안 넘기면 '현재 useTileCount' 기준이라 반복 호출 시 2씩 계속 밀려난다.
         level_number: selectedLevel.meta.level_number,
-        tile_type_profile: tileTypeProfile === 'baseline' ? undefined : tileTypeProfile,
+        // 전역 UI 설정이 아니라 **이 배치를 만든 곡선**을 보내야 백엔드 클램프 기준이 맞다.
+        tile_type_profile: effTileProfile === 'baseline' ? undefined : effTileProfile,
       });
       const r = resp.data as { best_level_json: LevelJsonLike; tile_count: number; color_types: number };
       await saveProductionLevels(batchId, [{
@@ -4914,6 +4952,70 @@ function TestTab({
       worst_gap_pp?: number; direction?: 'too_easy' | 'too_hard' | 'ok';
     };
     // 라운드 간 유지 상태
+    /**
+     * [리렌더 억제] 순차검증 진행 상태를 500ms 로 묶어 반영한다.
+     *
+     * 예전엔 레벨 측정마다 곧바로 setState 했다. 1500레벨 × 최대 5라운드면 수천 번인데,
+     * 매번 `results: [...resultByLn.values()]` 로 1500개 배열을 새로 만들고 그때마다
+     * ProductionDashboard(단일 파일 500KB 초과, 1500행 리스트 포함) 전체가 리렌더됐다.
+     * 실측 세션: rl-sim 827건 → 최소 827회 리렌더 + 124만 개 객체 할당.
+     * 12시간 돌리면 탭이 버티지 못한다(크래시 리포트도 안 남음 = OS 회수 정황).
+     *
+     * 생성 경로엔 이미 같은 방식(updateProgressThrottled, 500ms)이 있다 — 그걸 순차검증에도 맞춘다.
+     * 상태 자체는 seqProgressRef 에 즉시 반영하므로 로직 정확도는 그대로다.
+     */
+    const seqProgressRef = { current: null as null | Parameters<typeof setSequentialProgress>[0] };
+    let seqFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    const seqPatch: { v: Record<string, unknown> } = { v: {} };
+    const setSeqThrottled = (patch: Record<string, unknown>) => {
+      Object.assign(seqPatch.v, patch);
+      if (seqFlushTimer) return;
+      seqFlushTimer = setTimeout(() => {
+        seqFlushTimer = null;
+        const p = seqPatch.v;
+        seqPatch.v = {};
+        setSequentialProgress(prev => ({ ...prev, ...p }));
+      }, 500);
+    };
+    const seqFlushNow = () => {
+      if (seqFlushTimer) { clearTimeout(seqFlushTimer); seqFlushTimer = null; }
+      const p = seqPatch.v;
+      seqPatch.v = {};
+      if (Object.keys(p).length) setSequentialProgress(prev => ({ ...prev, ...p }));
+    };
+    void seqProgressRef;
+
+    /**
+     * [리렌더 억제] 측정 결과로 인한 levels 상태 갱신을 500ms 로 묶는다.
+     *
+     * `setLevels(prev => prev.map(...))` 는 배열 하나 만드는 비용은 작지만,
+     * **1500행 레벨 리스트 전체가 리렌더**된다. 측정마다 부르면 그게 수천 번이다.
+     * 디스크 저장(saveProductionLevels)은 즉시 하므로 데이터는 안전하고,
+     * 화면 반영만 0.5초 늦어진다.
+     */
+    const pendingMeta = new Map<number, Record<string, unknown>>();
+    let metaFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    const flushMeta = () => {
+      metaFlushTimer = null;
+      if (pendingMeta.size === 0) return;
+      const patches = new Map(pendingMeta);
+      pendingMeta.clear();
+      const scrollTop = levelListRef.current?.scrollTop || 0;
+      setLevels(prev => prev.map(l => {
+        const patch = patches.get(l.meta.level_number);
+        return patch ? { ...l, meta: { ...l.meta, ...patch } } : l;
+      }));
+      requestAnimationFrame(() => { if (levelListRef.current) levelListRef.current.scrollTop = scrollTop; });
+    };
+    const patchLevelMeta = (ln: number, patch: Record<string, unknown>) => {
+      pendingMeta.set(ln, { ...(pendingMeta.get(ln) || {}), ...patch });
+      if (!metaFlushTimer) metaFlushTimer = setTimeout(flushMeta, 500);
+    };
+    const flushMetaNow = () => {
+      if (metaFlushTimer) { clearTimeout(metaFlushTimer); metaFlushTimer = null; }
+      flushMeta();
+    };
+
     const resultByLn = new Map<number, SeqResult>();
     const passedSet = new Set<number>();                    // 통과한 레벨(다음 라운드 측정 제외)
     const offsetByLn = new Map<number, number>();           // 측정 gap 기반 난이도 조준(재생성에 전달, 누적)
@@ -4984,7 +5086,7 @@ function TestTab({
       }
 
       const passThreshold = computeSequentialPassThreshold(currentLevel.meta.target_difficulty);
-      setSequentialProgress(prev => ({ ...prev, currentIndex: passedSet.size, currentLevel: levelNumber, currentAttempt: round, status: 'testing' }));
+      setSeqThrottled({ currentIndex: passedSet.size, currentLevel: levelNumber, currentAttempt: round, status: 'testing' });
 
       try {
         const rl = await simulateLevelSkillSweep({
@@ -5059,11 +5161,18 @@ function TestTab({
         else forceNoTemplateByLn.delete(levelNumber);
 
         await saveProductionLevels(batchId, [{ meta: { ...currentLevel.meta, ...rlMeta }, level_json: currentLevel.level_json }]);
-        const scrollTop = levelListRef.current?.scrollTop || 0;
-        setLevels(prev => prev.map(l => l.meta.level_number === levelNumber ? { ...l, meta: { ...l.meta, ...rlMeta } } : l));
-        requestAnimationFrame(() => { if (levelListRef.current) levelListRef.current.scrollTop = scrollTop; });
+        patchLevelMeta(levelNumber, rlMeta as unknown as Record<string, unknown>);
 
-        if (isPassed) { passedSet.add(levelNumber); recordPassedOffset(levelNumber, currentLevel.meta.target_difficulty, off); }
+        if (isPassed) {
+          passedSet.add(levelNumber);
+          recordPassedOffset(levelNumber, currentLevel.meta.target_difficulty, off);
+          // [메모리] 통과한 레벨은 라운드 간 상태를 더 안 쓴다 — 다음 라운드 측정 대상에서
+          // 빠지고, best 스냅샷은 '끝까지 미달인 레벨' 복원에만 쓰인다.
+          // 1500레벨이면 level_json 만 5MB 급이라 통과분을 계속 들고 있을 이유가 없다.
+          bestByLn.delete(levelNumber);
+          lastJsonByLn.delete(levelNumber);
+          clsByLn.delete(levelNumber);
+        }
 
         resultByLn.set(levelNumber, {
           level_number: levelNumber, attempts: round, final_score: matchScore, success: isPassed,
@@ -5071,7 +5180,8 @@ function TestTab({
           worst_gap_pp: gapPp, direction,
         });
         _completed++;
-        setSequentialProgress(prev => ({ ...prev, currentIndex: passedSet.size, results: [...resultByLn.values()] }));
+        // results 배열 재생성도 스로틀 안으로 — 매 측정마다 1500개를 새로 만들 이유가 없다.
+        setSeqThrottled({ currentIndex: passedSet.size, results: [...resultByLn.values()] });
       } catch (err) {
         console.error(`측정 실패 Lv.${levelNumber}:`, err);
       }
@@ -5096,7 +5206,7 @@ function TestTab({
       if (cls && cls !== 'unclearable_suspect' && srcJson && lvlMeta
           && !tunedByLn.has(levelNumber) && typeof lvlMeta.target_difficulty === 'number') {
         tunedByLn.add(levelNumber);
-        setSequentialProgress(prev => ({ ...prev, currentLevel: levelNumber, status: 'regenerating' }));
+        setSeqThrottled({ currentLevel: levelNumber, status: 'regenerating' });
         try {
           const resp = await apiClient.post('/tune/auto', {
             level_json: srcJson,
@@ -5105,11 +5215,19 @@ function TestTab({
             target_clear_rate_scale: bossTargetScale(levelNumber) ?? 1.0,
             skill_mean: rlSkillMean,
             tolerance: RL_CLEAR_TOL,
-            try_gimmick: true,
+            // [보스 레버 정책] 보스는 모양이 템플릿으로 고정이라 재생성이 난이도 레버로
+            // 거의 작동하지 않는다(실루엣이 그대로). 그래서 색 → 타일 종류(±2) 순으로 맞추고,
+            // 기믹 자동 스윕은 **끈다** — 자동 재배치가 수동으로 맞춰둔 기믹 구성을 덮어쓴다.
+            // 기믹은 난이도 다이얼에서 사람이 만질 때만 바뀌게 한다.
+            // 일반 레벨은 기존대로(기믹 스윕 O, 종류 고정) — 재생성이 실제 레버로 작동한다.
+            try_gimmick: !isBossLv(levelNumber),
+            try_tilecount: isBossLv(levelNumber),
+            tile_type_profile: effTileProfile === 'baseline' ? undefined : effTileProfile,
           }, { signal });
           const r = resp.data as {
             tuned: boolean; lever: string; best_level_json: LevelJsonLike;
             predicted_clear_rate: number; original_predicted: number; target_clear_rate: number;
+            tile_count?: number;
           };
           const before = Math.abs(r.original_predicted - r.target_clear_rate);
           const after = Math.abs(r.predicted_clear_rate - r.target_clear_rate);
@@ -5126,7 +5244,7 @@ function TestTab({
             }]);
             setLevels(prev => prev.map(l => l.meta.level_number === levelNumber
               ? { ...l, level_json: r.best_level_json as ProductionLevel['level_json'] } : l));
-            console.info(`[seq/tune] Lv.${levelNumber} ${r.lever}: `
+            console.info(`[seq/tune] Lv.${levelNumber} ${r.lever}${r.tile_count ? `(${r.tile_count}종)` : ''}: `
               + `${r.original_predicted.toFixed(3)} → ${r.predicted_clear_rate.toFixed(3)} (목표 ${r.target_clear_rate.toFixed(3)})`);
             return;   // 재생성 생략 — 다음 라운드가 튜닝본을 측정
           }
@@ -5136,7 +5254,7 @@ function TestTab({
         }
       }
 
-      setSequentialProgress(prev => ({ ...prev, currentLevel: levelNumber, status: 'regenerating' }));
+      setSeqThrottled({ currentLevel: levelNumber, status: 'regenerating' });
       try {
         await handleRegenerateLevel(levelNumber, undefined, undefined, {
           forceNoTemplate: forceNoTemplateByLn.has(levelNumber),
@@ -5209,6 +5327,7 @@ function TestTab({
       console.info(`[seq] 2차패스 보스 제외 ${bossExcluded}개 — 보스 모양 보존(라운드 재생성이 담당)`);
     }
     if (stillFailedNonBoss.length > 0 && !signal.aborted) {
+      seqFlushNow(); flushMetaNow();
       setSequentialProgress(prev => ({ ...prev, status: 'testing' }));
       addNotification('info', `2차패스(QD): 실패 ${stillFailedNonBoss.length}개 풀생성·배정 시작…`
         + (bossExcluded ? ` (보스 ${bossExcluded}개 제외)` : ''));
@@ -5225,6 +5344,7 @@ function TestTab({
     try { localStorage.removeItem(CURSOR_KEY); } catch { /* ignore */ }
 
     setIsSequentialProcessing(false);
+    seqFlushNow(); flushMetaNow();
     setSequentialProgress(prev => ({ ...prev, status: 'idle' }));
 
     const successCount = passedSet.size;
@@ -8996,6 +9116,38 @@ function TestTab({
                   </span>
                 </div>
 
+{/* [곡선] 이 배치를 만든 V 프로파일. 구배치는 기록이 없어 클램프가 baseline 으로
+                    잘못 걸린다 → 여기서 한 번 지정하면 배치에 박혀 이후 계속 쓰인다. */}
+                <div className="flex items-center gap-2">
+                  <span className="w-14 text-[10px] text-gray-400">곡선</span>
+                  <select
+                    value={batchTileProfile ?? ''}
+                    disabled={gimmickBusy}
+                    onChange={async (e) => {
+                      const v = e.target.value || null;
+                      try {
+                        const b = await getProductionBatch(batchId);
+                        if (!b) return;
+                        await putBatchRaw({ ...b, tile_type_profile: v ?? undefined });
+                        setBatchTileProfile(v);
+                        addNotification('success',
+                          v ? `이 배치의 V 곡선을 ${v} 로 지정 — 타일 종류 허용범위가 갱신됩니다`
+                            : '배치 곡선 지정 해제 (전역 설정 사용)');
+                      } catch (err) {
+                        addNotification('error', `곡선 지정 실패: ${(err as Error).message}`);
+                      }
+                    }}
+                    className="px-2 py-1 bg-gray-700 border border-gray-600 rounded text-xs text-white"
+                  >
+                    <option value="">(미지정 — 전역 {tileTypeProfile})</option>
+                    <option value="baseline">baseline (보통)</option>
+                    <option value="hard_steep">hard_steep (어려움)</option>
+                  </select>
+                  <span className="text-[9px] text-gray-500">
+                    이 배치를 만든 곡선. 타일 종류 ±2 클램프의 기준이 됩니다.
+                  </span>
+                </div>
+
                 {/* 4) 사용 타일 종류 수 — 입력 + 적용 (종류↑=어려움). 재타이핑=디스크 커밋(재검증 대상) */}
                 {/* [±2 제한 표시] 백엔드가 레벨 정본 그래프값 ±2 로 클램프한다. 범위를 안 보여주면
                     13 을 넣었는데 12 가 돌아와 버그처럼 보인다(실측 문의). 입력 자체를 범위로 막고,
@@ -9003,7 +9155,7 @@ function TestTab({
                 {(() => {
                   // 백엔드 클램프 기준과 동일하게 계산 — TILE_TYPE_PROFILE_CURVES 는
                   // generator.py 의 LEVEL_CONFIG_TABLE/TILE_TYPE_PROFILES 미러다.
-                  const curve = TILE_TYPE_PROFILE_CURVES[tileTypeProfile] ?? TILE_TYPE_PROFILE_CURVES.baseline;
+                  const curve = TILE_TYPE_PROFILE_CURVES[effTileProfile] ?? TILE_TYPE_PROFILE_CURVES.baseline;
                   const baseV = vAtLevel(curve, selectedLevel.meta.level_number);
                   const lo = baseV ? Math.max(2, baseV - 2) : 2;
                   const hi = baseV ? baseV + 2 : 15;
@@ -9023,8 +9175,8 @@ function TestTab({
                   <span className="text-[9px] text-gray-500">
                     종 (많을수록 어려움)
                     {baseV > 0 && (
-                      <span className="text-amber-400" title={`레벨 정본 그래프값 ${baseV} 기준 ±2 로 제한됩니다. 더 어렵게 하려면 기믹 강도·색 분산을 쓰거나, 이 구간의 난이도 설계(useTileCount 테이블)를 바꿔야 합니다.`}>
-                        {' '}· 허용 {lo}~{hi} (기준 {baseV})
+                      <span className="text-amber-400" title={`${effTileProfile} 곡선의 Lv${selectedLevel.meta.level_number} 그래프값 ${baseV} 기준 ±2 로 제한됩니다.${batchTileProfile ? '' : ' (이 배치에 생성 프로파일 기록이 없어 전역 설정을 씁니다 — 아래 [곡선] 에서 지정하세요)'} 더 어렵게 하려면 기믹 강도·색 분산을 쓰거나, 이 구간의 난이도 설계를 바꿔야 합니다.`}>
+                        {' '}· 허용 {lo}~{hi} (기준 {baseV} · {effTileProfile}{batchTileProfile ? '' : '⚠'})
                       </span>
                     )}
                   </span>

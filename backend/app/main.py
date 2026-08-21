@@ -95,13 +95,76 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Cleanup ProcessPoolExecutor on shutdown."""
+    """Cleanup ProcessPoolExecutor on shutdown.
+
+    ⚠️ 이 훅은 **정상 종료(SIGTERM/SIGINT)** 에서만 돈다. `kill -9` 로 죽이면 실행되지
+    않고 워커가 부모를 잃어 PID 1 로 넘어간다 — 그렇게 쌓인 고아가 실측 1985개였다
+    (프로세스 2638개 중 75%). 재시작은 반드시 TERM 을 먼저 보낼 것.
+    """
+    # ⚠️ 순서 주의: 아래 shutdown_* 헬퍼들이 전역 참조를 None 으로 만든다.
+    # 워커를 명시적으로 죽이려면 **참조가 살아 있는 지금** 풀 객체를 먼저 붙잡아야 한다.
+    live_pools = _iter_live_pools()
+
     from .api.routes.generate import _bot_process_pool, shutdown_gen_pool
     if _bot_process_pool is not None:
         _bot_process_pool.shutdown(wait=False)
     shutdown_gen_pool()
     from .api.routes.rl_sim import shutdown_pool
     shutdown_pool()
+    # [누수 차단] bot_simulator 의 모듈 전역 풀만 이 훅에서 빠져 있었다.
+    # 봇 시뮬(순차검증·난이도 판정)이 쓰는 풀이라 실사용 빈도가 가장 높은데도 아무도 닫지 않았다.
+    try:
+        from .core import bot_simulator as _bs
+        if _bs._process_pool is not None:
+            _bs._process_pool.shutdown(wait=False)
+            _bs._process_pool = None
+    except Exception:  # noqa: BLE001 — 종료 경로라 실패해도 막지 않는다
+        pass
+
+    # [최종 회수] shutdown(wait=False) 는 '더 이상 작업을 받지 않는다'는 신호일 뿐,
+    # 워커가 실제로 죽는 걸 기다리지 않는다. 부모가 곧바로 종료하면 워커는 아직 살아 있고
+    # 그대로 PID 1 로 입양돼 영구 잔류한다 — 실측으로 종료 1회당 20여 개가 남았다.
+    # 그래서 각 풀의 자식 프로세스를 명시적으로 죽인다(멱등, 이미 죽었으면 무시).
+    #
+    # wait=True 를 쓰지 않는 이유: 진행 중인 시뮬이 길면 종료가 그만큼 지연되고,
+    # 재시작이 잦은 개발 환경에서 오히려 좀비를 늘린다. 여기서는 즉시 종료가 옳다.
+    import contextlib
+    for pool in live_pools:
+        with contextlib.suppress(Exception):   # 풀 하나가 터져도 나머지는 정리한다
+            # ⚠️ `_processes` 는 워커를 아직 안 띄운 풀에서 **None** 이다(속성은 존재).
+            # getattr 기본값은 '속성 없음'에만 걸리므로 None 을 못 걸러 AttributeError 가 났고,
+            # 그 예외가 훅 전체를 중단시켜 `Application shutdown failed` → 오히려 정리가 안 됐다.
+            procs = list((getattr(pool, "_processes", None) or {}).values())
+            for p in procs:
+                with contextlib.suppress(Exception):
+                    if p.is_alive():
+                        p.terminate()
+            for p in procs:
+                with contextlib.suppress(Exception):
+                    p.join(timeout=1.0)
+                    if p.is_alive():
+                        p.kill()
+
+
+def _iter_live_pools():
+    """현재 살아 있는 ProcessPoolExecutor 전부. 풀이 5개로 흩어져 있어 모아서 순회한다."""
+    pools = []
+    try:
+        from .api.routes import generate as _g
+        pools += [_g._bot_process_pool, _g._gen_process_pool, _g._autoplay_process_pool]
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from .api.routes import rl_sim as _r
+        pools.append(_r._pool)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from .core import bot_simulator as _b
+        pools.append(_b._process_pool)
+    except Exception:  # noqa: BLE001
+        pass
+    return [p for p in pools if p is not None]
 
 
 @app.get("/health")

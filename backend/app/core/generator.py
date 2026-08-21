@@ -15613,8 +15613,15 @@ class LevelGenerator:
                 # 패턴 모드: regular t0 삭제 대신 컨테이너 내부 t0 개수를 (3-rt) 증가 → 시각 타일 무변경.
                 # 한 컨테이너에 몰아넣지 않고 내부 개수가 적은 것부터 1씩 분산한다(스택 하나만
                 # 비정상적으로 두꺼워지는 것 방지). need 는 1 또는 2 라 컨테이너 1~2개만 건드린다.
+                # ⚠️ **baked(내부 타입 문자열 확정) 컨테이너는 제외한다.**
+                # 개수만 올리고 문자열을 그대로 두면 둘이 어긋나는데, 게임은 개수가 안 맞으면
+                # baked 를 통째로 버리고 내부를 t0 로 재분배한다
+                # (CTileStackInfo:149  if (ids.Length == xStackTotalCount)).
+                # 그러면 우리가 센 색 구성과 실제 보드가 달라져 ÷3 이 깨진다.
+                # 실측(재생성본): craft_w [2,"t4_t5_t5_t4"] → 게임 t5 7개 = 클리어 불가.
                 targets = [td for _, _, td in containers
-                           if len(td) > 2 and isinstance(td[2], list) and td[2]]
+                           if len(td) > 2 and isinstance(td[2], list) and td[2]
+                           and not (len(td[2]) > 1 and isinstance(td[2][1], str) and td[2][1])]
                 if targets:
                     need = 3 - rt
                     targets.sort(key=_internal)
@@ -15644,6 +15651,10 @@ class LevelGenerator:
                     for li, pos, td in containers:
                         if removed >= rt:
                             break
+                        # baked 는 개수만 줄여도 문자열과 어긋난다(위와 같은 이유) → 건너뛴다.
+                        if len(td) > 2 and isinstance(td[2], list) and len(td[2]) > 1 \
+                                and isinstance(td[2][1], str) and td[2][1]:
+                            continue
                         intern = _internal(td)
                         take = min(intern - self.MIN_GOAL_COUNT, rt - removed)
                         if take > 0:

@@ -1066,6 +1066,16 @@ class AutoTuneRequest(BaseModel):
     skill_grid: Optional[List[float]] = None
     max_moves: Optional[int] = None
     try_gimmick: bool = True           # 색으로 부족할 때 기믹 스윕 허용
+    # [타일 종류 레버] 색으로 부족할 때 **정본 그래프값 ±2** 안에서 종류 수를 스윕한다.
+    #
+    # 보스 레벨용으로 넣었다. 보스는 모양이 템플릿으로 고정이라 재생성해도 실루엣이 그대로고,
+    # 그래서 '재생성' 이 난이도 레버로 거의 작동하지 않는다. 실제로 쓸 수 있는 건 색·종류뿐인데
+    # 종류는 그동안 그래프값에 잠겨 있어 봉인된 상태였다.
+    #
+    # 기믹은 반대로 자동 스윕을 **끄는 쪽**이 맞다 — 자동 재배치가 수동으로 맞춰둔 기믹 구성을
+    # 덮어쓴다. 기믹은 난이도 다이얼에서 사람이 만질 때만 바뀌게 한다.
+    try_tilecount: bool = False
+    tile_type_profile: Optional[str] = None   # ±2 기준 곡선(미지정=baseline)
 
 
 class AutoTuneResult(BaseModel):
@@ -1075,7 +1085,8 @@ class AutoTuneResult(BaseModel):
     original_predicted: float
     target_clear_rate: float
     close: bool                        # tolerance 안 도달 여부
-    lever: str                         # none/color/gimmick/gimmick+color
+    lever: str                         # none/color/tilecount/gimmick
+    tile_count: Optional[int] = None   # lever=='tilecount' 일 때 채택된 종류 수
     spread: Optional[float] = None
     intensity: Optional[float] = None
     cluster_index: Optional[float] = None
@@ -1108,7 +1119,8 @@ def tune_auto(req: AutoTuneRequest) -> AutoTuneResult:
     best_lv = req.level_json
     best_pred = -1.0
     best_meta: Dict[str, Any] = {"lever": "none", "spread": None, "intensity": None,
-                                 "cluster_index": None, "gimmick_count": None}
+                                 "cluster_index": None, "gimmick_count": None,
+                                 "tile_count": None}
     orig_pred = 0.0
 
     def _consider(lv, pred, lever, **meta):
@@ -1120,7 +1132,8 @@ def tune_auto(req: AutoTuneRequest) -> AutoTuneResult:
             best_meta = {"lever": lever, "spread": meta.get("spread"),
                          "intensity": meta.get("intensity"),
                          "cluster_index": meta.get("cluster_index"),
-                         "gimmick_count": meta.get("gimmick_count")}
+                         "gimmick_count": meta.get("gimmick_count"),
+                         "tile_count": meta.get("tile_count")}
 
     # ── ① 색 스윕 ──
     ctx = _color_context(req.level_json, arr_seed)
@@ -1137,7 +1150,49 @@ def tune_auto(req: AutoTuneRequest) -> AutoTuneResult:
 
     close = best_pred >= 0 and abs(best_pred - target_cr) <= req.tolerance
 
-    # ── ② 기믹 스윕 (색으로 부족 시) ──
+    # ── ②' 타일 종류 스윕 (색으로 부족 시) ──
+    # 색이 먼저다. 색은 배치만 바꾸는 '미세' 레버라 부작용이 거의 없고,
+    # 종류 수는 난이도를 지배하는 '거친' 레버다(실측 Lv710: 12색 0.000 / 9색 0.030 /
+    # 7색 0.171 / 6색 0.549). 그래서 색으로 못 맞출 때만 종류를 건드린다.
+    if req.try_tilecount and not close:
+        from ...core.generator import get_use_tile_count_for_level
+        tc_base = best_lv if best_meta["lever"] == "color" else req.level_json
+        try:
+            base_v = int(get_use_tile_count_for_level(int(req.level_number), req.tile_type_profile))
+        except Exception:  # noqa: BLE001
+            base_v = int(tc_base.get("useTileCount") or 0)
+        cur_v = int(tc_base.get("useTileCount") or base_v)
+        # 정본 그래프값 ±2. 현재값은 이미 측정됐으므로 후보에서 뺀다.
+        cands_n = [v for v in range(max(2, base_v - 2), base_v + 3) if v != cur_v]
+        tbuilt = []
+        for v in cands_n:
+            try:
+                r_tc = tune_tilecount(TileCountTuneRequest(
+                    level_json=tc_base, tile_count=v, evaluate=False,
+                    level_number=req.level_number, tile_type_profile=req.tile_type_profile,
+                    enforce_limit=True, seed=arr_seed,
+                ))
+                # 클램프·÷3 상한 때문에 요청과 다른 값이 나올 수 있다 → 실제 적용값을 쓴다.
+                tbuilt.append((r_tc.best_level_json, int(r_tc.tile_count)))
+            except Exception as ex:  # noqa: BLE001 — 후보 하나 실패가 전체를 막지 않는다
+                logger.warning("[tune/auto] tilecount %s 후보 생성 실패: %s", v, ex)
+        # 같은 종류 수로 수렴한 중복 후보 제거(측정 낭비)
+        seen_n = set()
+        uniq = []
+        for lv_c, n_c in tbuilt:
+            if n_c in seen_n or n_c == cur_v:
+                continue
+            seen_n.add(n_c)
+            uniq.append((lv_c, n_c))
+        if uniq:
+            _t_orig, tcand = _sweep_pick(tc_base, [u[0] for u in uniq], target_cr, mean, std,
+                                         rollouts, rl_seed, req.skill_grid, req.max_moves)
+            for (lv_c, n_c), (lv_r, pred) in zip(uniq, tcand):
+                _consider(lv_r, pred, "tilecount", tile_count=n_c,
+                          spread=best_meta.get("spread"))
+            close = best_pred >= 0 and abs(best_pred - target_cr) <= req.tolerance
+
+    # ── ③ 기믹 스윕 (색·종류로 부족 시) ──
     if req.try_gimmick and not close:
         color_base = best_lv if best_meta["lever"] == "color" else req.level_json
         intensities = [0.0, 0.25, 0.5, 0.75, 1.0]
@@ -1165,6 +1220,7 @@ def tune_auto(req: AutoTuneRequest) -> AutoTuneResult:
         target_clear_rate=target_cr,
         close=close,
         lever=best_meta["lever"],
+        tile_count=best_meta.get("tile_count"),
         spread=best_meta["spread"],
         intensity=best_meta["intensity"],
         cluster_index=best_meta["cluster_index"],

@@ -96,7 +96,20 @@ def _clearability_type_counts(level_json: Dict[str, Any]) -> Dict[str, int]:
                     # 포함)면 기존대로 t0로 재분배.
                     inner_str = td[2][1] if len(td[2]) > 1 and isinstance(td[2][1], str) else ""
                     baked = [s for s in inner_str.split("_") if s] if inner_str else []
-                    is_baked = bool(baked) and all(
+                    # [게임정합] 게임은 **개수가 정확히 일치할 때만** baked 를 채택한다:
+                    #   CTileStackInfo:149  if (ids.Length == xStackTotalCount.AsInt)
+                    # 어긋나면 문자열을 통째로 버리고 내부를 t0 로 재분배한다.
+                    #
+                    # 길이 검사를 빼면 우리만 그 색 구성을 믿게 되어 ÷3 을 오판한다.
+                    # 실측(재생성본): craft_w [2, "t4_t5_t5_t4"] — 개수 2 ≠ 문자열 4.
+                    #   솔버 → "위반 없음"  /  게임 분배 → t5 가 7개 = 클리어 불가.
+                    # 개수를 바꾸는 지점이 생성기에 10곳인데 전부 문자열을 안 건드려
+                    # 이 어긋남이 실제로 만들어진다 → 최소한 여기서 잡아야 한다.
+                    try:
+                        _declared = int(td[2][0])
+                    except (ValueError, TypeError, IndexError):
+                        _declared = -1
+                    is_baked = bool(baked) and len(baked) == _declared and all(
                         s == "key" or (s.startswith("t") and s[1:].isdigit() and s != "t0")
                         for s in baked
                     )

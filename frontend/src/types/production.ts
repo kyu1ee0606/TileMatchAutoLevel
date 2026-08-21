@@ -259,6 +259,17 @@ export interface ProductionBatch {
   difficulty_start: number;    // 시작 난이도 (예: 0.1)
   difficulty_end: number;      // 종료 난이도 (예: 0.95)
   use_sawtooth: boolean;       // 톱니바퀴 패턴
+  /**
+   * 타일 종류 수(V) 프로파일 — 'baseline' | 'hard_steep'. 생성 시점 값을 배치에 박는다.
+   *
+   * 예전엔 이 값이 localStorage(전역 UI 설정)에만 있어서, 배치를 어떤 곡선으로 만들었는지
+   * 데이터에 남지 않았다. 그래서 난이도 다이얼의 '타일 종류' ±2 클램프가 항상 baseline
+   * 기준으로 걸렸다 — hard_steep 으로 만든 배치인데 Lv550 이 8~12 로 묶여
+   * (hard_steep 기준이면 10~14) 더 올릴 수가 없었다.
+   *
+   * 미지정(구배치)이면 baseline 으로 본다.
+   */
+  tile_type_profile?: string;
 
   // 기믹 설정
   gimmick_unlock_levels: Record<string, number>;

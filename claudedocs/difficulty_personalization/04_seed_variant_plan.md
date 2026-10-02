@@ -188,9 +188,44 @@
 
 **A5-5. 표현 원칙**: 모든 결과는 "봇 가중 성공률 W와 그 차이"로만 쓴다. "사람 클리어율 x%"라고 표기하지 않는다(00 §7-1). tier는 레벨 안에서의 **상대 순위**다.
 
-### A6. 사본 테스트용 스키마 (배포 계약 초안)
+### A6. 배포 형식
 
-**[제안] t0화된 level_json (sandbox `selected.jsonl`)**
+#### A6-0. 확정: A안 — 기존 `randSeed` 필드에 5시드 문자열 (2026-10-02 사용자 결정)
+- 형식: `randSeed = "base|e2|e1|h1|h2"`. 구분자는 `|`, **첫 값 = 기준(base)**이다. 새 필드는 만들지 않는다.
+  - 예: `"1929029997|149028555|1903905507|1771213338|800834984"`
+- 양방향 5시드를 확보하지 못한 레벨: t0화하지 않고 **기존 명시 맵을 유지**한다(randSeed는 기존 값). 단일 시드 t0 운영은 사용자 결정 전까지 쓰지 않는다.
+- **클라 파싱 규칙(신규 코드)**:
+  - `|`로 나눈 모든 값이 양의 정수(1~2³¹−1)이고 개수가 1 또는 5일 때만 사용한다.
+  - 그 외에는 첫 값만 쓴다. 첫 값도 불량이면 기존 동작(`xRandSeed.AsInt`)으로 간다.
+  - 선택된 값을 `ShuffleEmptyTiles`의 시드로 쓴다. 개인화 선택 로직은 별건이다.
+- **에디터 내보내기 검사**: 정확히 5개, 0·음수·범위 밖 없음, 서로 다른 값, 첫 값 = 선별된 base. 위반 시 내보내기를 차단한다. 구현 예: `backend/scripts/pv_selection_export.py::validate_a_values`.
+- **🔴 구버전 클라 호환 [사실]**: 구 코드는 `xRandSeed.AsInt`로 읽는다. `"a|b|c|d|e"`는 `double.TryParse` 실패 → **0** → zWellRandom이 **시간 기반 시드**로 동작한다(SE:529-535, ZW:25-30, 05 §3-2).
+  - 즉 미지원 빌드는 base가 아니라 **매 판 다른 무작위 배치**를 플레이한다(÷3은 유지되지만 결정성·검증이 없다).
+  - 레벨 데이터가 빌드에 내장돼 있는 동안(델타 OFF, 01 §1)에는 새 데이터와 구 코드가 만나지 않는다.
+  - **서버 델타를 다시 켜기 전에는 "A안 파서를 가진 최소 앱 버전 미만은 A안 행을 받지 않는다" 규칙을 강제해야 한다**(필수 안전장치).
+- GB 변환 [사실]: `str(level_json.get("randSeed"))`로 출고한다(GB:465). 문자열이면 그대로 통과하므로 변환 코드 수정은 필요 없다. 다만 아래 영향 지점에서 에디터 쪽이 깨진다.
+- **에디터 randSeed 숫자 처리 영향 지점** (전수 Grep, 수정 안 함):
+  | 위치 | 처리 | A안 문자열 입력 시 |
+  |---|---|---|
+  | `backend/app/core/bot_simulator.py:309`(`rand_seed > 0`), `:824-843`(`== 0`, 대입), `:1023`(`get` → 분배기 전달) | 숫자 비교·연산 | `str > int` **TypeError** |
+  | `backend/app/core/solver.py:140` `int(level_json.get("randSeed"))` | int 변환 | **ValueError** |
+  | `backend/app/core/generator.py` 약 40곳(`:1989, 3084, 3212, 14158, 14185, 14452, 14727, 15235-15334, 15753, 15790, 16164-16219, 16361, 16531-16553, 16579-16658`) | 생성·재시드·`int()`·`+` 연산 | 생성 경로는 숫자를 새로 쓰므로 무관. 재검증·수정 경로(`int()`, `+ offset`)에서 **예외** |
+  | `backend/app/api/routes/tune.py:313, 502, 748, 876, 1117` `int(... randSeed ...)` | int 변환 | **ValueError** |
+  | `backend/app/api/routes/simulate.py:114, 162, 1081-1082` | 분배기에 전달 | TypeError |
+  | `backend/app/api/routes/analyze.py:1956-1967, 2471, 3028, 3131, 3992` | 숫자 대입·int 정규화(3028) | 3028 정규화 **ValueError**, 나머지는 덮어씀 |
+  | `backend/app/api/routes/generate.py:1123` | 새 숫자 생성 | 무관 |
+  | `backend/app/models/benchmark_level.py:103` | 기본값 0 | 문자열이 그대로 전달됨 |
+  | `backend/app/api/routes/gboost.py:465` | `str()` 출고 | 통과(정상) |
+  | `frontend/src/types/index.ts:24` `randSeed?: number` | 타입 | TS 타입 불일치 |
+  | `frontend/src/components/ProductionDashboard/index.tsx:379-380` bakeFullBoard `typeof === 'number'` 아니면 0 | bake 생략 | 굽기를 건너뜀(t0 유지 — A안에는 의도에 맞음) |
+  | `frontend/src/engine/gameEngine.ts:488-489` `typeof === 'number'` 아니면 **42** | 미리보기 시드 | 미리보기가 42로 배치(클라와 다름) |
+  | `frontend/src/engine/tileDistributor.ts:400-413` `randSeed > 0` | 숫자 | 문자열 비교로 시간 시드 경로 |
+  | `frontend/src/components/RLSimulationPanel.tsx:1678`, `FixedLevelEditor.tsx:117` | 표시 / 0 대입 | 표시만 |
+  - 결론 [제안]: A안 문자열은 **내보내기 직전(GB 변환 입력 단계)에만** 만들고, 에디터 내부 저장은 숫자 base + 별도 메타(선별 결과)로 둔다. 그러면 위 지점을 고치지 않아도 된다. 내부에서도 문자열로 저장해야 한다면 위 지점 전부에 파서를 추가해야 한다.
+
+#### A6-1. 보류안: 별도 `pv.*` 필드 (아래 초안, 참고용으로 남김)
+
+**[보류안] t0화된 level_json (sandbox `selected.jsonl`)**
 ```json
 {
   "layer": 6, "layer_0": { "col": "7", "row": "7", "tiles": { "1_1": ["t0", ""], "2_5": ["craft_s", "", [3]] } },

@@ -167,3 +167,118 @@ def final_select(base: str, easy_c: List[str], hard_c: List[str], stage2: Dict[s
     status = "flat" if len(collapsed) == 4 else ("collapsed" if collapsed else "ok")
     seeds = [("e2", e2), ("e1", e1), ("b", base), ("h1", h1), ("h2", h2)]
     return {"status": status, "collapsed": sorted(collapsed), "seeds": seeds, "log": {"easy": e_log, "hard": h_log}}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v2 (P1 re-measure, 06 §8): adaptive θ, independent-sample CI, bidirectional 5 seeds
+# ─────────────────────────────────────────────────────────────────────────────
+SCAN_THETAS = (0.0, 0.15, 0.29, 0.55, 0.65, 0.75, 0.85, 1.0)  # skips the bot skill trough [0.34, 0.50) (06 §7-1)
+UNEVALUABLE_MAX = 0.10      # orig rate at θ=1.0 below this -> bot cannot evaluate the level
+DELTA_MIN_V2 = 0.04         # easy/hard vs base: diff >= this AND independent CI lower bound > 0
+GAP_MIN_V2 = 0.02           # e2 vs e1 (h2 vs h1): point-estimate order with at least this gap
+Z_V2 = 2.4977               # Bonferroni over 4 comparisons vs base (two-sided 95%)
+
+
+def choose_thetas(scan: Dict[str, float]) -> Dict[str, Any]:
+    """scan: {θstr: orig success rate}. Pick 2 θ whose orig rate is closest to 0.5 (prefer 0.3–0.7)."""
+    rates = {float(t): r for t, r in scan.items()}
+    # max over all scanned θ (not θ=1.0 alone): the bot is non-monotone at θ=1.0 too — patience 0.8 hits the
+    # `patience >= 0.8` early-return branch (bot_simulator.py:4137-4147) and skips look-ahead (06 §8).
+    best = max(rates.values()) if rates else 0.0
+    if best < UNEVALUABLE_MAX:
+        return {"evaluable": False, "thetas": [], "reason": f"orig max rate over scan θ = {best:.3f} < {UNEVALUABLE_MAX}"}
+    ranked = sorted(rates, key=lambda t: (abs(rates[t] - 0.5), t))
+    pick = sorted(ranked[:2])
+    in_band = [t for t in pick if 0.3 <= rates[t] <= 0.7]
+    return {"evaluable": True, "thetas": pick, "inBand": len(in_band), "rates": {str(t): rates[t] for t in pick}}
+
+
+def indep_diff(a: Dict[str, Any], b: Dict[str, Any], z: float = Z_V2) -> Dict[str, Any]:
+    """W(a) - W(b) with an independent two-sample normal SE (no pairing; CRN gain was ~0, 06 §7-3)."""
+    thetas = sorted(set(a["theta"]) & set(b["theta"]))
+    var = 0.0
+    diffs = {}
+    for t in thetas:
+        pa, na = a["theta"][t]["rate"], a["theta"][t]["n"]
+        pb, nb = b["theta"][t]["rate"], b["theta"][t]["n"]
+        diffs[t] = pa - pb
+        var += pa * (1 - pa) / na + pb * (1 - pb) / nb
+    T = len(thetas)
+    diff = sum(diffs.values()) / T
+    se = math.sqrt(var) / T
+    return {"diff": diff, "se": se, "lo": diff - z * se, "hi": diff + z * se, "perTheta": diffs}
+
+
+def base_pick(w1: Dict[str, float], w_orig: float, verified: Dict[str, bool]) -> Dict[str, Any]:
+    vals = list(w1.values())
+    q_lo, q_hi = quantile(vals, BAND[0]), quantile(vals, BAND[1])
+    band = [s for s, w in w1.items() if q_lo <= w <= q_hi and verified.get(s)] or \
+           [s for s, w in w1.items() if q_lo <= w <= q_hi]
+    base = min(band, key=lambda s: (abs(w1[s] - w_orig), int(s)))
+    pct = sum(1 for w in vals if w < w_orig) / len(vals)
+    return {"base": base, "band": [q_lo, q_hi], "origPercentile": pct,
+            "origExtreme": pct < 0.10 or pct > 0.90}
+
+
+def staircase_shortlist(w1: Dict[str, float], base: str, verified: Dict[str, bool],
+                        targets: Sequence[float] = (0.06, 0.12, 0.18, 0.26), exclude: Sequence[str] = ()) -> Dict[str, List[str]]:
+    """Up to 4 easy and 4 hard candidates nearest to stepped Δ targets from base (stage-1 W)."""
+    wb = w1[base]
+    out = {}
+    for side, sign in (("easy", 1), ("hard", -1)):
+        pool = [s for s in w1 if s != base and s not in exclude and sign * (w1[s] - wb) > 0]
+        if side == "hard":
+            pool = [s for s in pool if verified.get(s)] or pool
+        chosen: List[str] = []
+        for tg in targets:
+            rest = [s for s in pool if s not in chosen]
+            if not rest:
+                break
+            chosen.append(min(rest, key=lambda s: (abs(sign * (w1[s] - wb) - tg), int(s))))
+        out[side] = chosen
+    return out
+
+
+def bidirectional_select(base: str, cands: List[str], ev: Dict[str, Dict[str, Any]], verified: Dict[str, bool],
+                         delta_min: float = DELTA_MIN_V2, gap_min: float = GAP_MIN_V2) -> Dict[str, Any]:
+    """User rule (2026-10-02): base + 2 easy + 2 hard, distinct seeds, both directions required.
+
+    near/far on each side: both significantly beyond base (Δ ≥ delta_min, CI lower > 0), solvability evidence,
+    far beyond near by point estimate ≥ gap_min. Pick near = smallest valid |Δ|, far = largest valid |Δ|.
+    """
+    wb = ev[base]["W"]
+    result: Dict[str, Any] = {"base": base, "sides": {}}
+    ok_all = True
+    for side, sign in (("easy", 1), ("hard", -1)):
+        valid, log = [], []
+        for s in cands:
+            if s == base or s not in ev:
+                continue
+            d = indep_diff(ev[s], ev[base]) if sign > 0 else indep_diff(ev[base], ev[s])
+            rec = {"seed": s, "delta": round(sign * d["diff"], 4), "lo": round(d["lo"], 4), "hi": round(d["hi"], 4)}
+            if sign * (ev[s]["W"] - wb) <= 0:
+                continue
+            if not verified.get(s):
+                rec["reject"] = "unverified"
+            elif d["diff"] < delta_min:
+                rec["reject"] = f"delta<{delta_min}"
+            elif d["lo"] <= 0:
+                rec["reject"] = "ci_includes_0"
+            else:
+                valid.append((d["diff"], s))
+            log.append(rec)
+        valid.sort()
+        pick = None
+        if len(valid) >= 2 and valid[-1][0] - valid[0][0] >= gap_min:
+            pick = (valid[0][1], valid[-1][1])
+        reason = None
+        if pick is None:
+            ok_all = False
+            reason = "no_valid" if not valid else ("one_valid" if len(valid) == 1 else f"gap<{gap_min}")
+        result["sides"][side] = {"pick": pick, "nValid": len(valid), "reason": reason, "log": log}
+    result["ok"] = ok_all
+    if ok_all:
+        e1, e2 = result["sides"]["easy"]["pick"]
+        h1, h2 = result["sides"]["hard"]["pick"]
+        result["seeds"] = [("e2", e2), ("e1", e1), ("b", base), ("h1", h1), ("h2", h2)]
+    return result

@@ -111,3 +111,50 @@ def test_final_select_ok_collapse_flat():
     assert r["status"] == "collapsed" and r["collapsed"] == ["e2"] and dict(r["seeds"])["e2"] == "e1"
     r = final_select("b", ["e1", "e2"], ["h1", "h2"], s2, {k: k == "b" for k in lv})
     assert r["status"] == "flat" and all(s == "b" for _, s in r["seeds"])
+
+
+# ── v2: adaptive θ / independent CI / bidirectional selection ─────────────────
+from app.core.pv.select import (  # noqa: E402
+    base_pick, bidirectional_select, choose_thetas, indep_diff, staircase_shortlist,
+)
+
+
+def _ev2(rates, n=950):
+    th = {t: {"rate": r, "n": n, "wins": [1] * int(round(r * n)) + [0] * (n - int(round(r * n)))} for t, r in rates.items()}
+    return {"theta": th, "W": sum(rates.values()) / len(rates)}
+
+
+def test_choose_thetas():
+    c = choose_thetas({"0.0": 0.1, "0.29": 0.35, "0.55": 0.52, "0.65": 0.7, "1.0": 0.95})
+    assert c["evaluable"] and c["thetas"] == [0.29, 0.55]
+    assert not choose_thetas({"0.65": 0.0, "1.0": 0.05})["evaluable"]
+
+
+def test_indep_diff():
+    d = indep_diff(_ev2({"0.55": 0.6, "0.85": 0.7}), _ev2({"0.55": 0.5, "0.85": 0.6}))
+    assert d["diff"] == pytest.approx(0.1) and d["lo"] > 0
+    d = indep_diff(_ev2({"0.55": 0.52}), _ev2({"0.55": 0.5}))
+    assert d["lo"] < 0
+
+
+def test_base_pick_and_staircase():
+    w1 = {str(i): i / 100 for i in range(1, 33)}
+    ver = {s: True for s in w1}
+    bp = base_pick(w1, 0.20, ver)
+    assert bp["base"] == "20" and not bp["origExtreme"]
+    assert base_pick(w1, 0.95, ver)["origExtreme"]
+    sl = staircase_shortlist(w1, "20", ver)
+    assert sl["easy"][:2] == ["26", "32"] and sl["hard"][:2] == ["14", "8"]
+
+
+def test_bidirectional_select_rules():
+    ev = {"b": _ev2({"t": 0.5}), "e1": _ev2({"t": 0.56}), "e2": _ev2({"t": 0.7}),
+          "h1": _ev2({"t": 0.44}), "h2": _ev2({"t": 0.35}), "hx": _ev2({"t": 0.49})}
+    ver = {k: True for k in ev}
+    r = bidirectional_select("b", list(ev), ev, ver)
+    assert r["ok"] and r["seeds"] == [("e2", "e2"), ("e1", "e1"), ("b", "b"), ("h1", "h1"), ("h2", "h2")]
+    r = bidirectional_select("b", ["e1", "e2", "h1"], ev, ver)  # only one valid hard
+    assert not r["ok"] and r["sides"]["hard"]["reason"] == "one_valid"
+    ver["h2"] = False
+    r = bidirectional_select("b", list(ev), ev, ver)  # unverified hard excluded
+    assert not r["ok"]

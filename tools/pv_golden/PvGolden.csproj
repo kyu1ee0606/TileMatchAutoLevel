@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    PV golden harness (E-P0-3). Runs the game client's original t0 shuffle code (DB_Level.cs)
+    outside Unity to produce golden vectors for the Python port.
+    Game sources are LINKED (never copied). DB_Level.cs methods are extracted by
+    extract_methods.py into Generated/ (sha256-pinned; build fails if the original changed).
+    Override game repo location: dotnet build -p:GameRepo=/path/to/sp_meowsgarden
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>PvGolden</RootNamespace>
+    <AssemblyName>PvGolden</AssemblyName>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- original Unity sources produce many style warnings; they are not ours to fix -->
+    <NoWarn>$(NoWarn);CS0162;CS0168;CS0169;CS0219;CS0414;CS0649;CS0660;CS0661;CS0108;CS0114;CS8632;CS0472;CS1717;CS0618</NoWarn>
+    <GameRepo Condition="'$(GameRepo)' == ''">$(MSBuildThisFileDirectory)../../../sp_meowsgarden</GameRepo>
+    <GameAssets>$(GameRepo)/Assets</GameAssets>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- original game sources, linked as-is -->
+    <Compile Include="$(GameAssets)/00.spComponents/zWellRandom.cs" Link="Game/zWellRandom.cs" />
+    <Compile Include="$(GameAssets)/00.spComponents/SimpleJSON.cs" Link="Game/SimpleJSON.cs" />
+    <Compile Include="$(GameAssets)/00.spComponents/spInteger.cs" Link="Game/spInteger.cs" />
+    <Compile Include="$(GameAssets)/00.spComponents/spEncrypt/spEncryptValue.cs" Link="Game/spEncryptValue.cs" />
+    <Compile Include="$(GameAssets)/08.Scripts/Tile_Script/InGame/TileEffectType.cs" Link="Game/TileEffectType.cs" />
+
+    <!-- verbatim extraction of DB_Level.cs line ranges (generated before build) -->
+    <Compile Include="Generated/DB_Level.Extract.g.cs" />
+
+    <Compile Include="Shims/*.cs" />
+    <Compile Include="Program.cs" />
+  </ItemGroup>
+
+  <Target Name="ExtractDbLevel" BeforeTargets="BeforeBuild">
+    <Exec Command="python3 &quot;$(MSBuildThisFileDirectory)extract_methods.py&quot; --game-repo &quot;$(GameRepo)&quot;" />
+  </Target>
+
+</Project>

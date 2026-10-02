@@ -62,7 +62,11 @@ def run_games_task(args: Dict[str, Any]) -> Dict[str, Any]:
     t0 = time.time()
     bot = _TrackingBot()
     lj = args["level_json"]
-    profile = make_skill_profile(float(args["theta"]))
+    if args.get("profile"):  # named bot profile (e.g. "average", "expert") for robust checks (09 report)
+        from app.models.bot_profile import BotType, get_profile
+        profile = get_profile(BotType(args["profile"]))
+    else:
+        profile = make_skill_profile(float(args["theta"]))
     base = bot._create_initial_state(lj, int(lj["max_moves"]))
     bot._precompute_blocking_map(base)
     wins: List[int] = []
@@ -80,7 +84,7 @@ def run_games_task(args: Dict[str, Any]) -> Dict[str, Any]:
         crisis_any.append(1 if bot.t_crisis_turns > 0 else 0)
         crisis_frac.append(bot.t_crisis_turns / max(1, bot.t_turns))
     return {
-        "key": args["key"], "theta": args["theta"], "start": args["start"],
+        "key": args["key"], "theta": args["theta"], "start": args["start"], "point": args.get("point"),
         "wins": wins, "dockMax": dock_max, "crisisAny": crisis_any, "crisisFrac": crisis_frac,
         "sec": time.time() - t0,
     }
@@ -143,3 +147,44 @@ def solve_check(level_json: Dict[str, Any], node_budget: int = 5000, time_cap_s:
     if hasattr(verdict, "value"):
         verdict = verdict.value
     return {"verdict": str(verdict), "nodeBudget": node_budget, "sec": round(time.time() - t0, 2)}
+
+
+def evaluate_points(
+    executor,
+    maps: Dict[str, Dict[str, Any]],
+    points: Sequence[str],
+    games: int,
+    seed_base: int,
+    chunk: int = 100,
+) -> Dict[str, Dict[str, Any]]:
+    """Like evaluate_maps but over mixed measurement points: "θ:<float>" or "profile:<BotType value>".
+
+    Returns {key: {"point": {pointStr: {...per-game lists, rate, n}}}}. Point index p uses bot seeds
+    `seed_base + p*10_000 + i` (identical across maps).
+    """
+    futures = []
+    for key, lj in maps.items():
+        for p_idx, pt in enumerate(points):
+            kind, val = pt.split(":", 1)
+            for start in range(0, games, chunk):
+                a = {"key": key, "level_json": lj, "seed_base": seed_base + p_idx * 10_000,
+                     "start": start, "count": min(chunk, games - start), "point": pt}
+                if kind == "θ":
+                    a["theta"] = float(val)
+                else:
+                    a["theta"] = 0.0
+                    a["profile"] = val
+                futures.append(executor.submit(run_games_task, a))
+    acc: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+    for f in futures:
+        r = f.result()
+        acc.setdefault(r["key"], {}).setdefault(r["point"], []).append(r)
+    out: Dict[str, Dict[str, Any]] = {}
+    for key, per in acc.items():
+        pts = {}
+        for pt, parts in per.items():
+            parts.sort(key=lambda x: x["start"])
+            wins = [w for x in parts for w in x["wins"]]
+            pts[pt] = {"wins": wins, "n": len(wins), "rate": sum(wins) / len(wins)}
+        out[key] = {"point": pts}
+    return out

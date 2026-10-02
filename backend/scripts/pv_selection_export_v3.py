@@ -154,8 +154,10 @@ def main() -> int:
            "rule": "v2 rule + utc flex: utc0 first; easy side may use utc0-1, hard side utc0+1; flex pools ≤64; "
                    "relaxed base utc0∓1 only for extreme-original levels (pct>0.90 / <0.10)",
            "ciZ": Z_V2, "levels": rows}
-    with open(os.path.join(SB, "selection_v3.json"), "w", encoding="utf-8") as f:
+    dst = os.path.join(SB, "selection_v3.json")
+    with open(dst + ".tmp", "w", encoding="utf-8") as f:  # atomic: readers never see a partial file
         json.dump(out, f, ensure_ascii=False, indent=1)
+    os.replace(dst + ".tmp", dst)
     from collections import Counter
     print("strict", Counter(r["status"] for r in rows),
           "relaxed ok", sum(1 for r in rows if r.get("relaxed", {}).get("ok")),

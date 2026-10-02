@@ -106,8 +106,10 @@ def main() -> int:
         "aPlanOrder": list(A_ORDER),
         "levels": rows,
     }
-    with open(os.path.join(SB, "selection_v2.json"), "w", encoding="utf-8") as f:
+    dst = os.path.join(SB, "selection_v2.json")
+    with open(dst + ".tmp", "w", encoding="utf-8") as f:  # atomic: readers never see a partial file
         json.dump(out, f, ensure_ascii=False, indent=1)
+    os.replace(dst + ".tmp", dst)
     from collections import Counter
     print(Counter(r["status"] for r in rows))
     return 0

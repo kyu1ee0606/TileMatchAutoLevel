@@ -224,6 +224,13 @@
   | `frontend/src/components/RLSimulationPanel.tsx:1678`, `FixedLevelEditor.tsx:117` | 표시 / 0 대입 | 표시만 |
   - 결론 [제안]: A안 문자열은 **내보내기 직전(GB 변환 입력 단계)에만** 만들고, 에디터 내부 저장은 숫자 base + 별도 메타(선별 결과)로 둔다. 그러면 위 지점을 고치지 않아도 된다. 내부에서도 문자열로 저장해야 한다면 위 지점 전부에 파서를 추가해야 한다.
 
+#### A6-0b. 제안: 종류 수 ±1 허용에 따른 토큰 확장 (v3, 08 §7)
+- 사용자 결정(쉬움 ≤ utc0−1, 어려움 ≤ utc0+1 허용)으로 tier마다 utc가 다를 수 있다. 새 필드 없이 **토큰 = `seed` 또는 `seed@utc`**로 확장한다(`@` 없으면 레벨 useTileCount = utc0).
+  - 예: `1635606022@11|358522884@11|2079322438@11|894482049|264350516`
+- 클라 파싱: 각 토큰이 `^\d+(@\d+)?$`이고 seed 1~2³¹−1, utc 1~15이며 개수 1 또는 5일 때만 쓴다. 아니면 첫 토큰(그 `@utc` 포함), 그것도 불량이면 기존 동작. 선택된 토큰의 utc를 그 판 `ShuffleEmptyTiles`의 maxTileIndex로 쓰고, 레벨 행의 useTileCount는 utc0을 유지한다.
+- 에디터 검사(`pv_selection_export_v3.py::validate_a_v3`): 5토큰, (seed, utc) 쌍 서로 다름, |utc−utc0| ≤1, utc0에는 `@` 금지, 첫 토큰 = 기준 시드. 정책 검사: 쉬움 칸 utc ∈ {utc0−1, utc0}, 어려움 칸 ∈ {utc0, utc0+1}, 기준 칸은 strict면 utc0, relaxed면 utc0±1.
+- 대안(병렬 useTileCount 문자열, seed에 utc 인코딩)과의 비교는 08 §7.
+
 #### A6-1. 보류안: 별도 `pv.*` 필드 (아래 초안, 참고용으로 남김)
 
 **[보류안] t0화된 level_json (sandbox `selected.jsonl`)**

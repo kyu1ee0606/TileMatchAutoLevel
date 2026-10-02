@@ -179,6 +179,12 @@ GAP_MIN_V2 = 0.02           # e2 vs e1 (h2 vs h1): point-estimate order with at 
 Z_V2 = 2.4977               # Bonferroni over 4 comparisons vs base (two-sided 95%)
 
 
+def _sid(s: str):
+    """Tie-break key for candidate ids: plain seed "123" or "utc:seed" (v3). Numeric order for plain seeds."""
+    tail = s.split(":")[-1]
+    return (int(tail), s) if tail.isdigit() else (0, s)
+
+
 def choose_thetas(scan: Dict[str, float]) -> Dict[str, Any]:
     """scan: {θstr: orig success rate}. Pick 2 θ whose orig rate is closest to 0.5 (prefer 0.3–0.7)."""
     rates = {float(t): r for t, r in scan.items()}
@@ -214,7 +220,7 @@ def base_pick(w1: Dict[str, float], w_orig: float, verified: Dict[str, bool]) ->
     q_lo, q_hi = quantile(vals, BAND[0]), quantile(vals, BAND[1])
     band = [s for s, w in w1.items() if q_lo <= w <= q_hi and verified.get(s)] or \
            [s for s, w in w1.items() if q_lo <= w <= q_hi]
-    base = min(band, key=lambda s: (abs(w1[s] - w_orig), int(s)))
+    base = min(band, key=lambda s: (abs(w1[s] - w_orig), _sid(s)))
     pct = sum(1 for w in vals if w < w_orig) / len(vals)
     return {"base": base, "band": [q_lo, q_hi], "origPercentile": pct,
             "origExtreme": pct < 0.10 or pct > 0.90}
@@ -234,7 +240,7 @@ def staircase_shortlist(w1: Dict[str, float], base: str, verified: Dict[str, boo
             rest = [s for s in pool if s not in chosen]
             if not rest:
                 break
-            chosen.append(min(rest, key=lambda s: (abs(sign * (w1[s] - wb) - tg), int(s))))
+            chosen.append(min(rest, key=lambda s: (abs(sign * (w1[s] - wb) - tg), _sid(s))))
         out[side] = chosen
     return out
 

@@ -59,7 +59,10 @@ SCAN_GAMES, S1_GAMES, S2_GAMES, ROBUST_GAMES = 64, 64, 950, 600
 SOLVER_NODES = 5000
 OUTER_MIN, INNER_MIN, GAP_MIN = 0.10, 0.04, 0.02
 TARGET = {"easy": 0.15, "hard": -0.20}
-H_PRED_MIN, H_HI_MIN = 0.20, 0.10
+H_PRED_MIN, H_HI_MIN = 0.20, 0.10   # H_PRED_MIN kept for flags only (absolute floor rejected 10/09)
+H_PRED_REL = 0.5                      # h2 predicted clear ≥ 0.5 × original predicted clear (proposed, user to confirm)
+PRED_FLAGS = {"abs20": lambda pc, po: pc >= 0.20, "abs10": lambda pc, po: pc >= 0.10, "abs05": lambda pc, po: pc >= 0.05,
+              "rel50": lambda pc, po: pc >= H_PRED_REL * po, "none": lambda pc, po: True}
 LEVEL_TIME_CAP = 20 * 60
 POOL_PLAN = [("u0", 0, 32), ("u0", 32, 64), ("u0", 64, 128), ("flex", 0, 32), ("flex", 32, 64)]
 
@@ -375,6 +378,7 @@ def step(n, ex):
     lt = low_theta(th, xt)
     points = [f"θ:{xt:g}", "profile:average", "profile:expert", f"θ:{lt:g}"]   # first 3 == v4 robust points
     judged = [f"θ:{float(t):g}" for t in th] + points[:3]
+    judged_inner = judged + [points[3]]       # inner tiers: + low-skill point (10/09)
 
     # 3. orig stage-2
     s2 = w.get("s2.json", {})
@@ -404,7 +408,7 @@ def step(n, ex):
     w_orig = s2["orig"]["W"]
     rounds = w.get("rounds.json", [])
 
-    sides_done = decide(prep, s1, s2, sol, rob, judged)
+    sides_done = decide(prep, s1, s2, sol, rob, judged, None, judged_inner)
     failing = [sd for sd in ("easy", "hard") if sides_done[sd]["outer"] is None]
 
     # robust measurement for s2-valid candidates not yet measured
@@ -434,13 +438,15 @@ def step(n, ex):
     # editor predictor for h2 candidates that passed everything else
     pred = w.get("pred.json", {})
     pq = [k for k in sides_done["hard"]["predQueue"] if k not in pred]
+    if pq and "orig" not in pred:
+        pq = ["orig"] + pq
     if pq:
-        futs = {k: ex.submit(sweep_level_task, {"level_json": lj_seed(prep, k), "seed": SEED_PRED, "level_number": n})
-                for k in pq}
+        futs = {k: ex.submit(sweep_level_task, {"level_json": lj_orig(prep) if k == "orig" else lj_seed(prep, k),
+                                                "seed": SEED_PRED, "level_number": n}) for k in pq}
         w.merge("pred.json", {k: {"predicted_clear_rate": f.result().get("predicted_clear_rate"),
                                   "error": f.result().get("error")} for k, f in futs.items()})
         return tick(f"pred {len(pq)}")
-    sides_done = decide(prep, s1, s2, sol, rob, judged, pred)
+    sides_done = decide(prep, s1, s2, sol, rob, judged, pred, judged_inner)
     failing = [sd for sd in ("easy", "hard") if sides_done[sd]["outer"] is None]
 
     if failing:
@@ -517,9 +523,19 @@ def step(n, ex):
     return finalize(w, prep, s1, s2, sol, rob, judged, points, th, sides_done, rounds, pred, done)
 
 
-def decide(prep, s1, s2, sol, rob, judged, pred=None):
+def same_side_order(outer_k, inner_k, s2, rob, sign, pts):
+    """Outer must be more extreme than inner on a majority of informative points (else order flipped)."""
+    ro, ri, rb = point_rates(outer_k, s2, rob), point_rates(inner_k, s2, rob), point_rates("orig", s2, rob)
+    use = [p for p in pts if p in ro and p in ri and p in rb
+           and not (max(ro[p], ri[p], rb[p]) <= 0.02 or min(ro[p], ri[p], rb[p]) >= 0.98)]
+    good = sum(1 for p in use if sign * (ro[p] - ri[p]) > 0)
+    return {"ok": bool(use) and good * 2 > len(use), "points": len(use), "outerMoreExtreme": good}
+
+
+def decide(prep, s1, s2, sol, rob, judged, pred=None, judged_inner=None):
     """Per side: valid candidates, robust queue, chosen outer/inner."""
     pred = pred or {}
+    judged_inner = judged_inner or judged
     out = {}
     o = s2["orig"]
     for side in ("easy", "hard"):
@@ -554,23 +570,62 @@ def decide(prep, s1, s2, sol, rob, judged, pred=None):
                     pred_q.append(c["key"])
                     continue
                 pcr = pred[c["key"]].get("predicted_clear_rate") or 0.0
+                po = (pred.get("orig") or {}).get("predicted_clear_rate")
                 c["pred"] = pcr
-                if pcr < H_PRED_MIN:
+                if po is None:
+                    if "orig" not in pred_q:
+                        pred_q.insert(0, "orig")
+                    continue
+                if pcr < H_PRED_REL * po:
                     continue
             outer = c
             break
         inner = None
+        inner_log = []
         if outer:
             for c in inner_c:
-                j = judged_map.get(c["key"])
-                if c["key"] == outer["key"] or not j or not j["pass"] or c["absd"] > outer["absd"] - GAP_MIN:
+                if c["key"] == outer["key"] or c["absd"] > outer["absd"] - GAP_MIN or c["key"] not in rob:
+                    continue
+                # 10/09: inner robust test also includes the low-skill point (trough-free θ)
+                ji = robust_judge(c["key"], s2, rob, sign, judged_inner)
+                order = same_side_order(outer["key"], c["key"], s2, rob, sign, judged_inner)
+                inner_log.append({"key": c["key"], "robust": ji, "order": order})
+                if not ji["pass"] or not order["ok"]:
                     continue
                 inner = c
                 break
-            if inner and judged_map[inner["key"]]["meanDelta"] > judged_map[outer["key"]]["meanDelta"]:
-                inner = None  # order flip on robust points -> inner dropped (3 tiers), conservative
         out[side] = {"outer": outer, "inner": inner, "nCand": len(cand), "robustQueue": queue,
-                     "predQueue": pred_q, "judged": judged_map}
+                     "predQueue": pred_q, "judged": judged_map, "innerLog": inner_log}
+    return out
+
+
+def candidate_info(prep, s2, rob, sides, pred):
+    """All CI/evidence-valid candidates with robust verdict and h2 floor flags (re-selection without re-running)."""
+    po = (pred.get("orig") or {}).get("predicted_clear_rate")
+    out = {}
+    for sd in ("easy", "hard"):
+        rows = []
+        for k, j in sides[sd]["judged"].items():
+            r = point_rates(k, s2, rob)
+            th = [p for p in r if p.startswith("θ:")]
+            hi = max([r[max(th, key=lambda p: float(p[2:]))]] + ([r["profile:expert"]] if "profile:expert" in r else [])) if th else None
+            pc = (pred.get(k) or {}).get("predicted_clear_rate")
+            rec = {"key": k, "delta": s2[k]["W"] - s2["orig"]["W"], "robustPass": j["pass"], "sensitive": j["sensitive"],
+                   "informative": j["informative"], "dirOk": j["dirOk"], "spread": j["spread"], "hiRate": hi, "pred": pc}
+            if sd == "hard" and pc is not None and po is not None:
+                rec["floorFlags"] = {name: bool(f(pc, po)) for name, f in PRED_FLAGS.items()}
+            rows.append(rec)
+        out[sd] = {"candidates": rows, "nJudged": len(rows), "nSensitive": sum(1 for x in rows if x["sensitive"]),
+                   "nRobustPass": sum(1 for x in rows if x["robustPass"])}
+    out["predOrig"] = po
+    easy_outer = any(x["robustPass"] and x["delta"] >= OUTER_MIN for x in out["easy"]["candidates"])
+    feas = {}
+    for name in PRED_FLAGS:
+        hard_outer = any(x["robustPass"] and x["delta"] <= -OUTER_MIN and (x["hiRate"] or 0) >= H_HI_MIN
+                         and (x.get("floorFlags") or {}).get(name) for x in out["hard"]["candidates"])
+        feas[name] = bool(easy_outer and hard_outer)
+    out["levelRuleFeasible"] = feas   # would an e2/h2 pair exist under each h2 floor rule (no re-measurement)
+    out["note"] = "floorFlags absent = predictor not run (candidate failed robust or max(θ_hi, EXPERT) ≥ 0.10 first)"
     return out
 
 
@@ -628,7 +683,7 @@ def finalize(w, prep, s1, s2, sol, rob, judged, points, th, sides, rounds, pred,
                            "nRobustJudged": len(sides[sd]["judged"]),
                            "nRobustPass": sum(1 for j in sides[sd]["judged"].values() if j["pass"])}
         return done({"status": "no_variant", "reason": "outer tier not found after pools: " + ",".join(miss),
-                     "detail": reasons, **base})
+                     "detail": reasons, "candidates": candidate_info(prep, s2, rob, sides, w.get("pred.json", {})), **base})
     tiers = {"e2": e["outer"], "h2": h["outer"]}
     if e["inner"] and h["inner"]:
         tiers.update(e1=e["inner"], h1=h["inner"])
@@ -669,6 +724,9 @@ def finalize(w, prep, s1, s2, sol, rob, judged, points, th, sides, rounds, pred,
                        "evidence": c["evidence"], "solver": sol.get(c["key"], {}).get("verdict"),
                        "robust": sides[sd]["judged"][c["key"]], "pointRates": r,
                        "lowSkillRate": r.get(points[3]), "predictedClearRate": pred.get(c["key"], {}).get("predicted_clear_rate")}
+        pc, po_ = tier_out[t]["predictedClearRate"], pred.get("orig", {}).get("predicted_clear_rate")
+        if t.startswith("h") and pc is not None and po_ is not None:
+            tier_out[t]["floorFlags"] = {name: bool(f(pc, po_)) for name, f in PRED_FLAGS.items()}
     pcr_o = pred.get("orig", {}).get("predicted_clear_rate")
     pe, ph = tier_out["e2"]["predictedClearRate"], tier_out["h2"]["predictedClearRate"]
     order_ok = all(isinstance(x, (int, float)) for x in (pe, pcr_o, ph)) and pe > pcr_o > ph
@@ -688,6 +746,8 @@ def finalize(w, prep, s1, s2, sol, rob, judged, points, th, sides, rounds, pred,
     w.put("baked_hard.json", baked["hard"])
     grade = "strict" if all(v["evidence"] == "strict" for v in tier_out.values()) else "extended"
     return done({"status": status, "token": token, "tiers": tier_out, "grade": grade, "invariantIssues": issues,
+                 "candidates": candidate_info(prep, s2, rob, sides, pred), "h2FloorRule": f"pred >= {H_PRED_REL} x orig pred",
+                 "innerLog": {sd: sides[sd]["innerLog"] for sd in ("easy", "hard")}, "innerRule": "robust incl. low-skill point + same-side order majority",
                  "warnings": warn, "predOrig": pcr_o, "orderOk": order_ok, **base})
 
 

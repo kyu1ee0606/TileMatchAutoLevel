@@ -53,6 +53,11 @@ def main():
     for n, (fin, d) in sorted(finals.items()):
         st = fin["status"]
         meta = {"level": n, "status": st, "reason": fin.get("reason"), "wallSec": fin.get("wallSec")}
+        if fin.get("candidates"):
+            meta.update(levelRuleFeasible=fin["candidates"].get("levelRuleFeasible"), predOrig=fin["candidates"].get("predOrig"),
+                        candidates={sd: fin["candidates"][sd] for sd in ("easy", "hard")},
+                        sensitiveStats={sd: {"judged": fin["candidates"][sd]["nJudged"],
+                                             "sensitive": fin["candidates"][sd]["nSensitive"]} for sd in ("easy", "hard")})
         if st in ("5tier", "3tier"):
             row = load(os.path.join(d, "seedvar_row.json"))
             seedvar_rows[f"seedvar_{n}"] = row
@@ -66,7 +71,8 @@ def main():
             meta.update(token=fin["token"], grade=fin["grade"], tiers=fin["tiers"], thetas=fin["thetas"],
                         robustPoints=fin["robustPoints"], wOrig=fin["wOrig"], predOrig=fin.get("predOrig"),
                         orderOk=fin.get("orderOk"), warnings=fin.get("warnings"), invariantIssues=fin.get("invariantIssues"),
-                        utc0=fin["utc0"], rounds=fin.get("rounds"))
+                        utc0=fin["utc0"], rounds=fin.get("rounds"), innerLog=fin.get("innerLog"),
+                        h2FloorFlags=fin["tiers"]["h2"].get("floorFlags"))
         elif st == "invariant_fail":
             meta.update(token=fin.get("token"), invariantIssues=fin.get("invariantIssues"))
         else:

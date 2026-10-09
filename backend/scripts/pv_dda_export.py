@@ -22,7 +22,7 @@ BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(BACKEND, "scripts"))
 
 from pv_dda import (  # noqa: E402
-    DDA, GAP_MIN, H_HI_MIN, H_PRED_MIN, INNER_MIN, OUTER_MIN, POOL_PLAN, ROBUST_GAMES, S1_GAMES, S2_GAMES,
+    DDA, GAP_MIN, H_HI_MIN, H_PRED_REL, INNER_MIN, OUTER_MIN, POOL_PLAN, ROBUST_GAMES, S1_GAMES, S2_GAMES,
     SCAN_GAMES, SEED_PRED, SEED_ROBUST, SEED_S1, SEED_S2, SEED_SCAN, SOLVER_NODES, TARGET, load,
 )
 
@@ -107,7 +107,8 @@ def main():
            "spec": "game IMPL_SPEC §V2-9-2 seedvar_N (original level_N untouched; token e2|e1|h1|h2 or e2|h2; "
                    "token 'seed' or 'seed@utc'); baseline = original map",
            "proposedThresholds": {"outerAbsDeltaMin": OUTER_MIN, "innerDeltaMin": INNER_MIN, "sameSideGapMin": GAP_MIN,
-                                  "target": TARGET, "h2PredictedClearMin": H_PRED_MIN, "h2HiSkillRateMin": H_HI_MIN,
+                                  "target": TARGET, "h2PredictedClearRelMin": H_PRED_REL, "h2HiSkillRateMin": H_HI_MIN,
+                                  "h2FloorFlagsRecorded": "abs20/abs10/abs05/rel50/none (reselect without re-measure)",
                                   "status": "proposed values — user decision pending (spec has no magnitude rule)"},
            "measurement": {"scan": {"thetas": "0,0.15,0.29,0.55,0.65,0.75,0.85,1.0", "games": SCAN_GAMES, "seedBase": SEED_SCAN},
                            "stage1": {"gamesPerTheta": S1_GAMES, "seedBase": SEED_S1},

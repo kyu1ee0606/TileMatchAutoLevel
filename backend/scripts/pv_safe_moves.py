@@ -22,7 +22,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pv_dda as P  # noqa: E402  (helpers: lj_seed / lj_orig / load / save; import only)
 
-from app.core.pv.safe_moves import analyze_board  # noqa: E402
+from app.core.pv.safe_moves import analyze_board, analyze_board_info  # noqa: E402
 
 OUT = os.path.join(P.SB, "safe_moves")
 ROOT_NODES, WALL_CAP = 20000, 300.0
@@ -302,6 +302,103 @@ def analyze():
     print(json.dumps({k: v for k, v in summary.items() if k != "perLevel"}, ensure_ascii=False, indent=1))
 
 
+# ── information-limited B′ (doc 11 §8) ────────────────────────────────────────────────────────────
+INFO_DIR = os.path.join(OUT, "boards_info")
+INFO_CFG = {"k_paths": 2, "points_per_path": 8, "m_worlds": 6, "thr": 0.8, "wall_cap_s": 900.0, "world_node_budget": 300}
+INFO_METRICS = ["B", "B_nonTrivial", "B_sampled", "Bp_occluded", "Bp_covered"]   # all: higher = easier
+
+
+def info_path(n, key):
+    return os.path.join(INFO_DIR, f"{n:04d}_{key.replace(':', '-')}.json")
+
+
+def one_board_info(n, key):
+    prep = P.load(os.path.join(wdir(n), "prep.json"))
+    lj = P.lj_orig(prep) if key == "orig" else P.lj_seed(prep, key)
+    try:
+        r = analyze_board_info(lj, seed=SAMPLE_SEED, node_budget=NODE_BUDGET, root_node_budget=ROOT_NODES, **INFO_CFG)
+    except Exception as exc:  # noqa: BLE001
+        r = {"ok": False, "error": repr(exc)}
+    r.update({"level": n, "key": key})
+    P.save(info_path(n, key), r)
+    return n, key, r.get("ok"), r.get("sec"), r.get("tiles")
+
+
+def run_info(tasks, workers):
+    os.makedirs(INFO_DIR, exist_ok=True)
+    todo = [(n, k) for n, k in tasks if not os.path.exists(info_path(n, k))]
+    print(f"todo {len(todo)} / {len(tasks)}", flush=True)
+    t0 = time.time()
+    with ProcessPoolExecutor(max_workers=workers) as ex:
+        futs = [ex.submit(one_board_info, n, k) for n, k in todo]
+        for i, f in enumerate(as_completed(futs), 1):
+            n, k, ok, sec, tiles = f.result()
+            print(f"[{i}/{len(todo)} {time.time() - t0:.0f}s] L{n} {k} ok={ok} tiles={tiles} sec={sec}", flush=True)
+
+
+def analyze_info():
+    pl = P.load(os.path.join(OUT, "plan.json"))
+    levels = []
+    for c in pl["levels"]:
+        if c["stratum"] == "untrusted":
+            continue
+        rows = []
+        for x in c["candidates"]:
+            bp = info_path(c["level"], x["key"])
+            if os.path.exists(bp):
+                b = P.load(bp)
+                if b.get("ok"):
+                    rows.append({**x, **{m: b.get(m) for m in INFO_METRICS + ["B_sat1", "B_ntSat1", "Bp_occluded_sat1",
+                                                                          "Bp_covered_sat1", "Bp_occluded_unc",
+                                                                          "Bp_covered_unc", "Bp_occluded_hidden",
+                                                                          "Bp_covered_hidden", "immFrac", "sec", "tiles"]},
+                                 "pv": {m: [pp.get(m) for pp in b["paths"]] for m in INFO_METRICS}})
+        orig = next((r for r in rows if r["key"] == "orig"), None)
+        if len(rows) < 6 or not orig:
+            continue
+        lv = {"level": c["level"], "stratum": c["stratum"], "n": len(rows), "rho": {}, "dir": {}, "rel": {}}
+        for m in INFO_METRICS:
+            v = [r for r in rows if r[m] is not None]
+            lv["rho"][m] = spearman([r[m] for r in v], [r["W"] for r in v])
+            a = n = 0
+            for r in v:
+                if r["key"] != "orig" and orig[m] is not None and abs(r["W"] - orig["W"]) >= DIR_MIN:
+                    n += 1
+                    a += (r[m] - orig[m] > 0) == (r["W"] > orig["W"])
+            lv["dir"][m] = (a, n)
+            pv = [r["pv"][m] for r in v if len(r["pv"][m]) >= 2 and None not in r["pv"][m][:2]]
+            lv["rel"][m] = spearman([x[0] for x in pv], [x[1] for x in pv])
+        lv["rows"] = rows
+        levels.append(lv)
+
+    def summ(ls):
+        o = {"nLevels": len(ls)}
+        for m in INFO_METRICS:
+            rh = [l["rho"][m] for l in ls if l["rho"][m] is not None]
+            a = sum(l["dir"][m][0] for l in ls)
+            n = sum(l["dir"][m][1] for l in ls)
+            o[m] = {"rhoMedian": median(rh), "rhoPos": sum(1 for x in rh if x > 0), "nRho": len(rh),
+                    "dirAgree": a / n if n else None, "dirN": n,
+                    "relPathSplit": median([l["rel"][m] for l in ls if l["rel"][m] is not None])}
+        return o
+
+    rows = [r for l in levels for r in l["rows"]]
+    dist = {k: {"median": median([r[k] for r in rows if r[k] is not None]),
+                "p10": sorted(r[k] for r in rows if r[k] is not None)[len(rows) // 10] if rows else None,
+                "p90": sorted(r[k] for r in rows if r[k] is not None)[len(rows) * 9 // 10] if rows else None}
+            for k in INFO_METRICS + ["B_sat1", "B_ntSat1", "Bp_occluded_sat1", "Bp_covered_sat1", "Bp_occluded_unc",
+                                     "Bp_covered_unc", "Bp_occluded_hidden", "Bp_covered_hidden", "immFrac"]}
+    cost = {}
+    for r in rows:
+        cost.setdefault(str((r["tiles"] // 10) * 10), []).append(r["sec"])
+    res = {"config": INFO_CFG, "all": summ(levels), "noCraft": summ([l for l in levels if "craft" not in l["stratum"]]),
+           "craft": summ([l for l in levels if "craft" in l["stratum"]]), "dist": dist, "boards": len(rows),
+           "cost": {k: {"n": len(v), "median": median(v), "max": max(v)} for k, v in sorted(cost.items(), key=lambda kv: int(kv[0]))},
+           "perLevel": [{k: v for k, v in l.items() if k != "rows"} for l in levels]}
+    P.save(os.path.join(OUT, "summary_info.json"), res)
+    print(json.dumps({k: v for k, v in res.items() if k != "perLevel"}, ensure_ascii=False, indent=1))
+
+
 def kcurve(ks=(1, 3, 5, 10, 15)):
     """Paired K effect on the K-boost boards: metric = mean over the first k paths (log-mean-exp for (e))."""
     pl = P.load(os.path.join(OUT, "plan.json"))
@@ -346,7 +443,7 @@ def kcurve(ks=(1, 3, 5, 10, 15)):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["plan", "run", "pilot", "analyze", "kcurve"])
+    ap.add_argument("cmd", choices=["plan", "run", "pilot", "analyze", "kcurve", "run_info", "pilot_info", "analyze_info"])
     ap.add_argument("--workers", type=int, default=3)
     ap.add_argument("--levels", default="")
     ap.add_argument("--seeds", type=int, default=0)
@@ -358,6 +455,18 @@ def main():
         run(min(a.workers, 3))
     elif a.cmd == "pilot":
         pilot([int(x) for x in a.levels.split(",") if x], a.seeds, min(a.workers, 3), a.wall)
+    elif a.cmd == "run_info":
+        pl = P.load(os.path.join(OUT, "plan.json"))
+        lv = sorted((c for c in pl["levels"] if c["stratum"] != "untrusted"), key=lambda c: c["tiles"])
+        run_info([(c["level"], x["key"]) for c in lv for x in c["candidates"]], min(a.workers, 3))
+    elif a.cmd == "pilot_info":
+        tasks = []
+        for n in [int(x) for x in a.levels.split(",") if x]:
+            prep = P.load(os.path.join(wdir(n), "prep.json"))
+            tasks += [(n, "orig")] + [(n, f"{prep['utc0']}:{s}") for s in P.pool_seeds(prep, prep["utc0"])[:a.seeds]]
+        run_info(tasks, min(a.workers, 3))
+    elif a.cmd == "analyze_info":
+        analyze_info()
     elif a.cmd == "kcurve":
         kcurve()
     else:

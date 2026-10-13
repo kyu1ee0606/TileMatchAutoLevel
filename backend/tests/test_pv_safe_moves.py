@@ -84,3 +84,41 @@ def test_fast_copy_matches_core_copy_on_random_playouts():
                 a, b = step(sim, a, m, core), step(sim, b, m, fast_copy)
                 if a.cleared or a.failed:
                     break
+
+
+def _two_layer():
+    # layer_0 (bottom) cells 0_0..2_0 fully under same-parity layer_2 cells; 3_0..5_0 open.
+    low = {f"{i}_0": [t, ""] for i, t in enumerate(["t1", "t2", "t3", "t1", "t2", "t3"])}
+    top = {f"{i}_0": [t, ""] for i, t in enumerate(["t1", "t2", "t3"])}
+    return {"layer": 3, "randSeed": 1, "useTileCount": 3, "unlockTile": 0,
+            "layer_0": {"col": "6", "row": "1", "tiles": low, "num": "6"},
+            "layer_1": {"col": "6", "row": "1", "tiles": {}, "num": "0"},
+            "layer_2": {"col": "6", "row": "1", "tiles": top, "num": "3"}}
+
+
+def test_hidden_tiles_and_determinize_preserve_visible_info():
+    from app.core.pv.safe_moves import determinize, hidden_tiles
+
+    an = SafeMoveAnalyzer(_two_layer())
+    hid = hidden_tiles(an.sim, an.root, "occluded")
+    assert sorted((t.layer_idx, t.x_idx) for t in hid) == [(0, 0), (0, 1), (0, 2)]
+    assert len(hidden_tiles(an.sim, an.root, "covered")) == 3
+    rng = random.Random(1)
+    for _ in range(5):
+        w, n = determinize(an.sim, an.root, "occluded", rng)
+        assert n == 3
+        seen = lambda st: sorted((li, p, t.tile_type) for li, l in st.tiles.items() for p, t in l.items()
+                                 if not an.sim._is_blocked_by_upper(st, t))
+        assert seen(w) == seen(an.root)                                  # visible tiles unchanged
+        hid_types = lambda st: sorted(t.tile_type for t in hidden_tiles(an.sim, st, "occluded"))
+        assert hid_types(w) == hid_types(an.root)                        # hidden type counts preserved
+    assert [t.tile_type for t in hidden_tiles(an.sim, an.root, "occluded")] == ["t1", "t2", "t3"]  # root untouched
+
+
+def test_analyze_board_info_runs_and_reports_both_variants():
+    from app.core.pv.safe_moves import analyze_board_info
+
+    r = analyze_board_info(_two_layer(), k_paths=1, points_per_path=3, m_worlds=4)
+    assert r["ok"] and r["root"] == S and r["nSampled"] == 3
+    for k in ("B", "B_nonTrivial", "Bp_occluded", "Bp_covered"):
+        assert r[k] is None or 0.0 <= r[k] <= 1.0

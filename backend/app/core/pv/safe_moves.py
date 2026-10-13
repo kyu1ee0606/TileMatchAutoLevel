@@ -25,7 +25,7 @@ import time
 from dataclasses import replace
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.core.bot_simulator import BotSimulator, DockSlot, GameState, TileState
+from app.core.bot_simulator import BotSimulator, DockSlot, GameState, TileEffectType, TileState
 from app.core.solver import _remaining_count, _state_signature
 
 S, I, U = "S", "I", "U"
@@ -103,9 +103,77 @@ def fast_copy(state) -> GameState:
     return n
 
 
+def ext_signature(state) -> Tuple:
+    """Solver signature + types of hidden stack/craft inner tiles (needed once worlds differ only there)."""
+    inner = tuple(sorted((k, t.tile_type) for k, t in state.stacked_tiles.items() if not t.picked))
+    return (_state_signature(state), inner)
+
+
+# ── information-limited variant B′ (determinization) ─────────────────────────────────────────────
+HIDE_MODES = ("occluded", "covered")
+
+
+def _fully_occluded(sim: BotSimulator, state, t: TileState) -> bool:
+    """Tile completely hidden under unpicked upper tiles: a same-parity tile on the same cell, or all four
+    quadrants covered by opposite-parity tiles (half-offset grid, same offsets as `_is_blocked_by_upper`)."""
+    quads = set()
+    for ul in range(t.layer_idx + 1, state._max_layer_idx + 1):
+        layer = state.tiles.get(ul)
+        if not layer:
+            continue
+        if ul % 2 == t.layer_idx % 2:
+            u = layer.get(f"{t.x_idx}_{t.y_idx}")
+            if u is not None and not u.picked:
+                return True
+            continue
+        bigger = state.layer_cols.get(ul, 7) > state.layer_cols.get(t.layer_idx, 7)
+        offs = BotSimulator.BLOCKING_OFFSETS_UPPER_BIGGER if bigger else BotSimulator.BLOCKING_OFFSETS_UPPER_SMALLER
+        for dx, dy in offs:
+            u = layer.get(f"{t.x_idx + dx}_{t.y_idx + dy}")
+            if u is not None and not u.picked:
+                quads.add((dx, dy) if bigger else (dx + 1, dy + 1))
+        if len(quads) == 4:
+            return True
+    return False
+
+
+def hidden_tiles(sim: BotSimulator, state, mode: str) -> List[TileState]:
+    """Tiles whose type the player cannot see now.
+
+    Both modes: stack/craft inner tiles not on the board, and covered `unknown` tiles (game shows "?").
+    occluded (game-faithful): + board tiles completely hidden under upper tiles. Covered-but-partly-visible
+                              tiles are drawn dimmed with their type in the client (TileEffect CheckMask).
+    covered (upper bound):    + every covered (blocked) board tile.
+    """
+    out, on_board = [], set()
+    for layer in state.tiles.values():
+        for t in layer.values():
+            if t.picked:
+                continue
+            if t.original_full_key:
+                on_board.add(t.original_full_key)
+            if not sim._is_blocked_by_upper(state, t):
+                continue
+            if mode == "covered" or t.effect_type == TileEffectType.UNKNOWN or _fully_occluded(sim, state, t):
+                out.append(t)
+    out += [t for k, t in state.stacked_tiles.items() if not t.picked and k not in on_board]
+    return out
+
+
+def determinize(sim: BotSimulator, state, mode: str, rng: random.Random):
+    """A world consistent with what the player sees: hidden tiles' types permuted (counts preserved)."""
+    w = fast_copy(state)
+    hid = hidden_tiles(sim, w, mode)
+    types = [t.tile_type for t in hid]
+    rng.shuffle(types)
+    for t, ty in zip(hid, types):
+        t.tile_type = ty
+    return w, len(hid)
+
+
 class SafeMoveAnalyzer:
     def __init__(self, level_json: Dict[str, Any], node_budget: int = 3000, time_cap_s: float = 20.0,
-                 root_node_budget: int = 20000):
+                 root_node_budget: int = 20000, ext_sig: bool = False):
         self.sim = BotSimulator()
         total = sum(len(l["tiles"]) for k, l in level_json.items()
                     if k.startswith("layer_") and isinstance(l, dict) and isinstance(l.get("tiles"), dict))
@@ -118,32 +186,34 @@ class SafeMoveAnalyzer:
         self.root_node_budget = root_node_budget
         self.time_cap_s = time_cap_s
         self.cache: Dict[Tuple, str] = {}
+        self.sig = ext_signature if ext_sig else _state_signature
         self.nodes = 0
         self.solves = 0
 
     # ── primitives ────────────────────────────────────────────────────────────────────────────
+    def apply(self, state, move):
+        """Child after `move` (by position) or None. cleared/failed flags set."""
+        child = fast_copy(state)
+        ct = child.tiles.get(move.layer_idx, {}).get(move.position)
+        if ct is None:
+            return None
+        try:
+            self.sim._apply_move(child, replace(move, tile_state=ct))
+        except Exception:  # noqa: BLE001 — same tolerance as core solver
+            return None
+        self.sim._is_game_over(child)
+        return child
+
     def children(self, state) -> List[Any]:
         """Child states of every legal move (cleared/failed flags set). Move order = legal-move order."""
-        out = []
-        for move in self.sim._get_available_moves(state):
-            child = fast_copy(state)
-            ct = child.tiles.get(move.layer_idx, {}).get(move.position)
-            if ct is None:
-                continue
-            try:
-                self.sim._apply_move(child, replace(move, tile_state=ct))
-            except Exception:  # noqa: BLE001 — same tolerance as core solver
-                continue
-            self.sim._is_game_over(child)
-            out.append(child)
-        return out
+        return [c for c in (self.apply(state, m) for m in self.sim._get_available_moves(state)) if c is not None]
 
     def judge(self, state, node_budget: Optional[int] = None) -> str:
         if state.cleared or _remaining_count(state) == 0:
             return S
         if state.failed:
             return I
-        sig = _state_signature(state)
+        sig = self.sig(state)
         got = self.cache.get(sig)
         if got in (S, I):
             return got
@@ -177,7 +247,7 @@ class SafeMoveAnalyzer:
                     return S
                 if child.failed:
                     continue
-                sig = _state_signature(child)
+                sig = self.sig(child)
                 if sig in parent:
                     continue
                 c = self.cache.get(sig)
@@ -275,6 +345,118 @@ def analyze_board(level_json: Dict[str, Any], k_paths: int = 4, seed: int = 1, n
     agg["log10RandClear"] = math.log10(sum(vals) / len(vals)) if vals and sum(vals) > 0 else None
     out.update({"ok": True, **agg, "paths": paths, "pathsDone": len(paths),
                 "stuckPaths": sum(1 for p in paths if p["end"] != "cleared"),
+                "nodes": an.nodes, "solves": an.solves, "cacheSize": len(an.cache),
+                "sec": round(time.monotonic() - t_start, 2)})
+    return out
+
+
+def _ratio(s: int, u: int) -> Optional[float]:
+    return s / (s + u) if s + u > 0 else None
+
+
+def _mean(xs: List[Optional[float]]) -> Optional[float]:
+    v = [x for x in xs if x is not None]
+    return sum(v) / len(v) if v else None
+
+
+def info_metrics(points: List[Dict[str, Any]], modes=HIDE_MODES) -> Dict[str, Any]:
+    """B (all points / sampled points / excluding immediately-failing moves) and B′ per hiding mode."""
+    rb = [_ratio(p["safe"], p["unsafe"]) for p in points]
+    rnt = [_ratio(p["safe"], p["unsafe"] - p["imm"]) for p in points]
+    smp = [p for p in points if modes[0] in p]
+    out = {
+        "nPoints": len(points), "nSampled": len(smp),
+        "B": _mean(rb),
+        "B_nonTrivial": _mean(rnt),                                    # immediate dock/gimmick fails removed
+        "B_sat1": _mean([1.0 if r == 1.0 else 0.0 for r in rb if r is not None]),      # share of points at 1.0
+        "B_ntSat1": _mean([1.0 if r == 1.0 else 0.0 for r in rnt if r is not None]),
+        "B_sampled": _mean([_ratio(p["safe"], p["unsafe"]) for p in smp]),
+        "immFrac": (sum(p["imm"] for p in points) / sum(p["legal"] for p in points)) if points else None,
+    }
+    for m in modes:
+        rr = [_ratio(p[m]["safe"], p[m]["unsafe"]) for p in smp]
+        out[f"Bp_{m}"] = _mean(rr)
+        out[f"Bp_{m}_sat1"] = _mean([1.0 if r == 1.0 else 0.0 for r in rr if r is not None])
+        out[f"Bp_{m}_unc"] = (sum(p[m]["unc"] for p in smp) / sum(p["legal"] for p in smp)) if smp else None
+        out[f"Bp_{m}_hidden"] = _mean([p[m]["hidden"] for p in smp])
+    return out
+
+
+def analyze_board_info(level_json: Dict[str, Any], k_paths: int = 2, points_per_path: int = 6, m_worlds: int = 6,
+                       thr: float = 0.8, modes=HIDE_MODES, seed: int = 1, node_budget: int = 3000,
+                       root_node_budget: int = 20000, time_cap_s: float = 20.0,
+                       wall_cap_s: float = 900.0, world_node_budget: int = 1000) -> Dict[str, Any]:
+    """B and information-limited B′ on the same random solution paths.
+
+    B′ (per sampled point, per hiding mode): build M worlds consistent with what the player sees (hidden tiles'
+    types permuted); a move is safe′ if, among worlds where it was decided, ≥ thr keep it solvable, unsafe′ if
+    fewer, uncertain′ if fewer than M/2 worlds were decided. Paths follow the TRUE board (random truly-safe move).
+    """
+    t_start = time.monotonic()
+    an = SafeMoveAnalyzer(level_json, node_budget=node_budget, time_cap_s=time_cap_s,
+                          root_node_budget=root_node_budget, ext_sig=True)
+    out: Dict[str, Any] = {"tiles": an.total_tiles, **board_flags(level_json), "k": k_paths, "M": m_worlds,
+                           "thr": thr, "pointsPerPath": points_per_path, "nodeBudget": node_budget,
+                           "worldNodeBudget": world_node_budget,
+                           "impl": "fastcopy+info"}
+    root_v = an.judge(an.root, node_budget=root_node_budget)
+    out["root"] = root_v
+    if root_v != S:
+        out.update({"ok": False, "sec": round(time.monotonic() - t_start, 2), "nodes": an.nodes})
+        return out
+    rng, wrng = random.Random(seed), random.Random(seed + 1)
+    sim = an.sim
+    paths = []
+    for _ in range(k_paths):
+        if paths and time.monotonic() - t_start > wall_cap_s:
+            break
+        span = max(1, an.total_tiles - 3)   # path length = tile count; skip the trivial last moves
+        sample = set(rng.sample(range(span), min(points_per_path, span)))
+        state, pts, end, step = an.root, [], "cleared", 0
+        while True:
+            if time.monotonic() - t_start > wall_cap_s:
+                end = "wallCap"
+                break
+            kids = [(m, c) for m in sim._get_available_moves(state) for c in [an.apply(state, m)] if c is not None]
+            if not kids:
+                end = "noMove"
+                break
+            verd = [an.judge(c) for _, c in kids]
+            pt = {"step": step, "legal": len(kids), "imm": sum(1 for _, c in kids if c.failed),
+                  "safe": verd.count(S), "unsafe": verd.count(I), "unc": verd.count(U)}
+            if step in sample:
+                for mode in modes:
+                    worlds = [determinize(sim, state, mode, wrng) for _ in range(m_worlds)]
+                    sp = up = uc = 0
+                    for m, _c in kids:
+                        cs = ci = 0
+                        for w, _h in worlds:
+                            wc = an.apply(w, m)
+                            v = U if wc is None else an.judge(wc, node_budget=world_node_budget)
+                            cs += v == S
+                            ci += v == I
+                        if cs + ci < m_worlds / 2:
+                            uc += 1
+                        elif cs / (cs + ci) >= thr:
+                            sp += 1
+                        else:
+                            up += 1
+                    pt[mode] = {"safe": sp, "unsafe": up, "unc": uc, "hidden": worlds[0][1]}
+            pts.append(pt)
+            safe_kids = [c for (_m, c), v in zip(kids, verd) if v == S]
+            if not safe_kids:
+                end = "stuck"
+                break
+            state = rng.choice(safe_kids)
+            step += 1
+            if state.cleared:
+                break
+        paths.append({"end": end, "points": pts})
+    allpts = [p for pp in paths for p in pp["points"]]
+    out.update({"ok": True, **info_metrics(allpts, modes),
+                "paths": [{"end": pp["end"], **info_metrics(pp["points"], modes)} for pp in paths],
+                "points": allpts, "pathsDone": len(paths),
+                "stuckPaths": sum(1 for pp in paths if pp["end"] != "cleared"),
                 "nodes": an.nodes, "solves": an.solves, "cacheSize": len(an.cache),
                 "sec": round(time.monotonic() - t_start, 2)})
     return out

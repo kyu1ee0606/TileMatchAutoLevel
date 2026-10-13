@@ -22,7 +22,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pv_dda as P  # noqa: E402  (helpers: lj_seed / lj_orig / load / save; import only)
 
-from app.core.pv.safe_moves import analyze_board, analyze_board_info  # noqa: E402
+from app.core.pv.safe_moves import TOPK, analyze_board, analyze_board_info, analyze_board_topk  # noqa: E402
 
 OUT = os.path.join(P.SB, "safe_moves")
 ROOT_NODES, WALL_CAP = 20000, 300.0
@@ -313,6 +313,8 @@ def info_path(n, key):
 
 
 def one_board_info(n, key):
+    if os.path.exists(info_path(n, key)):   # another process got here first
+        return n, key, "skip", 0, None
     prep = P.load(os.path.join(wdir(n), "prep.json"))
     lj = P.lj_orig(prep) if key == "orig" else P.lj_seed(prep, key)
     try:
@@ -336,7 +338,13 @@ def run_info(tasks, workers):
             print(f"[{i}/{len(todo)} {time.time() - t0:.0f}s] L{n} {k} ok={ok} tiles={tiles} sec={sec}", flush=True)
 
 
-def analyze_info():
+INFO_EXTRA = ["B_sat1", "B_ntSat1", "Bp_occluded_sat1", "Bp_covered_sat1", "Bp_occluded_unc", "Bp_covered_unc",
+              "Bp_occluded_hidden", "Bp_covered_hidden", "immFrac"]
+
+
+def analyze_info(bdir=None, metrics=None, extra=None, out_name="summary_info.json", cfg=None):
+    bdir, metrics = bdir or INFO_DIR, metrics or INFO_METRICS
+    extra = INFO_EXTRA if extra is None else extra
     pl = P.load(os.path.join(OUT, "plan.json"))
     levels = []
     for c in pl["levels"]:
@@ -344,20 +352,17 @@ def analyze_info():
             continue
         rows = []
         for x in c["candidates"]:
-            bp = info_path(c["level"], x["key"])
+            bp = os.path.join(bdir, f"{c['level']:04d}_{x['key'].replace(':', '-')}.json")
             if os.path.exists(bp):
                 b = P.load(bp)
                 if b.get("ok"):
-                    rows.append({**x, **{m: b.get(m) for m in INFO_METRICS + ["B_sat1", "B_ntSat1", "Bp_occluded_sat1",
-                                                                          "Bp_covered_sat1", "Bp_occluded_unc",
-                                                                          "Bp_covered_unc", "Bp_occluded_hidden",
-                                                                          "Bp_covered_hidden", "immFrac", "sec", "tiles"]},
-                                 "pv": {m: [pp.get(m) for pp in b["paths"]] for m in INFO_METRICS}})
+                    rows.append({**x, **{m: b.get(m) for m in metrics + extra + ["sec", "tiles"]},
+                                 "pv": {m: [pp.get(m) for pp in b["paths"]] for m in metrics}})
         orig = next((r for r in rows if r["key"] == "orig"), None)
         if len(rows) < 6 or not orig:
             continue
         lv = {"level": c["level"], "stratum": c["stratum"], "n": len(rows), "rho": {}, "dir": {}, "rel": {}}
-        for m in INFO_METRICS:
+        for m in metrics:
             v = [r for r in rows if r[m] is not None]
             lv["rho"][m] = spearman([r[m] for r in v], [r["W"] for r in v])
             a = n = 0
@@ -373,7 +378,7 @@ def analyze_info():
 
     def summ(ls):
         o = {"nLevels": len(ls)}
-        for m in INFO_METRICS:
+        for m in metrics:
             rh = [l["rho"][m] for l in ls if l["rho"][m] is not None]
             a = sum(l["dir"][m][0] for l in ls)
             n = sum(l["dir"][m][1] for l in ls)
@@ -386,17 +391,52 @@ def analyze_info():
     dist = {k: {"median": median([r[k] for r in rows if r[k] is not None]),
                 "p10": sorted(r[k] for r in rows if r[k] is not None)[len(rows) // 10] if rows else None,
                 "p90": sorted(r[k] for r in rows if r[k] is not None)[len(rows) * 9 // 10] if rows else None}
-            for k in INFO_METRICS + ["B_sat1", "B_ntSat1", "Bp_occluded_sat1", "Bp_covered_sat1", "Bp_occluded_unc",
-                                     "Bp_covered_unc", "Bp_occluded_hidden", "Bp_covered_hidden", "immFrac"]}
+            for k in metrics + extra}
     cost = {}
     for r in rows:
         cost.setdefault(str((r["tiles"] // 10) * 10), []).append(r["sec"])
-    res = {"config": INFO_CFG, "all": summ(levels), "noCraft": summ([l for l in levels if "craft" not in l["stratum"]]),
+    res = {"config": cfg or INFO_CFG, "all": summ(levels), "noCraft": summ([l for l in levels if "craft" not in l["stratum"]]),
            "craft": summ([l for l in levels if "craft" in l["stratum"]]), "dist": dist, "boards": len(rows),
            "cost": {k: {"n": len(v), "median": median(v), "max": max(v)} for k, v in sorted(cost.items(), key=lambda kv: int(kv[0]))},
            "perLevel": [{k: v for k, v in l.items() if k != "rows"} for l in levels]}
-    P.save(os.path.join(OUT, "summary_info.json"), res)
+    P.save(os.path.join(OUT, out_name), res)
     print(json.dumps({k: v for k, v in res.items() if k != "perLevel"}, ensure_ascii=False, indent=1))
+
+
+# ── bot-candidate top-k B (doc 11 §9) ──────────────────────────────────────────────────────────────
+TOPK_DIR = os.path.join(OUT, "boards_topk")
+TOPK_CFG = {"k_paths": 3, "info_points_per_path": 6, "m_worlds": 6, "thr": 0.8, "wall_cap_s": 600.0,
+            "world_node_budget": 300}
+TOPK_METRICS = [f"Bk{k}" for k in TOPK] + [f"Bk{k}_info" for k in TOPK]
+
+
+def one_board_topk(n, key):
+    bp = os.path.join(TOPK_DIR, f"{n:04d}_{key.replace(':', '-')}.json")
+    if os.path.exists(bp):
+        return n, key, "skip", 0, None
+    prep = P.load(os.path.join(wdir(n), "prep.json"))
+    lj = P.lj_orig(prep) if key == "orig" else P.lj_seed(prep, key)
+    thetas = sorted(float(t) for t in P.load(os.path.join(wdir(n), "s2.json"))["orig"]["theta"])   # bot W's θ pair
+    try:
+        r = analyze_board_topk(lj, thetas, seed=SAMPLE_SEED, node_budget=NODE_BUDGET, root_node_budget=ROOT_NODES,
+                               **TOPK_CFG)
+    except Exception as exc:  # noqa: BLE001
+        r = {"ok": False, "error": repr(exc)}
+    r.update({"level": n, "key": key})
+    P.save(bp, r)
+    return n, key, r.get("ok"), r.get("sec"), r.get("tiles")
+
+
+def run_topk(tasks, workers):
+    os.makedirs(TOPK_DIR, exist_ok=True)
+    todo = [(n, k) for n, k in tasks if not os.path.exists(os.path.join(TOPK_DIR, f"{n:04d}_{k.replace(':', '-')}.json"))]
+    print(f"todo {len(todo)} / {len(tasks)}", flush=True)
+    t0 = time.time()
+    with ProcessPoolExecutor(max_workers=workers) as ex:
+        futs = [ex.submit(one_board_topk, n, k) for n, k in todo]
+        for i, f in enumerate(as_completed(futs), 1):
+            n, k, ok, sec, tiles = f.result()
+            print(f"[{i}/{len(todo)} {time.time() - t0:.0f}s] L{n} {k} ok={ok} tiles={tiles} sec={sec}", flush=True)
 
 
 def kcurve(ks=(1, 3, 5, 10, 15)):
@@ -443,11 +483,13 @@ def kcurve(ks=(1, 3, 5, 10, 15)):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["plan", "run", "pilot", "analyze", "kcurve", "run_info", "pilot_info", "analyze_info"])
+    ap.add_argument("cmd", choices=["plan", "run", "pilot", "analyze", "kcurve", "run_info", "pilot_info", "analyze_info",
+                                     "run_topk", "analyze_topk"])
     ap.add_argument("--workers", type=int, default=3)
     ap.add_argument("--levels", default="")
     ap.add_argument("--seeds", type=int, default=0)
     ap.add_argument("--wall", type=float, default=WALL_CAP)
+    ap.add_argument("--reverse", action="store_true")
     a = ap.parse_args()
     if a.cmd == "plan":
         plan()
@@ -457,7 +499,8 @@ def main():
         pilot([int(x) for x in a.levels.split(",") if x], a.seeds, min(a.workers, 3), a.wall)
     elif a.cmd == "run_info":
         pl = P.load(os.path.join(OUT, "plan.json"))
-        lv = sorted((c for c in pl["levels"] if c["stratum"] != "untrusted"), key=lambda c: c["tiles"])
+        lv = sorted((c for c in pl["levels"] if c["stratum"] != "untrusted"), key=lambda c: c["tiles"],
+                    reverse=a.reverse)   # --reverse: a second process can work from the large end
         run_info([(c["level"], x["key"]) for c in lv for x in c["candidates"]], min(a.workers, 3))
     elif a.cmd == "pilot_info":
         tasks = []
@@ -467,6 +510,14 @@ def main():
         run_info(tasks, min(a.workers, 3))
     elif a.cmd == "analyze_info":
         analyze_info()
+    elif a.cmd == "run_topk":
+        pl = P.load(os.path.join(OUT, "plan.json"))
+        lv = sorted((c for c in pl["levels"] if c["stratum"] != "untrusted"
+                     and (not a.levels or str(c["level"]) in a.levels.split(","))), key=lambda c: c["tiles"],
+                    reverse=a.reverse)
+        run_topk([(c["level"], x["key"]) for c in lv for x in c["candidates"]], min(a.workers, 3))
+    elif a.cmd == "analyze_topk":
+        analyze_info(TOPK_DIR, TOPK_METRICS, [], "summary_topk.json", TOPK_CFG)
     elif a.cmd == "kcurve":
         kcurve()
     else:

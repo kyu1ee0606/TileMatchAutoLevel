@@ -460,3 +460,120 @@ def analyze_board_info(level_json: Dict[str, Any], k_paths: int = 2, points_per_
                 "nodes": an.nodes, "solves": an.solves, "cacheSize": len(an.cache),
                 "sec": round(time.monotonic() - t_start, 2)})
     return out
+
+
+# ── bot-candidate (top-k) variant (doc 11 §9) ─────────────────────────────────────────────────────
+TOPK = (1, 2, 3, 5)
+
+
+def bot_ranking(sim: BotSimulator, state, moves, profile) -> List[int]:
+    """Indices of `moves` in the bot's preference order: completing matches first, then by profile score
+    (`_select_move_with_profile`: max-score matching move, else score-sorted; lookahead re-ranks only within the
+    pruned top 3~7 of this order). `sim._rng` must be seeded by the caller (score noise for θ < 1)."""
+    scores = [sim._score_move_with_profile(m, state, profile) for m in moves]
+    return sorted(range(len(moves)), key=lambda i: (moves[i].will_match, scores[i]), reverse=True)
+
+
+def topk_metrics(points: List[Dict[str, Any]], ks=TOPK) -> Dict[str, Any]:
+    """Per k: mean over points of safe / (safe + unsafe) among the bot's top-k moves (averaged over θ),
+    and the same for the determinized (occluded) verdict at sampled points (`Bk{k}_info`)."""
+    out: Dict[str, Any] = {"nPoints": len(points)}
+    for k in ks:
+        out[f"Bk{k}"] = _mean([_mean([_ratio(*v[str(k)]) for v in p["topk"].values()]) for p in points])
+        smp = [p for p in points if "topk_info" in p]
+        out[f"Bk{k}_info"] = _mean([_mean([_ratio(*v[str(k)]) for v in p["topk_info"].values()]) for p in smp])
+    return out
+
+
+def analyze_board_topk(level_json: Dict[str, Any], thetas: List[float], k_paths: int = 3, seed: int = 1,
+                       node_budget: int = 3000, root_node_budget: int = 20000, time_cap_s: float = 20.0,
+                       wall_cap_s: float = 600.0, ks=TOPK, info_points_per_path: int = 6, m_worlds: int = 6,
+                       thr: float = 0.8, world_node_budget: int = 300) -> Dict[str, Any]:
+    """Safe ratio restricted to the moves the bot actually considers (top-k of its own ranking at each θ).
+
+    Path: from the root, step to a uniformly random truly-safe move among the bot's top-max(k) moves (union over
+    θ); if none is safe, among any safe move (judged lazily in bot order). Only top-max(k) children are judged,
+    plus fallbacks. At `info_points_per_path` sampled points the same top-k moves are also judged in M
+    determinized worlds (occluded mode, as B′): safe′ if ≥ thr of decided worlds keep it solvable.
+    """
+    from app.core.mc_difficulty import make_skill_profile
+
+    t_start = time.monotonic()
+    an = SafeMoveAnalyzer(level_json, node_budget=node_budget, time_cap_s=time_cap_s,
+                          root_node_budget=root_node_budget, ext_sig=True)
+    out: Dict[str, Any] = {"tiles": an.total_tiles, **board_flags(level_json), "k": k_paths, "thetas": thetas,
+                           "ks": list(ks), "M": m_worlds, "thr": thr, "nodeBudget": node_budget,
+                           "worldNodeBudget": world_node_budget, "impl": "fastcopy+topk"}
+    root_v = an.judge(an.root, node_budget=root_node_budget)
+    out["root"] = root_v
+    if root_v != S:
+        out.update({"ok": False, "sec": round(time.monotonic() - t_start, 2), "nodes": an.nodes})
+        return out
+    sim, kmax = an.sim, max(ks)
+    profiles = {f"{t:g}": make_skill_profile(t) for t in thetas}
+    rng, wrng = random.Random(seed), random.Random(seed + 1)
+    sim._rng = random.Random(seed + 2)
+    paths = []
+    for _ in range(k_paths):
+        if paths and time.monotonic() - t_start > wall_cap_s:
+            break
+        sample = set(rng.sample(range(max(1, an.total_tiles - 3)), min(info_points_per_path, max(1, an.total_tiles - 3))))
+        state, pts, end, step = an.root, [], "cleared", 0
+        while True:
+            if time.monotonic() - t_start > wall_cap_s:
+                end = "wallCap"
+                break
+            moves = sim._get_available_moves(state)
+            if not moves:
+                end = "noMove"
+                break
+            order = {th: bot_ranking(sim, state, moves, pf) for th, pf in profiles.items()}
+            kids: Dict[int, Any] = {}
+            verd: Dict[int, str] = {}
+
+            def v_of(i):
+                if i not in verd:
+                    kids[i] = an.apply(state, moves[i])
+                    verd[i] = U if kids[i] is None else an.judge(kids[i])
+                return verd[i]
+
+            pt = {"step": step, "legal": len(moves), "topk": {}}
+            for th, o in order.items():
+                pt["topk"][th] = {str(k): (sum(v_of(i) == S for i in o[:k]), sum(v_of(i) == I for i in o[:k]))
+                                  for k in ks}
+            if step in sample:
+                worlds = [determinize(sim, state, "occluded", wrng)[0] for _ in range(m_worlds)]
+                wv: Dict[int, str] = {}
+                for i in {i for o in order.values() for i in o[:kmax]}:
+                    cs = ci = 0
+                    for w in worlds:
+                        wc = an.apply(w, moves[i])
+                        v = U if wc is None else an.judge(wc, node_budget=world_node_budget)
+                        cs += v == S
+                        ci += v == I
+                    wv[i] = U if cs + ci < m_worlds / 2 else (S if cs / (cs + ci) >= thr else I)
+                pt["topk_info"] = {th: {str(k): (sum(wv[i] == S for i in o[:k]), sum(wv[i] == I for i in o[:k]))
+                                        for k in ks} for th, o in order.items()}
+            pts.append(pt)
+            safe_idx = sorted({i for o in order.values() for i in o[:kmax] if verd[i] == S})
+            if not safe_idx:   # bot's candidates all unsafe/uncertain: fall back to any safe move (bot order)
+                for i in order[next(iter(order))]:
+                    if v_of(i) == S:
+                        safe_idx = [i]
+                        break
+            if not safe_idx:
+                end = "stuck"
+                break
+            state = kids[rng.choice(safe_idx)]
+            step += 1
+            if state.cleared:
+                break
+        paths.append({"end": end, "points": pts})
+    allpts = [p for pp in paths for p in pp["points"]]
+    out.update({"ok": True, **topk_metrics(allpts, ks),
+                "paths": [{"end": pp["end"], **topk_metrics(pp["points"], ks)} for pp in paths],
+                "points": allpts, "pathsDone": len(paths),
+                "stuckPaths": sum(1 for pp in paths if pp["end"] != "cleared"),
+                "nodes": an.nodes, "solves": an.solves, "cacheSize": len(an.cache),
+                "sec": round(time.monotonic() - t_start, 2)})
+    return out

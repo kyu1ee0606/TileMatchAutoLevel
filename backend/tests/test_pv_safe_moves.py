@@ -122,3 +122,25 @@ def test_analyze_board_info_runs_and_reports_both_variants():
     assert r["ok"] and r["root"] == S and r["nSampled"] == 3
     for k in ("B", "B_nonTrivial", "Bp_occluded", "Bp_covered"):
         assert r[k] is None or 0.0 <= r[k] <= 1.0
+
+
+def test_topk_bot_ranking_and_metrics():
+    from app.core.mc_difficulty import make_skill_profile
+    from app.core.pv.safe_moves import analyze_board_topk, bot_ranking
+
+    types = [f"t{k}" for k in range(1, 8)] * 3
+    an = SafeMoveAnalyzer(_flat(types))
+    an.sim._rng = random.Random(1)
+    st = an.apply(an.root, an.sim._get_available_moves(an.root)[0])
+    st = an.apply(st, next(m for m in an.sim._get_available_moves(st) if m.tile_type == "t1"))
+    moves = an.sim._get_available_moves(st)
+    order = bot_ranking(an.sim, st, moves, make_skill_profile(0.7))
+    assert moves[order[0]].will_match and sorted(order) == list(range(len(moves)))
+
+    r = analyze_board_topk(_flat(types), [0.55, 0.65], k_paths=2, info_points_per_path=3, m_worlds=3)
+    assert r["ok"] and r["stuckPaths"] == 0
+    for k in (1, 2, 3, 5):
+        assert 0.0 <= r[f"Bk{k}"] <= 1.0 and r[f"Bk{k}_info"] is not None
+    assert sum("topk_info" in p for p in r["points"]) == 6
+    easy = analyze_board_topk(_flat(["t1", "t2", "t1", "t2", "t1", "t2"]), [0.5], k_paths=1, info_points_per_path=1)
+    assert easy["Bk5"] == 1.0

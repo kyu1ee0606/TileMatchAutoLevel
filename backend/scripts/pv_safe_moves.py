@@ -1,0 +1,251 @@
+"""Metric B (safe-move ratio) validation against bot W — doc 11.
+
+  python scripts/pv_safe_moves.py plan                 # stratified level sample (L32-500) + candidate boards
+  python scripts/pv_safe_moves.py run [--workers 3]    # compute B per board (resumable, one json per board)
+  python scripts/pv_safe_moves.py pilot --levels 1001,1002 [--seeds 2]   # L1001+ unevaluable trial
+  python scripts/pv_safe_moves.py analyze              # Spearman / direction agreement / cost -> summary.json
+
+Ground truth = stage-2 bot W (950 games x 2 adaptive θ) already stored in dda_sets/work/NNNN/s2.json.
+Reads dda_sets only; writes <sandbox>/safe_moves/ only. Shared core untouched (import only).
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import random
+import sys
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pv_dda as P  # noqa: E402  (helpers: lj_seed / lj_orig / load / save; import only)
+
+from app.core.pv.safe_moves import analyze_board  # noqa: E402
+
+OUT = os.path.join(P.SB, "safe_moves")
+K_PATHS, ROOT_NODES, WALL_CAP = 3, 20000, 300.0
+NODE_BUDGET = int(os.environ.get("PV_SM_NODES", "3000"))   # per-child solve budget (1000 tried: more UNCERTAIN -> slower)
+BOARDS = os.path.join(OUT, "boards" if NODE_BUDGET == 3000 else f"boards_n{NODE_BUDGET}")
+MAX_CANDS = 12               # orig + chosen tiers + random fill (8~16 per level)
+SAMPLE_SEED = 20261013
+TILE_BINS = ((0, 50), (50, 70), (70, 90))   # levels ≥ 90 tiles skipped in validation (cost; measured in pilot)
+PER_STRATUM = 6
+UNTRUSTED_N = 8
+METRICS = {"meanSafe": 1, "low10Safe": 1, "bottle1": -1, "bottle2": -1, "log10RandClear": 1}  # sign: +1 = higher is easier
+DIR_MIN = 0.05               # |ΔW| needed to count a candidate in direction agreement (≈3σ at 950x2 games)
+
+
+def wdir(n):
+    return os.path.join(P.DDA, "work", f"{n:04d}")
+
+
+def board_path(n, key):
+    return os.path.join(BOARDS, f"{n:04d}_{key.replace(':', '-')}.json")
+
+
+# ── plan ──────────────────────────────────────────────────────────────────────────────────────
+def plan():
+    pool = []
+    for n in range(32, 501):
+        d = wdir(n)
+        if not all(os.path.exists(os.path.join(d, f)) for f in ("prep.json", "final.json", "s2.json")):
+            continue
+        fin, prep, s2 = (P.load(os.path.join(d, f)) for f in ("final.json", "prep.json", "s2.json"))
+        if fin["status"] not in ("5tier", "3tier", "no_variant") or "orig" not in s2 or len(s2) < 8:
+            continue
+        if prep["tileCount"] >= TILE_BINS[-1][1]:
+            continue
+        pool.append({"level": n, "tiles": prep["tileCount"], "craft": bool(prep.get("craft")),
+                     "untrusted": bool(prep.get("solverUnreliable")), "status": fin["status"]})
+    rng = random.Random(SAMPLE_SEED)
+    chosen = []
+    for lo, hi in TILE_BINS:
+        for craft in (False, True):
+            st = [p for p in pool if not p["untrusted"] and p["craft"] == craft and lo <= p["tiles"] < hi]
+            rng.shuffle(st)
+            chosen += [{**p, "stratum": f"t{lo}-{hi}{'_craft' if craft else ''}"} for p in st[:PER_STRATUM]]
+    unt = [p for p in pool if p["untrusted"]]
+    rng.shuffle(unt)
+    chosen += [{**p, "stratum": "untrusted"} for p in unt[:UNTRUSTED_N]]
+    for c in chosen:
+        s2 = P.load(os.path.join(wdir(c["level"]), "s2.json"))
+        fin = P.load(os.path.join(wdir(c["level"]), "final.json"))
+        tiers = {t: v["key"] for t, v in (fin.get("tiers") or {}).items()}
+        keys = ["orig"] + [k for k in tiers.values() if k in s2]
+        rest = sorted(k for k in s2 if k not in keys)
+        rng.shuffle(rest)
+        keys += rest[:MAX_CANDS - len(keys)]
+        c["candidates"] = [{"key": k, "tier": next((t for t, v in tiers.items() if v == k), None),
+                            "W": s2[k]["W"]} for k in keys]
+    P.save(os.path.join(OUT, "plan.json"), {"levels": chosen, "pool": len(pool),
+                                            "params": {"k": K_PATHS, "nodeBudget": NODE_BUDGET, "rootNodes": ROOT_NODES,
+                                                       "wallCap": WALL_CAP, "maxCands": MAX_CANDS, "seed": SAMPLE_SEED}})
+    from collections import Counter
+    print("pool", len(pool), "chosen", len(chosen), Counter(c["stratum"] for c in chosen),
+          "boards", sum(len(c["candidates"]) for c in chosen))
+
+
+# ── run ───────────────────────────────────────────────────────────────────────────────────────
+def one_board(n, key, k_paths, wall_cap):
+    prep = P.load(os.path.join(wdir(n), "prep.json"))
+    lj = P.lj_orig(prep) if key == "orig" else P.lj_seed(prep, key)
+    try:
+        r = analyze_board(lj, k_paths=k_paths, seed=SAMPLE_SEED, node_budget=NODE_BUDGET,
+                          root_node_budget=ROOT_NODES, wall_cap_s=wall_cap)
+    except Exception as exc:  # noqa: BLE001
+        r = {"ok": False, "error": repr(exc)}
+    r.update({"level": n, "key": key})
+    P.save(board_path(n, key), r)
+    return n, key, r.get("ok"), r.get("sec"), r.get("tiles")
+
+
+def run_tasks(tasks, workers, k_paths, wall_cap):
+    os.makedirs(BOARDS, exist_ok=True)
+    todo = [(n, k) for n, k in tasks if not os.path.exists(board_path(n, k))]
+    print(f"todo {len(todo)} / {len(tasks)}", flush=True)
+    t0 = time.time()
+    with ProcessPoolExecutor(max_workers=workers) as ex:
+        futs = [ex.submit(one_board, n, k, k_paths, wall_cap) for n, k in todo]
+        for i, f in enumerate(as_completed(futs), 1):
+            n, k, ok, sec, tiles = f.result()
+            print(f"[{i}/{len(todo)} {time.time() - t0:.0f}s] L{n} {k} ok={ok} tiles={tiles} sec={sec}", flush=True)
+
+
+def run(workers):
+    pl = P.load(os.path.join(OUT, "plan.json"))
+    # small boards first so partial results cover many levels
+    lv = sorted(pl["levels"], key=lambda c: c["tiles"])
+    run_tasks([(c["level"], x["key"]) for c in lv for x in c["candidates"]], workers, K_PATHS, WALL_CAP)
+
+
+def pilot(levels, seeds, workers, wall_cap):
+    tasks = []
+    for n in levels:
+        prep = P.load(os.path.join(wdir(n), "prep.json"))
+        tasks.append((n, "orig"))
+        tasks += [(n, f"{prep['utc0']}:{s}") for s in P.pool_seeds(prep, prep["utc0"])[:seeds]]
+    run_tasks(tasks, workers, K_PATHS, wall_cap)
+
+
+# ── analyze ───────────────────────────────────────────────────────────────────────────────────
+def ranks(xs):
+    order = sorted(range(len(xs)), key=lambda i: xs[i])
+    r = [0.0] * len(xs)
+    i = 0
+    while i < len(xs):
+        j = i
+        while j + 1 < len(xs) and xs[order[j + 1]] == xs[order[i]]:
+            j += 1
+        for t in range(i, j + 1):
+            r[order[t]] = (i + j) / 2
+        i = j + 1
+    return r
+
+
+def spearman(x, y):
+    if len(x) < 3:
+        return None
+    rx, ry = ranks(x), ranks(y)
+    mx, my = sum(rx) / len(rx), sum(ry) / len(ry)
+    sxy = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    sxx = sum((a - mx) ** 2 for a in rx)
+    syy = sum((b - my) ** 2 for b in ry)
+    return sxy / math.sqrt(sxx * syy) if sxx > 0 and syy > 0 else None
+
+
+def median(xs):
+    xs = sorted(xs)
+    if not xs:
+        return None
+    m = len(xs) // 2
+    return xs[m] if len(xs) % 2 else (xs[m - 1] + xs[m]) / 2
+
+
+def analyze():
+    pl = P.load(os.path.join(OUT, "plan.json"))
+    per_level = []
+    for c in pl["levels"]:
+        rows = []
+        for x in c["candidates"]:
+            bp = board_path(c["level"], x["key"])
+            if os.path.exists(bp):
+                b = P.load(bp)
+                rows.append({**x, **{m: b.get(m) for m in list(METRICS) + ["uncertainFrac", "sec", "tiles", "ok",
+                                                                         "root", "stuckPaths"]}})
+        okrows = [r for r in rows if r["ok"]]
+        orig = next((r for r in okrows if r["key"] == "orig"), None)
+        lvl = {"level": c["level"], "stratum": c["stratum"], "tiles": c["tiles"], "nBoards": len(rows),
+               "nOk": len(okrows), "rho": {}, "dir": {}}
+        if len(okrows) >= 6 and orig:
+            for m, sg in METRICS.items():
+                v = [(r[m], r["W"]) for r in okrows if r[m] is not None]
+                rho = spearman([sg * a for a, _ in v], [b for _, b in v])
+                lvl["rho"][m] = rho
+                agree = tie = tot = 0
+                for r in okrows:
+                    if r["key"] == "orig" or r[m] is None or abs(r["W"] - orig["W"]) < DIR_MIN:
+                        continue
+                    tot += 1
+                    d = sg * (r[m] - orig[m])
+                    if d == 0:
+                        tie += 1
+                    elif (d > 0) == (r["W"] > orig["W"]):
+                        agree += 1
+                lvl["dir"][m] = {"agree": agree, "tie": tie, "n": tot}
+        lvl["boards"] = rows
+        per_level.append(lvl)
+
+    def summarize(levels):
+        out = {"nLevels": len(levels)}
+        for m in METRICS:
+            rh = [l["rho"][m] for l in levels if l["rho"].get(m) is not None]
+            dd = [l["dir"][m] for l in levels if m in l["dir"]]
+            n, a = sum(d["n"] for d in dd), sum(d["agree"] for d in dd)
+            out[m] = {"rhoMedian": median(rh), "rhoMean": (sum(rh) / len(rh)) if rh else None, "nRho": len(rh),
+                      "rhoPos": sum(1 for x in rh if x > 0), "dirAgree": (a / n) if n else None, "dirN": n,
+                      "dirTies": sum(d["tie"] for d in dd)}
+        return out
+
+    usable = [l for l in per_level if l["rho"]]
+    groups = {"trusted": [l for l in usable if l["stratum"] != "untrusted"],
+              "trusted_noCraft": [l for l in usable if l["stratum"] != "untrusted" and "craft" not in l["stratum"]],
+              "trusted_craft": [l for l in usable if "craft" in l["stratum"]],
+              "untrusted": [l for l in usable if l["stratum"] == "untrusted"]}
+    # pooled within-level: W delta vs metric delta (all candidates vs orig)
+    boards = [b for l in per_level for b in l["boards"] if b["ok"]]
+    cost = {}
+    for b in boards:
+        k = f"{(b['tiles'] // 10) * 10}"
+        cost.setdefault(k, []).append(b["sec"])
+    summary = {"groups": {g: summarize(v) for g, v in groups.items()},
+               "boards": len(boards), "boardsFailed": sum(1 for l in per_level for b in l["boards"] if not b["ok"]),
+               "uncertainFracMedian": median([b["uncertainFrac"] for b in boards if b["uncertainFrac"] is not None]),
+               "uncertainFracMax": max([b["uncertainFrac"] or 0 for b in boards], default=None),
+               "costByTiles": {k: {"n": len(v), "median": median(v), "max": max(v)} for k, v in sorted(cost.items(), key=lambda kv: int(kv[0]))},
+               "perLevel": [{k: v for k, v in l.items() if k != "boards"} for l in per_level]}
+    P.save(os.path.join(OUT, f"summary_n{NODE_BUDGET}.json"), summary)
+    print(json.dumps({k: v for k, v in summary.items() if k != "perLevel"}, ensure_ascii=False, indent=1))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("cmd", choices=["plan", "run", "pilot", "analyze"])
+    ap.add_argument("--workers", type=int, default=3)
+    ap.add_argument("--levels", default="")
+    ap.add_argument("--seeds", type=int, default=0)
+    ap.add_argument("--wall", type=float, default=WALL_CAP)
+    a = ap.parse_args()
+    if a.cmd == "plan":
+        plan()
+    elif a.cmd == "run":
+        run(min(a.workers, 3))
+    elif a.cmd == "pilot":
+        pilot([int(x) for x in a.levels.split(",") if x], a.seeds, min(a.workers, 3), a.wall)
+    else:
+        analyze()
+
+
+if __name__ == "__main__":
+    main()

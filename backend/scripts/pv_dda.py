@@ -64,6 +64,7 @@ H_PRED_REL = 0.5                      # h2 predicted clear ≥ 0.5 × original p
 PRED_FLAGS = {"abs20": lambda pc, po: pc >= 0.20, "abs10": lambda pc, po: pc >= 0.10, "abs05": lambda pc, po: pc >= 0.05,
               "rel50": lambda pc, po: pc >= H_PRED_REL * po, "none": lambda pc, po: True}
 LEVEL_TIME_CAP = 20 * 60
+SWAP_ON_ORDER_FLIP = False   # 10/13 withdrawn: verification found swap fixes 0/11 -> inner failure = 3-tier fallback
 POOL_PLAN = [("u0", 0, 32), ("u0", 32, 64), ("u0", 64, 128), ("flex", 0, 32), ("flex", 32, 64)]
 
 
@@ -532,7 +533,7 @@ def same_side_order(outer_k, inner_k, s2, rob, sign, pts):
     return {"ok": bool(use) and good * 2 > len(use), "points": len(use), "outerMoreExtreme": good}
 
 
-def decide(prep, s1, s2, sol, rob, judged, pred=None, judged_inner=None):
+def decide(prep, s1, s2, sol, rob, judged, pred=None, judged_inner=None, outer_min=OUTER_MIN, swap=None):
     """Per side: valid candidates, robust queue, chosen outer/inner."""
     pred = pred or {}
     judged_inner = judged_inner or judged
@@ -549,7 +550,7 @@ def decide(prep, s1, s2, sol, rob, judged, pred=None, judged_inner=None):
             if d["lo"] <= 0 or ev is None:
                 continue
             cand.append({"key": k, "delta": e["W"] - o["W"], "absd": d["diff"], "lo": d["lo"], "hi": d["hi"], "evidence": ev})
-        outer_c = sorted([c for c in cand if c["absd"] >= OUTER_MIN], key=lambda c: (abs(c["delta"] - TARGET[side]), c["key"]))
+        outer_c = sorted([c for c in cand if c["absd"] >= outer_min], key=lambda c: (abs(c["delta"] - TARGET[side]), c["key"]))
         inner_c = sorted([c for c in cand if INNER_MIN <= c["absd"]], key=lambda c: (c["absd"], c["key"]))
         queue = [c["key"] for c in outer_c[:3]] + [c["key"] for c in inner_c[:3]]
         judged_map = {c["key"]: robust_judge(c["key"], s2, rob, sign, judged) for c in cand if c["key"] in rob}
@@ -596,7 +597,7 @@ def decide(prep, s1, s2, sol, rob, judged, pred=None, judged_inner=None):
                 break
         swap_log = []
         outer_no_swap = outer
-        if outer and inner is None:
+        if outer and inner is None and (SWAP_ON_ORDER_FLIP if swap is None else swap):
             # 10/13 (v4 rule): before falling back to 3 tiers, an inner candidate that passed its robust test but is
             # MORE extreme than the outer on a majority of points is tried as the outer (old outer -> inner), re-judged
             for x in inner_log:
@@ -606,7 +607,7 @@ def decide(prep, s1, s2, sol, rob, judged, pred=None, judged_inner=None):
                 rec = {"key": c["key"], "oldOuter": outer["key"]}
                 swap_log.append(rec)
                 jc = judged_map.get(c["key"])
-                if c["absd"] < OUTER_MIN or not jc or not jc["pass"]:
+                if c["absd"] < outer_min or not jc or not jc["pass"]:
                     rec["result"] = "new outer fails |Δ|/robust"
                     continue
                 if side == "hard":
@@ -798,7 +799,7 @@ def finalize(w, prep, s1, s2, sol, rob, judged, points, th, sides, rounds, pred,
                  "innerLog": {sd: sides[sd]["innerLog"] for sd in ("easy", "hard")},
                  "swapLog": {sd: sides[sd].get("swapLog", []) for sd in ("easy", "hard")},
                  "swapped": {sd: sides[sd].get("swapped", False) for sd in ("easy", "hard")},
-                 "innerRule": "robust incl. low-skill point + same-side order majority; order flip -> swap & re-judge (10/13)",
+                 "innerRule": "robust incl. low-skill point + same-side order majority; failure -> 3-tier (swap disabled 10/13)",
                  "warnings": warn, "predOrig": pcr_o, "orderOk": order_ok, **base})
 
 

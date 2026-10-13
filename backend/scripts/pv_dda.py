@@ -594,8 +594,49 @@ def decide(prep, s1, s2, sol, rob, judged, pred=None, judged_inner=None):
                     continue
                 inner = c
                 break
+        swap_log = []
+        outer_no_swap = outer
+        if outer and inner is None:
+            # 10/13 (v4 rule): before falling back to 3 tiers, an inner candidate that passed its robust test but is
+            # MORE extreme than the outer on a majority of points is tried as the outer (old outer -> inner), re-judged
+            for x in inner_log:
+                if not x["robust"]["pass"] or x["order"]["ok"]:
+                    continue
+                c = next(cc for cc in inner_c if cc["key"] == x["key"])
+                rec = {"key": c["key"], "oldOuter": outer["key"]}
+                swap_log.append(rec)
+                jc = judged_map.get(c["key"])
+                if c["absd"] < OUTER_MIN or not jc or not jc["pass"]:
+                    rec["result"] = "new outer fails |Δ|/robust"
+                    continue
+                if side == "hard":
+                    r = point_rates(c["key"], s2, rob)
+                    th_hi = max((p for p in r if p.startswith("θ:")), key=lambda p: float(p[2:]))
+                    c["hiRate"] = max(r[th_hi], r.get("profile:expert", 0.0))
+                    if c["hiRate"] < H_HI_MIN:
+                        rec["result"] = "new outer fails hi-skill floor"
+                        continue
+                    po = (pred.get("orig") or {}).get("predicted_clear_rate")
+                    if c["key"] not in pred or po is None:
+                        pred_q += [k for k in (["orig"] if po is None else []) + [c["key"]] if k not in pred_q]
+                        rec["result"] = "predictor pending"
+                        continue
+                    c["pred"] = pred[c["key"]].get("predicted_clear_rate") or 0.0
+                    if c["pred"] < H_PRED_REL * po:
+                        rec["result"] = "new outer fails h2 predictor floor"
+                        continue
+                jo = robust_judge(outer["key"], s2, rob, sign, judged_inner)
+                order2 = same_side_order(c["key"], outer["key"], s2, rob, sign, judged_inner)
+                rec.update(newInnerRobust=jo, newOrder=order2)
+                if not jo["pass"] or not order2["ok"]:
+                    rec["result"] = "re-judge failed"
+                    continue
+                rec["result"] = "swapped"
+                outer, inner = c, outer
+                break
         out[side] = {"outer": outer, "inner": inner, "nCand": len(cand), "robustQueue": queue,
-                     "predQueue": pred_q, "judged": judged_map, "innerLog": inner_log}
+                     "predQueue": pred_q, "judged": judged_map, "innerLog": inner_log, "swapLog": swap_log,
+                     "swapped": bool(swap_log) and swap_log[-1].get("result") == "swapped", "outerNoSwap": outer_no_swap}
     return out
 
 
@@ -670,6 +711,13 @@ def invariants(prep, seedvar_row, baked):
 
 def finalize(w, prep, s1, s2, sol, rob, judged, points, th, sides, rounds, pred, done):
     e, h = sides["easy"], sides["hard"]
+    if not (e["inner"] and h["inner"]):
+        # swap only exists to avoid the 3-tier fallback; if the level stays 3-tier, keep the unswapped outer
+        for sd in ("easy", "hard"):
+            if sides[sd].get("swapped"):
+                sides[sd] = {**sides[sd], "outer": sides[sd]["outerNoSwap"], "inner": None, "swapped": False,
+                             "swapLog": sides[sd]["swapLog"] + [{"result": "reverted (other side has no inner)"}]}
+        e, h = sides["easy"], sides["hard"]
     base = {"thetas": th, "robustPoints": points, "judgedPoints": judged, "wOrig": s2["orig"]["W"],
             "utc0": prep["utc0"], "rounds": rounds, "effects": prep["effects"], "solverUnreliable": prep["solverUnreliable"]}
     if not (e["outer"] and h["outer"]):
@@ -747,18 +795,83 @@ def finalize(w, prep, s1, s2, sol, rob, judged, points, th, sides, rounds, pred,
     grade = "strict" if all(v["evidence"] == "strict" for v in tier_out.values()) else "extended"
     return done({"status": status, "token": token, "tiers": tier_out, "grade": grade, "invariantIssues": issues,
                  "candidates": candidate_info(prep, s2, rob, sides, pred), "h2FloorRule": f"pred >= {H_PRED_REL} x orig pred",
-                 "innerLog": {sd: sides[sd]["innerLog"] for sd in ("easy", "hard")}, "innerRule": "robust incl. low-skill point + same-side order majority",
+                 "innerLog": {sd: sides[sd]["innerLog"] for sd in ("easy", "hard")},
+                 "swapLog": {sd: sides[sd].get("swapLog", []) for sd in ("easy", "hard")},
+                 "swapped": {sd: sides[sd].get("swapped", False) for sd in ("easy", "hard")},
+                 "innerRule": "robust incl. low-skill point + same-side order majority; order flip -> swap & re-judge (10/13)",
                  "warnings": warn, "predOrig": pcr_o, "orderOk": order_ok, **base})
+
+
+def refinalize(n, ex, dry=False, allow_pred=False):
+    """10/13 backfill: re-select a finished 3-tier level with the swap rule from stored measurements.
+    No new bot measurement (scan/stage-1/stage-2/robust). Only verification for newly chosen keys
+    (dotnet golden, solver) and, with allow_pred, the editor predictor for h2 swap candidates."""
+    w = W(n)
+    fin = w.get("final.json")
+    if not fin or fin["status"] != "3tier":
+        return "skip"
+    prep, scan = w.get("prep.json"), w.get("scan.json")
+    th = scan["choice"]["thetas"]
+    xt = extra_theta(scan["rates"], th)
+    points = [f"θ:{xt:g}", "profile:average", "profile:expert", f"θ:{low_theta(th, xt):g}"]
+    judged = [f"θ:{float(t):g}" for t in th] + points[:3]
+    judged_inner = judged + [points[3]]
+    th_set = {float(t) for t in th}
+    s1 = {k: v for k, v in w.get("s1.json", {}).items() if {float(t) for t in v["theta"]} == th_set}
+    s2 = {k: v for k, v in w.get("s2.json", {}).items() if {float(t) for t in v["theta"]} == th_set}
+    sol, rob, pred = w.get("solve.json", {}), w.get("robust.json", {}), w.get("pred.json", {})
+    rob_v4 = w.get("robust_v4.json", {"results": {}})
+    if rob_v4.get("points") == points[:3]:
+        for k, v in rob_v4["results"].items():
+            rob.setdefault(k, v)
+    sides = decide(prep, s1, s2, sol, rob, judged, pred, judged_inner)
+    pending = [r["key"] for r in sides["hard"]["swapLog"] if r.get("result") == "predictor pending"]
+    if pending and allow_pred and not dry:
+        pq = (["orig"] if "orig" not in pred else []) + pending
+        futs = {k: ex.submit(sweep_level_task, {"level_json": lj_orig(prep) if k == "orig" else lj_seed(prep, k),
+                                                "seed": SEED_PRED, "level_number": n}) for k in pq}
+        pred = w.merge("pred.json", {k: {"predicted_clear_rate": f.result().get("predicted_clear_rate"),
+                                         "error": f.result().get("error")} for k, f in futs.items()})
+        sides = decide(prep, s1, s2, sol, rob, judged, pred, judged_inner)
+    sw = {sd: sides[sd]["swapLog"] for sd in ("easy", "hard") if sides[sd]["swapLog"]}
+    if not (sides["easy"]["inner"] and sides["hard"]["inner"]):
+        return "unchanged " + json.dumps({"swapTried": sw}, ensure_ascii=False, default=str)[:300]
+    if dry:
+        return "would-5tier " + json.dumps({sd: [r.get("result") for r in v] for sd, v in sw.items()}, ensure_ascii=False)
+    chosen = [sides[sd][k]["key"] for sd in ("easy", "hard") for k in ("outer", "inner")]
+    gold = w.get("golden.json", {})
+    by_u = {}
+    for k in chosen:
+        if k not in gold:
+            u, s = k.split(":")
+            by_u.setdefault(int(u), []).append(int(s))
+    for u, seeds in by_u.items():
+        golden_check(w, prep, u, seeds)
+    unsolved = [k for k in chosen if k not in sol]
+    if unsolved:
+        futs = {k: ex.submit(solve_check, lj_seed(prep, k), SOLVER_NODES) for k in unsolved}
+        sol = w.merge("solve.json", {k: f.result() for k, f in futs.items()})
+    os.makedirs(os.path.join(DDA, "finals_before_swap"), exist_ok=True)
+    save(os.path.join(DDA, "finals_before_swap", f"{n:04d}.json"), fin)
+
+    def done(final):
+        final.update(level=n, wallSec=fin.get("wallSec"), refinalized="10/13 swap backfill (no new bot measurement)")
+        w.put("final.json", final)
+        return "final " + final["status"]
+    return finalize(w, prep, s1, s2, sol, rob, judged, points, th, sides, fin.get("rounds", []), pred, done)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--level", type=int, required=True)
     ap.add_argument("--next", action="store_true")
+    ap.add_argument("--refinalize", action="store_true")
+    ap.add_argument("--dry", action="store_true")
+    ap.add_argument("--allow-pred", action="store_true")
     args = ap.parse_args()
     t = time.time()
     with ProcessPoolExecutor(max_workers=WORKERS) as ex:
-        r = step(args.level, ex)
+        r = (refinalize(args.level, ex, args.dry, args.allow_pred) if args.refinalize else step(args.level, ex))
     print(f"{args.level} {r} {time.time() - t:.1f}s", flush=True)
     return 0
 

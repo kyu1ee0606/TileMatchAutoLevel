@@ -42,7 +42,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--from", dest="lo", type=int, default=32)
     ap.add_argument("--to", dest="hi", type=int, default=1500)
+    ap.add_argument("--out", default=DDA, help="output dir (default dda_sets/; use a staging dir for atomic swaps)")
     args = ap.parse_args()
+    OUT = args.out
     work = os.path.join(DDA, "work")
     finals = {}
     for name in sorted(os.listdir(work)) if os.path.isdir(work) else []:
@@ -61,11 +63,11 @@ def main():
         if st in ("5tier", "3tier"):
             row = load(os.path.join(d, "seedvar_row.json"))
             seedvar_rows[f"seedvar_{n}"] = row
-            save(os.path.join(DDA, "seedvar", f"seedvar_{n}.json"), {"_note": NOTE, "id": f"seedvar_{n}", **row})
+            save(os.path.join(OUT, "seedvar", f"seedvar_{n}.json"), {"_note": NOTE, "id": f"seedvar_{n}", **row})
             for name, tgt in (("easy", easy_rows), ("hard", hard_rows)):
                 r = load(os.path.join(d, f"baked_{name}.json"))
                 tgt[f"{name}_{n}"] = r
-                save(os.path.join(DDA, "reference_baked", f"{name}_{n}.json"),
+                save(os.path.join(OUT, "reference_baked", f"{name}_{n}.json"),
                      {"_note": "REFERENCE ONLY (not canonical, D13 ③ style bake of the same selection). " + NOTE,
                       "id": f"{name}_{n}", **r})
             meta.update(token=fin["token"], grade=fin["grade"], tiers=fin["tiers"], thetas=fin["thetas"],
@@ -77,11 +79,11 @@ def main():
             meta.update(token=fin.get("token"), invariantIssues=fin.get("invariantIssues"))
         else:
             meta.update(detail=fin.get("detail"), thetas=fin.get("thetas"), wOrig=fin.get("wOrig"))
-        save(os.path.join(DDA, "meta", f"{n}.json"), meta)
+        save(os.path.join(OUT, "meta", f"{n}.json"), meta)
         sel_levels.append(meta)
-    save(os.path.join(DDA, "seedvar_rows.json"), {"_note": NOTE, "rows": seedvar_rows})
-    save(os.path.join(DDA, "reference_baked", "easy_rows.json"), {"_note": "REFERENCE ONLY. " + NOTE, "rows": easy_rows})
-    save(os.path.join(DDA, "reference_baked", "hard_rows.json"), {"_note": "REFERENCE ONLY. " + NOTE, "rows": hard_rows})
+    save(os.path.join(OUT, "seedvar_rows.json"), {"_note": NOTE, "rows": seedvar_rows})
+    save(os.path.join(OUT, "reference_baked", "easy_rows.json"), {"_note": "REFERENCE ONLY. " + NOTE, "rows": easy_rows})
+    save(os.path.join(OUT, "reference_baked", "hard_rows.json"), {"_note": "REFERENCE ONLY. " + NOTE, "rows": hard_rows})
 
     cov = {"note": NOTE, "levelsFinished": len(finals), "status": dict(Counter(m["status"] for m in sel_levels)),
            "bySegment": {}, "reasons": dict(Counter((m.get("reason") or "").split(":")[0] for m in sel_levels
@@ -101,11 +103,12 @@ def main():
         if m["status"] == "no_variant":
             unmet[m.get("reason", "")] += 1
     cov["noVariantReasons"] = dict(unmet)
-    save(os.path.join(DDA, "coverage.json"), cov)
+    save(os.path.join(OUT, "coverage.json"), cov)
 
     sel = {"format": "pv_selection_dda/v1", "note": NOTE, "copyId": "pv_20261002_live3",
            "spec": "game IMPL_SPEC §V2-9-2 seedvar_N (original level_N untouched; token e2|e1|h1|h2 or e2|h2; "
                    "token 'seed' or 'seed@utc'); baseline = original map",
+           "ruleVersion": "R2-outer0.13 (user decision 10/14; R1 outer 0.10 archived in dda_sets/archive_R1_010/)",
            "proposedThresholds": {"outerAbsDeltaMin": OUTER_MIN, "innerDeltaMin": INNER_MIN, "sameSideGapMin": GAP_MIN,
                                   "target": TARGET, "h2PredictedClearRelMin": H_PRED_REL, "h2HiSkillRateMin": H_HI_MIN,
                                   "h2FloorFlagsRecorded": "abs20/abs10/abs05/rel50/none (reselect without re-measure)",
@@ -121,7 +124,7 @@ def main():
                            "pools": POOL_PLAN,
                            "verifierNote": "independent verification must use different bot seed bases, θ points and profiles"},
            "levels": sel_levels}
-    save(os.path.join(DDA, "selection_dda.json"), sel)
+    save(os.path.join(OUT, "selection_dda.json"), sel)
     print(json.dumps({k: v for k, v in cov.items() if k != "note"}, ensure_ascii=False))
     return 0
 

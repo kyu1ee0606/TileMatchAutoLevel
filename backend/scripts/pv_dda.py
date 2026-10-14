@@ -57,7 +57,8 @@ TROUGH = (0.34, 0.50)
 SEED_SCAN, SEED_S1, SEED_S2, SEED_ROBUST, SEED_PRED = 5_000_000, 6_000_000, 7_000_000, 9_100_000, 4242
 SCAN_GAMES, S1_GAMES, S2_GAMES, ROBUST_GAMES = 64, 64, 950, 600
 SOLVER_NODES = 5000
-OUTER_MIN, INNER_MIN, GAP_MIN = 0.10, 0.04, 0.02
+OUTER_MIN, INNER_MIN, GAP_MIN = 0.13, 0.04, 0.02   # outer 0.10 -> 0.13 (R2, user decision 10/14; R1 archived)
+RULE_VERSION = "R2-outer0.13"
 TARGET = {"easy": 0.15, "hard": -0.20}
 H_PRED_MIN, H_HI_MIN = 0.20, 0.10   # H_PRED_MIN kept for flags only (absolute floor rejected 10/09)
 H_PRED_REL = 0.5                      # h2 predicted clear ≥ 0.5 × original predicted clear (proposed, user to confirm)
@@ -710,7 +711,7 @@ def invariants(prep, seedvar_row, baked):
     return issues
 
 
-def finalize(w, prep, s1, s2, sol, rob, judged, points, th, sides, rounds, pred, done):
+def finalize(w, prep, s1, s2, sol, rob, judged, points, th, sides, rounds, pred, done, run_pred=True):
     e, h = sides["easy"], sides["hard"]
     if not (e["inner"] and h["inner"]):
         # swap only exists to avoid the 3-tier fallback; if the level stays 3-tier, keep the unswapped outer
@@ -743,7 +744,7 @@ def finalize(w, prep, s1, s2, sol, rob, judged, points, th, sides, rounds, pred,
     # predictor for every chosen tier + orig (difficulty display values)
     pred = w.get("pred.json", {})
     need = [tiers[t]["key"] for t in order if tiers[t]["key"] not in pred] + ([] if "orig" in pred else ["orig"])
-    if need:
+    if need and run_pred:
         with ProcessPoolExecutor(max_workers=WORKERS) as ex2:
             futs = {k: ex2.submit(sweep_level_task, {"level_json": lj_orig(prep) if k == "orig" else lj_seed(prep, k),
                                                      "seed": SEED_PRED, "level_number": prep["level"]}) for k in need}
@@ -780,7 +781,10 @@ def finalize(w, prep, s1, s2, sol, rob, judged, points, th, sides, rounds, pred,
     pe, ph = tier_out["e2"]["predictedClearRate"], tier_out["h2"]["predictedClearRate"]
     order_ok = all(isinstance(x, (int, float)) for x in (pe, pcr_o, ph)) and pe > pcr_o > ph
     warn = []
-    if not order_ok:
+    if not all(isinstance(x, (int, float)) for x in (pe, pcr_o, ph)):
+        order_ok = None
+        warn.append(f"predictor value missing (rescored without measurement): {pe} / {pcr_o} / {ph}")
+    elif not order_ok:
         warn.append(f"predicted clear% order easy>normal>hard violated: {pe} / {pcr_o} / {ph}")
     for t, v in tier_out.items():
         lr, orr = v["lowSkillRate"], rob.get("orig", {}).get("point", {}).get(points[3], {}).get("rate")
@@ -800,7 +804,7 @@ def finalize(w, prep, s1, s2, sol, rob, judged, points, th, sides, rounds, pred,
                  "swapLog": {sd: sides[sd].get("swapLog", []) for sd in ("easy", "hard")},
                  "swapped": {sd: sides[sd].get("swapped", False) for sd in ("easy", "hard")},
                  "innerRule": "robust incl. low-skill point + same-side order majority; failure -> 3-tier (swap disabled 10/13)",
-                 "warnings": warn, "predOrig": pcr_o, "orderOk": order_ok, **base})
+                 "warnings": warn, "predOrig": pcr_o, "orderOk": order_ok, "ruleVersion": RULE_VERSION, **base})
 
 
 def refinalize(n, ex, dry=False, allow_pred=False):
@@ -860,6 +864,60 @@ def refinalize(n, ex, dry=False, allow_pred=False):
         w.put("final.json", final)
         return "final " + final["status"]
     return finalize(w, prep, s1, s2, sol, rob, judged, points, th, sides, fin.get("rounds", []), pred, done)
+
+
+def rescore(n, archive_dir):
+    """10/14 R2 promotion: re-select a finished level under the current rule from stored measurements only
+    (no bot run, no predictor). Changed levels: R1 work files are archived first, then re-finalized."""
+    w = W(n)
+    fin = w.get("final.json")
+    if not fin or fin["status"] not in ("5tier", "3tier", "no_variant"):
+        return "skip"
+    if fin["status"] == "no_variant":
+        fin["ruleVersion"] = RULE_VERSION + " (R1 no_variant kept: stricter outer rule cannot add a tier)"
+        w.put("final.json", fin)
+        return "no_variant-kept"
+    prep, scan = w.get("prep.json"), w.get("scan.json")
+    th = scan["choice"]["thetas"]
+    xt = extra_theta(scan["rates"], th)
+    points = [f"θ:{xt:g}", "profile:average", "profile:expert", f"θ:{low_theta(th, xt):g}"]
+    judged = [f"θ:{float(t):g}" for t in th] + points[:3]
+    ts = {float(t) for t in th}
+    s1 = {k: v for k, v in w.get("s1.json", {}).items() if {float(t) for t in v["theta"]} == ts}
+    s2 = {k: v for k, v in w.get("s2.json", {}).items() if {float(t) for t in v["theta"]} == ts}
+    sol, rob, pred = w.get("solve.json", {}), w.get("robust.json", {}), w.get("pred.json", {})
+    rv4 = w.get("robust_v4.json", {"results": {}})
+    if rv4.get("points") == points[:3]:
+        for k, v in rv4["results"].items():
+            rob.setdefault(k, v)
+    sides = decide(prep, s1, s2, sol, rob, judged, pred, judged + [points[3]])
+    e, h = sides["easy"], sides["hard"]
+    if e["outer"] and h["outer"]:
+        order = ("e2", "e1", "h1", "h2") if (e["inner"] and h["inner"]) else ("e2", "h2")
+        keys = {"e2": e["outer"]["key"], "h2": h["outer"]["key"]}
+        if len(order) == 4:
+            keys.update(e1=e["inner"]["key"], h1=h["inner"]["key"])
+        if {t: fin["tiers"][t]["key"] for t in fin["tiers"]} == keys:
+            fin["ruleVersion"] = RULE_VERSION + " (same tiers as R1)"
+            w.put("final.json", fin)
+            return "same"
+    arch = os.path.join(archive_dir, "work", f"{n:04d}")
+    os.makedirs(arch, exist_ok=True)
+    for name in ("final.json", "seedvar_row.json", "baked_easy.json", "baked_hard.json"):
+        if os.path.exists(w.f(name)):
+            save(os.path.join(arch, name), load(w.f(name)))
+
+    def done(final):
+        final.update(level=n, wallSec=fin.get("wallSec"), ruleVersion=RULE_VERSION,
+                     rescored="10/14 R2 promotion from stored measurements (no new measurement)", r1Status=fin["status"],
+                     r1Token=fin.get("token"))
+        if final["status"] not in ("5tier", "3tier"):
+            for name in ("seedvar_row.json", "baked_easy.json", "baked_hard.json"):
+                if os.path.exists(w.f(name)):
+                    os.remove(w.f(name))
+        w.put("final.json", final)
+        return "final " + final["status"]
+    return finalize(w, prep, s1, s2, sol, rob, judged, points, th, sides, fin.get("rounds", []), pred, done, run_pred=False)
 
 
 def main():

@@ -690,6 +690,22 @@ GIMMICK_NOTICE_RATES = {
     "stack_w": (0.60, 0.75, 0.90, 0.98, 1.0),
 }
 
+# [bot v2.1] 기믹(폭탄·풀) 인지 확률 모델 기본값 — 16_bot_v21_gimmick_awareness.md §2.
+#   p_aware(g) = L(n_g) · σ(alpha_g + beta·(θ − 1) + gamma_g·imminent_g)
+#   L(n) = 1 − (1 − l0)·exp(−n / tau)   (n = 이 기믹이 나온 이전 레벨 수; None = 충분히 학습됨 → 1)
+#   imminent: bomb = 노출 폭탄 카운트 ≤ 1(게임이 점프 경고를 띄우는 구간),
+#             grass = 남은 인접 타일 − 남은 풀 ≤ 1(한 번만 더 옆을 집으면 못 깨는 상태)
+#   alpha·gamma 는 AF 실패 사유·클리어율로 보정, beta·l0·tau 는 가정값(보정 불가 — 문서 참조).
+V21_AWARENESS_DEFAULTS = {
+    # 보정값(2026-10-14, L101~500 θ1.0 격자 + 2겹 CV): bomb α−1·γ2, grass α−2·γ0(grass 는 α≤−2 에서 포화 — 문서 §4)
+    "alpha": {"bomb": -1.0, "grass": -2.0},
+    "gamma": {"bomb": 2.0, "grass": 0.0},
+    "beta": 4.0,
+    "l0": 0.5,
+    "tau": 15.0,
+    "exposure": None,
+}
+
 # [v15.15] Chain isolation danger awareness by bot type
 # Probability that bot recognizes picking a tile will isolate a chain
 # (leaving it with no horizontal neighbors, making game impossible)
@@ -1733,6 +1749,10 @@ class BotSimulator:
             if not moves:
                 state.failed = True
                 break
+
+            # [bot v2.1] 이번 턴에 폭탄·풀 위협을 인지했는지 먼저 정한다(턴 단위 1회, v2.1에서만 난수 소비).
+            if getattr(profile, "bot_version", "v1") == "v2.1":
+                self._v21_draw_awareness(state, profile)
 
             # Score moves based on profile
             for move in moves:
@@ -2887,6 +2907,7 @@ class BotSimulator:
         """
         base_score = 1.0
         dock_count = len(state.dock_tiles)
+        v21 = getattr(profile, "bot_version", "v1") == "v2.1"
 
         # CRITICAL: Moves that complete a 3-match get MASSIVE bonus
         # This is the most important factor - always prefer matching
@@ -3426,78 +3447,9 @@ class BotSimulator:
 
                     base_score += chain_unlock_bonus
 
-                # 2b. GRASS REDUCE BONUS: Bonus for picking tiles that reduce grass layers
-                # Grass reduces when 4-directional adjacent tile is picked (and grass is not blocked)
-                # Difficulty factors:
-                #   - Exposed (not blocked) vs Hidden (blocked by upper layer)
-                #   - Remaining grass layers: 1 (last layer, critical) vs 2+ (normal)
-                #   - Number of adjacent tiles: fewer = more critical
-                grass_reduce_bonus = 0.0
-                adjacent_neighbors = [
-                    (move_x - 1, move_y), (move_x + 1, move_y),
-                    (move_x, move_y - 1), (move_x, move_y + 1)
-                ]
-                for nx, ny in adjacent_neighbors:
-                    neighbor_pos = f"{nx}_{ny}"
-                    if neighbor_pos in layer_tiles:
-                        neighbor_tile = layer_tiles[neighbor_pos]
-                        if (not neighbor_tile.picked and
-                            neighbor_tile.effect_type == TileEffectType.GRASS):
-                            remaining_grass = neighbor_tile.effect_data.get("remaining", 0)
-                            if remaining_grass > 0:
-                                # Count how many adjacent tiles the grass has (accessibility)
-                                grass_x, grass_y = neighbor_tile.x_idx, neighbor_tile.y_idx
-                                grass_adj_positions = [
-                                    (grass_x - 1, grass_y), (grass_x + 1, grass_y),
-                                    (grass_x, grass_y - 1), (grass_x, grass_y + 1)
-                                ]
-                                grass_adj_count = sum(
-                                    1 for gx, gy in grass_adj_positions
-                                    if f"{gx}_{gy}" in layer_tiles and not layer_tiles[f"{gx}_{gy}"].picked
-                                )
-
-                                # Accessibility multiplier: fewer neighbors = more critical
-                                # 1 neighbor = 2.0x, 2 neighbors = 1.5x, 3+ neighbors = 1.0x
-                                if grass_adj_count <= 1:
-                                    adj_multiplier = 2.0
-                                elif grass_adj_count == 2:
-                                    adj_multiplier = 1.5
-                                else:
-                                    adj_multiplier = 1.0
-
-                                # Check if grass tile is blocked
-                                if not self._is_blocked_by_upper(state, neighbor_tile):
-                                    if remaining_grass == 1:
-                                        # EXPOSED + LAST LAYER: This move will fully unlock - HIGHEST PRIORITY
-                                        # Base: 30, with adj multiplier: 30-60
-                                        grass_reduce_bonus = max(grass_reduce_bonus, 30.0 * adj_multiplier * profile.blocking_awareness * gimmick_bonus_multiplier)
-                                    else:
-                                        # EXPOSED + layers remaining: reduces grass - HIGH PRIORITY
-                                        # Base: 15, with adj multiplier: 15-30
-                                        grass_reduce_bonus = max(grass_reduce_bonus, 15.0 * adj_multiplier * profile.blocking_awareness * gimmick_bonus_multiplier)
-                                else:
-                                    # HIDDEN (blocked): still helps progress
-                                    # Base: 5, with adj multiplier: 5-10
-                                    grass_reduce_bonus = max(grass_reduce_bonus, 5.0 * adj_multiplier * profile.blocking_awareness * gimmick_bonus_multiplier)
-
-                if grass_reduce_bonus > 0:
-                    # [v15.31] Balance grass reduce bonus with type matching priority
-                    # Same logic as chain: type concentration is more important early game
-                    dock_has_same_type = any(t.tile_type == move.tile_type for t in state.dock_tiles)
-
-                    if dock_has_same_type:
-                        grass_reduce_bonus *= 1.5  # BONUS: match + grass reduce
-                    else:
-                        # REDUCE: Adding new type - grass unlock is much less valuable
-                        if dock_count >= 4:
-                            grass_reduce_bonus *= 0.05  # Almost completely ignore
-                        elif dock_count >= 2:
-                            grass_reduce_bonus *= 0.15  # Heavily reduce
-                        else:
-                            # Early game: focus on type concentration
-                            grass_reduce_bonus *= 0.1
-
-                    base_score += grass_reduce_bonus
+                # 2b. GRASS REDUCE BONUS → _grass_reduce_bonus (동작 동일 추출; v2.1은 인지한 턴에만, 게이트 밖에서 적용)
+                if not v21:
+                    base_score = self._grass_reduce_bonus(base_score, move, state, profile, dock_count)
 
             # 3. CHAIN tiles: Collect locked chain positions for isolation check
             locked_chain_positions = []
@@ -3563,67 +3515,9 @@ class BotSimulator:
                         # CRITICAL: This move would cause guaranteed game over
                         base_score -= 1000.0 * profile.blocking_awareness
 
-            # ============================================================
-            # 4. GRASS ISOLATION DANGER - Only penalize when:
-            # 1. Grass is BLOCKED by upper layer (can't be reduced yet)
-            # 2. This move is adjacent to the grass (up/down/left/right)
-            # 3. This move would leave grass with insufficient neighbors to clear
-            # ============================================================
-            grass_positions = []
-            for layer_idx, layer in state.tiles.items():
-                for pos, tile in layer.items():
-                    if not tile.picked and tile.effect_type == TileEffectType.GRASS:
-                        remaining_grass = tile.effect_data.get("remaining", 0)
-                        if remaining_grass > 0:
-                            grass_positions.append((layer_idx, pos, tile, remaining_grass))
-
-            if tile_state and grass_positions:
-                move_pos = tile_state.position_key
-                move_layer = tile_state.layer_idx
-                move_x, move_y = tile_state.x_idx, tile_state.y_idx
-
-                for grass_layer_idx, grass_pos, grass_tile, remaining_grass in grass_positions:
-                    # Only check grass in the same layer
-                    if grass_layer_idx != move_layer:
-                        continue
-
-                    grass_x, grass_y = grass_tile.x_idx, grass_tile.y_idx
-                    adjacent_neighbors = [
-                        (grass_x - 1, grass_y), (grass_x + 1, grass_y),
-                        (grass_x, grass_y - 1), (grass_x, grass_y + 1)
-                    ]
-
-                    # Check if THIS move is adjacent to the grass
-                    is_move_adjacent_to_grass = (move_x, move_y) in adjacent_neighbors
-
-                    # Skip if this move is NOT adjacent to the grass
-                    if not is_move_adjacent_to_grass:
-                        continue
-
-                    # Check if grass is blocked by upper layer
-                    grass_is_blocked = self._is_blocked_by_upper(state, grass_tile)
-
-                    # If grass is NOT blocked and move is adjacent, it will REDUCE the grass
-                    # No penalty - this is a GOOD move
-                    if not grass_is_blocked:
-                        continue
-
-                    # Grass IS blocked - check if this move would cause isolation
-                    # Count remaining adjacent neighbors after this move
-                    remaining_neighbors = 0
-                    for nx, ny in adjacent_neighbors:
-                        neighbor_pos = f"{nx}_{ny}"
-                        if neighbor_pos == move_pos:
-                            continue
-                        layer_tiles = state.tiles.get(grass_layer_idx, {})
-                        neighbor = layer_tiles.get(neighbor_pos)
-                        if neighbor and not neighbor.picked:
-                            remaining_neighbors += 1
-
-                    # If remaining neighbors < remaining grass layers = impossible to clear
-                    if remaining_neighbors < remaining_grass:
-                        # CRITICAL: This move would make grass impossible to clear
-                        base_score -= 800.0 * profile.blocking_awareness
+            # 4. GRASS ISOLATION DANGER → _grass_isolation_penalty (동작 동일 추출; v2.1은 인지한 턴에만)
+            if not v21:
+                base_score = self._grass_isolation_penalty(base_score, state, profile, tile_state)
 
             # 4. LINK tiles: Bonus for completing link pairs (clears 2 tiles at once)
             # [v15.17] Enhanced bonus - links are very efficient (2 tiles per move)
@@ -3638,59 +3532,13 @@ class BotSimulator:
                 else:
                     base_score += profile.blocking_awareness * 8.0
 
-            # 5. BOMB tiles: CRITICAL - Must pick before explosion!
-            # Bombs explode when their countdown reaches 0
-            # Countdown decreases each move while bomb is exposed
-            # Phase 2: Low-skill bots may not notice bombs
-            if state.bomb_tiles:
+            # 5. BOMB tiles → _bomb_urgency (동작 동일 추출). v1/v2: Phase 2 인지율(_is_gimmick_noticed).
+            #    v2.1: 이 자리 대신 게이트 밖에서 턴 단위 인지 확률(_v21_draw_awareness)로 적용.
+            if state.bomb_tiles and not v21:
                 # Phase 2: Check if player notices bomb danger
                 bomb_noticed = self._is_gimmick_noticed(TileEffectType.BOMB, profile)
-
                 if bomb_noticed:
-                    # Find exposed bombs and their urgency
-                    critical_bomb_move = False
-                    min_bomb_remaining = float('inf')
-
-                    for bomb_key, remaining in state.bomb_tiles.items():
-                        # Parse bomb key: layerIdx_x_y
-                        parts = bomb_key.split('_')
-                        if len(parts) >= 3:
-                            layer_idx = int(parts[0])
-                            pos = f"{parts[1]}_{parts[2]}"
-                            layer = state.tiles.get(layer_idx, {})
-                            if pos in layer and not layer[pos].picked:
-                                bomb_tile = layer[pos]
-                                # Check if bomb is exposed (not blocked by upper layer)
-                                if not self._is_blocked_by_upper(state, bomb_tile):
-                                    min_bomb_remaining = min(min_bomb_remaining, remaining)
-
-                                    # Check if THIS move is picking this bomb tile
-                                    if (tile_state and
-                                        tile_state.layer_idx == layer_idx and
-                                        tile_state.position_key == pos):
-                                        critical_bomb_move = True
-
-                    # Score adjustment based on bomb urgency
-                    if min_bomb_remaining != float('inf'):
-                        if critical_bomb_move:
-                            # THIS move picks a bomb - MASSIVE BONUS
-                            if min_bomb_remaining <= 1:
-                                base_score += 500.0  # About to explode - MUST pick
-                            elif min_bomb_remaining <= 2:
-                                base_score += 200.0  # Very urgent
-                            elif min_bomb_remaining <= 3:
-                                base_score += 100.0  # Urgent
-                            else:
-                                base_score += 50.0   # Moderate priority
-                        else:
-                            # This move does NOT pick a bomb - penalize if bomb is critical
-                            if min_bomb_remaining <= 1:
-                                # Bomb explodes next move if not picked NOW!
-                                base_score -= 300.0  # Severe penalty - almost game over
-                            elif min_bomb_remaining <= 2:
-                                base_score -= 100.0  # High penalty
-                            elif min_bomb_remaining <= 3:
-                                base_score -= 30.0   # Moderate penalty
+                    base_score = self._bomb_urgency(base_score, state, tile_state)
                 # else: bomb_noticed=False - bot doesn't notice bomb, no score adjustment
 
             # ============================================================
@@ -3786,12 +3634,268 @@ class BotSimulator:
                     # and dock is filling without a match - HIGH RISK
                     base_score -= profile.blocking_awareness * 15.0
 
+        # [bot v2.1] 폭탄·풀 위협은 θ 게이트(blocking_awareness>=0.7)와 무관하게, 이번 턴에 '인지'했을 때만 고려한다.
+        # 미인지 턴에는 매칭 점수만으로 고른다(사람이 카운트·번짐을 못 보고 매칭에 집중하다 실패하는 모델).
+        if v21:
+            aware = getattr(self, "_v21_aware", None) or {}
+            tile_state = move.tile_state
+            if aware.get("grass") and tile_state:
+                base_score = self._grass_reduce_bonus(base_score, move, state, profile, dock_count)
+                base_score = self._grass_isolation_penalty(base_score, state, profile, tile_state)
+            if aware.get("bomb") and state.bomb_tiles:
+                base_score = self._bomb_urgency(base_score, state, tile_state)
+
         # Add randomness based on profile (NONE for optimal bot)
         if profile.pattern_recognition < 1.0:
             randomness = (1 - profile.pattern_recognition) * self._rng.random() * 2
             base_score += randomness
         # Optimal bot (pattern_recognition=1.0) is perfectly deterministic
 
+        return base_score
+
+    # ── [bot v2.1] 기믹 인지 확률 ─────────────────────────────────────────────────────────────────────
+    def _v21_p_aware(self, gimmick: str, profile: BotProfile, imminent: bool) -> float:
+        import math
+        cfg = getattr(profile, "gimmick_awareness", None) or V21_AWARENESS_DEFAULTS
+        theta = float(cfg.get("theta", 1.0))
+        z = (cfg["alpha"][gimmick] + cfg["beta"] * (theta - 1.0)
+             + (cfg["gamma"][gimmick] if imminent else 0.0))
+        p = 1.0 / (1.0 + math.exp(-z))
+        exposure = cfg.get("exposure")
+        if exposure is not None:
+            n = float(exposure.get(gimmick, 0))
+            p *= 1.0 - (1.0 - cfg["l0"]) * math.exp(-n / cfg["tau"])
+        return p
+
+    def _v21_draw_awareness(self, state: GameState, profile: BotProfile) -> None:
+        """Per-turn draw: does the player notice the bomb / grass threat this turn? (only gimmicks on the board)."""
+        aware = {}
+        has_grass, grass_imm = False, False
+        for layer_tiles in state.tiles.values():
+            for tile in layer_tiles.values():
+                if tile.picked or tile.effect_type != TileEffectType.GRASS:
+                    continue
+                remaining = tile.effect_data.get("remaining", 0)
+                if remaining <= 0:
+                    continue
+                has_grass = True
+                if not grass_imm:
+                    x, y = tile.x_idx, tile.y_idx
+                    adj = 0
+                    for ax, ay in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                        t2 = layer_tiles.get(f"{ax}_{ay}")
+                        if t2 is not None and not t2.picked:
+                            adj += 1
+                    if adj - remaining <= 1:
+                        grass_imm = True
+        if has_grass:
+            aware["grass"] = self._rng.random() < self._v21_p_aware("grass", profile, grass_imm)
+        if state.bomb_tiles:
+            min_rem = None
+            for bomb_key, remaining in state.bomb_tiles.items():
+                parts = bomb_key.split('_')
+                if len(parts) < 3:
+                    continue
+                tile = state.tiles.get(int(parts[0]), {}).get(f"{parts[1]}_{parts[2]}")
+                if tile is not None and not tile.picked and not self._is_blocked_by_upper(state, tile):
+                    min_rem = remaining if min_rem is None else min(min_rem, remaining)
+            if min_rem is not None:
+                aware["bomb"] = self._rng.random() < self._v21_p_aware("bomb", profile, min_rem <= 1)
+        self._v21_aware = aware
+
+    # ── 기믹 위협 점수 (v1/v2 원래 인라인 코드를 그대로 옮긴 것 — 연산 순서·값 동일) ──────────────────────
+    def _grass_reduce_bonus(self, base_score: float, move: Move, state: GameState, profile: BotProfile,
+                            dock_count: int) -> float:
+        tile_state = move.tile_state
+        move_x, move_y = tile_state.x_idx, tile_state.y_idx
+        move_layer = tile_state.layer_idx
+        layer_tiles = state.tiles.get(move_layer, {})
+        gimmick_bonus_multiplier = 0.1 + profile.chain_preference * 1.9
+        # 2b. GRASS REDUCE BONUS: Bonus for picking tiles that reduce grass layers
+        # Grass reduces when 4-directional adjacent tile is picked (and grass is not blocked)
+        # Difficulty factors:
+        #   - Exposed (not blocked) vs Hidden (blocked by upper layer)
+        #   - Remaining grass layers: 1 (last layer, critical) vs 2+ (normal)
+        #   - Number of adjacent tiles: fewer = more critical
+        grass_reduce_bonus = 0.0
+        adjacent_neighbors = [
+            (move_x - 1, move_y), (move_x + 1, move_y),
+            (move_x, move_y - 1), (move_x, move_y + 1)
+        ]
+        for nx, ny in adjacent_neighbors:
+            neighbor_pos = f"{nx}_{ny}"
+            if neighbor_pos in layer_tiles:
+                neighbor_tile = layer_tiles[neighbor_pos]
+                if (not neighbor_tile.picked and
+                    neighbor_tile.effect_type == TileEffectType.GRASS):
+                    remaining_grass = neighbor_tile.effect_data.get("remaining", 0)
+                    if remaining_grass > 0:
+                        # Count how many adjacent tiles the grass has (accessibility)
+                        grass_x, grass_y = neighbor_tile.x_idx, neighbor_tile.y_idx
+                        grass_adj_positions = [
+                            (grass_x - 1, grass_y), (grass_x + 1, grass_y),
+                            (grass_x, grass_y - 1), (grass_x, grass_y + 1)
+                        ]
+                        grass_adj_count = sum(
+                            1 for gx, gy in grass_adj_positions
+                            if f"{gx}_{gy}" in layer_tiles and not layer_tiles[f"{gx}_{gy}"].picked
+                        )
+
+                        # Accessibility multiplier: fewer neighbors = more critical
+                        # 1 neighbor = 2.0x, 2 neighbors = 1.5x, 3+ neighbors = 1.0x
+                        if grass_adj_count <= 1:
+                            adj_multiplier = 2.0
+                        elif grass_adj_count == 2:
+                            adj_multiplier = 1.5
+                        else:
+                            adj_multiplier = 1.0
+
+                        # Check if grass tile is blocked
+                        if not self._is_blocked_by_upper(state, neighbor_tile):
+                            if remaining_grass == 1:
+                                # EXPOSED + LAST LAYER: This move will fully unlock - HIGHEST PRIORITY
+                                # Base: 30, with adj multiplier: 30-60
+                                grass_reduce_bonus = max(grass_reduce_bonus, 30.0 * adj_multiplier * profile.blocking_awareness * gimmick_bonus_multiplier)
+                            else:
+                                # EXPOSED + layers remaining: reduces grass - HIGH PRIORITY
+                                # Base: 15, with adj multiplier: 15-30
+                                grass_reduce_bonus = max(grass_reduce_bonus, 15.0 * adj_multiplier * profile.blocking_awareness * gimmick_bonus_multiplier)
+                        else:
+                            # HIDDEN (blocked): still helps progress
+                            # Base: 5, with adj multiplier: 5-10
+                            grass_reduce_bonus = max(grass_reduce_bonus, 5.0 * adj_multiplier * profile.blocking_awareness * gimmick_bonus_multiplier)
+
+        if grass_reduce_bonus > 0:
+            # [v15.31] Balance grass reduce bonus with type matching priority
+            # Same logic as chain: type concentration is more important early game
+            dock_has_same_type = any(t.tile_type == move.tile_type for t in state.dock_tiles)
+
+            if dock_has_same_type:
+                grass_reduce_bonus *= 1.5  # BONUS: match + grass reduce
+            else:
+                # REDUCE: Adding new type - grass unlock is much less valuable
+                if dock_count >= 4:
+                    grass_reduce_bonus *= 0.05  # Almost completely ignore
+                elif dock_count >= 2:
+                    grass_reduce_bonus *= 0.15  # Heavily reduce
+                else:
+                    # Early game: focus on type concentration
+                    grass_reduce_bonus *= 0.1
+
+            base_score += grass_reduce_bonus
+        return base_score
+
+    def _grass_isolation_penalty(self, base_score: float, state: GameState, profile: BotProfile,
+                                 tile_state) -> float:
+        # ============================================================
+        # 4. GRASS ISOLATION DANGER - Only penalize when:
+        # 1. Grass is BLOCKED by upper layer (can't be reduced yet)
+        # 2. This move is adjacent to the grass (up/down/left/right)
+        # 3. This move would leave grass with insufficient neighbors to clear
+        # ============================================================
+        grass_positions = []
+        for layer_idx, layer in state.tiles.items():
+            for pos, tile in layer.items():
+                if not tile.picked and tile.effect_type == TileEffectType.GRASS:
+                    remaining_grass = tile.effect_data.get("remaining", 0)
+                    if remaining_grass > 0:
+                        grass_positions.append((layer_idx, pos, tile, remaining_grass))
+
+        if tile_state and grass_positions:
+            move_pos = tile_state.position_key
+            move_layer = tile_state.layer_idx
+            move_x, move_y = tile_state.x_idx, tile_state.y_idx
+
+            for grass_layer_idx, grass_pos, grass_tile, remaining_grass in grass_positions:
+                # Only check grass in the same layer
+                if grass_layer_idx != move_layer:
+                    continue
+
+                grass_x, grass_y = grass_tile.x_idx, grass_tile.y_idx
+                adjacent_neighbors = [
+                    (grass_x - 1, grass_y), (grass_x + 1, grass_y),
+                    (grass_x, grass_y - 1), (grass_x, grass_y + 1)
+                ]
+
+                # Check if THIS move is adjacent to the grass
+                is_move_adjacent_to_grass = (move_x, move_y) in adjacent_neighbors
+
+                # Skip if this move is NOT adjacent to the grass
+                if not is_move_adjacent_to_grass:
+                    continue
+
+                # Check if grass is blocked by upper layer
+                grass_is_blocked = self._is_blocked_by_upper(state, grass_tile)
+
+                # If grass is NOT blocked and move is adjacent, it will REDUCE the grass
+                # No penalty - this is a GOOD move
+                if not grass_is_blocked:
+                    continue
+
+                # Grass IS blocked - check if this move would cause isolation
+                # Count remaining adjacent neighbors after this move
+                remaining_neighbors = 0
+                for nx, ny in adjacent_neighbors:
+                    neighbor_pos = f"{nx}_{ny}"
+                    if neighbor_pos == move_pos:
+                        continue
+                    layer_tiles = state.tiles.get(grass_layer_idx, {})
+                    neighbor = layer_tiles.get(neighbor_pos)
+                    if neighbor and not neighbor.picked:
+                        remaining_neighbors += 1
+
+                # If remaining neighbors < remaining grass layers = impossible to clear
+                if remaining_neighbors < remaining_grass:
+                    # CRITICAL: This move would make grass impossible to clear
+                    base_score -= 800.0 * profile.blocking_awareness
+        return base_score
+
+    def _bomb_urgency(self, base_score: float, state: GameState, tile_state) -> float:
+        """Bomb urgency score (original 'bomb_noticed' branch; the caller decides whether the threat is noticed)."""
+        # Find exposed bombs and their urgency
+        critical_bomb_move = False
+        min_bomb_remaining = float('inf')
+
+        for bomb_key, remaining in state.bomb_tiles.items():
+            # Parse bomb key: layerIdx_x_y
+            parts = bomb_key.split('_')
+            if len(parts) >= 3:
+                layer_idx = int(parts[0])
+                pos = f"{parts[1]}_{parts[2]}"
+                layer = state.tiles.get(layer_idx, {})
+                if pos in layer and not layer[pos].picked:
+                    bomb_tile = layer[pos]
+                    # Check if bomb is exposed (not blocked by upper layer)
+                    if not self._is_blocked_by_upper(state, bomb_tile):
+                        min_bomb_remaining = min(min_bomb_remaining, remaining)
+
+                        # Check if THIS move is picking this bomb tile
+                        if (tile_state and
+                            tile_state.layer_idx == layer_idx and
+                            tile_state.position_key == pos):
+                            critical_bomb_move = True
+
+        # Score adjustment based on bomb urgency
+        if min_bomb_remaining != float('inf'):
+            if critical_bomb_move:
+                # THIS move picks a bomb - MASSIVE BONUS
+                if min_bomb_remaining <= 1:
+                    base_score += 500.0  # About to explode - MUST pick
+                elif min_bomb_remaining <= 2:
+                    base_score += 200.0  # Very urgent
+                elif min_bomb_remaining <= 3:
+                    base_score += 100.0  # Urgent
+                else:
+                    base_score += 50.0   # Moderate priority
+            else:
+                # This move does NOT pick a bomb - penalize if bomb is critical
+                if min_bomb_remaining <= 1:
+                    # Bomb explodes next move if not picked NOW!
+                    base_score -= 300.0  # Severe penalty - almost game over
+                elif min_bomb_remaining <= 2:
+                    base_score -= 100.0  # High penalty
+                elif min_bomb_remaining <= 3:
+                    base_score -= 30.0   # Moderate penalty
         return base_score
 
     def _filter_by_attention(
@@ -3836,7 +3940,7 @@ class BotSimulator:
         visible_depth = int(1 + profile.pattern_recognition * 5)  # 1-4 layers
         # [bot v2] 계단(θ≈0.34에서 2→3층 등) 대신 다음 층을 소수부 확률로 본다 → 연속.
         partial_prob = 0.0
-        if getattr(profile, "bot_version", "v1") == "v2":
+        if getattr(profile, "bot_version", "v1") in ("v2", "v2.1"):
             partial_prob = (1 + profile.pattern_recognition * 5) - visible_depth
 
         # Always keep matching moves
@@ -4102,7 +4206,7 @@ class BotSimulator:
         if not moves:
             return None
 
-        is_v2 = getattr(profile, "bot_version", "v1") == "v2"
+        is_v2 = getattr(profile, "bot_version", "v1") in ("v2", "v2.1")
         raw_moves = moves
 
         # Phase 1: Apply attention zone filtering

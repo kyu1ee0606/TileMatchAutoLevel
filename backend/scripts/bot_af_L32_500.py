@@ -36,7 +36,8 @@ sys.path.insert(0, str(BACKEND / "scripts"))
 
 from bot_af_L1_31 import q, spearman  # noqa: E402
 
-OUT = BACKEND / "data/pv_sandbox/af_calibration/bot_compare_L32_500"
+OUT = Path(os.environ.get("BOT_CMP_OUT") or BACKEND / "data/pv_sandbox/af_calibration/bot_compare_L32_500")
+VERSIONS = tuple((os.environ.get("BOT_CMP_VERSIONS") or "v1,v2").split(","))   # report/calib versions (bot_<ver>.json)
 AF_JSON = BACKEND / "data/pv_sandbox/af_calibration/level_metrics.json"
 GAME_REPO = "/Users/casualdev/sp_meowsgarden"
 SHARD_110, SHARD_162 = "b741f6a3", "a2229a5d"
@@ -329,7 +330,7 @@ def cmd_report(a):
     rep["af_mean_mid"]["all"] = round(sum(mid.values()) / len(mid), 4)
     seg_names = [f"{a}-{b}" for a, b in SEGMENTS]
 
-    for ver in ("v1", "v2"):
+    for ver in VERSIONS:
         p = OUT / f"bot_{ver}.json"
         if not p.exists():
             continue
@@ -539,7 +540,7 @@ def cmd_calib(a):
         m = {s: sum(v) / len(v) for s, v in m.items() if v}
         return lambda L: m[seg_of(L)]
     out["baseline_segment_mean"] = cv(seg_mean)
-    for ver in ("v1", "v2"):
+    for ver in VERSIONS:
         p = OUT / f"bot_{ver}.json"
         if not p.exists():
             continue

@@ -104,6 +104,15 @@ async def shutdown_event():
     # ⚠️ 순서 주의: 아래 shutdown_* 헬퍼들이 전역 참조를 None 으로 만든다.
     # 워커를 명시적으로 죽이려면 **참조가 살아 있는 지금** 풀 객체를 먼저 붙잡아야 한다.
     live_pools = _iter_live_pools()
+    # [재로드 누수 근본 원인, 2026-10-14] ProcessPoolExecutor.shutdown() 은 (wait=False 여도)
+    # 마지막에 `self._processes = None` 을 한다(CPython 3.13 concurrent/futures/process.py).
+    # 그래서 아래 shutdown 호출 '뒤'에 _processes 를 읽던 최종 회수 루프는 늘 빈 목록이었고,
+    # 리로드마다 풀 워커 전부(약 22개)가 PPID 1 고아로 남았다. 워커 목록은 shutdown '전'에 잡는다.
+    import contextlib
+    live_procs = []
+    for pool in live_pools:
+        with contextlib.suppress(Exception):
+            live_procs += list((getattr(pool, "_processes", None) or {}).values())
 
     from .api.routes.generate import _bot_process_pool, shutdown_gen_pool
     if _bot_process_pool is not None:
@@ -128,22 +137,16 @@ async def shutdown_event():
     #
     # wait=True 를 쓰지 않는 이유: 진행 중인 시뮬이 길면 종료가 그만큼 지연되고,
     # 재시작이 잦은 개발 환경에서 오히려 좀비를 늘린다. 여기서는 즉시 종료가 옳다.
-    import contextlib
-    for pool in live_pools:
-        with contextlib.suppress(Exception):   # 풀 하나가 터져도 나머지는 정리한다
-            # ⚠️ `_processes` 는 워커를 아직 안 띄운 풀에서 **None** 이다(속성은 존재).
-            # getattr 기본값은 '속성 없음'에만 걸리므로 None 을 못 걸러 AttributeError 가 났고,
-            # 그 예외가 훅 전체를 중단시켜 `Application shutdown failed` → 오히려 정리가 안 됐다.
-            procs = list((getattr(pool, "_processes", None) or {}).values())
-            for p in procs:
-                with contextlib.suppress(Exception):
-                    if p.is_alive():
-                        p.terminate()
-            for p in procs:
-                with contextlib.suppress(Exception):
-                    p.join(timeout=1.0)
-                    if p.is_alive():
-                        p.kill()
+    # 워커 목록(live_procs)은 위에서 shutdown 전에 잡아 두었다.
+    for p in live_procs:
+        with contextlib.suppress(Exception):
+            if p.is_alive():
+                p.terminate()
+    for p in live_procs:
+        with contextlib.suppress(Exception):
+            p.join(timeout=1.0)
+            if p.is_alive():
+                p.kill()
 
 
 def _iter_live_pools():

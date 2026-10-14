@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 import statistics
 from enum import Enum
+from types import SimpleNamespace
 import os
 
 from ..models.bot_profile import BotProfile, BotType, BotTeam, get_profile
@@ -3833,6 +3834,10 @@ class BotSimulator:
         # Determine how many layers this bot can "see"
         # NOVICE (0.2): 1-2 layers, CASUAL (0.4): 2-3 layers, AVERAGE (0.6): 3-4 layers
         visible_depth = int(1 + profile.pattern_recognition * 5)  # 1-4 layers
+        # [bot v2] 계단(θ≈0.34에서 2→3층 등) 대신 다음 층을 소수부 확률로 본다 → 연속.
+        partial_prob = 0.0
+        if getattr(profile, "bot_version", "v1") == "v2":
+            partial_prob = (1 + profile.pattern_recognition * 5) - visible_depth
 
         # Always keep matching moves
         matching_moves = [m for m in moves if m.will_match]
@@ -3850,6 +3855,9 @@ class BotSimulator:
 
             # Within visible depth - always see
             if layer_depth < visible_depth:
+                visible_moves.append(move)
+                continue
+            if partial_prob > 0 and layer_depth == visible_depth and self._rng.random() < partial_prob:
                 visible_moves.append(move)
                 continue
 
@@ -4094,6 +4102,9 @@ class BotSimulator:
         if not moves:
             return None
 
+        is_v2 = getattr(profile, "bot_version", "v1") == "v2"
+        raw_moves = moves
+
         # Phase 1: Apply attention zone filtering
         if BotSimulatorConfig.ENABLE_ATTENTION_ZONE:
             moves = self._filter_by_attention(moves, state, profile)
@@ -4104,7 +4115,15 @@ class BotSimulator:
 
         # Check for mistake (random wrong choice) - using adjusted rate
         if self._rng.random() < adjusted_mistake_rate:
+            if is_v2:
+                # [bot v2] 무작위 수는 θ와 무관한 고정 시야(θ0 수준)에서 뽑는다. v1처럼 θ의 시야에서
+                # 뽑으면 θ↑ → 시야↑ → 무작위 수가 더 해로워져 실력이 비단조가 된다(12_bot_v2.md §2).
+                return self._rng.choice(self._v2_random_pool(raw_moves, state))
             return self._rng.choice(moves)
+
+        # [bot v2] θ>1.0 확장 등급: 독이 3칸 이상 찼을 때 후보 수마다 짧은 롤아웃으로 실제 결과를 본다.
+        if is_v2 and getattr(profile, "search_rollouts", 0) > 0 and len(state.dock_tiles) >= 3:
+            return self._v2_search_select(moves, state, profile)
 
         # CRITICAL: Filter out dangerous moves that would cause game over
         # Score threshold: -100 indicates critical danger (e.g., chain isolation)
@@ -4129,7 +4148,21 @@ class BotSimulator:
         # 높은 patience = 최적의 수를 신중하게 선택 (점수 차이 고려)
         # 낮은 patience = 빠른 결정, 상위 몇 개 중 임의 선택
         # ============================================================
-        if profile.patience < 0.5 and len(sorted_moves) > 1:
+        if is_v2:
+            # [bot v2, 12_bot_v2.md] 실력(θ) 단조화. v1의 두 결함을 고친다:
+            #  (a) patience<0.5면 항상 무작위 반환 → lookahead 무효, 후보 폭은 patience↑일수록 넓어짐(역방향)
+            #  (b) patience>=0.8이면 2-in-dock 후보를 lookahead 없이 즉시 반환 → θ1.0이 θ0.85보다 약함
+            # v2: 성급한 무작위 선택 '확률'이 patience 0.2→0.5에서 1→0으로 연속 감소하고,
+            #     후보 폭도 patience↑일수록 좁아진다(0.38→0.30). 후보는 고정 시야 풀(실수와 동일)의
+            #     점수 상위. 그 외에는 lookahead로 내려간다.
+            impulsive = max(0.0, min(1.0, (0.5 - profile.patience) / 0.3))
+            if impulsive > 0 and len(sorted_moves) > 1 and self._rng.random() < impulsive:
+                pool = [m for m in self._v2_random_pool(raw_moves, state) if m.score > DANGEROUS_SCORE_THRESHOLD]
+                pool = sorted(pool, key=lambda m: m.score, reverse=True) or sorted_moves
+                width = 0.3 + max(0.0, 0.5 - profile.patience) * 0.27
+                cutoff = max(1, int(len(pool) * width))
+                return self._rng.choice(pool[:cutoff])
+        elif profile.patience < 0.5 and len(sorted_moves) > 1:
             # 성급한 플레이어: 상위 후보 중 랜덤 선택
             # patience가 낮을수록 더 적은 후보에서 선택
             cutoff = max(1, int(len(sorted_moves) * (0.3 + profile.patience * 0.4)))
@@ -4173,6 +4206,152 @@ class BotSimulator:
             return best_move
 
         return sorted_moves[0]
+
+    # [bot v2] 무작위 수(실수·성급 선택)의 고정 시야: θ0 봇(pattern_recognition 0.15)과 같은 층 필터.
+    _V2_RANDOM_ATTENTION = SimpleNamespace(pattern_recognition=0.15, bot_version="v1")
+
+    def _v2_random_pool(self, raw_moves: List[Move], state: GameState) -> List[Move]:
+        if not BotSimulatorConfig.ENABLE_ATTENTION_ZONE:
+            return raw_moves
+        return self._filter_by_attention(raw_moves, state, self._V2_RANDOM_ATTENTION) or raw_moves
+
+    # ── [bot v2] rollout search (θ>1.0 tier) ───────────────────────────────────────────────────────
+    # 기존 'lookahead'(_estimate_future_score)는 depth를 쓰지 않는 1수 휴리스틱이라 상위 봇이 결정적으로
+    # 같은 함정에 빠진다(12_bot_v2.md §3). 이 등급은 후보 수(최대 6: 매치 3 + 비매치)를 실제로 두고
+    # 기본 정책으로 V2_SEARCH_LEN수 굴려 승/패/독 점유로 평가한다. 롤아웃은 실제 보드 사본을 쓰므로
+    # 가려진 타일(커튼·스택 내용)을 아는 셈이다 — 상한(upper bound) 측정용 등급이다.
+    V2_SEARCH_LEN = 10
+    V2_SEARCH_WIDTH = 6
+
+    @staticmethod
+    def _v2_tile_copy(t: TileState) -> TileState:
+        n = object.__new__(TileState)
+        d = t.__dict__.copy()
+        d["effect_data"] = dict(t.effect_data) if t.effect_data else {}
+        n.__dict__.update(d)
+        return n
+
+    @staticmethod
+    def _v2_shallow(t: TileState) -> TileState:
+        n = object.__new__(TileState)
+        n.__dict__.update(t.__dict__)
+        return n
+
+    def _v2_copy_state(self, state: GameState) -> GameState:
+        """Mid-game copy (same approach as pv/safe_moves.fast_copy: blocking maps shared, cache lazy)."""
+        import copy as _copy
+        n = GameState()
+        n.tiles = {li: {pos: (t if t.picked else self._v2_tile_copy(t)) for pos, t in layer.items()}
+                   for li, layer in state.tiles.items()}
+        n.layer_cols = state.layer_cols.copy()
+        n.dock = [DockSlot(index=s.index, is_locked=s.is_locked) for s in state.dock]
+        n.dock_tiles = [self._v2_shallow(t) for t in state.dock_tiles]
+        n.goals_remaining = state.goals_remaining.copy()
+        n.moves_used = state.moves_used
+        n.max_moves = state.max_moves
+        n.combo_count = state.combo_count
+        n.total_tiles_cleared = state.total_tiles_cleared
+        n.max_dock_slots = state.max_dock_slots
+        n.link_pairs = state.link_pairs.copy()
+        n.frog_positions = state.frog_positions.copy()
+        n.bomb_tiles = state.bomb_tiles.copy()
+        n.curtain_tiles = state.curtain_tiles.copy()
+        n.ice_tiles = state.ice_tiles.copy()
+        n.craft_boxes = {k: _copy.deepcopy(v) for k, v in state.craft_boxes.items()} if state.craft_boxes else {}
+        n.teleport_click_count = state.teleport_click_count
+        n.teleport_tiles = state.teleport_tiles.copy() if state.teleport_tiles else []
+        n.tile_type_overrides = state.tile_type_overrides.copy()
+        n.all_tile_type_counts = state.all_tile_type_counts.copy()
+        n._max_layer_idx = state._max_layer_idx
+        n.curtain_memory = {}
+        n.stacked_tiles = {k: self._v2_shallow(v) for k, v in state.stacked_tiles.items()} if state.stacked_tiles else {}
+        if state._blocking_map is not None:
+            n._blocking_map = state._blocking_map
+            n._reverse_blocking_map = state._reverse_blocking_map
+        return n
+
+    def _v2_exposed_before(self, state: GameState) -> Tuple[set, set]:
+        """Exposed bomb keys / curtain positions before a move (same rule as _play_game)."""
+        bombs, curtains = set(), set()
+        for key in state.bomb_tiles.keys():
+            parts = key.split('_')
+            if len(parts) >= 3:
+                tile = state.tiles.get(int(parts[0]), {}).get(f"{parts[1]}_{parts[2]}")
+                if tile and not tile.picked and not self._is_blocked_by_upper(state, tile):
+                    bombs.add(key)
+        for key in state.curtain_tiles.keys():
+            parts = key.split('_')
+            if len(parts) >= 3:
+                li, pos = int(parts[0]), f"{parts[1]}_{parts[2]}"
+                tile = state.tiles.get(li, {}).get(pos)
+                if tile and not tile.picked and not self._is_blocked_by_upper(state, tile):
+                    curtains.add((li, pos))
+        return bombs, curtains
+
+    def _v2_step(self, state: GameState, move: Move) -> bool:
+        tile = state.tiles.get(move.layer_idx, {}).get(move.position)
+        if tile is None:
+            return False
+        bombs, curtains = self._v2_exposed_before(state)
+        self._apply_move(state, Move(
+            layer_idx=move.layer_idx, position=move.position, tile_type=move.tile_type,
+            tile_state=tile, attribute=move.attribute, match_count=move.match_count,
+            will_match=move.will_match, score=move.score, linked_tiles=move.linked_tiles,
+        ))
+        state.moves_used += 1
+        self._process_move_effects(state, bombs, curtains)
+        return True
+
+    def _v2_rollout_move(self, state: GameState, profile: BotProfile) -> Optional[Move]:
+        """Rollout policy: match first, else best score, 15% random among top 3 (diversity)."""
+        moves = self._get_available_moves(state)
+        if not moves:
+            return None
+        for m in moves:
+            m.score = self._score_move_with_profile(m, state, profile)
+        matching = [m for m in moves if m.will_match and m.score > -100.0]
+        if matching:
+            return max(matching, key=lambda m: m.score)
+        moves.sort(key=lambda m: m.score, reverse=True)
+        if len(moves) > 1 and self._rng.random() < 0.15:
+            return self._rng.choice(moves[:3])
+        return moves[0]
+
+    def _v2_rollout_value(self, state: GameState, move: Move, profile: BotProfile) -> float:
+        total = 0.0
+        for _ in range(profile.search_rollouts):
+            s = self._v2_copy_state(state)
+            if not self._v2_step(s, move):
+                return -1.0
+            for _k in range(self.V2_SEARCH_LEN):
+                if self._is_game_over(s):
+                    break
+                nxt = self._v2_rollout_move(s, profile)
+                if nxt is None:
+                    s.failed = True
+                    break
+                if not self._v2_step(s, nxt):
+                    break
+            if s.failed or self._is_game_over(s):
+                remaining = sum(1 for layer in s.tiles.values() for t in layer.values() if not t.picked)
+                won = (not s.failed) and remaining == 0 and not s.dock_tiles
+                total += 1.0 if won else 0.0
+            else:
+                total += 0.5 - 0.06 * len(s.dock_tiles)
+        return total / profile.search_rollouts
+
+    def _v2_search_select(self, moves: List[Move], state: GameState, profile: BotProfile) -> Move:
+        safe = sorted([m for m in moves if m.score > -100.0] or moves, key=lambda m: m.score, reverse=True)
+        matching = [m for m in safe if m.will_match][:3]
+        cands = (matching + [m for m in safe if not m.will_match])[:self.V2_SEARCH_WIDTH]
+        if len(cands) == 1:
+            return cands[0]
+        best, best_v = cands[0], float("-inf")
+        for m in cands:
+            v = self._v2_rollout_value(state, m, profile) + m.score * 1e-4  # tie-break by heuristic score
+            if v > best_v:
+                best, best_v = m, v
+        return best
 
     def _get_adaptive_depth(self, state: GameState) -> int:
         """Calculate adaptive lookahead depth based on game state.

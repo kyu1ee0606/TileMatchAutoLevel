@@ -110,9 +110,15 @@ def _interp_gimmick_notice_rates(theta: float) -> Dict[str, float]:
     }
 
 
-def make_skill_profile(theta: float) -> BotProfile:
-    """theta ∈ [0,1]을 NOVICE↔EXPERT 파라미터 선형 보간 프로파일로 변환."""
+def make_skill_profile(theta: float, bot_version: str = "v1") -> BotProfile:
+    """theta ∈ [0,1]을 NOVICE↔EXPERT 파라미터 선형 보간 프로파일로 변환.
+
+    bot_version: "v1"(기본, 기존 동작) | "v2"(실력 단조화 봇, 12_bot_v2.md).
+    v2 전용 θ>1.0 확장 등급: 파라미터는 θ1.0과 같고 롤아웃 탐색 수 = round((θ−1)×10)
+    (θ1.1 → 1, θ1.2 → 2). v1은 기존대로 θ를 [0,1]로 자른다.
+    """
     t = max(0.0, min(1.0, theta))
+    search_rollouts = int(round((theta - 1.0) * 10)) if bot_version == "v2" and theta > 1.0 else 0
     params = {k: _lerp(lo, hi, t) for k, (lo, hi) in _ANCHORS.items()}
     return BotProfile(
         name=f"MC Skill {t:.2f}",
@@ -128,6 +134,8 @@ def make_skill_profile(theta: float) -> BotProfile:
         pattern_recognition=params["pattern_recognition"],
         weight=1.0,
         gimmick_notice_override=_interp_gimmick_notice_rates(t),
+        bot_version=bot_version,
+        search_rollouts=search_rollouts,
     )
 
 
@@ -275,7 +283,7 @@ def sweep_point_task(args: Dict[str, Any]) -> Dict[str, Any]:
     try:
         simulator = BotSimulator()
         theta = float(args["theta"])
-        profile = make_skill_profile(theta)
+        profile = make_skill_profile(theta, args.get("bot_version", "v1"))
         result = simulator.simulate_with_profile(
             args["level_json"],
             profile,
@@ -306,6 +314,7 @@ def run_skill_sweep(
     rollouts_per_point: int = DEFAULT_ROLLOUTS_PER_POINT,
     seed: int = DEFAULT_BASE_SEED,
     max_moves: Optional[int] = None,
+    bot_version: str = "v1",
 ) -> Dict[str, Any]:
     """
     스킬 그리드를 스윕하며 클리어율 곡선과 theta_star를 산출 (단일 프로세스 버전).
@@ -325,6 +334,7 @@ def run_skill_sweep(
             "rollouts": rollouts,
             "seed": seed + idx * 1000,  # 스킬 포인트별 독립 시드, 레벨 간에는 공통
             "max_moves": max_moves,
+            "bot_version": bot_version,
         })
         if point.get("error"):
             raise RuntimeError(point["error"])

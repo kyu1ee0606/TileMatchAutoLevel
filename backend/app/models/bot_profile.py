@@ -50,6 +50,11 @@ class BotProfile:
     # 레거시 5종 봇은 항상 None이므로 기존 동작 무변경.
     gimmick_notice_override: Optional[Dict[str, float]] = None
 
+    # [bot v2] 수 선택 로직 버전. "v1"(기본) = 기존 동작 그대로. "v2" = 실력 단조화(12_bot_v2.md).
+    bot_version: str = "v1"
+    # [bot v2] θ>1.0 확장 등급의 롤아웃 수(0 = 탐색 없음). v2에서만 쓰인다.
+    search_rollouts: int = 0
+
     def to_dict(self) -> Dict:
         """Convert to dictionary."""
         return {

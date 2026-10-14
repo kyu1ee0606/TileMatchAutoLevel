@@ -66,7 +66,7 @@ def run_games_task(args: Dict[str, Any]) -> Dict[str, Any]:
         from app.models.bot_profile import BotType, get_profile
         profile = get_profile(BotType(args["profile"]))
     else:
-        profile = make_skill_profile(float(args["theta"]))
+        profile = make_skill_profile(float(args["theta"]), args.get("bot_version", "v1"))
     base = bot._create_initial_state(lj, int(lj["max_moves"]))
     bot._precompute_blocking_map(base)
     wins: List[int] = []
@@ -97,6 +97,7 @@ def evaluate_maps(
     seed_base: int,
     thetas: Sequence[float] = THETAS,
     chunk: int = 100,
+    bot_version: str = "v1",
 ) -> Dict[str, Dict[str, Any]]:
     """Evaluate bot-level-json maps. Returns {key: {"theta": {θ: {...per-game lists...}}, "W": float}}.
 
@@ -110,6 +111,7 @@ def evaluate_maps(
                     "key": key, "theta": th, "level_json": lj,
                     "seed_base": seed_base + t_idx * 10_000,
                     "start": start, "count": min(chunk, games_per_point - start),
+                    "bot_version": bot_version,
                 }))
     acc: Dict[str, Dict[float, List[Dict[str, Any]]]] = {}
     cpu = 0.0
@@ -156,6 +158,7 @@ def evaluate_points(
     games: int,
     seed_base: int,
     chunk: int = 100,
+    bot_version: str = "v1",
 ) -> Dict[str, Dict[str, Any]]:
     """Like evaluate_maps but over mixed measurement points: "θ:<float>" or "profile:<BotType value>".
 
@@ -168,7 +171,8 @@ def evaluate_points(
             kind, val = pt.split(":", 1)
             for start in range(0, games, chunk):
                 a = {"key": key, "level_json": lj, "seed_base": seed_base + p_idx * 10_000,
-                     "start": start, "count": min(chunk, games - start), "point": pt}
+                     "start": start, "count": min(chunk, games - start), "point": pt,
+                     "bot_version": bot_version}
                 if kind == "θ":
                     a["theta"] = float(val)
                 else:

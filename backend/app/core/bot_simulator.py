@@ -698,8 +698,9 @@ GIMMICK_NOTICE_RATES = {
 #   alpha·gamma 는 AF 실패 사유·클리어율로 보정, beta·l0·tau 는 가정값(보정 불가 — 문서 참조).
 V21_AWARENESS_DEFAULTS = {
     # 보정값(2026-10-14, L101~500 θ1.0 격자 + 2겹 CV): bomb α−1·γ2, grass α−2·γ0(grass 는 α≤−2 에서 포화 — 문서 §4)
-    "alpha": {"bomb": -1.0, "grass": -2.0},
-    "gamma": {"bomb": 2.0, "grass": 0.0},
+    # chain(v2.3 chain_aware 에서만 사용): α−1·γ0 (19_bot_rule_parity.md §8, 체인 38레벨 θ1.0 격자 + CV)
+    "alpha": {"bomb": -1.0, "grass": -2.0, "chain": -1.0},
+    "gamma": {"bomb": 2.0, "grass": 0.0, "chain": 0.0},
     "beta": 4.0,
     "l0": 0.5,
     "tau": 15.0,
@@ -720,6 +721,7 @@ V23_PARITY_ITEMS = (
     "link_frog",       # 링크 짝에 개구리가 있으면 링크 쌍을 집을 수 없음 (TileEffect.cs:1274-1279)
     "key_locks",       # 잠긴 칸 수 = floor(key 타일 수 / 3) (TileGroup.cs:1338, Dock.cs:844)
     "auto_collect",    # 냥이의 도움(autoCollectCount>0): 뱃지 3장 → 뱃지 소진 시 독 짝 채우기 (AutoCollectController.cs)
+    "chain_aware",     # (행동) 체인 해제·고립 위협도 v2.1 폭탄·풀처럼 턴 단위 인지 확률로만 고려 — 규칙 아닌 인지 항목
 )
 
 
@@ -3001,6 +3003,7 @@ class BotSimulator:
         base_score = 1.0
         dock_count = len(state.dock_tiles)
         v21 = getattr(profile, "bot_version", "v1") in ("v2.1", "v2.3")
+        v23_chain = bool(self._par) and "chain_aware" in self._par
 
         # CRITICAL: Moves that complete a 3-match get MASSIVE bonus
         # This is the most important factor - always prefer matching
@@ -3482,131 +3485,22 @@ class BotSimulator:
                 # chain_preference 기반 보너스 배율 (0.1 ~ 2.0)
                 gimmick_bonus_multiplier = 0.1 + profile.chain_preference * 1.9
 
-                # 2a. CHAIN UNLOCK BONUS: Bonus for picking tiles that unlock chains
-                # Chain unlocks when HORIZONTAL adjacent tile is picked (and chain is not blocked)
-                # Difficulty factors:
-                #   - Exposed (not blocked) vs Hidden (blocked by upper layer)
-                #   - Number of horizontal neighbors: 1 (critical) vs 2 (safe)
-                # [v15.31] Dock state consideration: reduce bonus if adding new type to dock
-                chain_unlock_bonus = 0.0
-                horizontal_neighbors = [(move_x - 1, move_y), (move_x + 1, move_y)]
-                for nx, ny in horizontal_neighbors:
-                    neighbor_pos = f"{nx}_{ny}"
-                    if neighbor_pos in layer_tiles:
-                        neighbor_tile = layer_tiles[neighbor_pos]
-                        if (not neighbor_tile.picked and
-                            neighbor_tile.effect_type == TileEffectType.CHAIN and
-                            not neighbor_tile.effect_data.get("unlocked", False)):
-                            # Count how many horizontal neighbors the chain has
-                            chain_x, chain_y = neighbor_tile.x_idx, neighbor_tile.y_idx
-                            chain_h_neighbors = [(chain_x - 1, chain_y), (chain_x + 1, chain_y)]
-                            chain_neighbor_count = sum(
-                                1 for cx, cy in chain_h_neighbors
-                                if f"{cx}_{cy}" in layer_tiles and not layer_tiles[f"{cx}_{cy}"].picked
-                            )
-
-                            # Neighbor count multiplier: 1 neighbor = critical (2.0x), 2 neighbors = safe (1.0x)
-                            neighbor_multiplier = 2.0 if chain_neighbor_count == 1 else 1.0
-
-                            # Check if chain tile is blocked (if blocked, unlock won't happen)
-                            if not self._is_blocked_by_upper(state, neighbor_tile):
-                                # Chain is EXPOSED and will be unlocked immediately - HIGH PRIORITY
-                                # Base: 60, with neighbor multiplier: 60-120
-                                chain_unlock_bonus = max(chain_unlock_bonus, 60.0 * neighbor_multiplier * profile.blocking_awareness * gimmick_bonus_multiplier)
-                            else:
-                                # Chain is HIDDEN (blocked), but this move helps progress toward unlock
-                                # Base: 20, with neighbor multiplier: 20-40
-                                chain_unlock_bonus = max(chain_unlock_bonus, 20.0 * neighbor_multiplier * profile.blocking_awareness * gimmick_bonus_multiplier)
-
-                if chain_unlock_bonus > 0:
-                    # [v15.31] Balance chain unlock bonus with type matching priority
-                    # CRITICAL: Type concentration is MORE important than chain unlock at game start
-                    dock_has_same_type = any(t.tile_type == move.tile_type for t in state.dock_tiles)
-
-                    if dock_has_same_type:
-                        # BONUS: Can help match AND unlock chain - excellent move
-                        chain_unlock_bonus *= 1.5
-                    else:
-                        # REDUCE: Adding new type - chain unlock is much less valuable
-                        # Early game: focus on type concentration, not chain unlock
-                        if dock_count >= 4:
-                            chain_unlock_bonus *= 0.05  # Almost completely ignore
-                        elif dock_count >= 2:
-                            chain_unlock_bonus *= 0.15  # Heavily reduce
-                        else:
-                            # dock_count 0-1: CRITICAL early game phase
-                            # Type concentration must dominate - almost ignore chain unlock
-                            chain_unlock_bonus *= 0.1
-
-                    base_score += chain_unlock_bonus
+                # 2a. CHAIN UNLOCK BONUS → _chain_unlock_bonus (동작 동일 추출; v2.3 chain_aware 는 인지한 턴에만, 게이트 밖)
+                if not v23_chain:
+                    base_score = self._chain_unlock_bonus(base_score, move, state, profile, dock_count)
 
                 # 2b. GRASS REDUCE BONUS → _grass_reduce_bonus (동작 동일 추출; v2.1은 인지한 턴에만, 게이트 밖에서 적용)
                 if not v21:
                     base_score = self._grass_reduce_bonus(base_score, move, state, profile, dock_count)
 
-            # 3. CHAIN tiles: Collect locked chain positions for isolation check
-            locked_chain_positions = []
-            for layer_idx, layer in state.tiles.items():
-                for pos, tile in layer.items():
-                    if not tile.picked and tile.effect_type == TileEffectType.CHAIN:
-                        if not tile.effect_data.get("unlocked", False):
-                            locked_chain_positions.append((layer_idx, pos, tile))
-
-            # ============================================================
-            # [v15.31] CHAIN ISOLATION DANGER - Only penalize when:
-            # 1. Chain is BLOCKED by upper layer (can't be unlocked yet)
-            # 2. This move is adjacent to the chain (left/right)
-            # 3. This move would leave chain with NO horizontal neighbors (game over)
-            # ============================================================
-            if tile_state and locked_chain_positions:
-                move_pos = tile_state.position_key
-                move_layer = tile_state.layer_idx
-                move_x, move_y = tile_state.x_idx, tile_state.y_idx
-
-                for chain_layer_idx, chain_pos, chain_tile in locked_chain_positions:
-                    # Only check chains in the same layer
-                    if chain_layer_idx != move_layer:
-                        continue
-
-                    chain_x, chain_y = chain_tile.x_idx, chain_tile.y_idx
-                    horizontal_neighbors = [
-                        (chain_x - 1, chain_y),
-                        (chain_x + 1, chain_y)
-                    ]
-
-                    # Check if THIS move is adjacent to the chain
-                    is_move_adjacent_to_chain = (move_x, move_y) in horizontal_neighbors
-
-                    # Skip if this move is NOT adjacent to the chain
-                    if not is_move_adjacent_to_chain:
-                        continue
-
-                    # Check if chain is blocked by upper layer
-                    chain_is_blocked = self._is_blocked_by_upper(state, chain_tile)
-
-                    # If chain is NOT blocked and move is adjacent, it will UNLOCK the chain
-                    # No penalty - this is a GOOD move
-                    if not chain_is_blocked:
-                        continue
-
-                    # Chain IS blocked - check if this move would cause isolation
-                    # Count remaining horizontal neighbors after this move
-                    remaining_neighbors = 0
-                    for nx, ny in horizontal_neighbors:
-                        neighbor_pos = f"{nx}_{ny}"
-                        if neighbor_pos == move_pos:
-                            # This tile would be removed by this move
-                            continue
-                        layer_tiles = state.tiles.get(chain_layer_idx, {})
-                        neighbor = layer_tiles.get(neighbor_pos)
-                        if neighbor and not neighbor.picked:
-                            remaining_neighbors += 1
-
-                    # If this move would leave chain with NO horizontal neighbors
-                    # while chain is still blocked = guaranteed game over
-                    if remaining_neighbors == 0:
-                        # CRITICAL: This move would cause guaranteed game over
-                        base_score -= 1000.0 * profile.blocking_awareness
+            # 3. CHAIN ISOLATION DANGER → _chain_isolation_penalty (동작 동일 추출; v2.3 chain_aware 는 인지한 턴에만)
+            if not v23_chain:
+                base_score = self._chain_isolation_penalty(base_score, state, profile, tile_state)
+            # (원 코드 호환) 아래 7번 ICE 블록이 원래 3번 루프에서 새어 나온 `tile`(전체 타일 순회의 마지막 타일)을
+            # 참조한다. 추출 후에도 값이 같도록 그대로 재현한다(동작 불변).
+            for _li, _layer in state.tiles.items():
+                for _pos, tile in _layer.items():
+                    pass
 
             # 4. GRASS ISOLATION DANGER → _grass_isolation_penalty (동작 동일 추출; v2.1은 인지한 턴에만)
             if not v21:
@@ -3737,6 +3631,9 @@ class BotSimulator:
                 base_score = self._grass_isolation_penalty(base_score, state, profile, tile_state)
             if aware.get("bomb") and state.bomb_tiles:
                 base_score = self._bomb_urgency(base_score, state, tile_state)
+            if v23_chain and aware.get("chain") and tile_state:
+                base_score = self._chain_unlock_bonus(base_score, move, state, profile, dock_count)
+                base_score = self._chain_isolation_penalty(base_score, state, profile, tile_state)
 
         # Add randomness based on profile (NONE for optimal bot)
         if profile.pattern_recognition < 1.0:
@@ -3994,7 +3891,156 @@ class BotSimulator:
                     min_rem = remaining if min_rem is None else min(min_rem, remaining)
             if min_rem is not None:
                 aware["bomb"] = self._rng.random() < self._v21_p_aware("bomb", profile, min_rem <= 1)
+        if self._par and "chain_aware" in self._par:
+            # 잠긴 체인이 있으면 인지 추첨. 임박 = 남은 수평 이웃이 1개(한 번 더 옆을 집으면 못 푸는 상태).
+            has_chain, chain_imm = False, False
+            for layer_tiles in state.tiles.values():
+                for tile in layer_tiles.values():
+                    if tile.picked or tile.effect_type != TileEffectType.CHAIN or tile.effect_data.get("unlocked", False):
+                        continue
+                    has_chain = True
+                    if not chain_imm:
+                        x, y = tile.x_idx, tile.y_idx
+                        alive = sum(1 for ax in (x - 1, x + 1)
+                                    if (t2 := layer_tiles.get(f"{ax}_{y}")) is not None and not t2.picked)
+                        if alive <= 1:
+                            chain_imm = True
+            if has_chain:
+                aware["chain"] = self._rng.random() < self._v21_p_aware("chain", profile, chain_imm)
         self._v21_aware = aware
+
+    def _chain_unlock_bonus(self, base_score: float, move: Move, state: GameState, profile: BotProfile,
+                            dock_count: int) -> float:
+        tile_state = move.tile_state
+        move_x, move_y = tile_state.x_idx, tile_state.y_idx
+        move_layer = tile_state.layer_idx
+        layer_tiles = state.tiles.get(move_layer, {})
+        gimmick_bonus_multiplier = 0.1 + profile.chain_preference * 1.9
+        # 2a. CHAIN UNLOCK BONUS: Bonus for picking tiles that unlock chains
+        # Chain unlocks when HORIZONTAL adjacent tile is picked (and chain is not blocked)
+        # Difficulty factors:
+        #   - Exposed (not blocked) vs Hidden (blocked by upper layer)
+        #   - Number of horizontal neighbors: 1 (critical) vs 2 (safe)
+        # [v15.31] Dock state consideration: reduce bonus if adding new type to dock
+        chain_unlock_bonus = 0.0
+        horizontal_neighbors = [(move_x - 1, move_y), (move_x + 1, move_y)]
+        for nx, ny in horizontal_neighbors:
+            neighbor_pos = f"{nx}_{ny}"
+            if neighbor_pos in layer_tiles:
+                neighbor_tile = layer_tiles[neighbor_pos]
+                if (not neighbor_tile.picked and
+                    neighbor_tile.effect_type == TileEffectType.CHAIN and
+                    not neighbor_tile.effect_data.get("unlocked", False)):
+                    # Count how many horizontal neighbors the chain has
+                    chain_x, chain_y = neighbor_tile.x_idx, neighbor_tile.y_idx
+                    chain_h_neighbors = [(chain_x - 1, chain_y), (chain_x + 1, chain_y)]
+                    chain_neighbor_count = sum(
+                        1 for cx, cy in chain_h_neighbors
+                        if f"{cx}_{cy}" in layer_tiles and not layer_tiles[f"{cx}_{cy}"].picked
+                    )
+
+                    # Neighbor count multiplier: 1 neighbor = critical (2.0x), 2 neighbors = safe (1.0x)
+                    neighbor_multiplier = 2.0 if chain_neighbor_count == 1 else 1.0
+
+                    # Check if chain tile is blocked (if blocked, unlock won't happen)
+                    if not self._is_blocked_by_upper(state, neighbor_tile):
+                        # Chain is EXPOSED and will be unlocked immediately - HIGH PRIORITY
+                        # Base: 60, with neighbor multiplier: 60-120
+                        chain_unlock_bonus = max(chain_unlock_bonus, 60.0 * neighbor_multiplier * profile.blocking_awareness * gimmick_bonus_multiplier)
+                    else:
+                        # Chain is HIDDEN (blocked), but this move helps progress toward unlock
+                        # Base: 20, with neighbor multiplier: 20-40
+                        chain_unlock_bonus = max(chain_unlock_bonus, 20.0 * neighbor_multiplier * profile.blocking_awareness * gimmick_bonus_multiplier)
+
+        if chain_unlock_bonus > 0:
+            # [v15.31] Balance chain unlock bonus with type matching priority
+            # CRITICAL: Type concentration is MORE important than chain unlock at game start
+            dock_has_same_type = any(t.tile_type == move.tile_type for t in state.dock_tiles)
+
+            if dock_has_same_type:
+                # BONUS: Can help match AND unlock chain - excellent move
+                chain_unlock_bonus *= 1.5
+            else:
+                # REDUCE: Adding new type - chain unlock is much less valuable
+                # Early game: focus on type concentration, not chain unlock
+                if dock_count >= 4:
+                    chain_unlock_bonus *= 0.05  # Almost completely ignore
+                elif dock_count >= 2:
+                    chain_unlock_bonus *= 0.15  # Heavily reduce
+                else:
+                    # dock_count 0-1: CRITICAL early game phase
+                    # Type concentration must dominate - almost ignore chain unlock
+                    chain_unlock_bonus *= 0.1
+
+            base_score += chain_unlock_bonus
+        return base_score
+
+    def _chain_isolation_penalty(self, base_score: float, state: GameState, profile: BotProfile,
+                                 tile_state) -> float:
+        # 3. CHAIN tiles: Collect locked chain positions for isolation check
+        locked_chain_positions = []
+        for layer_idx, layer in state.tiles.items():
+            for pos, tile in layer.items():
+                if not tile.picked and tile.effect_type == TileEffectType.CHAIN:
+                    if not tile.effect_data.get("unlocked", False):
+                        locked_chain_positions.append((layer_idx, pos, tile))
+
+        # ============================================================
+        # [v15.31] CHAIN ISOLATION DANGER - Only penalize when:
+        # 1. Chain is BLOCKED by upper layer (can't be unlocked yet)
+        # 2. This move is adjacent to the chain (left/right)
+        # 3. This move would leave chain with NO horizontal neighbors (game over)
+        # ============================================================
+        if tile_state and locked_chain_positions:
+            move_pos = tile_state.position_key
+            move_layer = tile_state.layer_idx
+            move_x, move_y = tile_state.x_idx, tile_state.y_idx
+
+            for chain_layer_idx, chain_pos, chain_tile in locked_chain_positions:
+                # Only check chains in the same layer
+                if chain_layer_idx != move_layer:
+                    continue
+
+                chain_x, chain_y = chain_tile.x_idx, chain_tile.y_idx
+                horizontal_neighbors = [
+                    (chain_x - 1, chain_y),
+                    (chain_x + 1, chain_y)
+                ]
+
+                # Check if THIS move is adjacent to the chain
+                is_move_adjacent_to_chain = (move_x, move_y) in horizontal_neighbors
+
+                # Skip if this move is NOT adjacent to the chain
+                if not is_move_adjacent_to_chain:
+                    continue
+
+                # Check if chain is blocked by upper layer
+                chain_is_blocked = self._is_blocked_by_upper(state, chain_tile)
+
+                # If chain is NOT blocked and move is adjacent, it will UNLOCK the chain
+                # No penalty - this is a GOOD move
+                if not chain_is_blocked:
+                    continue
+
+                # Chain IS blocked - check if this move would cause isolation
+                # Count remaining horizontal neighbors after this move
+                remaining_neighbors = 0
+                for nx, ny in horizontal_neighbors:
+                    neighbor_pos = f"{nx}_{ny}"
+                    if neighbor_pos == move_pos:
+                        # This tile would be removed by this move
+                        continue
+                    layer_tiles = state.tiles.get(chain_layer_idx, {})
+                    neighbor = layer_tiles.get(neighbor_pos)
+                    if neighbor and not neighbor.picked:
+                        remaining_neighbors += 1
+
+                # If this move would leave chain with NO horizontal neighbors
+                # while chain is still blocked = guaranteed game over
+                if remaining_neighbors == 0:
+                    # CRITICAL: This move would cause guaranteed game over
+                    base_score -= 1000.0 * profile.blocking_awareness
+        return base_score
 
     # ── 기믹 위협 점수 (v1/v2 원래 인라인 코드를 그대로 옮긴 것 — 연산 순서·값 동일) ──────────────────────
     def _grass_reduce_bonus(self, base_score: float, move: Move, state: GameState, profile: BotProfile,

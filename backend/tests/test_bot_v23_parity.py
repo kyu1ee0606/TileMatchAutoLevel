@@ -304,3 +304,44 @@ def test_auto_collect_cycle():
 def test_auto_collect_off_without_level_flag():
     bot, st = _bot(CAT, "v2.3", ["auto_collect"], auto_collect=0)
     assert len(st.dock_tiles) == 0
+
+
+# ── chain awareness (behaviour item, not a rule) ───────────────────────────────────────────────
+CHAIN_COVERED = _level([{"1_0": ["t3", "chain"], "0_0": ["t1", ""], "2_0": ["t2", ""], "4_4": ["t5", ""]},
+                        {},
+                        {"1_0": ["t4", ""]}])
+
+
+def _chain_bot(alpha):
+    prof = make_skill_profile(1.0, "v2.3")
+    cfg = dict(prof.gimmick_awareness)
+    cfg["parity"] = ["chain_aware"]
+    cfg["alpha"] = dict(cfg["alpha"], chain=alpha)
+    prof = dataclasses.replace(prof, gimmick_awareness=cfg)
+    bot = BotSimulator()
+    bot.set_rule_parity(prof)
+    st = bot._create_initial_state(CHAIN_COVERED, 200)
+    bot._precompute_blocking_map(st)
+    return bot, st, prof
+
+
+def test_chain_awareness_gates_isolation_penalty():
+    """Users fail by Chain (AF 9% of 301~500 fails) while the θ≥0.73 bot never isolates a covered chain:
+    v2.3 draws chain awareness per turn like bomb/grass in v2.1; unaware turns ignore the chain threat."""
+    for alpha, expect in ((20.0, True), (-20.0, False)):
+        bot, st, prof = _chain_bot(alpha)
+        bot._v21_draw_awareness(st, prof)
+        assert bot._v21_aware.get("chain") is expect
+        m = _move_at(bot, st, 0, "0_0")
+        score = bot._score_move_with_profile(m, st, prof)
+        bot2, st2, prof2 = _chain_bot(alpha)
+        bot2._v21_aware = {"chain": expect}
+        if expect:
+            assert bot2._chain_isolation_penalty(0.0, st2, prof2, _move_at(bot2, st2, 0, "0_0").tile_state) == 0.0
+    # v2.1 profile never draws chain awareness
+    bot = BotSimulator()
+    p21 = make_skill_profile(1.0, "v2.1")
+    bot.set_rule_parity(p21)
+    st = bot._create_initial_state(CHAIN_COVERED, 200)
+    bot._v21_draw_awareness(st, p21)
+    assert "chain" not in bot._v21_aware

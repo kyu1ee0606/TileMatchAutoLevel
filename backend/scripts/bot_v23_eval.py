@@ -62,7 +62,9 @@ def run_task(args):
     prof = make_skill_profile(args["theta"], "v2.3")
     cfg = dict(prof.gimmick_awareness)
     cfg.update(v21.FIXED)
-    cfg["alpha"], cfg["gamma"] = V21_AWARENESS_DEFAULTS["alpha"], V21_AWARENESS_DEFAULTS["gamma"]
+    cfg["alpha"], cfg["gamma"] = dict(V21_AWARENESS_DEFAULTS["alpha"]), dict(V21_AWARENESS_DEFAULTS["gamma"])
+    if "chain_ag" in args:                         # chain awareness grid (alpha, gamma)
+        cfg["alpha"]["chain"], cfg["gamma"]["chain"] = args["chain_ag"]
     cfg["exposure"] = args["exposure"]
     cfg["parity"] = args["parity"]                 # None = all items
     cfg["auto_collect"] = int(float(entry["row"].get("autoCollectCount") or 0))
@@ -87,7 +89,7 @@ def run_task(args):
                 reasons[base.fail_reason(bot, final)] += 1
     return {"L": args["L"], "theta": args["theta"], "ver": "v2.3", "games": n, "wins": wins, "layouts": len(lays),
             "fail_tiles_left": left, "fail_tiles_left_board": left_board, "fail_reasons": dict(reasons),
-            "parity": args["parity"], "sec": time.time() - t0}
+            "parity": args["parity"], "chain_ag": args.get("chain_ag"), "sec": time.time() - t0}
 
 
 def _pool_run(tasks, name, key):
@@ -140,6 +142,73 @@ def cmd_full(a):
     print(f"full v2.3 rows={len(d['rows'])}")
 
 
+def cmd_chaingrid(a):
+    """chain_aware calibration: all rule items + chain_aware, θ=1.0, 64 games, chain levels, alpha × gamma."""
+    from app.core.bot_simulator import V23_PARITY_ITEMS
+    ex = {int(k): v for k, v in load(V21_OUT / "exposure.json").items()}
+    lv = levels_with(["eff_chain"])
+    tasks = [{"L": L, "theta": 1.0, "games": 64, "exposure": ex[L], "parity": list(V23_PARITY_ITEMS),
+              "chain_ag": [al, ga]} for al in (-3.0, -2.0, -1.0, 0.0, 1.0, 2.0) for ga in (0.0, 2.0, 4.0) for L in lv]
+    d = _pool_run(tasks, "chain_grid.json", lambda r: (r["L"], tuple(r.get("chain_ag", (None, None)))))
+    print(f"chaingrid rows={len(d['rows'])}")
+
+
+def cmd_chainfit(a):
+    """2-fold CV over chain levels: relative MAE, chain fail share, within-group ρ; baseline = v2.3 rule items only."""
+    import random
+    from bot_af_L1_31 import spearman
+    P, A = v21.prep()
+    rows = load(OUT / "chain_grid.json")["rows"]
+    base_rows = {r["L"]: r for r in load(OUT / "v23_rows.json")["rows"] if r["theta"] == 1.0}
+    lv = sorted({r["L"] for r in rows})
+    mid = {L: (A[L]["unaided_clear_lower_bound"] + A[L]["unaided_clear_upper_bound"]) / 2 for L in lv}
+    all23 = {r["L"]: r for r in load(OUT / "v23_rows.json")["rows"] if r["theta"] == 1.0}
+    lv_all = v21.levels_of()
+    plain = [L for L in lv_all if not any(P[L]["features"].get(f, 0) for f in ("eff_chain", "eff_bomb", "eff_grass"))]
+    seg_af, seg_bot = {}, {}
+    for lo, hi in base.SEGMENTS:
+        G = [L for L in plain if lo <= L <= hi]
+        sname = f"{lo}-{hi}"
+        seg_af[sname] = sum((A[L]["unaided_clear_lower_bound"] + A[L]["unaided_clear_upper_bound"]) / 2 for L in G) / len(G)
+        seg_bot[sname] = sum(all23[L]["wins"] / all23[L]["games"] for L in G) / len(G)
+    by = {}
+    for r in rows:
+        by.setdefault(tuple(r["chain_ag"]), {})[r["L"]] = r
+
+    def metrics(rs, ls):
+        pred = {L: seg_af[base.seg_of(L)] + rs[L]["wins"] / rs[L]["games"] - seg_bot[base.seg_of(L)] for L in ls}
+        bc, ac = Counter(), Counter()
+        for L in ls:
+            bc.update(rs[L]["fail_reasons"])
+            for k, v in (A[L]["fail_reason"] or {}).items():
+                ac[k.replace("_CantRevive", "")] += v
+        return {"mae_rel": sum(abs(pred[L] - mid[L]) for L in ls) / len(ls),
+                "bias_rel": sum(pred[L] - mid[L] for L in ls) / len(ls),
+                "share_bot": bc["Chain"] / max(1, sum(bc.values())), "share_af": ac["Chain"] / max(1, sum(ac.values())),
+                "rho": spearman([rs[L]["wins"] / rs[L]["games"] for L in ls], [mid[L] for L in ls])}
+
+    loss = lambda m: m["mae_rel"] + 0.5 * abs(m["share_bot"] - m["share_af"])
+    grid = {f"{k[0]},{k[1]}": metrics(v, lv) for k, v in by.items()}
+    rng, res, picks = random.Random(23), [], Counter()
+    for _ in range(200):
+        sh = lv[:]
+        rng.shuffle(sh)
+        A_, B_ = sh[: len(sh) // 2], sh[len(sh) // 2:]
+        best = min(by, key=lambda k: loss(metrics(by[k], A_)))
+        picks[f"{best[0]},{best[1]}"] += 1
+        res.append((metrics(by[best], B_), metrics(base_rows, B_)))
+    cv = {k: round(sum(r[0][k] for r in res) / 200, 4) for k in ("mae_rel", "bias_rel", "share_bot", "share_af", "rho")}
+    cv0 = {k: round(sum(r[1][k] for r in res) / 200, 4) for k in ("mae_rel", "bias_rel", "share_bot", "rho")}
+    best_all = min(by, key=lambda k: loss(grid[f"{k[0]},{k[1]}"]))
+    out = {"levels": len(lv), "baseline_v23_rules": metrics(base_rows, lv), "grid": grid,
+           "cv_chain_aware": cv, "cv_baseline": cv0, "picks": dict(picks.most_common(5)),
+           "chosen": {"alpha": best_all[0], "gamma": best_all[1], **grid[f"{best_all[0]},{best_all[1]}"]}}
+    save("chain_fit.json", out)
+    print(json.dumps({k: v for k, v in out.items() if k != "grid"}, ensure_ascii=False, indent=1))
+    for k, m in sorted(grid.items(), key=lambda kv: tuple(float(x) for x in kv[0].split(","))):
+        print("  ", k, {x: round(y, 3) for x, y in m.items()})
+
+
 def cmd_isum(a):
     from bot_af_L1_31 import spearman
     P, A = v21.prep()
@@ -153,7 +222,7 @@ def cmd_isum(a):
     out = {}
     for f in sorted(OUT.glob("item_*.json")):
         name = f.stem[5:]
-        if name == "cat_base" or name == "summary":
+        if name in ("cat_base", "summary", "v23chain"):
             continue
         rows = load(f)["rows"]
         by_t = {}
@@ -181,6 +250,10 @@ def cmd_isum(a):
 
 def cmd_assemble(a):
     rows = load(OUT / "v23_rows.json")["rows"]
+    over = OUT / "item_v23chain.json"           # chain levels re-measured with chain_aware (added after the full run)
+    if over.exists():
+        ov = {(r["L"], r["theta"]): r for r in load(over)["rows"]}
+        rows = [ov.get((r["L"], r["theta"]), r) for r in rows]
     save("bot_v2.3.json", {"rows": rows})
     shutil.copyfile(V21_OUT / "bot_v2.1.json", OUT / "bot_v2.1.json")
     for f in ("prep.json", "af.json", "bot_v1.json", "bot_v2.json"):
@@ -198,6 +271,8 @@ def main():
     p = sub.add_parser("full"); p.add_argument("--grid", default=GRID); p.add_argument("--games", type=int, default=128)
     p.set_defaults(f=cmd_full)
     sub.add_parser("isum").set_defaults(f=cmd_isum)
+    sub.add_parser("chaingrid").set_defaults(f=cmd_chaingrid)
+    sub.add_parser("chainfit").set_defaults(f=cmd_chainfit)
     sub.add_parser("assemble").set_defaults(f=cmd_assemble)
     a = ap.parse_args()
     a.f(a)

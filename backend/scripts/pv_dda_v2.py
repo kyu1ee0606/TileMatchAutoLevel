@@ -20,6 +20,7 @@ import argparse
 import json
 import math
 import os
+import statistics
 import subprocess
 import sys
 import time
@@ -641,6 +642,146 @@ def ab1():
     print(json.dumps(summ, ensure_ascii=False)[:3000])
 
 
+def ab3():
+    """③ summary: R2 status vs v2 re-check (statusA / statusB), outer failure reasons, verification overlap.
+    Comparison only — exports proposed rows to dda_sets_v2/p3_A, p3_B (NOT APPROVED, R2 untouched)."""
+    from collections import Counter
+    roll = P.load(os.path.join(P.SB, "verify_dda_seedvar", "_rollup_32_1500.json"))
+    fails = {int(k): v for k, v in roll["perLevelFail"].items()}
+    verified = {int(f[:4]) for f in os.listdir(os.path.join(P.SB, "verify_dda_seedvar")) if f[:4].isdigit()}
+    rows = {"A": {}, "B": {}}
+    lv = {}
+    for n, fin in r2_levels(32, 1000):
+        p3 = W2(n).get("p3.json")
+        if not p3:
+            continue
+        if "tiers" not in p3:
+            lv[n] = {"r2": fin["status"], "A": p3["status"], "B": p3["status"], "segment": "32-500" if n <= 500 else "501-1000"}
+            continue
+        T = p3["tiers"]
+        reasons = {}
+        for t in ("e2", "h2"):
+            v = T[t]
+            r = [x for x, ok in (("sign", v["signKept"]), ("mag", v["magOk"]), ("ci", v["ciOk"]), ("judge", v["judge"]["pass"])) if not ok]
+            if r:
+                reasons[t] = r
+        # sensitivity: outer threshold 0.10 (R1) instead of 0.13, everything else equal (criterion A)
+        ok10 = all(T[t]["signKept"] and abs(T[t]["v2Delta"]) >= 0.10 and T[t]["ciOk"] and T[t]["judge"]["pass"] for t in ("e2", "h2"))
+        p1 = W2(n).get("p1.json") or {}
+        lv[n] = {"r2": fin["status"], "A": p3["statusA"], "B": p3["statusB"], "p1A": p1.get("status"),
+                 "segment": "32-500" if n <= 500 else "501-1000", "outerReasons": reasons,
+                 "magOnly": bool(reasons) and all(r == ["mag"] for r in reasons.values()), "outerOk010": ok10,
+                 "hiWarn": p3["hiWarn"], "thetasR2": p3["thetasR2"], "thetasV2": p3["thetasV2"],
+                 "delta": {t: [T[t]["r2Delta"], T[t]["v2Delta"]] for t in T},
+                 "verified": n in verified, "verifyPass": (n in verified and n not in fails), "verifyFail": fails.get(n)}
+        prep = P.W(n).get("prep.json")
+        row = P.W(n).get("seedvar_row.json")
+        for c in ("A", "B"):
+            st = lv[n][c]
+            if st == "5tier":
+                rows[c][f"seedvar_{n}"] = {**row, "randSeed": fin["token"]}
+            elif st == "3tier":
+                rows[c][f"seedvar_{n}"] = {**row, "randSeed": "|".join(P.tok(prep, T[t]["key"]) for t in ("e2", "h2"))}
+    segs = ("32-500", "501-1000")
+    summ = {"levels": len(lv), "r2": dict(Counter(v["r2"] for v in lv.values()))}
+    for c in ("A", "B"):
+        ver = [v for v in lv.values() if v.get("verified") and v[c] in ("5tier", "3tier")]
+        summ[c] = {"status": dict(Counter(v[c] for v in lv.values())),
+                   "bySegment": {s: dict(Counter(v[c] for v in lv.values() if v["segment"] == s)) for s in segs},
+                   "transition": dict(Counter(f"{v['r2']}->{v[c]}" for v in lv.values())), "rows": len(rows[c]),
+                   "verifiedKept": len(ver), "verifiedKeptPass": sum(1 for v in ver if v["verifyPass"]),
+                   "verifiedKeptOuterPass": sum(1 for v in ver if not any(x.startswith("outer") for x in (v["verifyFail"] or [])))}
+    exA = [v for v in lv.values() if v["A"] == "excluded" and "outerReasons" in v]
+    summ["outerReasonCountsA"] = dict(Counter(r for v in exA for rs in v["outerReasons"].values() for r in rs))
+    summ["outerSignFlipLevels"] = sorted(n for n, v in lv.items() if any("sign" in rs for rs in v.get("outerReasons", {}).values()))
+    summ["excludedMagOnlyA"] = sum(1 for v in exA if v["magOnly"])
+    summ["keptIfOuter010A"] = sum(1 for v in lv.values() if v.get("outerOk010"))
+    ab = [v for v in lv.values() if v.get("p1A")]
+    summ["vsPhase1A"] = dict(Counter(f"{v['p1A']}|{v['A']}" for v in ab))
+    summ["deltaMedian"] = {t: {"r2": statistics.median([abs(v["delta"][t][0]) for v in lv.values() if "delta" in v]),
+                               "v2": statistics.median([abs(v["delta"][t][1]) for v in lv.values() if "delta" in v])} for t in ("e2", "h2")}
+    vv = [v for v in lv.values() if v.get("verified")]
+    summ["verifiedAll"] = {"n": len(vv), "pass": sum(1 for v in vv if v["verifyPass"]),
+                           "AKeptPass": sum(1 for v in vv if v["A"] != "excluded" and v["verifyPass"]),
+                           "AExcludedPass": sum(1 for v in vv if v["A"] == "excluded" and v["verifyPass"]),
+                           "AExcludedFail": sum(1 for v in vv if v["A"] == "excluded" and not v["verifyPass"])}
+    for c in ("A", "B"):
+        d = os.path.join(V2, f"p3_{c}")
+        P.save(os.path.join(d, "seedvar_rows.json"), {"_note": f"criterion {c} (phase ③ v2 re-check, 32~1000) — comparison only, NOT APPROVED", "rows": rows[c]})
+        P.save(os.path.join(d, "coverage.json"), {"criterion": c, "evalVer": eval_ver(), **summ[c]})
+    P.save(os.path.join(V2, "ab3_levels.json"), {str(k): v for k, v in lv.items()})
+    P.save(os.path.join(V2, "ab3_summary.json"), summ)
+    print(json.dumps(summ, ensure_ascii=False)[:4000])
+
+
+# ── ② A/B flags for finished v2 levels (measures MID + HI points for chosen tiers + orig) ────────────
+def p2ab_level(ex, n):
+    w = W2(n)
+    fin = w.get("final.json")
+    if not fin or fin["status"] not in ("5tier", "3tier") or w.get("ab.json"):
+        return "skip"
+    guard()
+    prep = w.get("prep.json")
+    keys = ["orig"] + [v["key"] for v in fin["tiers"].values()]
+    maps = {k: (P.lj_orig(prep) if k == "orig" else P.lj_seed(prep, k)) for k in keys}
+    s2, rob = w.get("s2.json", {}), w.get("robust.json", {})
+    extra = w.get("abm.json", {})
+    games = {**HI_GAMES, "θ:0.55": P.ROBUST_GAMES, "θ:0.65": P.ROBUST_GAMES}
+    pts_all = HI_POINTS + ["θ:0.85"] + MID_POINTS
+    cpu = 0.0
+    for i, pt in enumerate(pts_all):
+        ks = [k for k in keys if pt not in extra.get(k, {}) and pt not in P.point_rates(k, s2, rob)
+              and not (pt == "θ:0.85" and k != "orig")]
+        if ks:
+            r, c = run_points(ex, {k: maps[k] for k in ks}, [(pt, games[pt], 40 + i)], SEED_HI)
+            cpu += c
+            for k, v in r.items():
+                extra.setdefault(k, {}).update(v)
+    w.put("abm.json", extra)
+
+    def rates(k):
+        r = P.point_rates(k, s2, rob)
+        r.update({p: v["rate"] for p, v in extra.get(k, {}).items()})
+        return r
+    ro = rates("orig")
+    drop10 = ("θ:1.0" in ro and "θ:0.85" in ro and ro["θ:1.0"] < ro["θ:0.85"]
+              and z2({"rate": ro["θ:0.85"], "n": 400}, {"rate": ro["θ:1.0"], "n": 400}) > 2)
+    hp = [p for p in HI_POINTS if not (drop10 and p == "θ:1.0")]
+    judged, rp = fin["judgedPoints"], fin["robustPoints"]
+    pair = [p for p in judged if p.startswith("θ:")][:2]
+    tiers = {}
+    for t, v in fin["tiers"].items():
+        sign = 1 if t.startswith("e") else -1
+        inner = t in ("e1", "h1")
+        rc = rates(v["key"])
+        a_pts = judged + ([rp[3]] if inner else []) + hp
+        b_pts = list(dict.fromkeys(pair + MID_POINTS + [rp[0], "profile:average", "profile:expert"] + ([rp[3]] if inner else [])))
+        tiers[t] = {"key": v["key"], "judgeA": judge(rc, ro, sign, a_pts), "judgeB": judge(rc, ro, sign, b_pts),
+                    "judgeHiOnly": judge(rc, ro, sign, hp)}
+
+    def st(f):
+        if not (tiers["e2"][f]["pass"] and tiers["h2"][f]["pass"]):
+            return "excluded"
+        return "5tier" if "e1" in tiers and tiers["e1"][f]["pass"] and tiers["h1"][f]["pass"] else "3tier"
+    res = {"level": n, "status": fin["status"], "statusA": st("judgeA"), "statusB": st("judgeB"),
+           "hiWarn": [t for t, v in tiers.items() if not v["judgeHiOnly"]["pass"]], "theta1Dropped": drop10,
+           "tiers": tiers, "cpuSec": round(cpu, 1), "evalVer": eval_ver()}
+    w.put("ab.json", res)
+    return f"A={res['statusA']} B={res['statusB']}"
+
+
+def run_p2ab(lo, hi):
+    eval_ver()
+    lv = sorted(int(x) for x in os.listdir(os.path.join(V2, "work")) if x.isdigit() and lo <= int(x) <= hi)
+    with ProcessPoolExecutor(WORKERS) as ex:
+        for i, n in enumerate(lv):
+            t = time.time()
+            r = p2ab_level(ex, n)
+            if r != "skip":
+                print(f"{n} {r} {time.time() - t:.1f}s [{i + 1}/{len(lv)}]", flush=True)
+    print("end", time.strftime("%Y-%m-%d %H:%M:%S"), flush=True)
+
+
 def run_phase(fn, lo, hi):
     lv = r2_levels(lo, hi)
     eval_ver()
@@ -654,7 +795,7 @@ def run_phase(fn, lo, hi):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("phase", choices=["gate", "p1", "p3", "p2", "ab1"])
+    ap.add_argument("phase", choices=["gate", "p1", "p3", "p2", "ab1", "ab3", "p2ab"])
     ap.add_argument("--from", dest="lo", type=int, default=32)
     ap.add_argument("--to", dest="hi", type=int, default=1500)
     a = ap.parse_args()
@@ -663,8 +804,12 @@ def main():
         gate()
     elif a.phase == "p1":
         run_phase(p1_level, a.lo, a.hi)
+    elif a.phase == "p2ab":
+        run_p2ab(max(a.lo, 1001), a.hi)
     elif a.phase == "ab1":
         ab1()
+    elif a.phase == "ab3":
+        ab3()
     elif a.phase == "p3":
         run_phase(p3_level, a.lo, min(a.hi, 1000))
     else:

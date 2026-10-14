@@ -39,6 +39,7 @@
 | 09 (작성 중) | v4 재선별 보고(시드계획전문가) |
 | [p0_scan_result.md](./p0_scan_result.md) | P0 샤드 스캔 원자료 요약 |
 | [22_af_test_retest.md](./22_af_test_retest.md) | AF 클리어율 test-retest(시간분할/유저분할): 반-반 MAE·ρ, 전체표본 노이즈 바닥, 드리프트 성분, 검증 게이트 기준 판정 |
+| [23_residual_retrain_v23.md](./23_residual_retrain_v23.md) | 잔차 보정 모델(E1+CQR) v2.3 봇 입력 재학습: v2.1과 동률(MAE 0.067·ρ 0.743), 검증 게이트 MAE·포함률 합격 / ρ·tolAF·chain·grass 불합격, novelty 집계 버그 수정 |
 
 ## 4. 결정 로그 (사용자 확정)
 | # | 결정 |

@@ -161,6 +161,12 @@ def wls(xs, ys, ws, intercept):
 def evaluate(runs, cfg):
     pre = json.load(open(cfg["preregistration"], encoding="utf-8"))
     plan = {x["level"]: x for x in pre["levels"]}
+    for ad in pre.get("addenda", []):  # replacement addenda (e.g. §9-10 mismatch swap): add new levels
+        if ad.get("type", "").startswith("replacement"):
+            for k, v in ad["levels"].items():
+                plan[int(k)] = {"level": int(k), **v}
+    if pre.get("activeLevels"):
+        plan = {k: v for k, v in plan.items() if k in set(pre["activeLevels"])}
     av = cfg["arm_values"]
     t_lo, t_hi = cfg["start"], cfg["end"]
     sel = [r for r in runs if r["L"] in plan and r.get("arm") in av.values()

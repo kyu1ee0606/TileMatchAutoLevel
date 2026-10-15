@@ -31,7 +31,7 @@ from app.core.pv.cs_shuffle import CTile, resolve_map, shuffle_empty_tiles  # no
 
 V2 = os.path.join(P.SB, "dda_sets_v2")
 OUT = os.path.join(V2, "pilot_export")
-PLAN = os.path.join(V2, "consensus", "pilot_B_v3.json")
+PLAN = os.path.join(V2, "consensus", os.environ.get("PV_PILOT_PLAN", "pilot_B_v3_1.json"))  # v3.1: mismatch levels replaced (§9-10)
 LIVE = os.path.join(P.BACKEND, "data", "production", "batch_1789636723287_uulknmtej.json")
 LIVE_SHA_PREFIX = "1d4ba24ab6be6884"
 RM_OOF = os.path.join(P.BACKEND, "data", "pv_sandbox", "af_calibration", "residual_retrain_v23", "v23", "interval_oof.csv")
@@ -266,5 +266,47 @@ def prereg():
     print("sha256", digest)
 
 
+def addendum_replace():
+    """Append a replacement addendum (B v3 -> v3.1) to the pre-registration; earlier entries are not edited."""
+    p = os.path.join(OUT, "preregistration.json")
+    reg = P.load(p)
+    prev = sha256(p)
+    v31 = P.load(PLAN)
+    af = P.load(AF)
+    new = {x["level"]: x for x in v31["levels"]}
+    entry = {"type": "replacement (before any pilot result)", "registeredAt": time.strftime("%Y-%m-%d %H:%M:%S %z"),
+             "head": head(), "previousSha256": prev,
+             "reason": "live build shard map != editor LIVE3 map for these levels (doc 13 §6): structure same but the shard has "
+                       "one more tile kind, so the bot Δ baseline (LIVE3 original) is not the map users play as control",
+             "removed": v31["removedMismatch"], "replaced": v31["replaced"],
+             "plan": {"path": os.path.relpath(PLAN, P.SB), "sha256": sha256(PLAN)},
+             "rows": {"path": "dda_sets_v2/pilot_export/seedvar_rows.json", "sha256": sha256(os.path.join(OUT, "seedvar_rows.json"))},
+             "levels": {}}
+    for r in v31["replaced"]:
+        x = new[r["in"]]
+        p0 = af[str(x["level"])]["clean_ft_rate"]
+        sign = 1 if x["expose"] == "e2" else -1
+        pr = {}
+        for lab in ("v1", "v2"):
+            bl = x["risk"][lab]["botLogitDelta"]
+            pv = {b: expit(logit(p0) + b * bl) for b in (BETA_LO, BETA, BETA_HI)}
+            dv = sorted(v - p0 for v in pv.values())
+            pr[lab] = {"botWOrig": x["risk"][lab]["botWOrig"], "botWVariant": x["risk"][lab]["botWVar"], "botLogitDelta": bl,
+                       "variantClear": round(pv[BETA], 4), "userDelta": round(pv[BETA] - p0, 4),
+                       "userDeltaRange": [round(dv[0], 4), round(dv[-1], 4)], "intendedSign": sign,
+                       "directionOk": sign * (pv[BETA] - p0) > 0}
+        entry["levels"][str(x["level"])] = {"segment": x["segment"], "expose": x["expose"], "token": x["exposeToken"],
+                                            "pick": x["pick"], "v2Tag": x["v2Tag"], "afCleanFtRate": p0,
+                                            "afCleanFtN": af[str(x["level"])]["clean_ft_n"], "predictions": pr}
+    reg["addenda"].append(entry)
+    reg["activeLevels"] = sorted(new)
+    P.save(p, reg)
+    digest = sha256(p)
+    with open(p + ".sha256", "w") as f:
+        f.write(f"{digest}  preregistration.json\n")
+    print(json.dumps(entry["levels"], ensure_ascii=False))
+    print("previous", prev, "new", digest)
+
+
 if __name__ == "__main__":
-    {"export": export, "validate": validate, "prereg": prereg}[sys.argv[1]]()
+    {"export": export, "validate": validate, "prereg": prereg, "addendum_replace": addendum_replace}[sys.argv[1]]()

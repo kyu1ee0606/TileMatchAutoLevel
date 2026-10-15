@@ -42,6 +42,7 @@
 | [23_residual_retrain_v23.md](./23_residual_retrain_v23.md) | 잔차 보정 모델(E1+CQR) v2.3 봇 입력 재학습: v2.1과 동률(MAE 0.067·ρ 0.743), 검증 게이트 MAE·포함률 합격 / ρ·tolAF·chain·grass 불합격, novelty 집계 버그 수정 |
 | [24_live_pilot_design.md](./24_live_pilot_design.md) | 시드 변형 라이브 파일럿 설계(실행 없음): 구간별 트래픽·검정력, 레벨당 n=100/군이면 20~30레벨 풀링 회귀로 봇Δ→유저Δ 기울기 추정 가능, 배정안 3개 비교(IMPL_SPEC 사다리와 충돌 명시), 게임팀 요청 목록 |
 | [25_natural_experiment_map_change.md](./25_natural_experiment_map_change.md) | 기존 AF 자연실험(앱버전별 맵 다른 L1~31 20레벨): 부호일치 80%, 봇Δ→유저Δ 환산 기울기 0.155[0.031~0.280] — 방향은 전달되나 크게 압축, 타일만 변경 사례는 L1 천장뿐이라 시드 변형 외삽엔 제한적 |
+| [27_human_vs_bot_behavior_audit.md](./27_human_vs_bot_behavior_audit.md) | 기믹별 사람 행동 vs 봇 v2.4 판단 감사(코드 수정 없음): 통제 회귀상 행동 잔차는 stack −0.13·grass +0.08 뿐, teleporter·bomb 은 공존·θ 몫. 우선 제안 = 스택 조기 개방, 독 감점 임계를 잠기지 않은 칸 기준으로, bomb β 적합, 냥이 진단. 기획 질문 15 |
 
 ## 4. 결정 로그 (사용자 확정)
 | # | 결정 |

@@ -49,6 +49,8 @@ GROUPS = {"봇 성공률": BOT_RATE, "봇 풀 실패비중": ["bot_grass_share"]
           "stack": ["has_stack", "n_stack", "stack_inner"], "craft": ["has_craft", "n_craft", "craft_inner"]}
 for _g in ("ice", "chain", "grass", "curtain", "teleporter", "frog", "link", "unknown"):
     GROUPS[_g] = [f"has_{_g}", f"n_{_g}"]
+if rm.EXTRA_BOT:
+    GROUPS["봇 실패형태 추가"] = list(rm.EXTRA_BOT)
 assert sorted(sum(GROUPS.values(), [])) == sorted(FEATS)
 
 

@@ -73,11 +73,17 @@ def run_task(args):
     cfg["parity"] = None
     cfg["auto_collect"] = int(float(entry["row"].get("autoCollectCount") or 0))
     if ver == "v2.4":
+        cfg["v24_expo"] = _gc_expo(P)[args["L"]]
         cfg["v24"] = args.get("v24")
         if args.get("psavvy") is not None:
             cfg["ac_p_savvy"] = args["psavvy"]
         if args.get("cmem") is not None:
             cfg["curtain_mem"] = args["cmem"]
+        if args.get("beta") is not None:
+            cfg["beta"] = args["beta"]
+        for k in ("extra",):                      # free-form v2.4 behaviour params (dict) for later items
+            if args.get(k):
+                cfg.update(args[k])
     prof = dataclasses.replace(prof, gimmick_awareness=cfg)
     bot = BotSimulator()
     wins, left, left_board, reasons, n = 0, [], [], Counter(), 0
@@ -100,7 +106,22 @@ def run_task(args):
     return {"L": args["L"], "theta": args["theta"], "ver": ver, "games": n, "wins": wins, "layouts": len(lays),
             "fail_tiles_left": left, "fail_tiles_left_board": left_board, "fail_reasons": dict(reasons),
             "parity": None, "v24": args.get("v24"), "psavvy": args.get("psavvy"), "cmem": args.get("cmem"),
-            "sec": time.time() - t0}
+            "beta": args.get("beta"), "extra": args.get("extra"), "sec": time.time() - t0}
+
+
+_GC = {}
+
+
+def _gc_expo(P):
+    """Levels before L (all levels incl. cat-help) whose map has grass / chain — v2.4 gc_naive learning."""
+    if not _GC:
+        cnt = Counter()
+        for L in sorted(P):
+            _GC[L] = {"grass": cnt["grass"], "chain": cnt["chain"]}
+            for g, f in (("grass", "eff_grass"), ("chain", "eff_chain")):
+                if P[L]["features"].get(f, 0) > 0:
+                    cnt[g] += 1
+    return _GC
 
 
 def _pool_run(tasks, name, key):
@@ -333,6 +354,57 @@ def cmd_cmemgrid(a):
     print(f"cmemgrid rows={len(d['rows'])}")
 
 
+BETA_GRID = (0.0, 1.0, 2.0, 4.0, 6.0)
+
+
+def cmd_betagrid(a):
+    """bomb awareness θ-slope β: bomb levels, θ ∈ {0.65, 0.85}, 64 games, β grid (all other v2.4 items on)."""
+    ex = _expo()
+    lv = v23.levels_with(["eff_bomb"])
+    tasks = [{"L": L, "theta": t, "games": 64, "exposure": ex[L], "v24": None, "beta": b}
+             for b in BETA_GRID for t in (0.65, 0.85) for L in lv]
+    d = _pool_run(tasks, "beta_grid.json", lambda r: (r["L"], r["theta"], r["beta"]))
+    print(f"betagrid rows={len(d['rows'])}")
+
+
+def cmd_betafit(a):
+    """2-fold CV (200): loss = mean over θ{0.65,0.85} of relative MAE (segment refs = v2.4 rows at that θ)."""
+    from bot_af_L1_31 import spearman
+    P, A = v21.prep()
+    refs = {}
+    rows24 = load(OUT / "bot_v2.4.json")["rows"]
+    for t in (0.65, 0.85):
+        refs[t] = seg_refs({r["L"]: r for r in rows24 if r["theta"] == t}, A, P)
+    by = {}
+    for r in load(OUT / "beta_grid.json")["rows"]:
+        by.setdefault(r["beta"], {}).setdefault(r["theta"], {})[r["L"]] = r
+    lv = sorted(L for L in by[4.0][0.85] if A[L]["unaided_clear_lower_bound"] is not None)
+
+    def met(b, ls, t):
+        rs = by[b][t]
+        sa, sb = refs[t]
+        rate = {L: rs[L]["wins"] / rs[L]["games"] for L in ls}
+        return {"mae_rel": sum(abs(sa[base.seg_of(L)] + rate[L] - sb[base.seg_of(L)] - _mid(A, L)) for L in ls) / len(ls),
+                "bias_rel": sum(sa[base.seg_of(L)] + rate[L] - sb[base.seg_of(L)] - _mid(A, L) for L in ls) / len(ls),
+                "resid": sum(rate[L] - _mid(A, L) for L in ls) / len(ls),
+                "rho": spearman([rate[L] for L in ls], [_mid(A, L) for L in ls])}
+    loss = lambda b, ls: sum(met(b, ls, t)["mae_rel"] for t in (0.65, 0.85)) / 2
+    grid = {str(b): {str(t): {k: round(v, 4) for k, v in met(b, lv, t).items()} for t in (0.65, 0.85)} for b in by}
+    rng, res, picks = random.Random(27), [], Counter()
+    for _ in range(200):
+        sh = lv[:]
+        rng.shuffle(sh)
+        tr, te = sh[: len(sh) // 2], sh[len(sh) // 2:]
+        best = min(by, key=lambda b: loss(b, tr))
+        picks[best] += 1
+        res.append((loss(best, te), loss(4.0, te)))
+    out = {"levels": len(lv), "grid": grid, "cv_loss_best": round(sum(r[0] for r in res) / 200, 4),
+           "cv_loss_beta4": round(sum(r[1] for r in res) / 200, 4), "picks": {str(k): v for k, v in picks.most_common()},
+           "chosen": min(by, key=lambda b: loss(b, lv))}
+    save("beta_fit.json", out)
+    print(json.dumps(out, ensure_ascii=False, indent=1))
+
+
 def cmd_cmem085(a):
     """θ0.85 check (64 games): no memory vs forgetful (a −2) vs near-perfect memory (a 8), c 0."""
     ex = _expo()
@@ -483,6 +555,137 @@ def cmd_curtfull(a):
     print(f"curtain v2.4 rows={len(d['rows'])}")
 
 
+def _boot_cmp(R0, R1, Ls, s0, s1, A, reason, boot, rng):
+    """Paired level bootstrap + binomial redraw of changed levels → verdicts for Δρ, Δ|resid|, ΔMAE_rel."""
+    m0, m1 = _gim_stats(R0, Ls, *s0, A, reason), _gim_stats(R1, Ls, *s1, A, reason)
+    changed = [L for L in Ls if R0[L]["wins"] != R1[L]["wins"]]
+    d = {"rho": [], "absres": [], "mae": []}
+    for _ in range(boot):
+        bs = [rng.choice(Ls) for _ in Ls]
+        P0, P1 = dict(R0), dict(R1)
+        for L in changed:
+            for R, PP in ((R0, P0), (R1, P1)):
+                ng, nw = R[L]["games"], R[L]["wins"]
+                PP[L] = dict(R[L], wins=sum(1 for _ in range(ng) if rng.random() < nw / ng))
+        x0, x1 = _gim_stats(P0, bs, *s0, A, reason), _gim_stats(P1, bs, *s1, A, reason)
+        d["rho"].append(x1["rho"] - x0["rho"])
+        d["absres"].append(abs(x1["resid"]) - abs(x0["resid"]))
+        d["mae"].append(x1["mae_rel"] - x0["mae_rel"])
+    out = {}
+    for k, v in d.items():
+        v = sorted(x for x in v if x == x)
+        lo, hi = (v[int(0.025 * len(v))], v[int(0.975 * len(v)) - 1]) if v else (0, 0)
+        pos_good = k == "rho"
+        out[k] = ("개선" if pos_good else "악화") if lo > 0 else (("악화" if pos_good else "개선") if hi < 0 else "동일")
+    return m0, m1, out, len(changed)
+
+
+def _default_items():
+    from app.core.bot_simulator import V24_DEFAULT
+    return list(V24_DEFAULT)
+
+
+def cmd_bgrid(a):
+    """Behaviour item grid: v2.4 default (+ fixed --extra-items) + ITEM with param P ∈ values; value 'off' = item off.
+    Levels = feature list (row_unlock / cat / eff_* / stack). 64 games, θ list."""
+    ex = _expo()
+    if a.levels == "sample3":                      # 일반 행동 항목: 비교 410레벨 중 매 3번째(137레벨)
+        lv = v21.levels_of()[::3]
+    else:
+        lv = v23.levels_with([f for f in a.levels.split(",") if f])
+    base_items = _default_items() + [x for x in a.extra_items.split(",") if x]
+    fixed = json.loads(a.fixed) if a.fixed else {}
+    tasks = []
+    for val in a.values.split(","):
+        items = list(base_items) + ([] if val == "off" else [a.item])
+        par = dict(fixed)
+        if val != "off":
+            par[a.param] = float(val)
+        for t in a.thetas.split(","):
+            for L in lv:
+                tasks.append({"L": L, "theta": float(t), "games": a.games, "exposure": ex[L], "v24": items,
+                              "extra": {"v24_par": par}, "val": val})
+    d = _pool_run(tasks, f"bg_{a.name}.json", lambda r: (r["L"], r["theta"], r.get("val") or "off"))
+    print(f"bgrid {a.name}: rows={len(d['rows'])} levels={len(lv)}")
+
+
+def cmd_bfit(a):
+    """2-fold CV (200) over levels: loss = mean_θ relative MAE (+ share_w·|fail share − AF| for --reason)."""
+    from bot_af_L1_31 import spearman
+    P, A = v21.prep()
+    rows24 = load(OUT / "bot_v2.4.json")["rows"]
+    by = {}
+    for r in load(OUT / f"bg_{a.name}.json")["rows"]:
+        by.setdefault(r.get("val") or "off", {}).setdefault(r["theta"], {})[r["L"]] = r
+    thetas = sorted(next(iter(by.values())))
+    refs = {t: seg_refs({r["L"]: r for r in rows24 if r["theta"] == t}, A, P) for t in thetas}
+    lv = sorted(L for L in by["off"][thetas[0]] if A[L]["unaided_clear_lower_bound"] is not None)
+
+    def met(v, ls, t):
+        rs = by[v][t]
+        sa, sb = refs[t]
+        rate = {L: rs[L]["wins"] / rs[L]["games"] for L in ls}
+        bc, ac = Counter(), Counter()
+        for L in ls:
+            bc.update(rs[L]["fail_reasons"])
+            ac.update(_af_fail(A, L))
+        return {"mae_rel": sum(abs(sa[base.seg_of(L)] + rate[L] - sb[base.seg_of(L)] - _mid(A, L)) for L in ls) / len(ls),
+                "resid": sum(rate[L] - _mid(A, L) for L in ls) / len(ls),
+                "rate": sum(rate.values()) / len(ls),
+                "rho": spearman([rate[L] for L in ls], [_mid(A, L) for L in ls]),
+                "share_bot": bc[a.reason] / max(1, sum(bc.values())), "share_af": ac[a.reason] / max(1, sum(ac.values()))}
+
+    def loss(v, ls):
+        ms = [met(v, ls, t) for t in thetas]
+        return sum(m["mae_rel"] + a.share_w * abs(m["share_bot"] - m["share_af"]) for m in ms) / len(ms)
+    grid = {v: {str(t): {k: round(x, 4) for k, x in met(v, lv, t).items()} for t in thetas} for v in by}
+    rng, res, picks = random.Random(31), [], Counter()
+    for _ in range(200):
+        sh = lv[:]
+        rng.shuffle(sh)
+        tr, te = sh[: len(sh) // 2], sh[len(sh) // 2:]
+        best = min(by, key=lambda v: loss(v, tr))
+        picks[best] += 1
+        res.append((loss(best, te), loss("off", te)))
+    out = {"levels": len(lv), "thetas": thetas, "grid": grid, "cv_loss_fit": round(sum(r[0] for r in res) / 200, 4),
+           "cv_loss_off": round(sum(r[1] for r in res) / 200, 4),
+           "cv_win_rate": round(sum(1 for r in res if r[0] < r[1]) / 200, 3),
+           "picks": dict(picks.most_common()), "chosen": min(by, key=lambda v: loss(v, lv))}
+    save(f"bfit_{a.name}.json", out)
+    print(json.dumps({k: v for k, v in out.items() if k != "grid"}, ensure_ascii=False))
+    for v, m in grid.items():
+        print("  ", v, " | ".join(f"θ{t}: rate {x['rate']:.3f} ρ {x['rho']:.3f} res {x['resid']:+.3f} mae {x['mae_rel']:.3f} "
+                                  f"share {x['share_bot']:.2f}/{x['share_af']:.2f}" for t, x in m.items()))
+
+
+def cmd_cmp(a):
+    """Compare an item's rows with a baseline rows file on its levels (θ each), with bootstrap verdicts."""
+    P, A = v21.prep()
+    full = {}
+    for r in load(OUT / "bot_v2.4.json")["rows"]:
+        full.setdefault(r["theta"], {})[r["L"]] = r
+    base_rows = {}
+    for f in a.base.split(","):
+        for r in load(OUT / f)["rows"]:
+            base_rows.setdefault(r["theta"], {})[r["L"]] = r
+    item = {}
+    for r in load(OUT / f"item_{a.name}.json")["rows"]:
+        item.setdefault(r["theta"], {})[r["L"]] = r
+    rng = random.Random(77)
+    for t in sorted(item):
+        Ls = sorted(L for L in item[t] if L in base_rows.get(t, {}) and A[L]["unaided_clear_lower_bound"] is not None)
+        if not Ls:
+            continue
+        f0 = dict(full.get(t, {})); f0.update(base_rows[t])
+        f1 = dict(f0); f1.update(item[t])
+        s0, s1 = seg_refs(f0, A, P), seg_refs(f1, A, P)
+        m0, m1, v, nch = _boot_cmp(base_rows[t], item[t], Ls, s0, s1, A, a.reason, a.boot, rng)
+        print(f"{a.name} θ{t} n={len(Ls)} changed={nch} rate {sum(base_rows[t][L]['wins']/base_rows[t][L]['games'] for L in Ls)/len(Ls):.3f}"
+              f"→{sum(item[t][L]['wins']/item[t][L]['games'] for L in Ls)/len(Ls):.3f} ρ {m0['rho']:.3f}→{m1['rho']:.3f} "
+              f"resid {m0['resid']:+.3f}→{m1['resid']:+.3f} maeRel {m0['mae_rel']:.3f}→{m1['mae_rel']:.3f} "
+              f"share {m0['share_bot']:.2f}→{m1['share_bot']:.2f} (AF {m0['share_af']:.2f}) | {v['rho']}/{v['absres']}/{v['mae']}")
+
+
 def cmd_assemble(a):
     rows = load(OUT / "v24_rows.json")["rows"]
     cur = OUT / "v24_curtain_rows.json"          # curtain levels re-measured after curtain_memory_v24 was added
@@ -517,6 +720,17 @@ def main():
     sub.add_parser("cmemfit").set_defaults(f=cmd_cmemfit)
     sub.add_parser("cmem085").set_defaults(f=cmd_cmem085)
     sub.add_parser("curtfull").set_defaults(f=cmd_curtfull)
+    sub.add_parser("betagrid").set_defaults(f=cmd_betagrid)
+    sub.add_parser("betafit").set_defaults(f=cmd_betafit)
+    p = sub.add_parser("bgrid"); p.add_argument("--name", required=True); p.add_argument("--item", required=True)
+    p.add_argument("--param", required=True); p.add_argument("--values", required=True); p.add_argument("--levels", required=True)
+    p.add_argument("--thetas", default="0.85,1.0"); p.add_argument("--games", type=int, default=64)
+    p.add_argument("--extra-items", dest="extra_items", default=""); p.add_argument("--fixed", default="")
+    p.set_defaults(f=cmd_bgrid)
+    p = sub.add_parser("bfit"); p.add_argument("--name", required=True); p.add_argument("--reason", default="Normal")
+    p.add_argument("--share-w", dest="share_w", type=float, default=0.0); p.set_defaults(f=cmd_bfit)
+    p = sub.add_parser("cmp"); p.add_argument("--name", required=True); p.add_argument("--base", default="bot_v2.4.json")
+    p.add_argument("--reason", default="Normal"); p.add_argument("--boot", type=int, default=500); p.set_defaults(f=cmd_cmp)
     p = sub.add_parser("gimtab"); p.add_argument("--thetas", default="1.0,0.85"); p.add_argument("--boot", type=int, default=1000)
     p.add_argument("--cat24", default="item_cat_v24.json"); p.set_defaults(f=cmd_gimtab)
     a = ap.parse_args()

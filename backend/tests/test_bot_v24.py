@@ -218,3 +218,81 @@ def test_curtain_memory_decays_with_turns():
         st.moves_used += 1
     assert kept == sorted(kept, reverse=True)                       # once forgotten, stays forgotten
     assert not kept[-1]
+
+
+# ── dock_rel / ac_inner / stack_hide ───────────────────────────────────────────────────────────
+def _bot_items(lj, items, version="v2.4", **cfgx):
+    prof = make_skill_profile(1.0, version)
+    cfg = dict(prof.gimmick_awareness)
+    cfg.update(parity=None, auto_collect=0, v24=list(items), **cfgx)
+    prof = dataclasses.replace(prof, gimmick_awareness=cfg)
+    bot = BotSimulator()
+    bot.set_rule_parity(prof)
+    st = bot._create_initial_state(lj, 200)
+    bot._precompute_blocking_map(st)
+    bot._v23_game_start(st)
+    return bot, st, prof
+
+
+KEY_LV = _level([{f"{x}_0": ["key", ""] for x in range(3)} | {f"{x}_2": [f"t{x + 1}", ""] for x in range(6)}
+                 | {f"{x}_4": [f"t{x + 1}", ""] for x in range(6)} | {f"{x}_6": [f"t{x + 1}", ""] for x in range(6)}])
+
+
+def test_dock_rel_shifts_thresholds_only_with_locked_slots():
+    nokey = _level([{f"{x}_{y}": [f"t{x + 1}", ""] for x in range(6) for y in (2, 4, 6)}])
+    for lj, locked in ((KEY_LV, 1), (nokey, 0)):
+        scores = []
+        for items in ([], ["dock_rel"]):
+            bot, st, prof = _bot_items(lj, items)
+            assert sum(sl.is_locked for sl in st.dock) == locked
+            for tt in ("t1", "t2", "t3", "t4"):                         # 4 different tiles in dock
+                mv = next(x for x in bot._get_available_moves(st) if x.tile_type == tt)
+                bot._v2_step(st, mv)
+            mv = next(x for x in bot._get_available_moves(st) if x.tile_type not in ("t1", "t2", "t3", "t4", "key"))
+            scores.append(_score(bot, st, prof, mv.layer_idx, mv.position))
+        if locked:
+            assert scores[1] < scores[0]                                 # 4 in dock + 1 locked = 'five' → bigger penalty
+        else:
+            assert scores[1] == scores[0]                                # 7 open slots → unchanged
+
+
+STACK_LV = _level([{"0_0": ["stack_e", "", [3, "t1_t2_t3"]], "2_0": ["t1", ""], "3_0": ["t1", ""],
+                    "4_0": ["t2", ""], "5_0": ["t2", ""], "6_0": ["t3", ""], "6_2": ["t3", ""]}], goalCount={"stack_e": 1})
+
+
+def test_ac_inner_field_and_pick_inner():
+    """Game cat field = TileGroup.TileList incl. every stack tile (TileGroup.cs:1266-1272)."""
+    bot, st, _ = _bot_items(STACK_LV, ["ac_inner"])
+    field = bot._v23_ac_field(st)
+    assert len(field) == 9                                              # 3 stack tiles + 6 plain
+    bot0, st0, _ = _bot_items(STACK_LV, [])
+    assert len(bot0._v23_ac_field(st0)) == 7                            # v2.3: board only (stack top)
+    top = st.tiles[0]["0_0"]
+    mid = st.stacked_tiles[top.under_stacked_tile_key]
+    bot._v23_ac_pick(st, mid)                                           # pull the middle stack tile
+    assert mid.picked and mid in st.dock_tiles
+    nxt = st.stacked_tiles[top.under_stacked_tile_key]
+    assert nxt is not mid and not nxt.picked                            # chain spliced: top → bottom
+    assert bot._v2_step(st, _move_at(bot, st, 0, "0_0"))
+    assert st.tiles[0]["0_0"] is nxt
+
+
+def test_stack_hide_shuffles_only_inner_tiles_in_rollout_copy():
+    lj = _level([{"0_0": ["stack_e", "", [4, "t1_t2_t3_t4"]], "3_3": ["stack_e", "", [3, "t5_t6_t1"]],
+                  "6_6": ["t2", ""]}], goalCount={"stack_e": 2})
+    bot, st, _ = _bot_items(lj, ["stack_hide"])
+    tops = {p: t.tile_type for p, t in st.tiles[0].items()}
+    keys = {t.full_key for t in st.tiles[0].values()}
+    inner_of = lambda S: [t.tile_type for k, t in sorted(S.stacked_tiles.items()) if t.full_key not in keys]
+    inner_before = sorted(inner_of(st))
+    changed = False
+    for seed in range(20):
+        bot._rng.seed(seed)
+        c = bot._v2_copy_state(st)
+        bot._v24_determinize(c)
+        assert {p: t.tile_type for p, t in c.tiles[0].items()} == tops
+        inner = inner_of(c)
+        assert sorted(inner) == inner_before
+        changed |= inner != inner_of(st)
+    assert changed
+    assert sorted(inner_of(st)) == inner_before

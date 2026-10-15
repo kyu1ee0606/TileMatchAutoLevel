@@ -30,7 +30,8 @@
 | 목표 폭 | ±5%p는 약속할 수 없다. 선별 재현에서 목표 ±5%p 적중률은 최선 규칙도 0.35~0.53이었다. 80% 구간 폭(≈0.26)이 목표 폭보다 넓어서 확률 규칙은 거의 모두 보류됐다. **기본 폭은 logit ±0.7**(mid 0.75 기준 ≈ 0.59~0.86)이다. 이때 적중률은 0.64~0.78이고 무작위는 0.40~0.53이다 |
 | 선별 검증 | 기존 라이브 410레벨을 "후보"로 놓고 OOF 예측으로 재현했다. 불확실성 벌점 규칙이 가장 나았다. 승자의 저주(고른 레벨의 실측이 예측보다 낮아짐)는 −1~−3%p 추가로, 무작위 선택보다 크다. 생성기 반복 탐색은 이보다 클 수 있다 → 독립 시드 재측정, 분포 밖 탐지, 선택 후 보정, 라이브 확인을 넣는다(§4) |
 | 라이브 검증 | 파일럿 29와 같은 하니스(해시 50:50, `pilot_arm`)를 재사용한다. 2차로 **신규 맵 약 30레벨**(목표 구간 3개 × 10, 101~300 중심)을 4주 돌린다. 판정 기준은 80% 구간 포함률, 목표 범위 적중률, 보정 기울기다(§5) |
-| 구현 범위 | 백엔드 신규 4~5파일 + 라우트·스키마, 학습·내보내기 스크립트 1개, 프론트 신규 2개 + 기존 패널 3곳 수정. 대략 **15~22 인일**(추정, §6). 현행 판정 경로 교체 포함(§2-0). 승인 필요 결정 14건(§7) |
+| 구현 범위 | 백엔드 신규 4~5파일 + 라우트·스키마, 학습·내보내기 스크립트 1개, 프론트 신규 2개 + 기존 패널 3곳 수정. 대략 **17~25 인일**(추정, §6). 현행 판정 경로 교체 포함(§2-0). 승인 필요 결정 16건(§7) |
+| **유저 표시 난이도도 틀림** | 업로드 때 게임 행 `difficulty`(xDifficulty) = round(`predicted_clear_rate`×100)이다. 게임은 이 값으로 난이도 티어 팝업과 결과 문구("N%의 집사들만이…")를 보여 준다. 그래서 **예측값을 바꾸면 유저 화면도 함께 바뀐다.** L32~500에서 팝업 대상(≤60%)은 현재 값 기준 264/469레벨인데, AF 첫 시도 실측 기준으로는 6레벨이다. 전환 방식은 승인이 필요하다(§3-5, D15·D16) |
 
 ## 1. 목표 지표 확정안
 
@@ -114,7 +115,7 @@
 | 프로덕션 순차 처리 | `ProductionDashboard/index.tsx:738` `computeSequentialPassThreshold`, `:5240-5300`(match_score = 100 − 2×\|gap\|%p), `:5520` 2차 패스(TOL 0.12) | 위 RL 예측·목표 gap | 같음. 결과가 레벨 메타 `predicted_clear_rate`·`verification_passed`로 저장된다 | **교체**: 메타에 `expected_clear_rate` 등 새 필드를 두고, 판정은 §3-3 규칙으로 |
 | `/generate/validated` | `generate.py:846` `calculate_target_clear_rates`(봇별 구간 목표), `:946` match_score, `:2621` `validation_passed = use_best_match` | 봇별 클리어율 vs 봇별 목표 | 봇 직접값끼리 비교한다. 실질적으로 항상 통과한다 | **교체**(또는 legacy로 두고 목표 클리어율 모드에서는 쓰지 않음) |
 | `/analyze/autoplay` 동적 목표 | `analyze.py:713-723`(generate.py 함수 복제) | 봇별 목표 클리어율 | 같음 | 참고 표시만. 판정에 쓰지 않음 |
-| 게임 업로드 | `gboost.py:477`가 `predicted_clear_rate`를 0~100 정수로 내보냄 | — | 틀린 값이 게임 데이터로 나간다 | 무엇을 넣을지 게임팀과 결정(§7 D10) |
+| 게임 업로드 → **유저 표시 난이도** | 프론트 `ProductionExport.tsx:892-896`이 meta `predicted_clear_rate`를 업로드 JSON에 넣는다 → `gboost.py:475-481`이 `difficulty = round(×100)`(없으면 −1)로 바꾼다 → 게임 `xDifficulty` → 난이도 티어 팝업·결과 문구(게임 위키 DESIGN_DIFFICULTY_TIER) | — | 라이브 1,529/1,530레벨이 이 값과 일치한다(10 §9-12). **유저에게 보이는 "클리어%"가 실제보다 20~60%p 낮다** | §3-5. 바꾸면 유저 화면도 바뀐다 → 결정 D15·D16 |
 
 **실측 비교**:
 - 2차 배치 메타 `predicted_clear_rate` vs AF. 대상은 맵 일치 레벨 중 clean_ft n≥100이다. 레벨별 예는 문서 10 §9-11, `pv_20261002_live3/batch_diff_2v3/table.md`.
@@ -270,6 +271,50 @@ E1 (Ridge + LightGBM 단조, logit 평균) ── 지표별 헤드(1안 ⑤, 보
 - 다섯 값(목표 / 예상 / 범위 / 신뢰도 / 경고)과 판정 세 가지를 색과 아이콘으로 구분한다. 근거 부족은 회색 ⏸이고, 불합격(빨강)과 다르게 보인다.
 - 프로덕션 배치 표에는 열을 추가한다: 목표 · 예상 · 범위 · 판정 · 경고 수. "근거 부족만 보기" 필터를 둔다.
 
+### 3-5. 게임 표시 난이도(xDifficulty) 연동 — 예측값을 바꾸면 유저 화면도 바뀐다
+**현행**
+- 업로드 패널이 meta `predicted_clear_rate`를 실어 보낸다. 백엔드 컨버터가 이를 `difficulty` = 0~100 정수로 바꾸고, 값이 없으면 −1(게임에서 숨김)이 된다.
+- 게임은 이 값을 클리어%로 쓴다:
+  - 서버 테이블 `difficulty_tier`(0~20 superhard · 21~40 veryhard · 41~60 hard · 61~80 normal · 81~100 easy)로 티어를 정한다.
+  - `show`가 켜진 티어(2026-09-22 조회: hard 이상)이고 전역 스위치 `showDifficultyPopup`이 켜져 있으면 스테이지 시작 팝업을 띄운다.
+  - 팝업 문구: "{0}%의 집사들만이 … 클리어했다냥".
+  - 결과 화면 격려 문구도 HARD 이상이면 `{1}`=클리어%를 쓴다.
+
+**규모** — 3차 배치 메타 값 vs AF 실측, 티어 분포(레벨 수, AF는 첫 시도 종료 판 ≥30):
+
+| 범위 | 현재 표시값 기준 티어 | AF ⑤ 첫 시도(도움 포함) 기준 | AF LB(무도움) 기준 | 팝업 대상(≤60%) 현재 → ⑤ |
+|---|---|---|---|---|
+| L1~31 | easy 26 · normal 5 | easy 31 | easy 26 · normal 3 · veryhard 2 | 0 → 0 |
+| L32~500 | superhard 34 · veryhard 65 · hard 165 · normal 181 · easy 24 | easy 443 · normal 20 · hard 5 · veryhard 1 | easy 196 · normal 178 · hard 76 · veryhard 18 · superhard 1 | **264 → 6** |
+| L501~1000 | superhard 171 · veryhard 281 · hard 38 · normal 5 · easy 5 | easy 465 · normal 23 · hard 6 · veryhard 3 (497레벨) | easy 181 · normal 209 · hard 77 · … | **487 → 9** |
+| L1001~1530 | superhard 496 · veryhard 28 · 기타 6 | (AF n≥30은 10레벨뿐) | | — |
+
+- 지금은 L32 이후 대부분 레벨에서 "30~50%의 집사들만이 클리어" 팝업이 사실과 다르게 뜨고 있다. 실제로는 첫 시도에 90% 이상 깬다.
+- 실측 기준으로 바꾸면 팝업이 거의 사라진다. 이것은 **유저 체감(긴장감 연출)·기획 의도가 바뀌는 일**이라 단순한 버그 수정이 아니다 → 승인 필요(D15).
+- 문구 "N%의 집사들이 클리어"의 의미와 가장 가까운 것은 1안 ⑤(첫 시도, 도움 포함)다. LB(무도움)를 쓰면 숫자는 낮아지지만 문구의 뜻과 어긋난다.
+
+**전환 선택지(D15)**
+| 안 | 내용 | 장점 | 단점 |
+|---|---|---|---|
+| a. 기존 값 유지(동결) | 표시값을 지금 값으로 고정한다. 새 예측은 에디터 안에서만 쓴다 | 유저 화면 변화 없음 | 틀린 수치를 계속 보여 준다. 표시 필드가 새 예측과 따로 놀게 되어 관리할 값이 둘이 된다 |
+| b. 일괄 갱신 | 기존 레벨: AF 실측이 충분하면(⑤ 종료 판 n≥100) **실측값**, 부족하면 새 모델 예측, 근거 부족이면 −1(숨김). 신규 레벨: 새 예측. **티어 경계도 함께 재조정**한다(서버 테이블 — 빌드 불필요) | 숫자가 사실이 된다 | 팝업 대부분이 사라진다 → 경계·show 재설계가 필요하다. 표시값이 월 단위로 바뀔 수 있다 |
+| c. 표시는 등급 기반으로 분리 | 표시값을 클리어% 대신 기획 티어(위치별 목표 곡선의 등급)로 넣는다. 문구에서 %를 빼거나 "상위 N%" 같은 다른 문구로 바꾼다 | 연출 의도를 유지하면서 수치 오표기를 없앤다 | 게임 문구·로직 변경(게임팀)이 필요하다 |
+| d. 임시 숨김 | 결정 전까지 −1로 올린다(팝업·% 문구 미표시) | 틀린 수치 노출을 즉시 멈춘다 | 연출이 없어진다 |
+
+- **전달 경로 주의**: 레벨 델타 갱신이 꺼져 있다(13 §6). 그래서 xDifficulty는 **빌드에 들어 있는 샤드 값**이다. 어느 안이든 새 빌드부터 적용되고, 구버전 앱은 기존 값을 계속 보여 준다. 티어 경계·show·전역 스위치는 서버 값이라 즉시 바뀐다. d안의 즉시 효과는 전역 스위치 OFF로만 낼 수 있다.
+- 개인화(DDA) 적용 레벨은 전역 클리어% 팝업을 건너뛰어야 한다(게임 위키 DESIGN_DIFFICULTY_TIER 관련 링크 주석) → 파일럿 29 레벨도 같은 처리가 필요한지 게임팀 확인.
+
+**업로드 후처리 일원화(D16)**
+- 지금 업로드 후처리는 **프론트 업로드 패널에만** 있다:
+  - `rewardCoin` 고정 5(기본 모드)
+  - 냥이 `autoCollectCount` = 3(level % 10 == 0)
+  - `predicted_clear_rate` 주입 → `difficulty`
+- 백엔드 API로 직접 업로드하면 이 처리가 빠져 결과가 달라진다. `predicted_clear_rate`가 없으면 −1이 된다.
+- 설계:
+  - 표시 난이도 계산(위 D15 안 적용)과 후처리를 **백엔드 함수 하나**로 옮긴다. 프론트·API 업로드 모두 그 함수를 거치게 한다.
+  - 레벨 메타에는 표시값의 출처를 기록한다: `display_clear_pct_source` = `af` / `model:<ver>` / `legacy_bot` / `hidden`.
+  - 업로드 전 검증 목록에 "표시값 출처가 legacy_bot인 레벨 수"를 넣는다.
+
 ## 4. 생성·선별 과정 검증 설계
 
 ### 4-1. 오프라인 재현 — 기존 라이브 레벨을 후보로 (이번에 실행)
@@ -364,6 +409,7 @@ E1 (Ridge + LightGBM 단조, logit 평균) ── 지표별 헤드(1안 ⑤, 보
 |---|---|---|---|
 | 백엔드 코어 | `backend/app/core/clear_rate/{__init__,features,model,guard}.py` (신규) | `residual_model.build`의 특징 계산을 level_json 단건 입력으로 이식, artifact 로드·E1·CQR·기여 계산, 경고·판정 | 4~6 |
 | 백엔드 API | `backend/app/api/routes/clear_rate.py` (신규), `backend/app/models/schemas.py`, `backend/app/main.py`(라우터 등록 — **현재 다른 세션이 미커밋 수정 중**, 조율 필요) | predict / select / model | 1~2 |
+| 표시 난이도·업로드 후처리 | `backend/app/api/routes/gboost.py`(`difficulty` 계산을 표시값 함수로), 신규 `backend/app/core/clear_rate/display.py`(출처 우선순위 AF 실측 > 모델 > 숨김), `ProductionExport.tsx`(rewardCoin·autoCollectCount·predicted 주입을 백엔드 호출로 대체), `types/production.ts`(`display_clear_pct`·`display_clear_pct_source`) | 프론트/API 업로드 결과 일치, 출처 기록 | 2~3 |
 | 현행 판정 경로 교체 | `rl_sim.py`(296-312 판정 블록), `mc_difficulty.py`(`population_clear_rate`·`TARGET_CLEAR_CURVE` → 참고값 전용), `ProductionDashboard/index.tsx`(`computeSequentialPassThreshold`·순차/2차 패스 판정을 새 판정으로), `generate.py`·`analyze.py`(봇별 목표는 legacy 표시), `gboost.py:477`(내보내기 값 결정 후) | 봇 직접값 판정을 새 판정으로 바꾼다. 기존 메타는 `legacy_bot_*`로 보존 | 2~3 |
 | 봇 측정 연결 | `backend/app/core/mc_difficulty.py` 또는 `bot_simulator` 호출부 | θ 4개 × 128판 + 실패 사유·잔여 반환(현 RL sweep이 실패 사유 비중을 주는지 확인 필요). 시드 묶음 S/C | 1~2 |
 | 학습·내보내기 | `backend/scripts/train_clear_rate_model.py` (신규, `residual_model_lib` 재사용) → `backend/data/models/clear_rate/<ver>/` | 전체 적합, 분위수+CQR, 분포 요약, manifest, 게이트 | 2~3 |
@@ -371,7 +417,7 @@ E1 (Ridge + LightGBM 단조, logit 평균) ── 지표별 헤드(1안 ⑤, 보
 | 프론트 | `frontend/src/api/clearRate.ts`(신규), `components/ClearRate/ClearRateCard.tsx`(신규), `DifficultyPanel/index.tsx`, `ProductionDashboard/index.tsx`(배치 열·필터 — 다른 세션 수정 중), `types/production.ts`(메타 필드 `expected_clear_rate` 등, 기존 `predicted_clear_rate`와 별도) | 카드·배치 표 | 3~5 |
 | 오프라인 선별 평가 | `backend/scripts/clear_rate_replay.py` | §4-1·4-2 재현을 생성 후보에도 적용 | 1~2 |
 | 검증 | tsc, Playwright 웹뷰, curl(CLAUDE.md 필수 절차) | | 1~2 |
-| **합계** | | | **약 15~22 인일**(1인 기준 추정, 봇 측정 시간 제외) |
+| **합계** | | | **약 17~25 인일**(1인 기준 추정, 봇 측정 시간 제외. 게임 쪽 티어 경계·문구 변경은 별도) |
 
 - 생성 비용: 후보 1개당 봇 512판(θ 4개 × 128) + 확인 측정이 든다. 판당 시간은 v2.3에서 재야 한다. 후보 N=20이면 레벨당 1만 판이 넘는다. 배치 단위로 하면 수십 시간대가 될 수 있으므로 1단계(64판) 거르기 → 2단계 정밀 측정 구조(10 R2와 같음)를 권장한다.
 - 데이터 파이프라인: 월 1회 AF pull → `af_level_metrics.py`(⑤는 이미 `ft_clear_rate_any_help`로 산출 중, 수정 불필요) → 학습 스크립트 → 게이트 → 사람 승인 → 레지스트리 활성화.
@@ -388,11 +434,13 @@ E1 (Ridge + LightGBM 단조, logit 평균) ── 지표별 헤드(1안 ⑤, 보
 | D7 | 백엔드 의존성 | scikit-learn·lightgbm 추가(서버 libomp 포함) vs 순수 파이썬 예측기 |
 | D8 | 봇 버전·측정 프로토콜 고정 | v2.3(현 학습) 고정 후 시작 vs v2.4 확정 뒤 재측정·재학습하고 시작 |
 | D9 | 재학습 주기·게이트 숫자 | 월 1회 + 봇 변경 시. 1안 게이트 MAE ≤0.035 · ρ ≥0.72 · 포함 0.75~0.85 |
-| D10 | 기존 `predicted_clear_rate`(봇 RL 추정) | "봇 추정(참고)"으로 이름을 바꾼다. 게임 업로드 필드(`gboost.py:477`)에 어떤 값을 넣을지는 게임팀과 확인 |
+| D10 | 기존 `predicted_clear_rate`(봇 RL 추정) | "봇 추정(참고)"으로 이름을 바꾼다. 게임 표시값과의 연결은 D15에서 정한다 |
 | D11 | 라이브 2차 검증 | 파일럿 29 종료 뒤 30레벨 · 4주, 같은 하니스 |
 | D12 | 파일럿 29 사전 등록에 E1 예측 추가 | 결과 열기 전 addenda로 추가한다(변형 21맵 봇 측정 필요) |
 | D13 | 목표 입력 방식 | 레벨 번호별 목표 곡선(위치 + 목표값)을 직접 입력한다. 기존 td 입력은 폐기하거나, 위치별 AF 분위수로 다시 매핑한다 |
 | D14 | 현행 판정 경로 교체 범위·시점 | RL `verification_passed`·순차 처리 match_score·`/generate/validated` 판정을 새 판정으로 교체. 과도기에는 둘 다 보여 주되 합격은 새 판정만 |
+| D15 | **유저 표시 난이도(xDifficulty) 전환** — 예측값 교체 시 팝업·결과 문구가 함께 바뀜 | 선택지 a 유지 / b 일괄 갱신(AF 실측 > 모델 > 숨김 + 티어 경계 재조정) / c 등급 표시로 분리 / d 임시 숨김(§3-5). 기획·게임팀과 공동 결정. 추천: 수치 오표기 중단을 우선해 **b + 티어 경계 재조정**, 연출 유지가 중요하면 c. 새 빌드부터 적용 |
+| D16 | 업로드 후처리 일원화 | rewardCoin·autoCollectCount·표시 난이도를 백엔드 함수 하나로 옮겨, 프론트·API 업로드 결과를 같게 한다 |
 
 ## 8. 한계
 - 선별 재현은 mid(현 산출물)와 ⑤ 점예측으로만 했다. ⑤의 CQR 구간과 보류 규칙 재현은 구현 단계에서 다시 해야 한다.

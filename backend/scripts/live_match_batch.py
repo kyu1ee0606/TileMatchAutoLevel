@@ -180,5 +180,36 @@ def verify():
     print(json.dumps({k: post.get(k) for k in ("levels", "mapHashMatch", "mapHashMatchNullEqEmpty", "mapMismatch", "missingInShard")}), "rowDiffs", len(post["rowDiffs"]), sorted({k for v in post["rowDiffs"].values() for k in v}))
 
 
+def rowdiff():
+    """All non-map export-row fields vs the live shard row (every key present on either side)."""
+    from collections import Counter, defaultdict
+    maps, rows = shard()
+    pay = load(os.path.join(OUT, "payload.json"))
+    diff = defaultdict(dict)
+    for x in pay["levels"]:
+        n = x["meta"]["level_number"]
+        ex = _convert_to_townpop_format(copy.deepcopy(x["level_json"]))
+        sr = rows[f"level_{n}"]
+        for k in (set(sr) | set(ex)) - {"map"}:
+            a, b = ex.get(k, "<none>"), sr.get(k, "<none>")
+            if str(a) != str(b):
+                diff[k][str(n)] = [str(a), str(b)]
+    # difficulty: explained by the upload panel injecting meta.predicted_clear_rate (ProductionExport.tsx:892)?
+    meta = {str(x["meta"]["level_number"]): x["meta"] for x in pay["levels"]}
+    unexplained = []
+    for n, (_, b) in diff.get("difficulty", {}).items():
+        pc = meta[n].get("predicted_clear_rate")
+        exp = str(max(0, min(100, round(pc * 100)))) if isinstance(pc, (int, float)) else "-1"
+        if exp != b:
+            unexplained.append([int(n), pc, b])
+    out = {"fields": {k: {"levels": len(v), "pairs": Counter(f"{a}->{b}" for a, b in v.values()).most_common(8),
+                          "sampleLevels": sorted(map(int, v))[:20]} for k, v in diff.items()},
+           "difficultyUnexplainedByPredicted": unexplained, "detail": diff}
+    with open(os.path.join(OUT, "rowdiff_all.json"), "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False, indent=1)
+    print(json.dumps(out["fields"], ensure_ascii=False))
+    print("difficulty unexplained", unexplained)
+
+
 if __name__ == "__main__":
-    {"build": build, "save": save, "verify": verify}[sys.argv[1]]()
+    {"build": build, "save": save, "verify": verify, "rowdiff": rowdiff}[sys.argv[1]]()

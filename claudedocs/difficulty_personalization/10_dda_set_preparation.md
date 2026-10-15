@@ -835,7 +835,38 @@ D13은 종결(시드 방식). 남은 것:
 | 기존 배치 1차·2차·3차 sha256 | 불변(`c27e696d…`, `4cf98a5f…`, `1d4ba24a…`) |
 | `_index.json` 기존 항목 | 불변(새 항목만 추가) |
 | 에디터 API | `GET /api/production/batches` 목록에 노출, `GET /api/production/batches/{id}` 1,530레벨 로드 |
-- `autoCollectCount` 차이는 L341 timea와 같은 종류다. 게임 데이터(GameBoost 행)에서만 설정된 값이다. 지시 범위가 timea뿐이라 **반영하지 않았다**(결정 필요). 반영하려면 해당 153레벨 level_json에 `autoCollectCount: 3`을 넣으면 내보내기 행이 샤드와 같아진다. 정식 저장 API에 `partial: true` 델타 저장을 쓰면 된다.
+- `autoCollectCount`는 새 배치에 **넣지 않는다**(사용자 결정 10-15: 냥이 설정은 업로드 때 후처리로 들어간다).
+
+**⚠ 업로드 후처리 의존 (2026-10-15 확인)**
+- 저장된 배치 level_json과 백엔드 내보내기(`_convert_to_townpop_format`, gboost.py:456-493)만으로는 라이브 행이 재현되지 않는다. `autoCollectCount`는 level_json 값(0), `rewardCoin`은 10, `difficulty`는 −1(predicted 없음)이 그대로 나간다.
+- 라이브 값은 **업로드 단계에서 페이로드에만 주입**된다. 주입 위치는 에디터 백엔드 바깥이고, 에디터 **프론트 업로드 패널** `frontend/src/components/ProductionDashboard/ProductionExport.tsx`다. 저장본은 바꾸지 않는다.
+  - `autoCollectCount`: 모드 기본값 `multiples10`. 게임 내 위치(slot)가 10의 배수면 3, 나머지는 0이다(:337-342, :856-866, :890).
+  - `rewardCoin`: 모드 기본값 `fixed 5`다(:324-331, :842-846, :889).
+  - `difficulty`: `meta.predicted_clear_rate`를 페이로드에 실으면 컨버터가 round(×100)으로 바꾼다(:892-895 → gboost.py:478-482).
+- 따라서 이 배치를 다시 올리거나 행을 재현할 때는 **같은 업로드 패널 기본값(냥이 multiples10=3, 보상 fixed 5)**을 써야 라이브와 같아진다. 백엔드 API로 직접 올리면 다르게 나간다.
+- (참고: 사용자 메모의 "gboost.py:463은 level_json 값(0)을 그대로 쓴다"는 맞다. 다만 후처리는 에디터 밖이 아니라 에디터 프론트 업로드 패널 안이다.)
+
+**냥이 레벨(라이브 `autoCollectCount` > 0)과 DDA·파일럿**
+- 냥이 레벨은 153개로 10의 배수 레벨(10~1530) 전부다. 이 레벨들은 보스 레벨(N%10==0)이고, DDA 파이프라인에서 `non_target`("boss level", pv_dda.py:328)으로 처음부터 제외됐다.
+- **R2 296행 중 0행, 파일럿 v3.1 21레벨 중 0레벨**이다. 합의·불일치·분리 측정(§9-7~9-9)도 R2 레벨만 다뤘으므로 0이다.
+- 따라서 "냥이 꺼진 상태로 측정·선정된 행"은 없다. 재측정 범위도 없다.
+- 다만 L32~500 봇·AF 보정 분석(문서 13·15·20)은 냥이 47레벨을 이미 따로 뺐다. 이번 확인과 같은 결론이다.
+- 봇 v2.3에는 냥이 규칙(`auto_collect`, bot_simulator.py:723)이 있다. 나중에 보스 레벨을 DDA 대상에 넣는다면 그때 측정한다.
+
+**내보내기 행 전체 필드 비교 (새 배치 vs 라이브 샤드, 맵 제외, 양쪽에 있는 키 전부 — `live_match_batch.py rowdiff` → `rowdiff_all.json`)**
+| 필드 | 다른 레벨 수 | 에디터 내보내기 → 샤드 | 구분 | 근거 |
+|---|---|---|---|---|
+| `autoCollectCount` | 153 | 0 → 3 (10의 배수) | 업로드 후처리 | ProductionExport.tsx multiples10 기본 3 |
+| `rewardCoin` | 1,530 | 10 → 5 | 업로드 후처리 | ProductionExport.tsx fixed 기본 5 |
+| `difficulty` | 1,530 | −1 → 0~100 | 업로드 후처리 | 패널이 `meta.predicted_clear_rate`를 실음 → round(×100). **1,529/1,530이 저장 meta와 정확히 일치**. L1523만 predicted 없음(−1 예상)인데 샤드 0 → **확인 필요** |
+| `id` | 1,530 | (없음) → `level_N` | 업로드 키 | 업로드 대상 ID(`saveToGBoost(targetId)`)로 붙는 행 키. 내용 차이 아님 |
+| `etime` | 1,530 | 내보낸 시각 → (없음) | 확인 필요 | 컨버터가 `time.time()`을 넣는다(gboost.py:493). 샤드 levels 테이블에 이 열이 없다 — 굽기(bake)에서 빠지는 열로 추정 |
+| `backgroundIndex` · `tileSkin` | 1,530 | "0" → null | 확인 필요 | 샤드 값이 null(열은 있으나 값 없음). 굽기 때 기본값을 생략하는 것으로 추정. 게임 기본값과 같은지 확인 필요 |
+| `rewardList` | 1,530 | "[]" → null | 확인 필요 | 위와 같음 |
+| `visualTileSeed` | 1,530 | (키 없음) → "" | 표현 차이 | 컨버터는 값이 없으면 키를 생략한다(gboost.py:467-471). 샤드는 빈 열이다. 둘 다 "리맵 안 함" |
+| `useInRandomizer` · `useTeleportInRandomizer` | 1 (L341) | "0" → "" | 확인 필요 | L341 행만 다르다. timea 180과 함께 GameBoost에서 그 행을 직접 고친 흔적으로 추정 |
+| `timea` | 0 (L341 반영 후) | 180 = 180 | 에디터 반영 | §9-12 위 L341 근거 |
+- 그 밖의 키(`randSeed`·`useTileCount`·`unlockTile`·`shuffleTile`·`shuffleLayer`·`typeImbalance`·`teleportRandSeed`·`layer`·`col`·`row`·`num`·`sets`)는 1,530레벨 모두 같다.
 
 **후속 영향 (실행 안 함 — 목록만)**: 이 배치를 DDA 원본으로 쓸 때
 1. 샌드박스 새 사본이 필요하다. `source.json`이 지금은 3차 바이트 사본이므로, 새 copyId(예: `pv_20261015_livematch`)로 사본과 manifest(sha256)를 만든다. 기존 `pv_20261002_live3` 결과와 섞지 않는다.

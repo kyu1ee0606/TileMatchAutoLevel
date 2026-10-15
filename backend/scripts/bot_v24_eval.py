@@ -484,7 +484,7 @@ def cmd_gimtab(a):
     b23, b24 = {}, {}
     for r in load(V23_OUT / "bot_v2.3.json")["rows"]:
         b23.setdefault(r["theta"], {})[r["L"]] = r
-    for r in load(OUT / "bot_v2.4.json")["rows"]:
+    for r in load(OUT / a.v24file)["rows"]:
         b24.setdefault(r["theta"], {})[r["L"]] = r
     cat23 = load(OUT / "v23_cat.json")["rows"]
     cat24 = load(OUT / a.cat24)["rows"] if (OUT / a.cat24).exists() else []
@@ -534,7 +534,7 @@ def cmd_gimtab(a):
                            "verdict": {"rho": verdict("rho", True), "absres": verdict("absres", False),
                                        "mae": verdict("mae", False)}}
         out[str(t)] = rows_out
-    save("gimmick_table.json", out)
+    save(a.out, out)
     for t, rows_out in out.items():
         print(f"## θ{t}")
         print("| 기믹 | n | ρ v2.3→v2.4 | 잔차 v2.3→v2.4 | 상대MAE v2.3→v2.4 | 실패비중 봇 v2.3→v2.4 (AF) | 판정 ρ/잔차/MAE |")
@@ -551,9 +551,13 @@ def cmd_final(a):
     ex = _expo()
     stored = load(V23_OUT / "bot_v2.3.json")["rows"]
     lv = sorted({r["L"] for r in stored})
-    tasks = [{"L": L, "theta": float(t), "games": 128, "exposure": ex[L], "v24": None} for t in a.thetas.split(",") for L in lv]
-    d = _pool_run(tasks, "v24f_rows.json", lambda r: (r["L"], r["theta"]))
-    save("bot_v2.4f.json", {"rows": d["rows"]})
+    items = None
+    if a.drop:
+        items = [x for x in _default_items() if x not in a.drop.split(",")]
+    tasks = [{"L": L, "theta": float(t), "games": 128, "exposure": ex[L], "v24": items} for t in a.thetas.split(",") for L in lv]
+    tag = f"_no_{a.drop.replace(',', '_')}" if a.drop else ""
+    d = _pool_run(tasks, f"v24f{tag}_rows.json", lambda r: (r["L"], r["theta"]))
+    save(f"bot_v2.4f{tag}.json", {"rows": d["rows"]})
     print(f"final v2.4 rows={len(d['rows'])}")
 
 
@@ -753,7 +757,8 @@ def main():
     sub.add_parser("cmemfit").set_defaults(f=cmd_cmemfit)
     sub.add_parser("cmem085").set_defaults(f=cmd_cmem085)
     sub.add_parser("curtfull").set_defaults(f=cmd_curtfull)
-    p = sub.add_parser("final"); p.add_argument("--thetas", default="0.55,0.65,0.85,1.0"); p.set_defaults(f=cmd_final)
+    p = sub.add_parser("final"); p.add_argument("--thetas", default="0.55,0.65,0.85,1.0"); p.add_argument("--drop", default="")
+    p.set_defaults(f=cmd_final)
     sub.add_parser("betagrid").set_defaults(f=cmd_betagrid)
     sub.add_parser("betafit").set_defaults(f=cmd_betafit)
     p = sub.add_parser("bgrid"); p.add_argument("--name", required=True); p.add_argument("--item", required=True)
@@ -768,7 +773,8 @@ def main():
     p = sub.add_parser("cmp"); p.add_argument("--name", required=True); p.add_argument("--base", default="bot_v2.4.json")
     p.add_argument("--reason", default="Normal"); p.add_argument("--boot", type=int, default=500); p.set_defaults(f=cmd_cmp)
     p = sub.add_parser("gimtab"); p.add_argument("--thetas", default="1.0,0.85"); p.add_argument("--boot", type=int, default=1000)
-    p.add_argument("--cat24", default="item_cat_v24.json"); p.set_defaults(f=cmd_gimtab)
+    p.add_argument("--cat24", default="item_cat_v24.json"); p.add_argument("--v24file", default="bot_v2.4.json")
+    p.add_argument("--out", default="gimmick_table.json"); p.set_defaults(f=cmd_gimtab)
     a = ap.parse_args()
     a.f(a)
 

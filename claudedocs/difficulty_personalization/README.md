@@ -43,7 +43,7 @@
 | [24_live_pilot_design.md](./24_live_pilot_design.md) | 시드 변형 라이브 파일럿 설계(실행 없음): 구간별 트래픽·검정력, 레벨당 n=100/군이면 20~30레벨 풀링 회귀로 봇Δ→유저Δ 기울기 추정 가능, 배정안 3개 비교(IMPL_SPEC 사다리와 충돌 명시), 게임팀 요청 목록 |
 | [25_natural_experiment_map_change.md](./25_natural_experiment_map_change.md) | 기존 AF 자연실험(앱버전별 맵 다른 L1~31 20레벨): 부호일치 80%, 봇Δ→유저Δ 환산 기울기 0.155[0.031~0.280] — 방향은 전달되나 크게 압축, 타일만 변경 사례는 L1 천장뿐이라 시드 변형 외삽엔 제한적 |
 | [27_human_vs_bot_behavior_audit.md](./27_human_vs_bot_behavior_audit.md) | 기믹별 사람 행동 vs 봇 v2.4 판단 감사(코드 수정 없음): 통제 회귀상 행동 잔차는 stack −0.13·grass +0.08 뿐, teleporter·bomb 은 공존·θ 몫. 우선 제안 = 스택 조기 개방, 독 감점 임계를 잠기지 않은 칸 기준으로, bomb β 적합, 냥이 진단. 기획 질문 15 |
-| [28_bot_v1_vs_v2_discrimination.md](./28_bot_v1_vs_v2_discrimination.md) | 봇 v1 vs v2.3 판별(라이브 데이터 가벼운 체크): 자연실험 기울기·불일치135 집중특징(`eff_unknown`)·그 특징군 라이브 예측력 모두 v2.3 소폭 우위지만 부트스트랩 CI는 0 포함 — 근거 약함, 판별 불가에 가까움 |
+| [28_bot_v1_vs_v2_discrimination.md](./28_bot_v1_vs_v2_discrimination.md) | 봇 v1 vs v2.3 판별(라이브 데이터 가벼운 체크): 자연실험 기울기·불일치135 집중특징(`eff_unknown`="가려진 타일" 기믹, v2.4가 정보정합 수정)·그 특징군 라이브 예측력 모두 v2.3 소폭 우위지만 부트스트랩 CI는 0 포함 — 근거 약함. §6: 구버전(1.0.146~160) 자연실험 확장 시도 — L32+ 맵은 1.0.148~162 전체가 완전 동일(교체 1회뿐), 판별력 못 늘림 |
 | [29_pilot_handoff.md](./29_pilot_handoff.md) | 라이브 파일럿(B v3, 21레벨) 게임팀 인계: 레벨·토큰 표, 해시(CUID+level)%2 배정, `pilot_arm` 파라미터, 4주·2주차 점검, 가드레일·중단 절차, 사다리 비중첩, 체크리스트 + 내보내기 검증·사전 등록(`pilot_export/`)·`pilot_eval.py` |
 
 ## 4. 결정 로그 (사용자 확정)

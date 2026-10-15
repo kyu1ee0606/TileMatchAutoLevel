@@ -113,12 +113,79 @@ def section3_days_for_pooled(traffic: dict):
     print()
 
 
+EXPOSURE_WEEKS = (4, 6)
+
+
+def actual_n_per_arm(traffic: dict, weeks: float) -> dict:
+    """노출 기간(주) 동안 50:50 배정으로 실제 도달하는 군당 n (구간별, 레벨 1개 기준)."""
+    days = weeks * 7
+    return {seg: traffic[seg]["clean_ft_per_level_per_day"] * days / 2 for seg in SEGMENTS}
+
+
+def section4_actual_n(traffic: dict):
+    """§1/§2 의 가정 n이 아니라, 지정 노출 기간에 실제 도달하는 군당 n (레벨 1개, 50:50)."""
+    print("## 4. 실제 도달 가능 군당 n (레벨 1개, 50:50, 노출 기간별)\n")
+    print("| 구간 | 일일 레벨당 첫시도 유저 | 4주 군당 n | 6주 군당 n |")
+    print("|---|---|---|---|")
+    for seg in SEGMENTS:
+        n4 = actual_n_per_arm(traffic, 4)[seg]
+        n6 = actual_n_per_arm(traffic, 6)[seg]
+        print(f"| {seg} | {traffic[seg]['clean_ft_per_level_per_day']:.2f} | {n4:.0f} | {n6:.0f} |")
+    print()
+
+
+def weighted_pooled_se(traffic: dict, level_mix: dict, weeks: float, sd_x: float) -> float:
+    """레벨 구성이 구간별로 다른 n을 가질 때(역분산 가중) 풀링 회귀 slope 표준오차.
+
+    Var(slope) ≈ 1 / (sd_x^2 * Σ_i w_i), w_i = n_i / (2*p0_i*(1-p0_i)) — 레벨별 x(봇Δ)가 배정(가중치)과
+    무관하게 독립으로 뿌려진다는 근사(레벨 수가 20개 이상이면 근사 오차가 작다).
+    """
+    n_per_arm = actual_n_per_arm(traffic, weeks)
+    total_w = sum(count * (n_per_arm[seg] / (2 * traffic[seg]["baseline_rate"] * (1 - traffic[seg]["baseline_rate"])))
+                  for seg, count in level_mix.items() if count > 0)
+    return (1 / (sd_x ** 2 * total_w)) ** 0.5 if total_w > 0 else float("inf")
+
+
+def section5_weighted_pooled(traffic: dict, level_mixes: dict):
+    """추천 레벨 구성(구간별 개수)으로, 4주/6주 실제 n을 섞어 쓸 때 풀링 회귀 slope 표준오차.
+
+    §2(균일 n 가정)와 달리 구간마다 실제 도달 n이 다르므로 역분산 가중으로 합산한다.
+    """
+    print("## 5. 추천 레벨 구성 — 실제 n(구간별) 혼합 풀링 회귀 slope 표준오차\n")
+    print("가정: slope=0.5 구별 SE(β1)≤0.179, slope=1.0 구별 SE(β1)≤0.357 (§2와 동일 기준).\n")
+    for name, mix in level_mixes.items():
+        total_levels = sum(mix.values())
+        mix_str = " + ".join(f"{seg}×{n}" for seg, n in mix.items() if n > 0)
+        print(f"### {name} (레벨 {total_levels}개: {mix_str})\n")
+        print("| 노출 기간 | 봇Δ sd=0.05 | sd=0.08 | sd=0.10 |")
+        print("|---|---|---|---|")
+        for weeks in EXPOSURE_WEEKS:
+            cells = []
+            for sd_x in (0.05, 0.08, 0.10):
+                se = weighted_pooled_se(traffic, mix, weeks, sd_x)
+                ok05 = "O" if se <= 0.5 / 2.8016 else "x"
+                ok10 = "O" if se <= 1.0 / 2.8016 else "x"
+                cells.append(f"SE={se:.3f} (0.5:{ok05} / 1.0:{ok10})")
+            print(f"| {weeks}주 | " + " | ".join(cells) + " |")
+        print()
+
+
 def main():
     traffic, days = load_segment_traffic()
     print(f"(데이터 기간 {days:.1f}일 기준 — backend/data/pv_sandbox/af_calibration/level_metrics.json)\n")
     section1_single_level(traffic)
     section2_pooled_regression(traffic)
     section3_days_for_pooled(traffic)
+    section4_actual_n(traffic)
+    level_mixes = {
+        "4주안 (32~300 위주, 301~500 소수, 501+ 제외)": {
+            "32-100": 8, "101-300": 10, "301-500": 3, "501-1000": 0,
+        },
+        "6주안 (301~500 비중 확대, 501+ 일부 포함)": {
+            "32-100": 8, "101-300": 10, "301-500": 5, "501-1000": 2,
+        },
+    }
+    section5_weighted_pooled(traffic, level_mixes)
 
 
 if __name__ == "__main__":

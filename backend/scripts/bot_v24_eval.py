@@ -546,6 +546,17 @@ def cmd_gimtab(a):
                   f"({a3['share_af']:.2f}, {GIM_FAIL.get(g, 'Normal')}) | {v['rho']}/{v['absres']}/{v['mae']} |")
 
 
+def cmd_final(a):
+    """Final v2.4 (V24_DEFAULT + fitted params) on all comparison levels, θ list, 128 games → v24f_rows.json."""
+    ex = _expo()
+    stored = load(V23_OUT / "bot_v2.3.json")["rows"]
+    lv = sorted({r["L"] for r in stored})
+    tasks = [{"L": L, "theta": float(t), "games": 128, "exposure": ex[L], "v24": None} for t in a.thetas.split(",") for L in lv]
+    d = _pool_run(tasks, "v24f_rows.json", lambda r: (r["L"], r["theta"]))
+    save("bot_v2.4f.json", {"rows": d["rows"]})
+    print(f"final v2.4 rows={len(d['rows'])}")
+
+
 def cmd_curtfull(a):
     """Re-measure curtain levels (θ grid, 128 games) with the final v2.4 (incl. curtain_memory_v24)."""
     ex = _expo()
@@ -615,15 +626,37 @@ def cmd_bfit(a):
     P, A = v21.prep()
     rows24 = load(OUT / "bot_v2.4.json")["rows"]
     by = {}
-    for r in load(OUT / f"bg_{a.name}.json")["rows"]:
-        by.setdefault(r.get("val") or "off", {}).setdefault(r["theta"], {})[r["L"]] = r
+    rows = load(OUT / f"bg_{a.name}.json")["rows"]
+    base_n = min(len(r.get("v24") or []) for r in rows)
+
+    def val_of(r):                                   # rows don't store 'val' → item present ⇒ its single v24_par value
+        if len(r.get("v24") or []) == base_n:
+            return "off"
+        par = ((r.get("extra") or {}).get("v24_par") or {})
+        return ",".join(f"{v:g}" for k, v in sorted(par.items()) if k not in (a.fixed_keys or "").split(",")) or "on"
+    for r in rows:
+        by.setdefault(val_of(r), {}).setdefault(r["theta"], {})[r["L"]] = r
     thetas = sorted(next(iter(by.values())))
     refs = {t: seg_refs({r["L"]: r for r in rows24 if r["theta"] == t}, A, P) for t in thetas}
     lv = sorted(L for L in by["off"][thetas[0]] if A[L]["unaided_clear_lower_bound"] is not None)
 
+    def self_refs(v, t):
+        """Segment refs from this value's own rows: plain levels (no chain/bomb/grass) among the measured levels;
+        a segment with no plain level falls back to all measured levels (= within-group centering)."""
+        rs = by[v][t]
+        sa, sb = {}, {}
+        for lo, hi in base.SEGMENTS:
+            sname = f"{lo}-{hi}"
+            seg = [L for L in lv if lo <= L <= hi]
+            G = [L for L in seg if not any(P[L]["features"].get(f, 0) for f in ("eff_chain", "eff_bomb", "eff_grass"))] or seg
+            if G:
+                sa[sname] = sum(_mid(A, L) for L in G) / len(G)
+                sb[sname] = sum(rs[L]["wins"] / rs[L]["games"] for L in G) / len(G)
+        return sa, sb
+
     def met(v, ls, t):
         rs = by[v][t]
-        sa, sb = refs[t]
+        sa, sb = self_refs(v, t) if a.refs == "self" else refs[t]
         rate = {L: rs[L]["wins"] / rs[L]["games"] for L in ls}
         bc, ac = Counter(), Counter()
         for L in ls:
@@ -651,7 +684,7 @@ def cmd_bfit(a):
            "cv_loss_off": round(sum(r[1] for r in res) / 200, 4),
            "cv_win_rate": round(sum(1 for r in res if r[0] < r[1]) / 200, 3),
            "picks": dict(picks.most_common()), "chosen": min(by, key=lambda v: loss(v, lv))}
-    save(f"bfit_{a.name}.json", out)
+    save(f"bfit_{a.name}_{a.refs}.json", out)
     print(json.dumps({k: v for k, v in out.items() if k != "grid"}, ensure_ascii=False))
     for v, m in grid.items():
         print("  ", v, " | ".join(f"θ{t}: rate {x['rate']:.3f} ρ {x['rho']:.3f} res {x['resid']:+.3f} mae {x['mae_rel']:.3f} "
@@ -720,6 +753,7 @@ def main():
     sub.add_parser("cmemfit").set_defaults(f=cmd_cmemfit)
     sub.add_parser("cmem085").set_defaults(f=cmd_cmem085)
     sub.add_parser("curtfull").set_defaults(f=cmd_curtfull)
+    p = sub.add_parser("final"); p.add_argument("--thetas", default="0.55,0.65,0.85,1.0"); p.set_defaults(f=cmd_final)
     sub.add_parser("betagrid").set_defaults(f=cmd_betagrid)
     sub.add_parser("betafit").set_defaults(f=cmd_betafit)
     p = sub.add_parser("bgrid"); p.add_argument("--name", required=True); p.add_argument("--item", required=True)
@@ -728,7 +762,9 @@ def main():
     p.add_argument("--extra-items", dest="extra_items", default=""); p.add_argument("--fixed", default="")
     p.set_defaults(f=cmd_bgrid)
     p = sub.add_parser("bfit"); p.add_argument("--name", required=True); p.add_argument("--reason", default="Normal")
-    p.add_argument("--share-w", dest="share_w", type=float, default=0.0); p.set_defaults(f=cmd_bfit)
+    p.add_argument("--share-w", dest="share_w", type=float, default=0.0); p.add_argument("--fixed-keys", dest="fixed_keys", default="")
+    p.add_argument("--refs", default="base", help="base = segment refs from bot_v2.4 rows; self = this value's own rows")
+    p.set_defaults(f=cmd_bfit)
     p = sub.add_parser("cmp"); p.add_argument("--name", required=True); p.add_argument("--base", default="bot_v2.4.json")
     p.add_argument("--reason", default="Normal"); p.add_argument("--boot", type=int, default=500); p.set_defaults(f=cmd_cmp)
     p = sub.add_parser("gimtab"); p.add_argument("--thetas", default="1.0,0.85"); p.add_argument("--boot", type=int, default=1000)

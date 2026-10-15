@@ -752,10 +752,12 @@ V24_ITEMS = (
 _V24_BEHAV = frozenset(("stack_early", "covered_info", "dock_avoid", "bomb_precollect", "tele_preempt", "key_first",
                         "locality"))
 V24_DEFAULT = ("unknown_hide", "curtain_hide", "unknown_nobonus", "ac_policy", "curtain_memory_v24",
-               "ac_inner", "stack_hide", "dock_rel", "bomb_beta")
+               "ac_inner", "stack_hide", "dock_rel", "bomb_beta",
+               "stack_early", "covered_info", "bomb_impulse", "key_first")   # 행동 채택 4건 (26 §10)
 V24_BETA_BOMB = 0.0     # 폭탄 105레벨 θ0.65·0.85 × β{0,1,2,4,6} 64판, 2겹 CV: β0 (CV 손실 0.156 vs β4 0.202)
-V24_BEHAV_DEFAULTS = {"stack_early_w": 0.0, "covered_info_a": 0.0, "dock_avoid_w": 0.0, "panic_calm_k": 0.5,
-                      "bomb_impulse_q": 0.0, "bomb_precollect_w": 0.0, "tele_preempt_w": 0.0, "key_first_w": 0.0,
+# 적합값(64판 격자 + 2겹 CV, 26 §10): stack_early 8 · covered_info 1 · bomb_impulse 0.3 · key_first 30. 기각 항목은 0/기본.
+V24_BEHAV_DEFAULTS = {"stack_early_w": 8.0, "covered_info_a": 1.0, "dock_avoid_w": 0.0, "panic_calm_k": 0.5,
+                      "bomb_impulse_q": 0.3, "bomb_precollect_w": 0.0, "tele_preempt_w": 0.0, "key_first_w": 30.0,
                       "locality_w": 0.0, "ac_savvy_b": 0.0,
                       "gc_naive_tau": 10.0}
 # 커튼 기억 유지 확률 = σ(a + b·(θ−1) − c·경과턴). 26_bot_v24.md §9 (커튼 66레벨 θ1.0 격자 + 2겹 CV). cfg["curtain_mem"] 로 덮어쓴다.

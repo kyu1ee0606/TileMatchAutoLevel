@@ -83,6 +83,18 @@ def _wilson_var(p, n):
     return p * (1 - p) / n
 
 
+def logit(p):
+    return math.log(p / (1 - p))
+
+
+def cc(p, n):
+    """연속성 보정: k=round(p*n) 재구성 후 (k+0.5)/(n+1) — p가 0/1 근처라도 logit 유한."""
+    if not n:
+        return 0.5
+    k = round(p * n)
+    return (k + 0.5) / (n + 1)
+
+
 def cmd_af(a):
     from af_level_metrics import wilson
     rows = {r["level"]: r for r in load(LEVEL_METRICS)["levels"] if r["level"] <= 31}
@@ -96,9 +108,15 @@ def cmd_af(a):
         diff = p_new - p_old
         var = _wilson_var(p_old, n_old) or 0
         var += _wilson_var(p_new, n_new) or 0
+        p_old_c, p_new_c = cc(p_old, n_old), cc(p_new, n_new)
+        n_old_c, n_new_c = n_old + 1, n_new + 1
+        diff_logit = logit(p_new_c) - logit(p_old_c)
+        var_logit = 1 / (n_old_c * p_old_c * (1 - p_old_c)) + 1 / (n_new_c * p_new_c * (1 - p_new_c))
+        p_overall, n_overall = _combine(bv, OLD_VERSIONS + NEW_VERSIONS)
         return {"level": r["level"], "old": {"n": n_old, "rate": round(p_old, 4)},
-                "new": {"n": n_new, "rate": round(p_new, 4)},
-                "diff_raw": round(diff, 4), "diff_var": var}
+                "new": {"n": n_new, "rate": round(p_new, 4)}, "rate_overall": round(p_overall, 4),
+                "diff_raw": round(diff, 4), "diff_var": var,
+                "diff_logit_raw": round(diff_logit, 4), "diff_logit_var": var_logit}
 
     mixed = {L: level_pair(r) for L, r in rows.items() if r.get("map_match") == "mixed"}
     mixed = {L: v for L, v in mixed.items() if v}
@@ -106,22 +124,29 @@ def cmd_af(a):
     control = {L: v for L, v in control.items() if v}
 
     # 드리프트: 대조군(map_match=same) 역분산 가중 평균 diff_raw — 맵이 안 바뀐 레벨의 "버전 간 차이"는
-    # 전부 시간 드리프트/표본노이즈여야 한다.
-    ws = [(1 / v["diff_var"] if v["diff_var"] else 0, v["diff_raw"]) for v in control.values()]
-    wsum = sum(w for w, _ in ws)
-    drift_mean = sum(w * d for w, d in ws) / wsum if wsum else 0.0
-    drift_var = 1 / wsum if wsum else None
+    # 전부 시간 드리프트/표본노이즈여야 한다. 확률 척도·logit 척도 각각 따로 보정.
+    def wmean(key, varkey):
+        ws = [(1 / v[varkey] if v[varkey] else 0, v[key]) for v in control.values()]
+        wsum = sum(w for w, _ in ws)
+        return (sum(w * d for w, d in ws) / wsum if wsum else 0.0), (1 / wsum if wsum else None)
+
+    drift_mean, drift_var = wmean("diff_raw", "diff_var")
+    drift_logit_mean, drift_logit_var = wmean("diff_logit_raw", "diff_logit_var")
     for v in mixed.values():
         v["diff_corrected"] = round(v["diff_raw"] - drift_mean, 4)
+        v["diff_logit_corrected"] = round(v["diff_logit_raw"] - drift_logit_mean, 4)
 
     out = {"old_versions": OLD_VERSIONS, "new_versions": NEW_VERSIONS,
-           "drift": {"mean": round(drift_mean, 4), "var": drift_var, "n_control_levels": len(control),
+           "drift": {"mean": round(drift_mean, 4), "var": drift_var,
+                     "logit_mean": round(drift_logit_mean, 4), "logit_var": drift_logit_var,
+                     "n_control_levels": len(control),
                      "per_level": {L: v["diff_raw"] for L, v in sorted(control.items())}},
            "mixed": mixed}
     save("af_deltas.json", out)
-    print(f"mixed={len(mixed)} control={len(control)} drift_mean={drift_mean:.4f}")
+    print(f"mixed={len(mixed)} control={len(control)} drift_mean={drift_mean:.4f} drift_logit_mean={drift_logit_mean:.4f}")
     for L, v in sorted(mixed.items()):
-        print(L, v["old"], v["new"], "diff_raw", v["diff_raw"], "diff_corrected", v["diff_corrected"])
+        print(L, v["old"], v["new"], "diff_raw", v["diff_raw"], "diff_corrected", v["diff_corrected"],
+              "diff_logit_corrected", v["diff_logit_corrected"])
 
 
 # ── maps: pull + 변화 종류 분류 ─────────────────────────────────────────────────────────────────
@@ -332,12 +357,18 @@ def cmd_report(a):
         n_old = sum(r["games"] for r in old_rs)
         n_new = sum(r["games"] for r in new_rs)
         var = p_old * (1 - p_old) / n_old + p_new * (1 - p_new) / n_new
+        p_old_c, p_new_c = cc(p_old, n_old), cc(p_new, n_new)
+        bot_diff_logit = logit(p_new_c) - logit(p_old_c)
         per_level[L] = {
             "change_type": maps_meta[str(L)]["change_type"],
             "user_n_old": af["mixed"][str(L)]["old"]["n"], "user_n_new": af["mixed"][str(L)]["new"]["n"],
+            "user_rate_overall": af["mixed"][str(L)]["rate_overall"],
             "user_diff_raw": af["mixed"][str(L)]["diff_raw"], "user_diff_corrected": af["mixed"][str(L)]["diff_corrected"],
             "user_diff_var": af["mixed"][str(L)]["diff_var"],
+            "user_diff_logit_corrected": af["mixed"][str(L)]["diff_logit_corrected"],
+            "user_diff_logit_var": af["mixed"][str(L)]["diff_logit_var"],
             "bot_old": round(p_old, 4), "bot_new": round(p_new, 4), "bot_diff": round(p_new - p_old, 4),
+            "bot_diff_logit": round(bot_diff_logit, 4),
             "bot_n_old": n_old, "bot_n_new": n_new, "bot_diff_var": var,
             "by_theta": {str(r["theta"]): None for r in old_rs},
         }
@@ -350,25 +381,40 @@ def cmd_report(a):
 
     small_n = {L: v for L, v in per_level.items() if min(v["user_n_old"], v["user_n_new"]) < 30}
     usable = {L: v for L, v in per_level.items() if L not in small_n}
+    non_ceiling = {L: v for L, v in usable.items() if v["user_rate_overall"] < 0.95}
 
-    def analyze(subset, label):
+    def analyze(subset, label, xk="bot_diff", yk="user_diff_corrected", wk="user_diff_var"):
         if len(subset) < 3:
             return {"label": label, "n": len(subset), "note": "표본 레벨 3개 미만 — 회귀 생략"}
         # 24_live_pilot_design.md §3: 봇Δ는 n이 커서(여기 ≥400x2) 거의 고정값, 유저Δ 분산으로 역분산 가중.
-        xs = [v["bot_diff"] for v in subset.values()]
-        ys = [v["user_diff_corrected"] for v in subset.values()]
-        ws = [1 / v["user_diff_var"] if v["user_diff_var"] else 1.0 for v in subset.values()]
+        xs = [v[xk] for v in subset.values()]
+        ys = [v[yk] for v in subset.values()]
+        ws = [1 / v[wk] if v[wk] else 1.0 for v in subset.values()]
         sign_agree = sum(1 for v in subset.values()
-                         if (v["bot_diff"] > 0) == (v["user_diff_corrected"] > 0) or
-                            (abs(v["bot_diff"]) < 1e-6 and abs(v["user_diff_corrected"]) < 1e-6))
+                         if (v[xk] > 0) == (v[yk] > 0) or (abs(v[xk]) < 1e-6 and abs(v[yk]) < 1e-6))
         slope, intercept, se, ci = weighted_regression(xs, ys, ws)
         return {"label": label, "n": len(subset), "sign_agreement": round(sign_agree / len(subset), 3),
                 "pearson_r": round(pearson(xs, ys), 3), "slope": round(slope, 3), "slope_se": round(se, 3) if se else None,
                 "slope_ci95": ci, "intercept": round(intercept, 4)}
 
+    logit_all = analyze(usable, "logit 척도 전체", "bot_diff_logit", "user_diff_logit_corrected", "user_diff_logit_var")
+    logit_non_ceiling = analyze(non_ceiling, "logit 척도, 유저전체클리어율<0.95", "bot_diff_logit",
+                                "user_diff_logit_corrected", "user_diff_logit_var")
+
+    # 예시 환산: L32+ 전형(봇 base=0.6, 봇Δ=0.13)을 logit_all 기울기로 유저Δ(%p)로 변환.
+    example = None
+    if logit_all.get("slope") is not None:
+        b, a = logit_all["slope"], logit_all["intercept"]
+        bot_base, bot_delta, user_base = 0.6, 0.13, 0.6
+        x = logit(bot_base + bot_delta) - logit(bot_base)
+        pred_logit_diff = a + b * x
+        user_new = 1 / (1 + math.exp(-(logit(user_base) + pred_logit_diff)))
+        example = {"bot_base": bot_base, "bot_delta": bot_delta, "user_base": user_base,
+                   "user_new": round(user_new, 4), "user_delta_pp": round((user_new - user_base) * 100, 2)}
+
     rep = {
         "n_mixed_levels": len(af["mixed"]), "n_control_levels": af["drift"]["n_control_levels"],
-        "drift_correction": af["drift"]["mean"],
+        "drift_correction": af["drift"]["mean"], "drift_logit_correction": af["drift"]["logit_mean"],
         "change_type_counts": {t: sum(1 for v in per_level.values() if v["change_type"] == t)
                                for t in ("tile_only", "gimmick_changed", "layout_changed")},
         "small_n_levels": sorted(small_n), "small_n_excluded_from": "all/usable 분석 (레벨별 결과엔 포함)",
@@ -377,6 +423,11 @@ def cmd_report(a):
         "tile_only": analyze({L: v for L, v in usable.items() if v["change_type"] == "tile_only"}, "타일만 변경"),
         "layout_changed": analyze({L: v for L, v in usable.items() if v["change_type"] == "layout_changed"}, "레이아웃 변경"),
         "gimmick_changed": analyze({L: v for L, v in usable.items() if v["change_type"] == "gimmick_changed"}, "기믹 변경"),
+        "logit_all": logit_all,
+        "non_ceiling_levels": sorted(non_ceiling),
+        "non_ceiling_prob_scale": analyze(non_ceiling, "확률 척도, 유저전체클리어율<0.95"),
+        "logit_non_ceiling": logit_non_ceiling,
+        "logit_example_L32plus": example,
         "per_level": per_level,
     }
     save("report.json", rep)

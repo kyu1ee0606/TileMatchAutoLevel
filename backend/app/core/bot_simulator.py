@@ -732,7 +732,7 @@ V24_ITEMS = (
     "unknown_nobonus",  # 노출된 unknown 은 이미 공개된 일반 타일 — v15.17 '조기 공개 가점'을 주지 않는다
     "ac_policy",        # 냥이의 도움: savvy(독을 채운 뒤 마지막 뱃지 매칭) / naive(평소대로) 혼합, p_savvy
 )
-V24_AC_P_SAVVY = 0.5    # savvy 유저 비율 기본값(26_bot_v24.md §3 적합 후 갱신). cfg["ac_p_savvy"] 로 덮어쓴다.
+V24_AC_P_SAVVY = 0.45   # savvy 유저 비율 기본값(26_bot_v24.md §3: θ1.0 냥이 41레벨 적합, CV상 식별 불가). cfg["ac_p_savvy"] 로 덮어쓴다.
 
 
 # [v15.15] Chain isolation danger awareness by bot type

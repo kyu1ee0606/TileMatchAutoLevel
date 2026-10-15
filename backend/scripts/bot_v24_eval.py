@@ -227,6 +227,8 @@ def cmd_isum(a):
     out = {}
     for f in sorted(OUT.glob("item_*.json")):
         name = f.stem[5:]
+        if name == "summary":
+            continue
         by_t = {}
         for r in load(f)["rows"]:
             if A[r["L"]]["unaided_clear_lower_bound"] is not None:
@@ -311,6 +313,95 @@ def cmd_catfit(a):
     print(json.dumps(out, ensure_ascii=False, indent=1))
 
 
+GIM_FEAT = {"grass": "eff_grass", "bomb": "eff_bomb", "chain": "eff_chain", "teleporter": "eff_teleporter",
+            "frog": "eff_frog", "ice": "eff_ice", "stack": "stack", "craft": "craft", "curtain": "eff_curtain",
+            "unknown": "eff_unknown", "link": "eff_link"}
+GIM_FAIL = {"grass": "Grass", "bomb": "Bomb", "chain": "Chain", "ice": "Ice"}   # others: Normal (dock overflow)
+
+
+def _gim_stats(rows_t, Ls, seg_af, seg_bot, A, reason):
+    from bot_af_L1_31 import spearman
+    rate = {L: rows_t[L]["wins"] / rows_t[L]["games"] for L in Ls}
+    res = [rate[L] - _mid(A, L) for L in Ls]
+    rel = [abs(seg_af[base.seg_of(L)] + rate[L] - seg_bot[base.seg_of(L)] - _mid(A, L)) for L in Ls]
+    bc, ac = Counter(), Counter()
+    for L in Ls:
+        bc.update(rows_t[L]["fail_reasons"])
+        ac.update(_af_fail(A, L))
+    return {"rho": spearman([rate[L] for L in Ls], [_mid(A, L) for L in Ls]) if len(Ls) > 2 else float("nan"),
+            "resid": sum(res) / len(Ls), "mae_rel": sum(rel) / len(Ls),
+            "share_bot": bc[reason] / max(1, sum(bc.values())), "share_af": ac[reason] / max(1, sum(ac.values()))}
+
+
+def cmd_gimtab(a):
+    """Per-gimmick v2.3 → v2.4 table; paired level bootstrap (+ binomial redraw of changed levels' bot wins)
+    for Δρ, Δ|resid|, ΔMAE_rel → 95% CI excludes 0 → 개선/악화, else 동일."""
+    P, A = v21.prep()
+    b23, b24 = {}, {}
+    for r in load(V23_OUT / "bot_v2.3.json")["rows"]:
+        b23.setdefault(r["theta"], {})[r["L"]] = r
+    for r in load(OUT / "v24_rows.json")["rows"]:
+        b24.setdefault(r["theta"], {})[r["L"]] = r
+    cat23 = load(OUT / "v23_cat.json")["rows"]
+    cat24 = load(OUT / a.cat24)["rows"] if (OUT / a.cat24).exists() else []
+    lv = v21.levels_of()
+    groups = {g: [L for L in lv if P[L]["features"].get(f, 0) > 0] for g, f in GIM_FEAT.items()}
+    rng = random.Random(2024)
+    out = {}
+    for t in [float(x) for x in a.thetas.split(",")]:
+        s23, s24 = seg_refs(b23[t], A, P), seg_refs(b24[t], A, P)
+        c23 = {r["L"]: r for r in cat23 if r["theta"] == t}
+        c24 = {r["L"]: r for r in cat24 if r["theta"] == t}
+        rows_out = {}
+        todo = list(groups.items()) + ([("냥이의 도움", sorted(c24))] if c24 else [])
+        for g, Ls in todo:
+            R23, R24 = (c23, c24) if g == "냥이의 도움" else (b23[t], b24[t])
+            Ls = [L for L in Ls if L in R23 and L in R24 and A[L]["unaided_clear_lower_bound"] is not None]
+            reason = GIM_FAIL.get(g, "Normal")
+            m23 = _gim_stats(R23, Ls, *s23, A, reason)
+            m24 = _gim_stats(R24, Ls, *s24, A, reason)
+            d = {"rho": [], "absres": [], "mae": []}
+            changed = [L for L in Ls if R23[L]["wins"] != R24[L]["wins"]]
+            for _ in range(a.boot):
+                bs = [rng.choice(Ls) for _ in Ls]
+                # 봇 표본 잡음: 결과가 바뀐 레벨은 두 버전의 승수를 각각 이항 재추출(같은 결과면 차이 0 그대로)
+                P23, P24 = dict(R23), dict(R24)
+                for L in changed:
+                    for R, PP in ((R23, P23), (R24, P24)):
+                        ng, nw = R[L]["games"], R[L]["wins"]
+                        PP[L] = dict(R[L], wins=sum(1 for _ in range(ng) if rng.random() < nw / ng))
+                x23, x24 = _gim_stats(P23, bs, *s23, A, reason), _gim_stats(P24, bs, *s24, A, reason)
+                d["rho"].append(x24["rho"] - x23["rho"])
+                d["absres"].append(abs(x24["resid"]) - abs(x23["resid"]))
+                d["mae"].append(x24["mae_rel"] - x23["mae_rel"])
+            ci = {}
+            for k, v in d.items():
+                v = sorted(x for x in v if x == x)
+                ci[k] = (v[int(0.025 * len(v))], v[int(0.975 * len(v)) - 1]) if v else (0, 0)
+
+            def verdict(k, better_if_positive):
+                lo, hi = ci[k]
+                if lo > 0:
+                    return "개선" if better_if_positive else "악화"
+                if hi < 0:
+                    return "악화" if better_if_positive else "개선"
+                return "동일"
+            rows_out[g] = {"n": len(Ls), "v23": m23, "v24": m24, "ci": ci,
+                           "verdict": {"rho": verdict("rho", True), "absres": verdict("absres", False),
+                                       "mae": verdict("mae", False)}}
+        out[str(t)] = rows_out
+    save("gimmick_table.json", out)
+    for t, rows_out in out.items():
+        print(f"## θ{t}")
+        print("| 기믹 | n | ρ v2.3→v2.4 | 잔차 v2.3→v2.4 | 상대MAE v2.3→v2.4 | 실패비중 봇 v2.3→v2.4 (AF) | 판정 ρ/잔차/MAE |")
+        print("|---|---|---|---|---|---|---|")
+        for g, m in rows_out.items():
+            a3, a4, v = m["v23"], m["v24"], m["verdict"]
+            print(f"| {g} | {m['n']} | {a3['rho']:.2f}→{a4['rho']:.2f} | {a3['resid']:+.3f}→{a4['resid']:+.3f} | "
+                  f"{a3['mae_rel']:.3f}→{a4['mae_rel']:.3f} | {a3['share_bot']:.2f}→{a4['share_bot']:.2f} "
+                  f"({a3['share_af']:.2f}, {GIM_FAIL.get(g, 'Normal')}) | {v['rho']}/{v['absres']}/{v['mae']} |")
+
+
 def cmd_assemble(a):
     rows = load(OUT / "v24_rows.json")["rows"]
     save("bot_v2.4.json", {"rows": rows})
@@ -337,6 +428,8 @@ def main():
     sub.add_parser("isum").set_defaults(f=cmd_isum)
     sub.add_parser("catfit").set_defaults(f=cmd_catfit)
     sub.add_parser("assemble").set_defaults(f=cmd_assemble)
+    p = sub.add_parser("gimtab"); p.add_argument("--thetas", default="1.0,0.85"); p.add_argument("--boot", type=int, default=1000)
+    p.add_argument("--cat24", default="item_cat_v24.json"); p.set_defaults(f=cmd_gimtab)
     a = ap.parse_args()
     a.f(a)
 

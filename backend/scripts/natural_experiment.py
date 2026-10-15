@@ -401,16 +401,20 @@ def cmd_report(a):
     logit_non_ceiling = analyze(non_ceiling, "logit 척도, 유저전체클리어율<0.95", "bot_diff_logit",
                                 "user_diff_logit_corrected", "user_diff_logit_var")
 
-    # 예시 환산: L32+ 전형(봇 base=0.6, 봇Δ=0.13)을 logit_all 기울기로 유저Δ(%p)로 변환.
-    example = None
+    # 환산표: L32+ 전형 유저 base(0.5/0.6/0.7) × DDA 변형 e2(봇Δ=+0.13)/h2(봇Δ=−0.13).
+    # intercept 미포함 — intercept(logit_all)는 이 두 버전 비교 특유의 전반적 차이를 흡수한 값이라
+    # "봇Δ→유저Δ 전달 비율"이라는 질문엔 기울기만 쓴다(절편 포함 버전은 10.8%p로 과대추정 — 수정).
+    conv_table = []
     if logit_all.get("slope") is not None:
-        b, a = logit_all["slope"], logit_all["intercept"]
-        bot_base, bot_delta, user_base = 0.6, 0.13, 0.6
-        x = logit(bot_base + bot_delta) - logit(bot_base)
-        pred_logit_diff = a + b * x
-        user_new = 1 / (1 + math.exp(-(logit(user_base) + pred_logit_diff)))
-        example = {"bot_base": bot_base, "bot_delta": bot_delta, "user_base": user_base,
-                   "user_new": round(user_new, 4), "user_delta_pp": round((user_new - user_base) * 100, 2)}
+        slope_lo, slope_pt, slope_hi = logit_all["slope_ci95"][0], logit_all["slope"], logit_all["slope_ci95"][1]
+        for base in (0.5, 0.6, 0.7):
+            for tag, delta in (("e2", 0.13), ("h2", -0.13)):
+                x = logit(base + delta) - logit(base)
+                vals = [round((1 / (1 + math.exp(-(logit(base) + s * x))) - base) * 100, 2)
+                        for s in (slope_lo, slope_pt, slope_hi)]
+                conv_table.append({"user_base": base, "variant": tag, "bot_diff": delta,
+                                   "user_delta_pp_lo": min(vals[0], vals[2]), "user_delta_pp_pt": vals[1],
+                                   "user_delta_pp_hi": max(vals[0], vals[2])})
 
     rep = {
         "n_mixed_levels": len(af["mixed"]), "n_control_levels": af["drift"]["n_control_levels"],
@@ -427,7 +431,7 @@ def cmd_report(a):
         "non_ceiling_levels": sorted(non_ceiling),
         "non_ceiling_prob_scale": analyze(non_ceiling, "확률 척도, 유저전체클리어율<0.95"),
         "logit_non_ceiling": logit_non_ceiling,
-        "logit_example_L32plus": example,
+        "logit_conversion_table": conv_table,
         "per_level": per_level,
     }
     save("report.json", rep)

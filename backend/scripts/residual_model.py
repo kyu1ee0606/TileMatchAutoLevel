@@ -678,7 +678,9 @@ def run_all(a):
     ga = np.mean([grade(p) == grade(m) for p, m in zip(ph, mid)])
     order = "SABCD"
     ga1 = np.mean([abs(order.index(grade(p)) - order.index(grade(m))) <= 1 for p, m in zip(ph, mid)])
-    nov = np.array([r["novelty"] > 0.5 or r["gimmick_first"] for r in recs])
+    # [수정 23] `x > 0.5 or gimmick_first` 는 gimmick_first(int)를 그대로 돌려줘 int 배열이 됐고, 그 배열로 인덱싱하면
+    # 0번·1번 레벨만 반복 선택됐다(21 §0-5). bool 로 강제해 마스크로 쓴다.
+    nov = np.array([bool(r["novelty"] > 0.5 or r["gimmick_first"]) for r in recs], dtype=bool)
     err = np.abs(ph - mid)
     res["interval80"] = {"model": fin_name if fin_name in models else "b: ridge 봇+구간+기믹",
                          "coverage_mid": round(float(((mid >= lo) & (mid <= hi)).mean()), 3),

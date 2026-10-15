@@ -87,3 +87,35 @@ def test_sweep_accepts_bot_version(golden):
     assert v1 == v1b
     v2 = run_skill_sweep(lj, skill_grid=[0.47], rollouts_per_point=8, bot_version="v2")
     assert "predicted_clear_rate" in v2
+
+
+# ── v2.1: bomb / grass awareness (16_bot_v21_gimmick_awareness.md) ──────────────────────────────────
+V21_BOMB = os.path.join(os.path.dirname(__file__), "golden", "bot_v2", "v21_bomb_level.json")
+
+
+def _games(level_json, theta, ver, n=40, seed_base=500):
+    return run_games_task({"key": "k", "theta": theta, "level_json": level_json, "seed_base": seed_base,
+                           "start": 0, "count": n, "bot_version": ver})
+
+
+def test_v21_profile_carries_awareness():
+    p = make_skill_profile(0.85, "v2.1")
+    assert p.bot_version == "v2.1" and p.gimmick_awareness["theta"] == 0.85
+    assert make_skill_profile(0.85, "v2").gimmick_awareness is None
+    assert make_skill_profile(1.2, "v2.1").search_rollouts == 2
+
+
+def test_v21_equals_v2_without_bomb_or_grass(golden):
+    # Lv55 / Lv123 have neither bomb nor grass: no awareness draw happens, so v2.1 must replay v2 exactly.
+    for level in ("55", "123"):
+        lj = golden[level]["level_json"]
+        for th in (0.29, 0.85):
+            a, b = _games(lj, th, "v2", 20), _games(lj, th, "v2.1", 20)
+            assert a["wins"] == b["wins"] and a["dockMax"] == b["dockMax"], (level, th)
+
+
+def test_v21_unaware_bomb_explodes_more():
+    # Lv302 (bomb): v2 at θ1.0 handles the countdown perfectly; v2.1 often does not notice it (users fail by Bomb).
+    with open(V21_BOMB, encoding="utf-8") as f:
+        lj = json.load(f)["level_json"]
+    assert sum(_games(lj, 1.0, "v2")["wins"]) > sum(_games(lj, 1.0, "v2.1")["wins"]) + 10

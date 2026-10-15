@@ -113,12 +113,18 @@ def _interp_gimmick_notice_rates(theta: float) -> Dict[str, float]:
 def make_skill_profile(theta: float, bot_version: str = "v1") -> BotProfile:
     """theta ∈ [0,1]을 NOVICE↔EXPERT 파라미터 선형 보간 프로파일로 변환.
 
-    bot_version: "v1"(기본, 기존 동작) | "v2"(실력 단조화 봇, 12_bot_v2.md).
+    bot_version: "v1"(기본, 기존 동작) | "v2"(실력 단조화 봇, 12_bot_v2.md)
+                 | "v2.1"(v2 + 폭탄·풀 인지 확률 모델, 16_bot_v21_gimmick_awareness.md)
+                 | "v2.3"(v2.1 + 게임 규칙 정합, 19_bot_rule_parity.md).
     v2 전용 θ>1.0 확장 등급: 파라미터는 θ1.0과 같고 롤아웃 탐색 수 = round((θ−1)×10)
     (θ1.1 → 1, θ1.2 → 2). v1은 기존대로 θ를 [0,1]로 자른다.
     """
     t = max(0.0, min(1.0, theta))
-    search_rollouts = int(round((theta - 1.0) * 10)) if bot_version == "v2" and theta > 1.0 else 0
+    search_rollouts = int(round((theta - 1.0) * 10)) if bot_version in ("v2", "v2.1", "v2.3") and theta > 1.0 else 0
+    gimmick_awareness = None
+    if bot_version in ("v2.1", "v2.3"):
+        from .bot_simulator import V21_AWARENESS_DEFAULTS
+        gimmick_awareness = dict(V21_AWARENESS_DEFAULTS, theta=float(theta))
     params = {k: _lerp(lo, hi, t) for k, (lo, hi) in _ANCHORS.items()}
     return BotProfile(
         name=f"MC Skill {t:.2f}",
@@ -136,6 +142,7 @@ def make_skill_profile(theta: float, bot_version: str = "v1") -> BotProfile:
         gimmick_notice_override=_interp_gimmick_notice_rates(t),
         bot_version=bot_version,
         search_rollouts=search_rollouts,
+        gimmick_awareness=gimmick_awareness,
     )
 
 

@@ -54,6 +54,10 @@ class BotProfile:
     bot_version: str = "v1"
     # [bot v2] θ>1.0 확장 등급의 롤아웃 수(0 = 탐색 없음). v2에서만 쓰인다.
     search_rollouts: int = 0
+    # [bot v2.1] 기믹(폭탄·풀) 인지 모델 설정. None = 사용 안 함. "v2.1"에서만 쓰인다(16_bot_v21_gimmick_awareness.md).
+    # {"theta": θ, "alpha": {"bomb": a, "grass": a}, "gamma": {...}, "beta": b, "l0": l0, "tau": tau,
+    #  "exposure": {"bomb": n, "grass": n} | None}
+    gimmick_awareness: Optional[Dict] = None
 
     def to_dict(self) -> Dict:
         """Convert to dictionary."""

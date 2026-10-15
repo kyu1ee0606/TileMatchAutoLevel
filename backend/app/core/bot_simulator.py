@@ -731,7 +731,10 @@ V24_ITEMS = (
     "curtain_hide",     # 닫힌 커튼 타일의 타입을 판단에 쓰지 않는다(덮인 타일 해제 가점에서 새던 경로)
     "unknown_nobonus",  # 노출된 unknown 은 이미 공개된 일반 타일 — v15.17 '조기 공개 가점'을 주지 않는다
     "ac_policy",        # 냥이의 도움: savvy(독을 채운 뒤 마지막 뱃지 매칭) / naive(평소대로) 혼합, p_savvy
+    "curtain_memory_v24",  # 열린 커튼에서 본 타입을 기억, 닫힌 뒤 θ·경과 턴에 따라 잊음. 기억한 노출 닫힌 커튼 = 다음 수에 열림 → 계획에 씀
 )
+# 커튼 기억 유지 확률 = σ(a + b·(θ−1) − c·경과턴). 26_bot_v24.md §9 (커튼 66레벨 θ1.0 격자 + 2겹 CV). cfg["curtain_mem"] 로 덮어쓴다.
+V24_CURTAIN_MEM = {"a": -2.0, "b": 4.0, "c": 0.0}   # 격자 최선(θ1.0 전체 적합). CV 상 기억 없음과 구분 안 됨
 V24_AC_P_SAVVY = 0.45   # savvy 유저 비율 기본값(26_bot_v24.md §3: θ1.0 냥이 41레벨 적합, CV상 식별 불가). cfg["ac_p_savvy"] 로 덮어쓴다.
 
 
@@ -1792,6 +1795,8 @@ class BotSimulator:
         while not self._is_game_over(state):
             # Phase 5: Update curtain memory at start of each turn
             self._update_curtain_memory(state, profile)
+            if self._v24 and "curtain_memory_v24" in self._v24 and state.curtain_tiles:
+                self._v24_curtain_update(state)
 
             moves = self._get_available_moves(state)
 
@@ -2197,6 +2202,11 @@ class BotSimulator:
             if self._can_pick_tile(state, tile):
                 type_counts[tile.tile_type] = type_counts.get(tile.tile_type, 0) + 1
 
+        # [bot v2.4 curtain_memory_v24] 기억한 노출 닫힌 커튼은 이번 클릭 뒤 열린다 → 계획용 개수에 넣는다.
+        known = getattr(state, "_v24_cmem_known", None)
+        if known and self._v24 and "curtain_memory_v24" in self._v24:
+            for tt in known:
+                type_counts[tt] = type_counts.get(tt, 0) + 1
         state._accessible_type_counts = type_counts
         return type_counts
 
@@ -3660,6 +3670,8 @@ class BotSimulator:
     _par: frozenset = frozenset()   # 켜진 정합 항목. v1/v2/v2.1 은 항상 빈 집합 → 기존 경로 그대로.
     _v24: frozenset = frozenset()   # 켜진 v2.4 항목. v2.4 가 아니면 항상 빈 집합.
     _v24_p_savvy: float = V24_AC_P_SAVVY
+    _v24_cmem_par: dict = V24_CURTAIN_MEM
+    _v24_theta: float = 1.0
     _v23_hint: bool = False         # 냥이 수집 픽 처리 중(게임의 m_SelectedByHint) — v2.3 auto_collect 에서만 True
 
     def set_rule_parity(self, profile) -> None:
@@ -3675,6 +3687,8 @@ class BotSimulator:
         v24 = cfg.get("v24")
         self._v24 = frozenset(V24_ITEMS if v24 is None else v24) if ver == "v2.4" else frozenset()
         self._v24_p_savvy = float(cfg.get("ac_p_savvy", V24_AC_P_SAVVY))
+        self._v24_cmem_par = dict(V24_CURTAIN_MEM, **(cfg.get("curtain_mem") or {}))
+        self._v24_theta = float(cfg.get("theta", 1.0))
         # 냥이의 도움은 레벨 설정(autoCollectCount)이 있어야 켜진다 — 호출자가 cfg["auto_collect"] 로 넘긴다.
         if not cfg.get("auto_collect"):
             self._par = self._par - {"auto_collect"}
@@ -3687,7 +3701,11 @@ class BotSimulator:
         if et == TileEffectType.UNKNOWN:
             return "unknown_hide" in self._v24 and self._is_blocked_by_upper(state, tile)
         if et == TileEffectType.CURTAIN:
-            return "curtain_hide" in self._v24 and not tile.effect_data.get("is_open", True)
+            if tile.effect_data.get("is_open", True):
+                return False
+            if "curtain_memory_v24" in self._v24:          # 닫힌 커튼: 기억하고 있으면 보인 셈, 아니면 모름
+                return f"{tile.layer_idx}_{tile.position_key}" not in (getattr(state, "_v24_cmem_keys", None) or ())
+            return "curtain_hide" in self._v24
         return False
 
     def _v23_cover_positions(self, state: GameState, layer_idx: int, x: int, y: int):
@@ -3842,6 +3860,42 @@ class BotSimulator:
             self._v23_ac_new_cycle(state)
         else:
             ac["phase"] = "wait_empty"
+
+    def _v24_curtain_update(self, state: GameState) -> None:
+        """[bot v2.4 curtain_memory_v24] 턴 시작마다 커튼 기억 갱신.
+        열린 커튼(덮였어도 아이콘이 보임)은 타입을 본다. 닫힌 커튼은 마지막으로 본 뒤 경과 턴 k 에 대해
+        기억 유지 확률 σ(a + b(θ−1) − c·k). 닫힐 때 u~U(0,1) 를 한 번 뽑아 u < p(k) 인 동안만 기억(단조), 잊으면 다시 열릴 때까지 모름.
+        한 번도 열린 걸 못 본 닫힌 커튼은 처음부터 모름."""
+        import math
+        mem = getattr(state, "_v24_cmem", None)
+        if mem is None:
+            mem = state._v24_cmem = {}
+        a, b, c = self._v24_cmem_par["a"], self._v24_cmem_par["b"], self._v24_cmem_par["c"]
+        keys, known = set(), []
+        for key in list(state.curtain_tiles.keys()):
+            parts = key.split('_')
+            tile = state.tiles.get(int(parts[0]), {}).get(f"{parts[1]}_{parts[2]}")
+            if tile is None or tile.picked or tile.effect_type != TileEffectType.CURTAIN:
+                mem.pop(key, None)
+                continue
+            if tile.effect_data.get("is_open", True):
+                mem[key] = [tile.tile_type, state.moves_used, None]
+                continue
+            m = mem.get(key)
+            if m is None:
+                continue
+            if m[2] is None:
+                m[2] = self._rng.random()
+            z = a + b * (self._v24_theta - 1.0) - c * (state.moves_used - m[1])
+            if m[2] >= 1.0 / (1.0 + math.exp(-z)):
+                del mem[key]                                   # 잊음
+                continue
+            keys.add(key)
+            if not self._is_blocked_by_upper(state, tile):
+                known.append(m[0])
+        state._v24_cmem_keys = keys
+        state._v24_cmem_known = known
+        state._accessible_type_counts = None
 
     def _v24_move_types(self, state: GameState, move: Move) -> List[str]:
         return [move.tile_type] + [state.tiles[li][lp].tile_type for li, lp in move.linked_tiles
@@ -4848,7 +4902,10 @@ class BotSimulator:
     def _v24_determinize(self, state: GameState) -> None:
         """[bot v2.4 unknown_hide] 롤아웃 사본에서 가려진 unknown 타일끼리 타입을 섞는다(실제 배치를 모르는 상태로 굴림)."""
         hidden = [t for li in sorted(state.tiles) for t in state.tiles[li].values()
-                  if not t.picked and self._v24_type_hidden(state, t) and t.effect_type == TileEffectType.UNKNOWN]
+                  if not t.picked and t.effect_type == TileEffectType.UNKNOWN and self._v24_type_hidden(state, t)]
+        if "curtain_memory_v24" in self._v24:          # 잊었거나 본 적 없는 닫힌 커튼도 모르는 타일로 섞는다
+            hidden += [t for li in sorted(state.tiles) for t in state.tiles[li].values()
+                       if not t.picked and t.effect_type == TileEffectType.CURTAIN and self._v24_type_hidden(state, t)]
         if len(hidden) >= 2:
             types = [t.tile_type for t in hidden]
             self._rng.shuffle(types)
@@ -4859,7 +4916,8 @@ class BotSimulator:
         total = 0.0
         for _ in range(profile.search_rollouts):
             s = self._v2_copy_state(state)
-            if self._v24 and "unknown_hide" in self._v24:
+            if self._v24 and ("unknown_hide" in self._v24 or "curtain_memory_v24" in self._v24):
+                s._v24_cmem_keys = getattr(state, "_v24_cmem_keys", None)
                 self._v24_determinize(s)
             if not self._v2_step(s, move):
                 return -1.0

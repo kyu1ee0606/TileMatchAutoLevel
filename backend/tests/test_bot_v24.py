@@ -163,3 +163,58 @@ def test_v24_without_items_equals_v23():
             res.append((s.cleared, s.moves_used, s.total_tiles_cleared))
         out.append(res)
     assert out[0] == out[1]
+
+
+# ── curtain memory ─────────────────────────────────────────────────────────────────────────────
+CURTAIN_LV = _level([{"0_0": ["t1", "curtain_open"], "2_0": ["t1", ""], "4_0": ["t2", ""],
+                      "0_4": ["t3", "curtain_close"], "2_4": ["t3", ""]}])
+
+
+def _cmem_bot(a):
+    prof = make_skill_profile(1.0, "v2.4")
+    cfg = dict(prof.gimmick_awareness)
+    cfg.update(parity=None, auto_collect=0, v24=["curtain_memory_v24"], curtain_mem={"a": a, "b": 4.0, "c": 0.5})
+    prof = dataclasses.replace(prof, gimmick_awareness=cfg)
+    bot = BotSimulator()
+    bot.set_rule_parity(prof)
+    st = bot._create_initial_state(CURTAIN_LV, 200)
+    bot._precompute_blocking_map(st)
+    return bot, st
+
+
+def _close(st, pos):
+    st.tiles[0][pos].effect_data["is_open"] = False
+    st.curtain_tiles[f"0_{pos}"] = False
+    st.moves_used += 1
+
+
+def test_curtain_remembered_type_counts_for_planning():
+    """Seen open → closes → remembered (high a): counted as available next turn; forgotten (low a): unknown."""
+    for a, expect in ((20.0, 2), (-20.0, 1)):
+        bot, st = _cmem_bot(a)
+        bot._v24_curtain_update(st)                               # sees t1 open at 0_0
+        _close(st, "0_0")
+        bot._v24_curtain_update(st)
+        assert bot._get_accessible_type_counts(st).get("t1", 0) == expect
+        assert bot._v24_type_hidden(st, st.tiles[0]["0_0"]) is (expect == 1)
+
+
+def test_never_seen_closed_curtain_unknown():
+    bot, st = _cmem_bot(20.0)
+    bot._v24_curtain_update(st)
+    assert bot._v24_type_hidden(st, st.tiles[0]["0_4"])
+    assert bot._get_accessible_type_counts(st).get("t3", 0) == 1    # only the plain t3
+
+
+def test_curtain_memory_decays_with_turns():
+    bot, st = _cmem_bot(1.0)                                       # p(k) = σ(1 − 0.5k): k=1 0.62 … k=8 0.05
+    bot._v24_curtain_update(st)
+    _close(st, "0_0")
+    bot._rng.seed(0)
+    kept = []
+    for _ in range(10):
+        bot._v24_curtain_update(st)
+        kept.append(not bot._v24_type_hidden(st, st.tiles[0]["0_0"]))
+        st.moves_used += 1
+    assert kept == sorted(kept, reverse=True)                       # once forgotten, stays forgotten
+    assert not kept[-1]

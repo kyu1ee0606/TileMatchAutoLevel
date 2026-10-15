@@ -76,6 +76,8 @@ def run_task(args):
         cfg["v24"] = args.get("v24")
         if args.get("psavvy") is not None:
             cfg["ac_p_savvy"] = args["psavvy"]
+        if args.get("cmem") is not None:
+            cfg["curtain_mem"] = args["cmem"]
     prof = dataclasses.replace(prof, gimmick_awareness=cfg)
     bot = BotSimulator()
     wins, left, left_board, reasons, n = 0, [], [], Counter(), 0
@@ -97,7 +99,8 @@ def run_task(args):
                 reasons[base.fail_reason(bot, final)] += 1
     return {"L": args["L"], "theta": args["theta"], "ver": ver, "games": n, "wins": wins, "layouts": len(lays),
             "fail_tiles_left": left, "fail_tiles_left_board": left_board, "fail_reasons": dict(reasons),
-            "parity": None, "v24": args.get("v24"), "psavvy": args.get("psavvy"), "sec": time.time() - t0}
+            "parity": None, "v24": args.get("v24"), "psavvy": args.get("psavvy"), "cmem": args.get("cmem"),
+            "sec": time.time() - t0}
 
 
 def _pool_run(tasks, name, key):
@@ -313,6 +316,75 @@ def cmd_catfit(a):
     print(json.dumps(out, ensure_ascii=False, indent=1))
 
 
+CMEM_ITEMS = ["unknown_hide", "curtain_hide", "unknown_nobonus", "curtain_memory_v24"]
+CMEM_A = (-2.0, 0.0, 2.0, 4.0, 8.0)
+CMEM_C = (0.0, 0.5, 1.5)
+
+
+def cmd_cmemgrid(a):
+    """curtain_memory_v24 calibration: θ=1.0, 64 games, curtain levels, a × c (b fixed 4); base = no memory."""
+    ex = _expo()
+    lv = v23.levels_with(["eff_curtain"])
+    tasks = [{"L": L, "theta": 1.0, "games": 64, "exposure": ex[L], "v24": CMEM_ITEMS[:3], "cmem": None} for L in lv]
+    tasks += [{"L": L, "theta": 1.0, "games": 64, "exposure": ex[L], "v24": CMEM_ITEMS,
+               "cmem": {"a": ca, "b": 4.0, "c": cc}} for ca in CMEM_A for cc in CMEM_C for L in lv]
+    key = lambda r: (r["L"], None if r.get("cmem") is None else (r["cmem"]["a"], r["cmem"]["c"]))
+    d = _pool_run(tasks, "cmem_grid.json", key)
+    print(f"cmemgrid rows={len(d['rows'])}")
+
+
+def cmd_cmem085(a):
+    """θ0.85 check (64 games): no memory vs forgetful (a −2) vs near-perfect memory (a 8), c 0."""
+    ex = _expo()
+    lv = v23.levels_with(["eff_curtain"])
+    tasks = [{"L": L, "theta": 0.85, "games": 64, "exposure": ex[L], "v24": CMEM_ITEMS[:3], "cmem": None} for L in lv]
+    tasks += [{"L": L, "theta": 0.85, "games": 64, "exposure": ex[L], "v24": CMEM_ITEMS,
+               "cmem": {"a": ca, "b": 4.0, "c": 0.0}} for ca in (-2.0, 8.0) for L in lv]
+    key = lambda r: (r["L"], None if r.get("cmem") is None else (r["cmem"]["a"], r["cmem"]["c"]))
+    d = _pool_run(tasks, "cmem_grid085.json", key)
+    print(f"cmem085 rows={len(d['rows'])}")
+
+
+def cmd_cmemfit(a):
+    """2-fold CV (200) over curtain levels: loss = relative MAE (segment refs from v2.4 full rows, θ1.0)."""
+    from bot_af_L1_31 import spearman
+    P, A = v21.prep()
+    b24 = {r["L"]: r for r in load(OUT / "v24_rows.json")["rows"] if r["theta"] == 1.0}
+    seg_af, seg_bot = seg_refs(b24, A, P)
+    by = {}
+    for r in load(OUT / "cmem_grid.json")["rows"]:
+        k = "none" if r.get("cmem") is None else f"{r['cmem']['a']},{r['cmem']['c']}"
+        by.setdefault(k, {})[r["L"]] = r
+    lv = sorted(L for L in by["none"] if A[L]["unaided_clear_lower_bound"] is not None)
+
+    def met(rs, ls):
+        rate = {L: rs[L]["wins"] / rs[L]["games"] for L in ls}
+        pred = {L: seg_af[base.seg_of(L)] + rate[L] - seg_bot[base.seg_of(L)] for L in ls}
+        return {"mae_rel": sum(abs(pred[L] - _mid(A, L)) for L in ls) / len(ls),
+                "resid": sum(rate[L] - _mid(A, L) for L in ls) / len(ls),
+                "rate": sum(rate.values()) / len(ls),
+                "rho": spearman([rate[L] for L in ls], [_mid(A, L) for L in ls])}
+    grid = {k: met(v, lv) for k, v in by.items()}
+    rng, res, picks = random.Random(26), [], Counter()
+    cands = [k for k in by if k != "none"]
+    for _ in range(200):
+        sh = lv[:]
+        rng.shuffle(sh)
+        tr, te = sh[: len(sh) // 2], sh[len(sh) // 2:]
+        best = min(cands, key=lambda k: met(by[k], tr)["mae_rel"])
+        picks[best] += 1
+        res.append((met(by[best], te), met(by["none"], te)))
+    cv = {k: round(sum(r[0][k] for r in res) / 200, 4) for k in ("mae_rel", "resid", "rho")}
+    cv0 = {k: round(sum(r[1][k] for r in res) / 200, 4) for k in ("mae_rel", "resid", "rho")}
+    best_all = min(cands, key=lambda k: grid[k]["mae_rel"])
+    out = {"levels": len(lv), "grid": {k: {x: round(y, 4) for x, y in m.items()} for k, m in grid.items()},
+           "cv_memory": cv, "cv_none": cv0, "picks": dict(picks.most_common(5)), "chosen": best_all}
+    save("cmem_fit.json", out)
+    print(json.dumps({k: v for k, v in out.items() if k != "grid"}, ensure_ascii=False, indent=1))
+    for k, m in sorted(grid.items()):
+        print("  ", k, {x: round(y, 3) for x, y in m.items()})
+
+
 GIM_FEAT = {"grass": "eff_grass", "bomb": "eff_bomb", "chain": "eff_chain", "teleporter": "eff_teleporter",
             "frog": "eff_frog", "ice": "eff_ice", "stack": "stack", "craft": "craft", "curtain": "eff_curtain",
             "unknown": "eff_unknown", "link": "eff_link"}
@@ -340,7 +412,7 @@ def cmd_gimtab(a):
     b23, b24 = {}, {}
     for r in load(V23_OUT / "bot_v2.3.json")["rows"]:
         b23.setdefault(r["theta"], {})[r["L"]] = r
-    for r in load(OUT / "v24_rows.json")["rows"]:
+    for r in load(OUT / "bot_v2.4.json")["rows"]:
         b24.setdefault(r["theta"], {})[r["L"]] = r
     cat23 = load(OUT / "v23_cat.json")["rows"]
     cat24 = load(OUT / a.cat24)["rows"] if (OUT / a.cat24).exists() else []
@@ -402,8 +474,21 @@ def cmd_gimtab(a):
                   f"({a3['share_af']:.2f}, {GIM_FAIL.get(g, 'Normal')}) | {v['rho']}/{v['absres']}/{v['mae']} |")
 
 
+def cmd_curtfull(a):
+    """Re-measure curtain levels (θ grid, 128 games) with the final v2.4 (incl. curtain_memory_v24)."""
+    ex = _expo()
+    lv = v23.levels_with(["eff_curtain"])
+    tasks = [{"L": L, "theta": float(t), "games": 128, "exposure": ex[L], "v24": None} for t in GRID.split(",") for L in lv]
+    d = _pool_run(tasks, "v24_curtain_rows.json", lambda r: (r["L"], r["theta"]))
+    print(f"curtain v2.4 rows={len(d['rows'])}")
+
+
 def cmd_assemble(a):
     rows = load(OUT / "v24_rows.json")["rows"]
+    cur = OUT / "v24_curtain_rows.json"          # curtain levels re-measured after curtain_memory_v24 was added
+    if cur.exists():
+        ov = {(r["L"], r["theta"]): r for r in load(cur)["rows"]}
+        rows = [ov.get((r["L"], r["theta"]), r) for r in rows]
     save("bot_v2.4.json", {"rows": rows})
     for f in ("bot_v2.3.json", "bot_v2.1.json", "prep.json", "af.json", "bot_v1.json", "bot_v2.json"):
         if (V23_OUT / f).exists():
@@ -428,6 +513,10 @@ def main():
     sub.add_parser("isum").set_defaults(f=cmd_isum)
     sub.add_parser("catfit").set_defaults(f=cmd_catfit)
     sub.add_parser("assemble").set_defaults(f=cmd_assemble)
+    sub.add_parser("cmemgrid").set_defaults(f=cmd_cmemgrid)
+    sub.add_parser("cmemfit").set_defaults(f=cmd_cmemfit)
+    sub.add_parser("cmem085").set_defaults(f=cmd_cmem085)
+    sub.add_parser("curtfull").set_defaults(f=cmd_curtfull)
     p = sub.add_parser("gimtab"); p.add_argument("--thetas", default="1.0,0.85"); p.add_argument("--boot", type=int, default=1000)
     p.add_argument("--cat24", default="item_cat_v24.json"); p.set_defaults(f=cmd_gimtab)
     a = ap.parse_args()

@@ -116,7 +116,7 @@ def test_level_out_of_range():
     assert "LEVEL_OUT_OF_RANGE" in r.insufficient_reasons
 
 
-@pytest.mark.parametrize("field,value", [("randSeed", 1), ("useTileCount", 11), ("timea", 180)])
+@pytest.mark.parametrize("field,value", [("randSeed", 1), ("useTileCount", 11), ("shuffleTile", 1)])
 def test_changed_game_condition_needs_measurement(field, value):
     lj = dict(copy.deepcopy(LJ), **{field: value})
     if field == "useTileCount":  # upload re-derives useTileCount from the tiles → change the tiles instead
@@ -126,6 +126,30 @@ def test_changed_game_condition_needs_measurement(field, value):
     r = predict_editor_level(lj, L)
     assert r.status == "measurement_required" and r.expected_ft_any is None
     assert r.insufficient_reasons == ["MEASUREMENT_MISSING"]
+
+
+def test_g1_cat_help_level_is_insufficient(mdl):
+    """G1: every 10th slot gets autoCollectCount=3 on upload; the training set has 0 such levels → no number."""
+    assert mdl.model["support"]["condition_train_levels"]["cat_help"] == 0
+    r = predict_editor_level(LJ, 240)
+    assert r.status == "insufficient_evidence" and r.expected_ft_any is None and not r.in_support
+    assert "CAT_HELP_UNSUPPORTED" in r.insufficient_reasons
+    # with a (hypothetical) matching measurement it is still suppressed — the flag is about training support
+    gm, cond = finalize_game_conditions(LJ, 240)
+    meas = dict(cached_measurement(mdl), cond_hash=cond_hash(gm, cond))
+    r3 = predict_editor_level(LJ, 240, bot_measurement=meas)
+    assert r3.expected_ft_any is None and r3.insufficient_reasons == ["CAT_HELP_UNSUPPORTED"]
+    # 'preserve' upload with autoCollectCount 0 → not a cat level at upload → no G1 flag
+    r2 = predict_editor_level(LJ, 240, upload_opts={"auto_collect_mode": "preserve"})
+    assert "CAT_HELP_UNSUPPORTED" not in r2.insufficient_reasons
+
+
+def test_g4_time_limit_level_is_insufficient(mdl):
+    assert mdl.model["support"]["condition_train_levels"]["time_limit"] == 0
+    for key in ("timea", "timeAttack"):
+        r = predict_editor_level(dict(LJ, **{key: 180}), L)
+        assert r.status == "insufficient_evidence" and r.expected_ft_any is None
+        assert "TIME_LIMIT_UNSUPPORTED" in r.insufficient_reasons
 
 
 def test_measurement_condition_hash_must_match(mdl):

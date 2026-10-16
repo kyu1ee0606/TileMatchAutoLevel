@@ -14,18 +14,28 @@ LOW_CONF_BELOW = 0.85    # doc 26 §11-9: actual < 0.85 → mean easy bias +0.12
 CEILING_FROM = 0.95      # doc 31 §3-2 NEAR_CEILING (⑤ median 0.963: selection ≈ random)
 NOVELTY_HIGH = 0.5
 SUPPRESS = {"PLACEMENT_MISSING", "LEVEL_OUT_OF_RANGE", "GIMMICK_UNSEEN", "GIMMICK_LOW_TRAIN", "FEATURE_OOD",
-            "BOT_PROTOCOL_MISMATCH", "BOT_CONDITION_MISMATCH", "BOT_SOURCE_UNKNOWN", "MEASUREMENT_MISSING", "UNSOLVED"}
+            "BOT_PROTOCOL_MISMATCH", "BOT_CONDITION_MISMATCH", "BOT_SOURCE_UNKNOWN", "MEASUREMENT_MISSING", "UNSOLVED",
+            "CAT_HELP_UNSUPPORTED", "TIME_LIMIT_UNSUPPORTED"}
 
 
 def flag(code: str, severity: str, detail: str = "") -> Dict[str, str]:
     return {"code": code, "severity": severity, "detail": detail}
 
 
-def input_flags(support: Dict[str, Any], *, placement_level: Optional[int], gimmicks: List[str]) -> List[Dict[str, str]]:
-    """Flags decidable from the map and position alone (before any bot data)."""
+def input_flags(support: Dict[str, Any], *, placement_level: Optional[int], gimmicks: List[str],
+                conditions: Optional[Dict[str, Any]] = None) -> List[Dict[str, str]]:
+    """Flags decidable from the map, final game conditions and position alone (before any bot data)."""
     out = []
     if placement_level is None:
         return [flag("PLACEMENT_MISSING", "hard", "배치 레벨 번호가 없어 도달 유저 분포를 정할 수 없음")]
+    cond = conditions or {}
+    have, need = support.get("condition_train_levels", {}), support.get("min_condition_levels", 10)
+    if int(cond.get("autoCollectCount") or 0) > 0 and have.get("cat_help", 0) < need:
+        out.append(flag("CAT_HELP_UNSUPPORTED", "hard", f"냥이 자동 수집(autoCollectCount={cond['autoCollectCount']}) "
+                                                        f"레벨: 학습 {have.get('cat_help', 0)}개 (< {need})"))
+    if int(cond.get("timea") or 0) > 0 and have.get("time_limit", 0) < need:
+        out.append(flag("TIME_LIMIT_UNSUPPORTED", "hard", f"시간 제한(timea={cond['timea']}) 레벨: "
+                                                          f"학습 {have.get('time_limit', 0)}개 (< {need})"))
     lo, hi = support["level_range"]
     if not lo <= placement_level <= hi:
         out.append(flag("LEVEL_OUT_OF_RANGE", "hard", f"학습 범위 L{lo}~{hi} 밖 (L{placement_level})"))

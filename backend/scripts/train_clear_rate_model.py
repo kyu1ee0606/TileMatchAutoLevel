@@ -335,6 +335,12 @@ def fit_export(rows, X, Y, expo, af, prep, bot_rows):
         "target_p05_p95_by_segment": {s: [float(v) for v in np.percentile(yv[[r["seg"] == s for r in rows]], [5, 95])]
                                       for s in segs},
         "min_gimmick_levels": 10, "ood_min_features": 2,
+        # G1/G4 (doc 35 §1-2): game conditions the training set does not cover → no prediction until ≥ min levels
+        "condition_train_levels": {
+            "cat_help": int(sum(int(float(prep[r["L"]]["row"].get("autoCollectCount") or 0)) > 0 for r in rows)),
+            "time_limit": int(sum(int(float(prep[r["L"]]["row"].get("timea") or 0)) > 0 for r in rows)),
+        },
+        "min_condition_levels": 10,
     }
     position = {"exposure": {str(L): v for L, v in sorted(expo.items())},
                 "gimmick_first_levels": sorted(L for L in af if af[L].get("is_gimmick_first")),

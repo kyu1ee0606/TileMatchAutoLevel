@@ -98,7 +98,8 @@ def predict_level(model: ClearRateModel, game_map: Dict[str, Any], conditions: D
                               bot_version=man["bot_version"], bot_protocol=man["bot_protocol"],
                               placement_level=placement_level, cond_hash=h, status=STATUS_OK, in_support=False,
                               measurement=measurement.meta() if measurement else None)
-    flags = guard.input_flags(sup, placement_level=placement_level, gimmicks=present_gimmicks(map_features(game_map)))
+    flags = guard.input_flags(sup, placement_level=placement_level, gimmicks=present_gimmicks(map_features(game_map)),
+                             conditions=cond)
     rows = list(measurement.rows) if measurement else []
     if measurement:
         flags += guard.bot_flags(man, measurement, h)

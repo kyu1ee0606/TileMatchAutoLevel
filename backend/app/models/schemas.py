@@ -811,3 +811,23 @@ class ClearRatePredictResponse(BaseModel):
     conditions: Dict[str, Any] = Field(default_factory=dict, description="Final game conditions (upload values) the prediction is for")
     upload_assumption: Optional[Dict[str, Any]] = Field(default=None, description="Upload-panel options assumed")
     reliability: Optional[Dict[str, Any]] = Field(default=None, description="Training out-of-fold error for this predicted zone / gimmick combination / segment (known before release)")
+
+
+# ── Experimental two-mode target evaluation (doc 35 §9) — not used by generation / verification / upload ──
+class ClearRateTargetEvalRequest(BaseModel):
+    """target_mode has no default: a request without it is rejected (422). Mode A never falls back to mode B."""
+    model_config = {"extra": "forbid"}
+
+    target_mode: Literal["user_expected", "bot_virtual"] = Field(..., description="A = expected real-user clear rate (ft_any_v1, model); B = bot virtual clear rate (bot v2.4 rules only, θ0.85, no help — real-user unverified)")
+    target: float = Field(..., gt=0.0, lt=1.0, description="A: target ft_any; B: target bot success rate at θ0.85 (not comparable with A)")
+    level_json: Dict[str, Any]
+    placement_level: Optional[int] = Field(default=None, ge=1)
+    bot_measurement_search: Optional[ClearRateBotMeasurement] = Field(default=None, description="Seed band S measurement (selection)")
+    bot_measurement_confirm: Optional[ClearRateBotMeasurement] = Field(default=None, description="Seed band C measurement (verdict; bot-stability check only, not real-user validation)")
+    upload_opts: Optional[ClearRateUploadOpts] = None
+
+
+class ClearRateTargetEvalResponse(BaseModel):
+    target_mode: Literal["user_expected", "bot_virtual"]
+    user_expected: Optional[Dict[str, Any]] = Field(default=None, description="Mode A only")
+    bot_virtual: Optional[Dict[str, Any]] = Field(default=None, description="Mode B only — always real_user_status=unverified")

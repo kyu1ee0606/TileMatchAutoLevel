@@ -736,9 +736,9 @@ class BatchVerifyRegenerateRequest(BaseModel):
     gimmick_unlock_levels: Optional[Dict[str, int]] = Field(default=None, description="Gimmick unlock levels for regeneration")
 
 
-# ── New real-user clear-rate prediction (parallel display, docs 31 §3-1 / 33) ──────────────────────
+# ── Real-user clear-rate prediction (ft_any_v1; parallel display now, generation/selection later — docs 31 / 33) ──
 class ClearRateBotRow(BaseModel):
-    """One bot measurement row (θ × games), same shape as the bot_v24 measurement rows."""
+    """One bot measurement row (θ × games), same shape as the bot_v24 measurement rows. Bot plays unaided."""
     theta: float = Field(..., description="Bot skill θ (model needs 0.55, 0.65, 0.85, 1.0)")
     games: int = Field(..., ge=1)
     wins: int = Field(..., ge=0)
@@ -750,19 +750,15 @@ class ClearRateBotRow(BaseModel):
 class ClearRateBotMeasurement(BaseModel):
     bot_version: str = Field(..., description="Must match the model manifest (v2.4)")
     protocol: str = Field(..., description="Must match the model manifest (theta4x128_v1)")
+    condition_hash: str = Field(..., description="clear_rate.condition_hash of the game conditions measured; must equal the current one")
+    seed_set: str = Field(default="", description="Seed set label (selection S vs confirmation C)")
     rows: List[ClearRateBotRow]
 
 
-class ClearRateTargetIn(BaseModel):
-    metric: str = Field(default="ft_any_v1")
-    value: float = Field(..., ge=0.0, le=1.0, description="Target first-try clear rate (incl. help) at placement_level")
-
-
 class ClearRatePredictRequest(BaseModel):
-    level_json: Dict[str, Any] = Field(..., description="Editor level JSON")
+    level_json: Dict[str, Any] = Field(..., description="Editor level JSON (converted to upload/game conditions server-side)")
     placement_level: Optional[int] = Field(default=None, ge=1, description="Level number the map is placed at (required for a prediction)")
-    target: Optional[ClearRateTargetIn] = None
-    bot_measurement: Optional[ClearRateBotMeasurement] = Field(default=None, description="Omit to use the model's bot-measurement cache")
+    bot_measurement: Optional[ClearRateBotMeasurement] = Field(default=None, description="Omit to use the model's live-build measurement cache")
 
 
 class ClearRateEvidenceFlag(BaseModel):
@@ -771,28 +767,29 @@ class ClearRateEvidenceFlag(BaseModel):
     detail: str = ""
 
 
-class ClearRateAux(BaseModel):
-    unaided_lb: Optional[float] = Field(default=None, description="Expected unaided first-try clear share (LB)")
-    help_rate: Optional[float] = Field(default=None, description="Expected first-try help usage rate")
-
-
-class ClearRateTargetInfo(BaseModel):
-    value: float
-    in_range80: bool = Field(..., description="Target inside the 80% range (information only, not a verdict)")
+class ClearRateMeasurementMeta(BaseModel):
+    source: Literal["cache", "request"]
+    bot_version: str
+    protocol: str
+    seed_set: str
+    condition_hash: str
 
 
 class ClearRatePredictResponse(BaseModel):
     model_version: str
-    target_metric: str
+    target_metric: str = Field(..., description="ft_any_v1 = real-user first-try clear rate incl. help, ended runs")
     bot_version: str
-    status: Literal["ok", "insufficient_evidence", "measurement_required"]
+    bot_protocol: str
     placement_level: Optional[int]
-    map_hash: str
-    expected: Optional[float] = Field(default=None, description="Expected first-try clear rate incl. help (0~1)")
-    range80: Optional[List[float]] = Field(default=None, description="[lo, hi] 80% range")
-    confidence: Optional[Literal["high", "medium", "low"]] = None
+    condition_hash: str = Field(..., description="Hash of the final game conditions of this request")
+    status: Literal["ok", "insufficient_evidence", "measurement_required"]
+    in_support: bool
+    insufficient_reasons: List[str] = Field(default_factory=list)
     evidence_flags: List[ClearRateEvidenceFlag] = Field(default_factory=list)
-    aux: ClearRateAux
-    target: Optional[ClearRateTargetInfo] = None
-    bot_source: Optional[Literal["cache", "request"]] = None
-    bot_success_reference: Dict[str, float] = Field(default_factory=dict, description="Bot win rate per θ — reference only, not a clear rate")
+    expected_ft_any: Optional[float] = Field(default=None, description="Primary target prediction (0~1)")
+    range80_ft_any: Optional[List[float]] = Field(default=None, description="[lo, hi] 80% range of expected_ft_any")
+    expected_unaided_lb: Optional[float] = Field(default=None, description="Predicted real-user unaided first-try clear share (LB)")
+    expected_help_rate: Optional[float] = Field(default=None, description="Predicted real-user first-try help usage rate")
+    confidence: Optional[Literal["high", "medium", "low"]] = None
+    measurement: Optional[ClearRateMeasurementMeta] = None
+    bot_unaided_win_rate: Dict[str, float] = Field(default_factory=dict, description="Bot (unaided) win rate per θ — model input, not a clear rate")

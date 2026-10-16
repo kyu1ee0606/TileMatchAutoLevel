@@ -1,8 +1,8 @@
-"""Evidence flags + confidence for the parallel-display clear-rate prediction (doc 31 §3-2 codes, doc 33 §1).
+"""Evidence flags + confidence for the clear-rate prediction (doc 31 §3-2 codes + measurement-condition codes).
 
-Display stage only: no PASS/FAIL verdict. A "suppressing" flag means the model has no support for this input,
-so the response carries the reason instead of a number (user decision (e), doc 33 implementation record).
-Target-only flags never suppress the prediction — they describe the target, not the model input.
+A "suppressing" flag (SUPPRESS) means the model has no support for this input, so the prediction carries the
+reason instead of a number (user decision (e), doc 33 §11). PASS/FAIL lives in judge.py.
+Target flags (target_flags) belong to the verdict (judge.py), not to the prediction.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ LOW_CONF_BELOW = 0.85    # doc 26 §11-9: actual < 0.85 → mean easy bias +0.12
 CEILING_FROM = 0.95      # doc 31 §3-2 NEAR_CEILING (⑤ median 0.963: selection ≈ random)
 NOVELTY_HIGH = 0.5
 SUPPRESS = {"PLACEMENT_MISSING", "LEVEL_OUT_OF_RANGE", "GIMMICK_UNSEEN", "GIMMICK_LOW_TRAIN", "FEATURE_OOD",
-            "BOT_PROTOCOL_MISMATCH", "UNSOLVED"}
+            "BOT_PROTOCOL_MISMATCH", "MEASUREMENT_MISSING", "MEASUREMENT_CONDITION_MISMATCH", "UNSOLVED"}
 
 
 def flag(code: str, severity: str, detail: str = "") -> Dict[str, str]:
@@ -39,14 +39,15 @@ def input_flags(support: Dict[str, Any], *, placement_level: Optional[int], gimm
     return out
 
 
-def bot_flags(manifest: Dict[str, Any], measurement: Optional[Dict[str, Any]],
+def bot_flags(manifest: Dict[str, Any], bot_version: str, protocol: str, measured_hash: str, current_hash: str,
               rows: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     out = []
-    if measurement is not None:
-        ver, proto = measurement.get("bot_version"), measurement.get("protocol")
-        if ver != manifest["bot_version"] or proto != manifest["bot_protocol"]:
-            out.append(flag("BOT_PROTOCOL_MISMATCH", "hard",
-                            f"측정 {ver}/{proto} ≠ 모델 {manifest['bot_version']}/{manifest['bot_protocol']}"))
+    if bot_version != manifest["bot_version"] or protocol != manifest["bot_protocol"]:
+        out.append(flag("BOT_PROTOCOL_MISMATCH", "hard",
+                        f"측정 {bot_version}/{protocol} ≠ 모델 {manifest['bot_version']}/{manifest['bot_protocol']}"))
+    if measured_hash != current_hash:
+        out.append(flag("MEASUREMENT_CONDITION_MISMATCH", "hard",
+                        f"측정한 게임 조건 {measured_hash} ≠ 현재 {current_hash} (맵·useTileCount·시드 등이 바뀜)"))
     by_t = {round(float(r["theta"]), 2): r for r in rows}
     missing = [t for t in THETAS if t not in by_t]
     short = [t for t in THETAS if t in by_t and int(by_t[t]["games"]) < manifest["bot_games_per_theta"]]
@@ -76,18 +77,24 @@ def feature_flags(support: Dict[str, Any], feats: Dict[str, float]) -> List[Dict
     return out
 
 
-def value_flags(expected: Optional[float], target: Optional[float], support: Dict[str, Any],
-                segment: Optional[str]) -> List[Dict[str, str]]:
+def value_flags(expected: float) -> List[Dict[str, str]]:
     out = []
-    vals = [("예상", expected), ("목표", target)]
-    low = [f"{k} {v:.3f}" for k, v in vals if v is not None and v < LOW_CONF_BELOW]
-    if low:
-        out.append(flag("LOW_CONFIDENCE", "soft", f"{', '.join(low)} < {LOW_CONF_BELOW} — 이 구간은 평균 12%p 쉽게 예측됨"))
-    high = [f"{k} {v:.3f}" for k, v in vals if v is not None and v >= CEILING_FROM]
-    if high:
-        out.append(flag("NEAR_CEILING", "soft", f"{', '.join(high)} ≥ {CEILING_FROM} — 천장, 구분력 낮음"))
+    if expected < LOW_CONF_BELOW:
+        out.append(flag("LOW_CONFIDENCE", "soft", f"예상 {expected:.3f} < {LOW_CONF_BELOW} — 이 구간은 평균 12%p 쉽게 예측됨"))
+    if expected >= CEILING_FROM:
+        out.append(flag("NEAR_CEILING", "soft", f"예상 {expected:.3f} ≥ {CEILING_FROM} — 천장, 구분력 낮음"))
+    return out
+
+
+def target_flags(target: float, support: Dict[str, Any], segment: Optional[str]) -> List[Dict[str, str]]:
+    """Flags about a target value (used by judge.judge, never by the prediction itself)."""
+    out = []
+    if target < LOW_CONF_BELOW:
+        out.append(flag("LOW_CONFIDENCE", "soft", f"목표 {target:.3f} < {LOW_CONF_BELOW} — 이 구간 예측은 신뢰 불가"))
+    if target >= CEILING_FROM:
+        out.append(flag("NEAR_CEILING", "soft", f"목표 {target:.3f} ≥ {CEILING_FROM} — 천장, 선별이 무작위와 비슷"))
     band = support["target_p05_p95_by_segment"].get(segment or "")
-    if target is not None and band and not band[0] <= target <= band[1]:
+    if band and not band[0] <= target <= band[1]:
         out.append(flag("TARGET_OUT_OF_SUPPORT", "hard", f"목표 {target:.3f}가 구간 {segment} 학습 p5~p95 "
                                                          f"[{band[0]:.3f}, {band[1]:.3f}] 밖"))
     return out

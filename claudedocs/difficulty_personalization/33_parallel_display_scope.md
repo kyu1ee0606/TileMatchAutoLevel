@@ -144,12 +144,14 @@ CLAUDE.md 프로젝트 규칙대로 **백엔드 스키마 변경 시 프론트 �
 |---|---|
 | `backend/app/core/clear_rate/features.py` | `residual_model.map_features`·`build` 의 48특징을 단건(맵, 배치 레벨, 봇 측정)으로 이식. numpy 없음, `app` import 없음(학습 스크립트가 파일 경로로 로드) |
 | `backend/app/core/clear_rate/model.py` | artifact 로드 + Ridge 내적·트리 순회 예측(순수 파이썬). CQR 범위 → 확률 변환 |
-| `backend/app/core/clear_rate/guard.py` | 문서 31 §3-2 코드로 경고·신뢰도. 판정(PASS/FAIL) 없음 |
-| `backend/app/core/clear_rate/service.py` | level_json → `canonical_map` → 특징 → 예측. 봇 측정: 요청값 → 모델 캐시 → 없으면 `measurement_required` |
+| `backend/app/core/clear_rate/guard.py` | 문서 31 §3-2 코드 + 측정 조건 코드로 경고·신뢰도 |
+| `backend/app/core/clear_rate/predict.py` | **순수 예측 함수** `predict_level` (최종 게임 조건 맵 + 조건 + 배치 + 봇 측정·메타 → 결과). I/O·캐시·UI 없음 |
+| `backend/app/core/clear_rate/judge.py` | **판정 함수** `judge` (PASS/FAIL/INSUFFICIENT_EVIDENCE, 문서 31 §3-3). 라우트·기존 판정에 연결 안 함 |
+| `backend/app/core/clear_rate/service.py` | 에디터 진입: level_json → 업로드 변환(최종 게임 조건) → 봇 측정(요청 → 캐시) → `predict_level` |
 | `backend/app/api/routes/clear_rate.py`, `schemas.py`(클래스 추가만), `main.py`(import 1줄 + include 1줄) | `POST /api/clear-rate/predict` |
 | `backend/scripts/train_clear_rate_model.py` | 재학습·평가·내보내기·활성화. `--check` = 재학습 결과가 저장본과 바이트 동일한지 |
 | `backend/data/models/clear_rate/cr-ftany-v24r-20261016/{model.json 404KB, bot_cache.json 172KB, manifest.json}`, `active.json` | 모델·봇 캐시·출처 |
-| `backend/tests/test_clear_rate.py`, `tests/golden/clear_rate_L237.json` | 17건 |
+| `backend/tests/test_clear_rate.py`, `tests/golden/clear_rate_L237.json` | 24건 (L237 픽스처 = 라이브 샤드 맵 + 행 필드) |
 | `frontend/src/api/clearRate.ts` | 요청·응답 타입(백엔드 1:1), `predictClearRate`, `toClearRateMeta`(응답 → 메타 새 필드) |
 | `frontend/src/types/production.ts` | `ProductionLevelMeta` 새 필드만 추가(`mc_replaced_at` 뒤 — 다른 세션 미커밋 변경과 다른 위치) |
 | `frontend/src/components/ClearRate/ClearRateCell.tsx` | 배치 표 1칸: 예상·80% 범위·신뢰도·경고 배지·무도움/도움 사용(보조). 메타 필드만 props 로 받음(독립 렌더) |
@@ -174,29 +176,43 @@ CLAUDE.md 프로젝트 규칙대로 **백엔드 스키마 변경 시 프론트 �
 - 80% 범위(rep 0 OOF): 포함 **0.818**(32-100 0.83 · 101-300 0.84 · 301-500 0.79), 평균 폭 0.096(중앙 0.073), 상한이 1.0인 레벨 73%(천장), 점예측이 범위 안 0.995.
 - 재현성: 학습은 결정적(고정 시드). `--check` 로 재학습 → model.json·bot_cache.json 바이트 동일(pytest 에 포함).
 
-### 11-4. API (`POST /api/clear-rate/predict`)
-요청 `{level_json, placement_level?, target?: {value}, bot_measurement?: {bot_version, protocol, rows[]}}` → 응답 `{model_version, target_metric, bot_version, status, placement_level, map_hash, expected, range80, confidence, evidence_flags[], aux{unaided_lb, help_rate}, target{value, in_range80}?, bot_source, bot_success_reference}`. 문서 31 §3-1 에서 판정 관련(`verdict`·`p_in_target_band`·`drivers`)은 뺐다(병행 표시 단계 범위 밖; 직접 GBM 은 SHAP 분해도 없음).
-- `status`: `ok` / `insufficient_evidence`(예측 대신 사유) / `measurement_required`(봇 측정 없음).
-- 예측을 막는 경고(hard): `PLACEMENT_MISSING`, `LEVEL_OUT_OF_RANGE`(L32~500 밖), `GIMMICK_UNSEEN`/`GIMMICK_LOW_TRAIN`(학습 레벨 <10), `FEATURE_OOD`(학습 1~99분위 밖 특징 ≥2개), `BOT_PROTOCOL_MISMATCH`(버전·프로토콜·θ·판 수), `UNSOLVED`(모든 θ 봇 클리어 0). `TARGET_OUT_OF_SUPPORT` 는 hard 지만 목표에 대한 경고라 예측은 보여 준다.
-- 표시 경고(soft): `LOW_CONFIDENCE`(예상 또는 목표 <0.85, 신뢰도 low), `NEAR_CEILING`(≥0.95), `GIMMICK_FIRST`/`NOVELTY_HIGH`(신뢰도 low), `GIMMICK_BOT_WEAK`(grass·chain, 신뢰도 medium).
-- 위치 특징: 노출 수는 학습 일정(라이브 L32~500)에서 그 위치 앞까지 센 값, 기믹 첫 등장 위치 표, 보스(=냥이 레벨)는 업로드 기본 규칙(레벨 %10 == 0 → autoCollectCount 3)으로 정한다. `map2nd`(2차 배치 맵 표시)는 학습셋에서 상수 0 이라 0 으로 둔다.
-- 봇 캐시 키 = 맵 해시 + `useTileCount`. 같은 맵이라도 타입 수가 다르면 다른 레벨로 보고 측정 필요로 낸다.
-- 예시(라이브 배치 L153, 목표 0.92): `expected 0.9554, range80 [0.902, 1.0], confidence low, flags NOVELTY_HIGH·GIMMICK_BOT_WEAK·NEAR_CEILING, aux {unaided_lb 0.793, help_rate 0.161}, target {0.92, in_range80 true}, bot_source cache`.
+### 11-4. API (`POST /api/clear-rate/predict`) — 개정 2026-10-16(공통 예측 경로화, §11-7)
+요청 `{level_json, placement_level?, bot_measurement?: {bot_version, protocol, condition_hash, seed_set?, rows[]}}` → 응답 `{model_version, target_metric, bot_version, bot_protocol, placement_level, condition_hash, status, in_support, insufficient_reasons[], evidence_flags[], expected_ft_any, range80_ft_any, expected_unaided_lb, expected_help_rate, confidence, measurement{source, bot_version, protocol, seed_set, condition_hash}, bot_unaided_win_rate{θ}}`. 판정(`verdict`)은 응답에 없다(`judge` 는 라이브러리로만 둠).
+- **필드 이름으로 지표 분리**: `expected_ft_any`/`range80_ft_any` = 주 목표(실유저 첫 시도·도움 포함·종료된 판). `expected_unaided_lb` = 실유저 무도움 첫 시도 클리어 비율(LB) 예측. `expected_help_rate` = 실유저 첫 시도 도움 사용률 예측(**출력만**). `bot_unaided_win_rate` = 봇(도움 없이 플레이) θ별 승률 = 입력, 클리어율 아님.
+- **입력 감사**: 특징은 맵 구조·기믹, 배치 위치(log L·구간·라이브 일정 기준 기믹 노출·첫 등장 표·보스=autoCollectCount 1~3), 봇 측정뿐이다. 그 레벨의 AF 값(도움 사용률·클리어율 등 출시 전에 알 수 없는 값)은 입력에 없다(manifest `input_audit`, 테스트 `test_no_post_release_inputs`).
+- `status`: `ok` / `insufficient_evidence`(예측 대신 `insufficient_reasons`) / `measurement_required`(그 게임 조건의 봇 측정 없음). `in_support` = 판정에 쓸 수 있는지.
+- 예측을 막는 경고(hard): `PLACEMENT_MISSING`, `LEVEL_OUT_OF_RANGE`(L32~500 밖), `GIMMICK_UNSEEN`/`GIMMICK_LOW_TRAIN`(학습 레벨 <10), `FEATURE_OOD`(학습 1~99분위 밖 특징 ≥2개), `BOT_PROTOCOL_MISMATCH`(버전·프로토콜·θ·판 수), `MEASUREMENT_MISSING`, **`MEASUREMENT_CONDITION_MISMATCH`**(측정한 게임 조건 해시 ≠ 현재), `UNSOLVED`(모든 θ 봇 클리어 0).
+- 표시 경고(soft, 예상값 기준): `LOW_CONFIDENCE`(<0.85, 신뢰도 low), `NEAR_CEILING`(≥0.95), `GIMMICK_FIRST`/`NOVELTY_HIGH`(신뢰도 low), `GIMMICK_BOT_WEAK`(grass·chain, 신뢰도 medium). 목표값 경고(목표 <0.85·≥0.95·`TARGET_OUT_OF_SUPPORT`)는 `judge` 쪽으로 옮겼다.
+- **측정 조건 해시** `condition_hash(game_map, conditions)`: 맵(층 수, 층별 col/row/타일) + 게임 동작 필드 `GAME_FIELDS` = useTileCount·unlockTile·autoCollectCount·randSeed·shuffleTile·typeImbalance·timea(빌드 샤드 행 키). 표시용 필드(tileSkin·배경·visualTileSeed·difficulty·rewardCoin)는 뺐다. 최종 게임 조건은 업로드 변환(`gboost._convert_to_townpop_format`: 타일 순서 정규화, **useTileCount 를 실제 타입 수로 재계산**) + 업로드 패널 기본 autoCollectCount 규칙(레벨 %10 == 0 → 3, 아니면 0)이다. 봇 캐시도 라이브 빌드 측정을 이 해시로 찾는다(메타: v2.4·theta4x128_v1·seed11M).
+- 예시(라이브 3차 배치 L153): `status ok, expected_ft_any 0.9554, range80_ft_any [0.902, 1.0], expected_unaided_lb 0.793, expected_help_rate 0.161, confidence low, flags NOVELTY_HIGH·GIMMICK_BOT_WEAK·NEAR_CEILING, measurement {cache, v2.4, theta4x128_v1, seed11M, f4693509…}, bot_unaided_win_rate {θ0.55 0.305 … θ1.0 0.945}`.
 
-### 11-5. 현재 라이브 배치(3차 에디터 `batch_1789636723287`) L1~600 에 돌린 결과
-| 구간 | ok | 측정 필요 | 근거 부족 |
+### 11-5. 배치에 돌린 결과 (L32~500, 조건 해시 기준)
+| 배치 | ok | 측정 필요 | 근거 부족 |
 |---|---|---|---|
-| L1~31 | 0 | 0 | 31 (`LEVEL_OUT_OF_RANGE`) |
-| L32~500 | **320** | 139 | 10 (`FEATURE_OOD` — L51~54 등 32-100 학습 레벨이 29개뿐이라 logL 이 분위 밖) |
-| L501~600 | 0 | 0 | 100 |
-- 측정 필요 139 = 봇 행이 원래 없는 레벨(측정 제외 레벨) + **에디터 3차 맵이 라이브(1.1.0 샤드)와 다른 92레벨**(L32~79 = 라이브는 2차 맵, 그 밖 57레벨은 맵은 같고 useTileCount 만 다름 — 문서 31 §2-2 "3차 useTileCount −1 수정 미업로드"). 이 맵들은 실제로 봇이 잰 적 없는 설정이라 측정 필요가 맞다.
-- ok 320레벨의 예상 p10/p50/p90 = 0.88 / 0.96 / 0.98. `NEAR_CEILING` 190 · `LOW_CONFIDENCE` 21.
+| 현재 에디터 3차 `batch_1789636723287` | **366** | 81 | 22 (전부 `FEATURE_OOD`) |
+| 라이브 빌드와 같은 2차 `batch_1792056041502` | 396 | 50 (= 원래 봇 행이 없는 50레벨) | 23 |
+- 3차의 측정 필요 81 = 봇 행이 없는 레벨 + 업로드 조건이 라이브와 다른 레벨(useTileCount 32·randSeed 1·timea 1, L32~79 는 라이브가 2차 맵). 이 조건들은 봇이 잰 적 없으니 측정 필요가 맞다. 처음 구현(맵 + 저장된 useTileCount 키)은 업로드가 useTileCount 를 재계산하는 것을 반영하지 못해 측정 필요를 139로 과대 계산했다.
+- 3차 ok 366레벨 예상 p10/p50/p90 = 0.89 / 0.96 / 0.98. `NEAR_CEILING` 227 · `LOW_CONFIDENCE` 21 · 신뢰도 high 226 / medium 57 / low 83. L1~31·L501+ 는 전부 `LEVEL_OUT_OF_RANGE`.
 
 ### 11-6. 하지 않은 것 · 남은 단계
 - **자동 봇 측정**: §1 MVP 에 없어 생략. 측정이 없는 맵은 `measurement_required` 로 응답한다. 측정 비용(512판/레벨)은 여전히 미측정.
 - `FEATURE_OOD` 의 마할라노비스 거리 규칙(문서 31 §3-2 "또는")은 구현하지 않았다(48특징·379레벨, 공분산 특이). 특징 수 규칙만 쓴다 — 학습 레벨 자체에서 9/379(2.4%)가 걸린다.
 - `POSITION_SHIFT`: 원래 위치 정보가 요청에 없어 구현하지 않음. 저장 필드 `clear_rate_placement_level` 로 나중에 비교 가능.
-- 셀의 "목표 대비" 표시는 넣지 않았다 — 메타의 기존 `target_clear_rate` 는 봇 척도 목표곡선(td 0.5 → 0.32)이라 ⑤ 범위와 비교하면 뜻이 없다. API 는 `target` 을 받아 `in_range80` 을 돌려준다.
+- 셀의 "목표 대비" 표시는 넣지 않았다 — 메타의 기존 `target_clear_rate` 는 봇 척도 목표곡선(td 0.5 → 0.32)이라 ⑤ 범위와 비교하면 뜻이 없다. 목표 비교는 `judge` 로만 한다(레벨 번호별 ⑤ 목표 곡선이 생기면 연결).
 - 새 메타 필드는 §1 제안 7개 + `clear_rate_status`(측정 필요/근거 부족 구분)·`clear_rate_placement_level`(문서 31 §2-1 ② "위치를 함께 기록") 2개를 더했다.
+- `judge` 의 P(목표 범위 안)는 80% 범위를 logit 공간 두 조각 정규분포로 근사한 값이다(10%/90% 점 = 범위 끝, 천장 쪽 끝이 1.0 이면 반대쪽 폭을 씀). 판정 임계(0.5)·폭(logit ±0.7)은 문서 31 D5·D6 제안값이고, ⑤ 기준 판정 재현(CQR 범위로 §4 선별 재현)은 아직 안 했다.
 - **대시보드 연결(다음 단계)**: 다른 세션의 `ProductionDashboard/index.tsx` 변경이 커밋된 뒤, 이 브랜치를 리베이스하고 배치 표에 열 추가 → 각 레벨 `predictClearRate({level_json, placement_level: meta.level_number})` → `toClearRateMeta` 로 메타 저장 → `<ClearRateCell {...meta} />`. 그때 Playwright 웹뷰 확인(§6-3).
 - 머지 시 주의: `backend/app/main.py` 는 다른 세션 미커밋 변경(`pv_play` 라우터)과 같은 위치 근처에 2줄 추가, `frontend/src/types/production.ts` 는 import 1줄 + 메타 필드 블록(다른 세션 변경과 다른 위치).
+
+### 11-7. 생성·검증에서 재사용할 인터페이스 (`app.core.clear_rate`)
+| 함수 | 입력 → 출력 | 비고 |
+|---|---|---|
+| `game_conditions(level_json, placement_level)` | → `(game_map, conditions)` 최종 게임 조건 | 업로드 변환 + autoCollectCount 기본 규칙. 생성기 후보도 이걸로 정규화 |
+| `condition_hash(game_map, conditions)` | → 20자 해시 | 봇 측정 결과에 붙이는 태그. 측정 저장 시 함께 기록 |
+| `BotMeasurement(bot_version, protocol, condition_hash, rows, seed_set, source)` | 측정 + 프로토콜 메타 | `seed_set` 으로 선별 시드 S / 확인 시드 C 구분(문서 31 §4-3) |
+| `predict_level(model, game_map, conditions, placement_level, measurement, random_layout=)` | → `ClearRatePrediction` | **순수 함수.** 같은 입력 → 같은 출력(테스트). 해시 불일치·프로토콜 불일치·지원 범위 밖이면 숫자 없이 `insufficient_reasons` |
+| `predict_editor_level(level_json, placement_level, bot_measurement=None)` | → `ClearRatePrediction` | 에디터/API 진입. 위 셋을 묶고 봇 캐시를 조회 |
+| `judge(prediction, target, support, half_width_logit=0.7)` | → `ClearRateVerdict(verdict, reason, target, band, p_in_band, target_flags)` | PASS / FAIL / INSUFFICIENT_EVIDENCE. **기존 합격 판정(`verification_passed`, `/generate/validated`, 순차 검증)은 바꾸지 않았고 연결도 안 했다** |
+| `load_model(version="")` | → `ClearRateModel`(manifest·model·bot_cache) | `model.model["support"]` 를 `judge` 에 넘긴다 |
+
+이후 경로(목표 곡선 → 후보 생성 → 봇 측정 → 예측 → 선별 → 독립 시드 확인 → 레벨셋)에서 남은 것: 레벨 번호별 ⑤ 목표 곡선 입력(문서 31 D13), 봇 측정 실행기가 `condition_hash`·`seed_set` 을 붙여 측정을 저장하는 부분(θ 4개 × 128판 실행·시간 측정), 확인 시드 C 재측정 후 `judge` 를 C 측정으로 다시 돌리는 선별 규칙, ⑤ 기준 판정 재현.

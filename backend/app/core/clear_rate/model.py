@@ -3,7 +3,7 @@
 Artifact layout (`backend/data/models/clear_rate/<version>/`, written by `scripts/train_clear_rate_model.py`):
   manifest.json   provenance + validation metrics (bot version, shard commit, target definition, trained_at, ...)
   model.json      heads (ridge coefficients + gradient-boosted trees), CQR width, support summary, position table
-  bot_cache.json  bot measurements of the training (live) maps keyed by `features.map_hash`
+  bot_cache.json  bot measurements of the training (live) maps keyed by `features.condition_hash` (+ measurement meta)
 Active version: `backend/data/models/clear_rate/active.json` {"version": "<version>"}.
 
 Model = residual_model "c+" (direct ridge + direct GBM, mean of the two logits; doc 21 — same accuracy as the

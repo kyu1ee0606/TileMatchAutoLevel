@@ -16,6 +16,8 @@ const FLAG_LABEL: Record<string, string> = {
   GIMMICK_LOW_TRAIN: '기믹 데이터 부족',
   FEATURE_OOD: '학습 범위 밖 특징',
   BOT_PROTOCOL_MISMATCH: '봇 측정 불일치',
+  MEASUREMENT_MISSING: '봇 측정 없음',
+  MEASUREMENT_CONDITION_MISMATCH: '측정 후 맵 조건 바뀜',
   UNSOLVED: '봇 클리어 0',
   TARGET_OUT_OF_SUPPORT: '목표 범위 밖',
   LOW_CONFIDENCE: '신뢰 낮음',
@@ -56,7 +58,7 @@ export function ClearRateCell(props: ClearRateCellProps) {
   }
   if (status === 'measurement_required') {
     return (
-      <span className="text-gray-400 text-xs" title="이 맵의 봇 v2.4 측정(θ 4개 × 128판)이 없어 예측하지 않음">
+      <span className="text-gray-400 text-xs" title="이 게임 조건(맵·useTileCount·시드 등)의 봇 v2.4 측정(θ 4개 × 128판)이 없어 예측하지 않음">
         측정 필요
       </span>
     );

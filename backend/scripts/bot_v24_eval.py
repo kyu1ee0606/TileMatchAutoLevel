@@ -561,6 +561,27 @@ def cmd_final(a):
     print(f"final v2.4 rows={len(d['rows'])}")
 
 
+def cmd_ablate(a):
+    """Final v2.4 minus items (--drop) re-measured ONLY on levels where the dropped items can act (--levels);
+    other levels copy the base rows (default final) — the items never fire there, same seeds ⇒ identical rows.
+    Writes bot_v2.4f_no_<tag>.json (4 θ)."""
+    ex = _expo()
+    drop = [x for x in a.drop.split(",") if x]
+    items = [x for x in _default_items() if x not in drop]
+    if a.levels == "all":
+        lv = sorted({r["L"] for r in load(OUT / a.base)["rows"]})
+    else:
+        lv = sorted(set().union(*[set(v23.levels_with([f])) for f in a.levels.split(",") if f]))
+    tag = a.tag or "_".join(drop)
+    tasks = [{"L": L, "theta": float(t), "games": 128, "exposure": ex[L], "v24": items}
+             for t in a.thetas.split(",") for L in lv]
+    d = _pool_run(tasks, f"abl_{tag}_rows.json", lambda r: (r["L"], r["theta"]))
+    ov = {(r["L"], r["theta"]): r for r in d["rows"]}
+    rows = [ov.get((r["L"], r["theta"]), r) for r in load(OUT / a.base)["rows"]]
+    save(f"bot_v2.4f_no_{tag}.json", {"rows": rows})
+    print(f"ablate {tag}: re-measured {len(d['rows'])} rows on {len(lv)} levels, total {len(rows)}")
+
+
 def cmd_curtfull(a):
     """Re-measure curtain levels (θ grid, 128 games) with the final v2.4 (incl. curtain_memory_v24)."""
     ex = _expo()
@@ -644,23 +665,33 @@ def cmd_bfit(a):
     refs = {t: seg_refs({r["L"]: r for r in rows24 if r["theta"] == t}, A, P) for t in thetas}
     lv = sorted(L for L in by["off"][thetas[0]] if A[L]["unaided_clear_lower_bound"] is not None)
 
-    def self_refs(v, t):
+    import hashlib
+    mh = {L: hashlib.sha1(json.dumps(P[L]["map"], sort_keys=True).encode()).hexdigest()[:12] for L in P}
+    rows24_t = {t: {r["L"]: r for r in rows24 if r["theta"] == t} for t in thetas}
+
+    def self_refs(v, t, excl=frozenset()):
         """Segment refs from this value's own rows: plain levels (no chain/bomb/grass) among the measured levels;
-        a segment with no plain level falls back to all measured levels (= within-group centering)."""
+        a segment with no plain level falls back to all measured levels (= within-group centering).
+        excl = levels whose AF must not enter the refs (--strict: the held-out fold)."""
         rs = by[v][t]
         sa, sb = {}, {}
         for lo, hi in base.SEGMENTS:
             sname = f"{lo}-{hi}"
-            seg = [L for L in lv if lo <= L <= hi]
+            seg = [L for L in lv if lo <= L <= hi and L not in excl]
             G = [L for L in seg if not any(P[L]["features"].get(f, 0) for f in ("eff_chain", "eff_bomb", "eff_grass"))] or seg
             if G:
                 sa[sname] = sum(_mid(A, L) for L in G) / len(G)
                 sb[sname] = sum(rs[L]["wins"] / rs[L]["games"] for L in G) / len(G)
         return sa, sb
 
-    def met(v, ls, t):
+    def met(v, ls, t, excl=frozenset()):
         rs = by[v][t]
-        sa, sb = self_refs(v, t) if a.refs == "self" else refs[t]
+        if a.refs == "self":
+            sa, sb = self_refs(v, t, excl)
+        elif excl:
+            sa, sb = seg_refs({L: r for L, r in rows24_t[t].items() if L not in excl}, A, P)
+        else:
+            sa, sb = refs[t]
         rate = {L: rs[L]["wins"] / rs[L]["games"] for L in ls}
         bc, ac = Counter(), Counter()
         for L in ls:
@@ -672,23 +703,35 @@ def cmd_bfit(a):
                 "rho": spearman([rate[L] for L in ls], [_mid(A, L) for L in ls]),
                 "share_bot": bc[a.reason] / max(1, sum(bc.values())), "share_af": ac[a.reason] / max(1, sum(ac.values()))}
 
-    def loss(v, ls):
-        ms = [met(v, ls, t) for t in thetas]
+    def loss(v, ls, excl=frozenset()):
+        ms = [met(v, ls, t, excl) for t in thetas]
         return sum(m["mae_rel"] + a.share_w * abs(m["share_bot"] - m["share_af"]) for m in ms) / len(ms)
     grid = {v: {str(t): {k: round(x, 4) for k, x in met(v, lv, t).items()} for t in thetas} for v in by}
     rng, res, picks = random.Random(31), [], Counter()
+    groups = sorted({mh[L] for L in lv})
     for _ in range(200):
-        sh = lv[:]
-        rng.shuffle(sh)
-        tr, te = sh[: len(sh) // 2], sh[len(sh) // 2:]
-        best = min(by, key=lambda v: loss(v, tr))
+        if a.strict:                                 # 맵해시 그룹 단위 분할 + 기준값은 검증 폴드를 뺀 레벨로만
+            gs = groups[:]
+            rng.shuffle(gs)
+            te_g = set(gs[len(gs) // 2:])
+            tr = [L for L in lv if mh[L] not in te_g]
+            te = [L for L in lv if mh[L] in te_g]
+            ex_te, ex_tr = frozenset(L for L in P if mh[L] in te_g), frozenset()
+        else:
+            sh = lv[:]
+            rng.shuffle(sh)
+            tr, te = sh[: len(sh) // 2], sh[len(sh) // 2:]
+            ex_te = ex_tr = frozenset()
+        best = min(by, key=lambda v: loss(v, tr, ex_te))
         picks[best] += 1
-        res.append((loss(best, te), loss("off", te)))
+        res.append((loss(best, te, ex_te), loss("off", te, ex_te)))
     out = {"levels": len(lv), "thetas": thetas, "grid": grid, "cv_loss_fit": round(sum(r[0] for r in res) / 200, 4),
            "cv_loss_off": round(sum(r[1] for r in res) / 200, 4),
            "cv_win_rate": round(sum(1 for r in res if r[0] < r[1]) / 200, 3),
            "picks": dict(picks.most_common()), "chosen": min(by, key=lambda v: loss(v, lv))}
-    save(f"bfit_{a.name}_{a.refs}.json", out)
+    out["strict"] = bool(a.strict)
+    out["groups"] = len(groups)
+    save(f"bfit_{a.name}_{a.refs}{'_strict' if a.strict else ''}.json", out)
     print(json.dumps({k: v for k, v in out.items() if k != "grid"}, ensure_ascii=False))
     for v, m in grid.items():
         print("  ", v, " | ".join(f"θ{t}: rate {x['rate']:.3f} ρ {x['rho']:.3f} res {x['resid']:+.3f} mae {x['mae_rel']:.3f} "
@@ -757,6 +800,9 @@ def main():
     sub.add_parser("cmemfit").set_defaults(f=cmd_cmemfit)
     sub.add_parser("cmem085").set_defaults(f=cmd_cmem085)
     sub.add_parser("curtfull").set_defaults(f=cmd_curtfull)
+    p = sub.add_parser("ablate"); p.add_argument("--drop", required=True); p.add_argument("--levels", required=True)
+    p.add_argument("--thetas", default="0.55,0.65,0.85,1.0"); p.add_argument("--base", default="bot_v2.4f.json")
+    p.add_argument("--tag", default=""); p.set_defaults(f=cmd_ablate)
     p = sub.add_parser("final"); p.add_argument("--thetas", default="0.55,0.65,0.85,1.0"); p.add_argument("--drop", default="")
     p.set_defaults(f=cmd_final)
     sub.add_parser("betagrid").set_defaults(f=cmd_betagrid)
@@ -769,6 +815,7 @@ def main():
     p = sub.add_parser("bfit"); p.add_argument("--name", required=True); p.add_argument("--reason", default="Normal")
     p.add_argument("--share-w", dest="share_w", type=float, default=0.0); p.add_argument("--fixed-keys", dest="fixed_keys", default="")
     p.add_argument("--refs", default="base", help="base = segment refs from bot_v2.4 rows; self = this value's own rows")
+    p.add_argument("--strict", action="store_true", help="map-hash group split + refs exclude the held-out fold")
     p.set_defaults(f=cmd_bfit)
     p = sub.add_parser("cmp"); p.add_argument("--name", required=True); p.add_argument("--base", default="bot_v2.4.json")
     p.add_argument("--reason", default="Normal"); p.add_argument("--boot", type=int, default=500); p.set_defaults(f=cmd_cmp)

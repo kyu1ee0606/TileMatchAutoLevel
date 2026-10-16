@@ -51,6 +51,7 @@ NEW_VERSIONS = ("android|1.1.0", "ios|2.1.0")
 WORKERS = min(2, int(os.environ.get("PV_WORKERS", "2")))
 GAMES_DEFAULT = 400
 THETAS_DEFAULT = (0.65, 0.75, 0.85)     # 14_bot_v2_vs_af_L1_31.md: L1~31 보정 θ v1≈0.85, v2≈0.75~0.85 근방
+BOT_VERSION_DEFAULT = "v2.3"
 
 
 def load(p):
@@ -260,9 +261,10 @@ def run_task(args):
     n_lay = min(32, games)
     lays = lays[:n_lay] if len(lays) > 1 else lays
     per = max(1, games // len(lays))
-    prof = make_skill_profile(args["theta"], "v2.3")
+    bot_version = args.get("bot_version", BOT_VERSION_DEFAULT)
+    prof = make_skill_profile(args["theta"], bot_version)
     auto = int(float(entry["row"].get("autoCollectCount") or 0))
-    if auto:
+    if auto and prof.gimmick_awareness is not None:   # auto_collect는 v2.1/v2.3 전용 정합 항목(v1엔 없음)
         import dataclasses
         cfg = dict(prof.gimmick_awareness)
         cfg["auto_collect"] = auto
@@ -278,19 +280,20 @@ def run_task(args):
             final = bot._play_game(bot._fast_copy_state(base_state), prof)
             n += 1
             wins += 1 if final.cleared else 0
-    return {"L": args["L"], "which": args["which"], "theta": args["theta"], "games": n, "wins": wins,
-            "layouts": len(lays), "sec": time.time() - t0}
+    return {"L": args["L"], "which": args["which"], "theta": args["theta"], "bot_version": bot_version,
+            "games": n, "wins": wins, "layouts": len(lays), "sec": time.time() - t0}
 
 
 def cmd_run(a):
     path = OUT / "bot_rows.json"
     done = load(path) if path.exists() else {"rows": []}
-    have = {(r["L"], r["which"], r["theta"]) for r in done["rows"]}
+    bot_version = a.bot_version
+    have = {(r["L"], r["which"], r["theta"], r.get("bot_version", BOT_VERSION_DEFAULT)) for r in done["rows"]}
     levels = sorted(int(k) for k in load(OUT / "maps.json"))
     thetas = [float(x) for x in a.thetas.split(",")] if a.thetas else THETAS_DEFAULT
-    todo = [{"L": L, "which": w, "theta": th, "games": a.games}
-            for L in levels for w in ("old", "new") for th in thetas if (L, w, th) not in have]
-    print(f"todo={len(todo)} workers={WORKERS}")
+    todo = [{"L": L, "which": w, "theta": th, "games": a.games, "bot_version": bot_version}
+            for L in levels for w in ("old", "new") for th in thetas if (L, w, th, bot_version) not in have]
+    print(f"todo={len(todo)} workers={WORKERS} bot_version={bot_version}")
     t0 = time.time()
     with ProcessPoolExecutor(WORKERS) as ex:
         for r in ex.map(run_task, todo, chunksize=1):
@@ -340,7 +343,9 @@ def weighted_regression(xs, ys, ws):
 def cmd_report(a):
     af = load(OUT / "af_deltas.json")
     maps_meta = load(OUT / "maps.json")
-    rows = load(OUT / "bot_rows.json")["rows"]
+    bot_version = a.bot_version
+    rows = [r for r in load(OUT / "bot_rows.json")["rows"]
+            if r.get("bot_version", BOT_VERSION_DEFAULT) == bot_version]
     by_lw = {}
     for r in rows:
         by_lw.setdefault((r["L"], r["which"]), []).append(r)
@@ -417,6 +422,7 @@ def cmd_report(a):
                                    "user_delta_pp_hi": max(vals[0], vals[2])})
 
     rep = {
+        "bot_version": bot_version,
         "n_mixed_levels": len(af["mixed"]), "n_control_levels": af["drift"]["n_control_levels"],
         "drift_correction": af["drift"]["mean"], "drift_logit_correction": af["drift"]["logit_mean"],
         "change_type_counts": {t: sum(1 for v in per_level.values() if v["change_type"] == t)
@@ -434,7 +440,8 @@ def cmd_report(a):
         "logit_conversion_table": conv_table,
         "per_level": per_level,
     }
-    save("report.json", rep)
+    out_name = "report.json" if bot_version == BOT_VERSION_DEFAULT else f"report_{bot_version}.json"
+    save(out_name, rep)
     print(json.dumps({k: v for k, v in rep.items() if k != "per_level"}, ensure_ascii=False, indent=1))
 
 
@@ -446,8 +453,11 @@ def main():
     p = sub.add_parser("run")
     p.add_argument("--thetas", default="")
     p.add_argument("--games", type=int, default=GAMES_DEFAULT)
+    p.add_argument("--bot-version", default=BOT_VERSION_DEFAULT)
     p.set_defaults(f=cmd_run)
-    sub.add_parser("report").set_defaults(f=cmd_report)
+    pr = sub.add_parser("report")
+    pr.add_argument("--bot-version", default=BOT_VERSION_DEFAULT)
+    pr.set_defaults(f=cmd_report)
     a = ap.parse_args()
     a.f(a)
 

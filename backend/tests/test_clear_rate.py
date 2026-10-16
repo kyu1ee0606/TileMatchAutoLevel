@@ -384,10 +384,11 @@ def test_api_rejects_bad_input(client, mdl):
 
 # ── training reproducibility ─────────────────────────────────────────────────────────────────────
 TRAIN_PY = Path(os.environ.get("CLEAR_RATE_TRAIN_PYTHON", str(BACKEND.parent.parent / "TileMatchAutoLevel/analysis_venv/bin/python")))
-TRAIN_DATA = BACKEND / "data/pv_sandbox/af_calibration/bot_v24/bot_v2.4f_no_rules_only.json"
+TRAIN_DATA = [BACKEND / "data/pv_sandbox/af_calibration/bot_v24/bot_v2.4f_no_rules_only.json",
+              BACKEND / "data/production/batch_1792056041502_cn5e4ny66.json"]  # legacy batch: level-set filter
 
 
-@pytest.mark.skipif(not TRAIN_PY.exists() or not TRAIN_DATA.exists(),
+@pytest.mark.skipif(not TRAIN_PY.exists() or not all(p.exists() for p in TRAIN_DATA),
                     reason="needs a numpy python (CLEAR_RATE_TRAIN_PYTHON) and the local AF/bot sandbox data")
 def test_training_reproduces_saved_model(mdl):
     out = subprocess.run([str(TRAIN_PY), "-W", "ignore", str(BACKEND / "scripts/train_clear_rate_model.py"),

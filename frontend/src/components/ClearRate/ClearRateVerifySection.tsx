@@ -76,29 +76,6 @@ export function ClearRateVerifySection({ batchId }: { batchId: string }) {
   const [saveError, setSaveError] = useState<string | null>(null);
   const locks = useRef(new Set<string>());
 
-  // ── 복원 (측정 요청 없음: 레벨·저장 상태 읽기 + 작업 상태 조회 + 현재 모델/기준 버전 조회) ─────────────────
-  useEffect(() => {
-    let alive = true;
-    setRecords({}); setJobs({}); setPlan(null); setPreview(null); setSelected(new Set()); setRowError({});
-    getProductionLevelsByBatch(batchId)
-      .then(ls => { if (alive) setLevels([...ls].sort((x, y) => x.meta.level_number - y.meta.level_number)); })
-      .catch(err => console.error('[ClearRateVerify] load levels failed:', err));
-    loadBatchVerifyState(batchId).then(st => {
-      if (!alive) return;
-      setCurve(st.curve);
-      const d = curveToDraft(st.curve);
-      setSegDraft(d.segments); setOvDraft(d.overrides);
-      setBInput(st.bTarget != null ? String(Math.round(st.bTarget * 1000) / 10) : '');
-      setRecords(Object.fromEntries(st.records.map(r => [r.key, r])));
-      setJobs(Object.fromEntries(st.jobs.map(j => [j.level_number, j])));
-      if (st.skipped) setMessage(`이전 저장 항목 ${st.skipped}개는 형식이 맞지 않아 무시함`);
-      if (st.jobs.length) refreshJobs(st.jobs).catch(() => undefined);
-    }).catch(err => setSaveError(`저장소 읽기 실패: ${errText(err)}`));
-    getVerifyInfo().then(i => { if (alive) setInfo(i); }).catch(() => undefined);
-    return () => { alive = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [batchId]);
-
   const persistJob = useCallback(async (ref: ConfirmJobRef) => {
     setJobs(prev => ({ ...prev, [ref.level_number]: ref }));
     try { await putJobRef(ref); } catch (e) { setSaveError(`작업 참조 저장 실패: ${errText(e)}`); }
@@ -121,6 +98,29 @@ export function ClearRateVerifySection({ batchId }: { batchId: string }) {
     const t = setInterval(() => { refreshJobs(activeRefs).catch(() => undefined); }, POLL_MS);
     return () => clearInterval(t);
   }, [activeRefs, refreshJobs]);
+
+  // ── 복원 (측정 요청 없음: 레벨·저장 상태 읽기 + 작업 상태 조회 + 현재 모델/기준 버전 조회) ─────────────────
+  useEffect(() => {
+    let alive = true;
+    setRecords({}); setJobs({}); setPlan(null); setPreview(null); setSelected(new Set()); setRowError({});
+    getProductionLevelsByBatch(batchId)
+      .then(ls => { if (alive) setLevels([...ls].sort((x, y) => x.meta.level_number - y.meta.level_number)); })
+      .catch(err => console.error('[ClearRateVerify] load levels failed:', err));
+    loadBatchVerifyState(batchId).then(st => {
+      if (!alive) return;
+      setCurve(st.curve);
+      const d = curveToDraft(st.curve);
+      setSegDraft(d.segments); setOvDraft(d.overrides);
+      setBInput(st.bTarget != null ? String(Math.round(st.bTarget * 1000) / 10) : '');
+      setRecords(Object.fromEntries(st.records.map(r => [r.key, r])));
+      setJobs(Object.fromEntries(st.jobs.map(j => [j.level_number, j])));
+      if (st.skipped) setMessage(`이전 저장 항목 ${st.skipped}개는 형식이 맞지 않아 무시함`);
+      if (st.jobs.length) refreshJobs(st.jobs).catch(() => undefined);
+    }).catch(err => setSaveError(`저장소 읽기 실패: ${errText(err)}`));
+    getVerifyInfo().then(i => { if (alive) setInfo(i); }).catch(() => undefined);
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [batchId]);
 
   const hashes = useMemo(() => Object.fromEntries(levels.map(l => [l.meta.level_number, mapHash(l.level_json)])), [levels]);
   const cHash = useMemo(() => curveHash(curve), [curve]);

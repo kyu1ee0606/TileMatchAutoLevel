@@ -195,3 +195,49 @@ def test_api_target_eval_modes_are_separate(client, mdl, fin):
     assert b["bot_virtual"]["bot_virtual_verdict"] == V.INSUFFICIENT
     assert b["bot_virtual"]["real_user_status"] == "unverified"
     assert not any(k in b["bot_virtual"] for k in A_KEYS)
+
+
+# ── pilot 2: structural screen, bands, isolated generation ───────────────────────────────────────────────────
+@pytest.mark.parametrize("placement", [L, 157, 268])
+def test_structural_screen_is_subset_of_prediction_flags(mdl, placement):
+    """The screen reports only flags the full prediction raises too, and a blocking screen means no normal verdict
+    (no number or confidence low) — it never relaxes or replaces the prediction."""
+    from app.core.clear_rate import predict_level
+    gm, cond = finalize_game_conditions(LJ, placement)
+    s = X.structural_screen(mdl, gm, cond, placement, random_layout=False)
+    cached = dict(mdl.bot_cache[cond_hash(*finalize_game_conditions(LJ, L))])
+    m = BotMeasurement.from_dict({**cached, "cond_hash": cond_hash(gm, cond)})
+    p = predict_level(mdl, gm, cond, placement, m, random_layout=False)
+    full = {f["code"] for f in p.evidence_flags}
+    assert set(s["codes"]) <= full, set(s["codes"]) - full
+    if s["blocking"]:
+        assert not p.in_support or p.confidence == "low"
+
+
+def test_virtual_def_bands_follow_definition():
+    d = V.VirtualDef(search_protocol="theta085x512_v1", seed_bands=("S2B", "C2"))
+    ok = meas("h", [{"theta": 0.85, "games": 512, "wins": 256}], band="C2")
+    assert V.virtual_verdict(ok, d, 0.5, "h").bot_virtual_verdict == V.MET
+    old = meas("h", [{"theta": 0.85, "games": 512, "wins": 256}], band="C")      # pilot-1 confirmation band
+    assert V.virtual_verdict(old, d, 0.5, "h").bot_virtual_verdict == V.INSUFFICIENT
+    assert d.def_id != V.DEFAULT_DEF.def_id
+
+
+def test_seed_bands_do_not_overlap():
+    from app.core.clear_rate.measure import LAYOUTS, PROTOCOLS, SEED_BANDS
+    span = (LAYOUTS - 1) * 1000 + max(g for _, g in PROTOCOLS.values())       # max offset used by a band
+    lo = sorted(SEED_BANDS.values())
+    assert all(b - a > span for a, b in zip(lo, lo[1:]))
+    assert PROTOCOLS["theta085x64_v1"] == ((0.85,), 64)
+
+
+def test_isolated_generation_is_reproducible():
+    import random as _r
+    import sys
+    sys.path.insert(0, str(BACKEND / "scripts"))
+    import clear_rate_gen_pilot2 as P2
+    spec = P2.PLAN["levels"][2]
+    req = P2.build_request(spec["placement"], 0.4, _r.Random(7), spec)
+    a, b = P2.generate_isolated(req, 7), P2.generate_isolated(req, 7)
+    assert a["ok"] and json.dumps(a["level_json"], sort_keys=True) == json.dumps(b["level_json"], sort_keys=True)
+    assert req["target_difficulty"] < 0.6 and req["max_layers"] <= 5

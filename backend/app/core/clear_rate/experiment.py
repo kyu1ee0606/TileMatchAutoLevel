@@ -49,10 +49,43 @@ def user_expected_precheck(model: Any, target: float, placement_level: Optional[
     return out
 
 
+# Low-confidence codes decidable from the map, final conditions and placement alone (no bot data). A candidate carrying
+# any of these (or a hard input / structural FEATURE_OOD flag) cannot get a normal verdict whatever its measurement,
+# so the generation search may skip measuring it. Same guard functions and inputs as predict_level — nothing relaxed.
+STRUCTURAL_LOW_CONF = ("GIMMICK_FIRST", "NOVELTY_HIGH", "SIMILAR_MAPS_FEW", "COMBO_HIGH_ERROR")
+
+
+def structural_screen(model: Any, game_map: Dict[str, Any], cond: Dict[str, Any], placement_level: int, *,
+                      random_layout: bool) -> Dict[str, Any]:
+    """Pre-measurement screen for mode A: the bot-independent part of predict_level's checks on the real map.
+    Bot features are left NaN (never compared, never fed to the model), so the screen only reports flags that the
+    full prediction would also raise; it does not produce or replace a prediction."""
+    from .features import level_features, map_features, present_gimmicks
+    from .predict import _exposure
+    sup, pos = model.model["support"], model.model["position"]
+    gims = present_gimmicks(map_features(game_map))
+    flags = guard.input_flags(sup, placement_level=placement_level, gimmicks=gims, conditions=cond)
+    L, acc = int(placement_level), int(cond["autoCollectCount"])
+    feats = level_features(game_map, placement_level=L, use_tile_count=cond["useTileCount"],
+                           unlock_tile=cond["unlockTile"], is_boss=1 <= acc <= 3, random_layout=random_layout,
+                           map2nd=False, exposure=_exposure(pos, L), gimmick_first=L in set(pos["gimmick_first_levels"]),
+                           bot_rows=None)
+    flags += guard.feature_flags(sup, feats)
+    combo = "+".join(g for g in gims if g != "craft") or "none"
+    flags += guard.reliability_flags({"pred_zone": None, "combo": {"key": combo, **(
+        (sup.get("reliability") or {}).get("combo", {}).get(combo) or {"n": 0})}})
+    codes = [f["code"] for f in flags]
+    blocking = [c for c in codes if c in guard.SUPPRESS or c in STRUCTURAL_LOW_CONF]
+    return {"codes": codes, "blocking": blocking, "combo": combo, "gimmicks": gims,
+            "structure": {k: feats[k] for k in ("tiles", "layers", "types", "tiles_per_type", "novelty")}}
+
+
 def evaluate_user_expected(model: Any, game_map: Dict[str, Any], cond: Dict[str, Any], placement_level: int,
-                           meas: Optional[BotMeasurement], target: float, *, random_layout: bool) -> Dict[str, Any]:
+                           meas: Optional[BotMeasurement], target: float, *, random_layout: bool,
+                           confirm_bands=None) -> Dict[str, Any]:
     pred = predict_level(model, game_map, cond, placement_level, meas, random_layout=random_layout)
-    v = verdict(pred, target, model.model["support"])
+    v = (verdict(pred, target, model.model["support"]) if confirm_bands is None else
+         verdict(pred, target, model.model["support"], confirm_bands=confirm_bands))
     vd = dict(v.__dict__)
     vd["band"], vd["thresholds"] = list(v.band), {k: (list(x) if isinstance(x, tuple) else x)
                                                    for k, x in v.thresholds.items()}

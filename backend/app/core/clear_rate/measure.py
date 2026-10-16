@@ -30,11 +30,15 @@ from .predict import BotMeasurement
 BOT_VERSION = "v2.4"
 LAYOUTS = 32                                   # bot_af_L32_500.LAYOUTS
 FIXED = {"beta": 4.0, "l0": 0.5, "tau": 15.0}   # bot_v21_fit.FIXED
-SEED_BANDS = {"seed11M": 11_000_000, "S": 15_000_000, "C": 16_000_000}
+SEED_BANDS = {"seed11M": 11_000_000, "S": 15_000_000, "C": 16_000_000,
+              # pilot 2 (doc 33 §14): new search / screening / confirmation bands — pilot 1 bands are not reused
+              "S2": 17_000_000, "P2": 17_500_000, "S2B": 18_000_000, "C2": 19_000_000}
 # protocol → (θ list, games per θ). theta4x128_v1 = the model protocol (A, and B search). theta085x512_v1 = B confirm.
+# theta085x64_v1 = B low-cost screening only (never a model input, never a verdict input).
 PROTOCOLS: Dict[str, Tuple[Tuple[float, ...], int]] = {
     "theta4x128_v1": ((0.55, 0.65, 0.85, 1.0), 128),
     "theta085x512_v1": ((0.85,), 512),
+    "theta085x64_v1": ((0.85,), 64),
 }
 EXPOSURE_GIMMICKS = ("bomb", "grass")          # bot_v21_fit.GIMMICKS (awareness exposure)
 NO_AIDS = {"booster": False, "revive": False}

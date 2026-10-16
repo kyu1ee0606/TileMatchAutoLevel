@@ -124,13 +124,15 @@ def measurement_problems(m: Any, d: VirtualDef, current_hash: str, *, stage: str
     out = []
     if m is None:
         return [f"{stage} 측정 없음"]
-    proto = d.confirm_protocol if stage == "C" else d.search_protocol
+    idx = 1 if stage == "C" else 0              # stage: "S" = search, "C" = confirmation (bands from the definition)
+    proto = d.confirm_protocol if idx else d.search_protocol
+    band = d.seed_bands[idx]
     if m.bot_version != d.bot_version:
         out.append(f"봇 버전 {m.bot_version or '?'} ≠ 정의 {d.bot_version}")
     if m.protocol != proto:
         out.append(f"프로토콜 {m.protocol or '?'} ≠ 정의 {proto}")
-    if m.seed_band != stage:
-        out.append(f"시드 묶음 {m.seed_band or '?'} ≠ {stage}")
+    if m.seed_band != band:
+        out.append(f"시드 묶음 {m.seed_band or '?'} ≠ {band}")
     if not m.cond_hash or m.cond_hash != current_hash:
         out.append(f"조건 해시 {m.cond_hash or '?'} ≠ 현재 {current_hash}")
     if m.aids_simulated and any(m.aids_simulated.values()):

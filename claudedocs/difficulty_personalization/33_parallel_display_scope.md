@@ -133,3 +133,70 @@ CLAUDE.md 프로젝트 규칙대로 **백엔드 스키마 변경 시 프론트 �
 - 게임 표시 난이도(xDifficulty) 변경, `ProductionExport.tsx`/`gboost.py`의 업로드 값 변경(트랙 B, D15 — 보류 상태 유지).
 - `select` API(후보 순위·자동 선별), 생성기 반복 탐색 연동(§4-3류 안전장치).
 - 라이브 검증(§5), 파일럿 29 연동(D12).
+
+## 11. 구현 기록 — 1단계 (2026-10-16, 브랜치 `feature/clear-rate-display`, 워크트리 `TileMatchAutoLevel_wt_clearrate`)
+
+> 승인 결정(마더 전달): (a) 필드 이름 §1 제안대로 (b) **순수 파이썬 예측기 — lightgbm 등 새 런타임 의존성 없음** (c) 모델 파일 git 포함 (d) 봇 v2.4 규칙 정합 6건(26dd967 `V24_DEFAULT`) + E1 재학습, 목표 ft_any (e) 경고: 예상·목표 <0.85 "신뢰 낮음", ≥0.95 "천장", 근거 부족은 **예측 대신 사유 표시**, placement_level 필수 (f) `ProductionDashboard/index.tsx` 는 다른 세션 커밋 뒤 (g) 배치 표만.
+> 기존 `predicted_clear_rate`·`verification_passed`·업로드 값(`ProductionExport.tsx`·`gboost.py`)은 **건드리지 않았다.**
+
+### 11-1. 파일
+| 파일 | 내용 |
+|---|---|
+| `backend/app/core/clear_rate/features.py` | `residual_model.map_features`·`build` 의 48특징을 단건(맵, 배치 레벨, 봇 측정)으로 이식. numpy 없음, `app` import 없음(학습 스크립트가 파일 경로로 로드) |
+| `backend/app/core/clear_rate/model.py` | artifact 로드 + Ridge 내적·트리 순회 예측(순수 파이썬). CQR 범위 → 확률 변환 |
+| `backend/app/core/clear_rate/guard.py` | 문서 31 §3-2 코드로 경고·신뢰도. 판정(PASS/FAIL) 없음 |
+| `backend/app/core/clear_rate/service.py` | level_json → `canonical_map` → 특징 → 예측. 봇 측정: 요청값 → 모델 캐시 → 없으면 `measurement_required` |
+| `backend/app/api/routes/clear_rate.py`, `schemas.py`(클래스 추가만), `main.py`(import 1줄 + include 1줄) | `POST /api/clear-rate/predict` |
+| `backend/scripts/train_clear_rate_model.py` | 재학습·평가·내보내기·활성화. `--check` = 재학습 결과가 저장본과 바이트 동일한지 |
+| `backend/data/models/clear_rate/cr-ftany-v24r-20261016/{model.json 404KB, bot_cache.json 172KB, manifest.json}`, `active.json` | 모델·봇 캐시·출처 |
+| `backend/tests/test_clear_rate.py`, `tests/golden/clear_rate_L237.json` | 17건 |
+| `frontend/src/api/clearRate.ts` | 요청·응답 타입(백엔드 1:1), `predictClearRate`, `toClearRateMeta`(응답 → 메타 새 필드) |
+| `frontend/src/types/production.ts` | `ProductionLevelMeta` 새 필드만 추가(`mc_replaced_at` 뒤 — 다른 세션 미커밋 변경과 다른 위치) |
+| `frontend/src/components/ClearRate/ClearRateCell.tsx` | 배치 표 1칸: 예상·80% 범위·신뢰도·경고 배지·무도움/도움 사용(보조). 메타 필드만 props 로 받음(독립 렌더) |
+
+### 11-2. 모델 (문서 21 c+ 직접 구현 재사용)
+- 점예측: `residual_model.Ridge`(내부 CV λ) + `residual_model.GBM`(250트리·깊이3) logit 평균. 헤드 3개: ft_any(판정 목표 ⑤), 보조 `unaided_lb`(무도움 LB)·`help_rate`(첫 시도 도움 사용률).
+- 80% 범위: **CQR 순수 구현** — 직접 분위수 GBM(핀볼 손실, 잎 값 = 잎에 든 잔차의 α분위) q0.1/q0.9 + 내부 5겹 점수 E=max(lo−y, y−hi)의 80% 분위(유한표본 보정), 내부 분할 3개 점수 합침(한 분할만 쓰면 폴드별 폭이 logit 0.00~0.22로 흔들림).
+- **천장 처리**: 학습 목표는 `residual_model.logit` 이 [0.01, 0.99]로 자른다(⑤ 레벨의 14.5%가 0.99 초과). 범위 끝이 이 자름값에 닿으면 확률 1.0(아래는 0.0)으로 표시한다 — 자름값 그대로 두면 포함률이 0.715로 낮게 나왔다(실제 0.995인 레벨이 상한 0.99 밖). 이 처리 후 0.818.
+- 학습 데이터: `bot_v24/bot_v2.4f_no_rules_only.json`(규칙만 = 현재 기본값, 문서 26 §11-1) × 기존 AF `level_metrics.json` — **새 봇 측정 없음.** 레벨 집합은 `target_metric_eval.py` 와 같은 379레벨. 학습 스크립트가 런타임 `features.py` 로 만든 특징이 `residual_model.build` 와 **469레벨 전부 일치**하는지 단언한 뒤 학습한다.
+- manifest: 봇 버전·설정·행 파일, 프로토콜 `theta4x128_v1`·시드 규칙, 샤드 커밋 `b741f6a3`(빌드 1.1.0), AF 기간(2026-09-08~10-14, level_metrics 생성 시각), 목표 정의, 학습 시각, K-fold 지표·기준선·게이트, model.json/bot_cache.json sha256, 순수 파이썬 vs numpy 최대 차이.
+
+### 11-3. 재검증 (맵 해시 그룹 5겹 × 4반복, 379레벨, 반복 평균 ± sd)
+| | MAE | 편향 | ρ | ±5%p | ±10%p |
+|---|---|---|---|---|---|
+| 기준선 v2.3 + E1(lightgbm, 26 §11-2) | 0.0320 (0.0001) | +0.0124 | 0.758 (0.008) | 0.838 | 0.930 |
+| 참고 v2.4 규칙만 + E1(lightgbm) | 0.0320 | +0.0125 | 0.758 | 0.838 | 0.930 |
+| **이번: v2.4 규칙만 + c+(순수 구현)** | **0.0311 (0.0001)** | +0.0113 | **0.763 (0.007)** | 0.844 | 0.934 |
+- 동등 판정(반복 sd 기준, 사전 정의 |ΔMAE| ≤ 2·max sd, Δρ ≥ −2·max sd): ΔMAE −0.0009(허용 0.0010), Δρ +0.005(허용 −0.016) → **동등**. 게이트(MAE ≤0.035, ρ ≥0.72, 문서 31 D9 제안값) 통과.
+- 구간별 MAE/ρ: 32-100 0.016/0.72 (n=29) · 101-300 0.028/0.75 (180) · 301-500 0.037/0.70 (170).
+- 실제값 구간별(26 §11-9 재현): ≥0.96 MAE 0.014 · 0.92~0.96 0.024 · 0.85~0.92 0.040(편향 +0.029) · <0.85 0.120(편향 **+0.109**) → `LOW_CONFIDENCE` 근거 유지.
+- 보조: LB MAE 0.078 / ρ 0.730, 도움 사용률 MAE 0.057 / ρ 0.681.
+- 80% 범위(rep 0 OOF): 포함 **0.818**(32-100 0.83 · 101-300 0.84 · 301-500 0.79), 평균 폭 0.096(중앙 0.073), 상한이 1.0인 레벨 73%(천장), 점예측이 범위 안 0.995.
+- 재현성: 학습은 결정적(고정 시드). `--check` 로 재학습 → model.json·bot_cache.json 바이트 동일(pytest 에 포함).
+
+### 11-4. API (`POST /api/clear-rate/predict`)
+요청 `{level_json, placement_level?, target?: {value}, bot_measurement?: {bot_version, protocol, rows[]}}` → 응답 `{model_version, target_metric, bot_version, status, placement_level, map_hash, expected, range80, confidence, evidence_flags[], aux{unaided_lb, help_rate}, target{value, in_range80}?, bot_source, bot_success_reference}`. 문서 31 §3-1 에서 판정 관련(`verdict`·`p_in_target_band`·`drivers`)은 뺐다(병행 표시 단계 범위 밖; 직접 GBM 은 SHAP 분해도 없음).
+- `status`: `ok` / `insufficient_evidence`(예측 대신 사유) / `measurement_required`(봇 측정 없음).
+- 예측을 막는 경고(hard): `PLACEMENT_MISSING`, `LEVEL_OUT_OF_RANGE`(L32~500 밖), `GIMMICK_UNSEEN`/`GIMMICK_LOW_TRAIN`(학습 레벨 <10), `FEATURE_OOD`(학습 1~99분위 밖 특징 ≥2개), `BOT_PROTOCOL_MISMATCH`(버전·프로토콜·θ·판 수), `UNSOLVED`(모든 θ 봇 클리어 0). `TARGET_OUT_OF_SUPPORT` 는 hard 지만 목표에 대한 경고라 예측은 보여 준다.
+- 표시 경고(soft): `LOW_CONFIDENCE`(예상 또는 목표 <0.85, 신뢰도 low), `NEAR_CEILING`(≥0.95), `GIMMICK_FIRST`/`NOVELTY_HIGH`(신뢰도 low), `GIMMICK_BOT_WEAK`(grass·chain, 신뢰도 medium).
+- 위치 특징: 노출 수는 학습 일정(라이브 L32~500)에서 그 위치 앞까지 센 값, 기믹 첫 등장 위치 표, 보스(=냥이 레벨)는 업로드 기본 규칙(레벨 %10 == 0 → autoCollectCount 3)으로 정한다. `map2nd`(2차 배치 맵 표시)는 학습셋에서 상수 0 이라 0 으로 둔다.
+- 봇 캐시 키 = 맵 해시 + `useTileCount`. 같은 맵이라도 타입 수가 다르면 다른 레벨로 보고 측정 필요로 낸다.
+- 예시(라이브 배치 L153, 목표 0.92): `expected 0.9554, range80 [0.902, 1.0], confidence low, flags NOVELTY_HIGH·GIMMICK_BOT_WEAK·NEAR_CEILING, aux {unaided_lb 0.793, help_rate 0.161}, target {0.92, in_range80 true}, bot_source cache`.
+
+### 11-5. 현재 라이브 배치(3차 에디터 `batch_1789636723287`) L1~600 에 돌린 결과
+| 구간 | ok | 측정 필요 | 근거 부족 |
+|---|---|---|---|
+| L1~31 | 0 | 0 | 31 (`LEVEL_OUT_OF_RANGE`) |
+| L32~500 | **320** | 139 | 10 (`FEATURE_OOD` — L51~54 등 32-100 학습 레벨이 29개뿐이라 logL 이 분위 밖) |
+| L501~600 | 0 | 0 | 100 |
+- 측정 필요 139 = 봇 행이 원래 없는 레벨(측정 제외 레벨) + **에디터 3차 맵이 라이브(1.1.0 샤드)와 다른 92레벨**(L32~79 = 라이브는 2차 맵, 그 밖 57레벨은 맵은 같고 useTileCount 만 다름 — 문서 31 §2-2 "3차 useTileCount −1 수정 미업로드"). 이 맵들은 실제로 봇이 잰 적 없는 설정이라 측정 필요가 맞다.
+- ok 320레벨의 예상 p10/p50/p90 = 0.88 / 0.96 / 0.98. `NEAR_CEILING` 190 · `LOW_CONFIDENCE` 21.
+
+### 11-6. 하지 않은 것 · 남은 단계
+- **자동 봇 측정**: §1 MVP 에 없어 생략. 측정이 없는 맵은 `measurement_required` 로 응답한다. 측정 비용(512판/레벨)은 여전히 미측정.
+- `FEATURE_OOD` 의 마할라노비스 거리 규칙(문서 31 §3-2 "또는")은 구현하지 않았다(48특징·379레벨, 공분산 특이). 특징 수 규칙만 쓴다 — 학습 레벨 자체에서 9/379(2.4%)가 걸린다.
+- `POSITION_SHIFT`: 원래 위치 정보가 요청에 없어 구현하지 않음. 저장 필드 `clear_rate_placement_level` 로 나중에 비교 가능.
+- 셀의 "목표 대비" 표시는 넣지 않았다 — 메타의 기존 `target_clear_rate` 는 봇 척도 목표곡선(td 0.5 → 0.32)이라 ⑤ 범위와 비교하면 뜻이 없다. API 는 `target` 을 받아 `in_range80` 을 돌려준다.
+- 새 메타 필드는 §1 제안 7개 + `clear_rate_status`(측정 필요/근거 부족 구분)·`clear_rate_placement_level`(문서 31 §2-1 ② "위치를 함께 기록") 2개를 더했다.
+- **대시보드 연결(다음 단계)**: 다른 세션의 `ProductionDashboard/index.tsx` 변경이 커밋된 뒤, 이 브랜치를 리베이스하고 배치 표에 열 추가 → 각 레벨 `predictClearRate({level_json, placement_level: meta.level_number})` → `toClearRateMeta` 로 메타 저장 → `<ClearRateCell {...meta} />`. 그때 Playwright 웹뷰 확인(§6-3).
+- 머지 시 주의: `backend/app/main.py` 는 다른 세션 미커밋 변경(`pv_play` 라우터)과 같은 위치 근처에 2줄 추가, `frontend/src/types/production.ts` 는 import 1줄 + 메타 필드 블록(다른 세션 변경과 다른 위치).

@@ -4,6 +4,7 @@
  */
 
 import { LevelJSON, DifficultyGrade } from './index';
+import type { ClearRateConfidence, ClearRateEvidenceFlag, ClearRateStatus } from '../api/clearRate';
 
 /**
  * 레벨 상태
@@ -194,6 +195,18 @@ export interface ProductionLevelMeta {
   };
   mc_replaced_backup?: LevelJSON;      // 교체 직전 원본 (1세대 롤백용)
   mc_replaced_at?: string;
+
+  // [D17 병행 표시] 새 실유저 클리어율 예측(첫 시도·도움 포함, api/clearRate.ts) — 참고용.
+  // 기존 predicted_clear_rate·verification_passed·업로드 값과 무관(판정에 쓰지 않음). 위치와 한 쌍.
+  expected_clear_rate_v1?: number | null;          // 예상값 0~1 (근거 부족·측정 필요면 null)
+  clear_rate_range80?: [number, number] | null;    // 80% 범위
+  clear_rate_confidence?: ClearRateConfidence | null;
+  clear_rate_evidence_flags?: ClearRateEvidenceFlag[];
+  unaided_lb_expected?: number | null;             // 무도움 첫 시도 클리어(LB) 예상
+  help_rate_expected?: number | null;              // 첫 시도 도움 사용률 예상
+  clear_rate_model_version?: string;
+  clear_rate_status?: ClearRateStatus;
+  clear_rate_placement_level?: number | null;      // 예측에 쓴 배치 레벨 (옮기면 재예측)
 
   // 상태 관리
   status: LevelStatus;

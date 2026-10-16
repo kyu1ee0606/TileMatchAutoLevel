@@ -1,0 +1,262 @@
+{
+ "model_version": "cr-ftany-v24r-20261016",
+ "trained_at": "2026-10-16T05:19:06+00:00",
+ "target_metric": "ft_any_v1",
+ "target_definition": "first-try clear rate incl. help = first-try clears / (clears + final fails); ended runs only, no_end excluded (af_level_metrics ft_clear_rate_any_help)",
+ "aux_targets": {
+  "unaided_lb": "unaided_clear_lower_bound",
+  "help_rate": "ft_help_rate"
+ },
+ "bot_version": "v2.4",
+ "bot_config": "rule-parity defaults (V24_DEFAULT @ 26dd967: unknown_hide, curtain_hide, unknown_nobonus, ac_inner, stack_hide, dock_rel); behaviour items off",
+ "bot_rows_file": "af_calibration/bot_v24/bot_v2.4f_no_rules_only.json",
+ "bot_rows_v24_tags_seen": [
+  "ac_inner",
+  "ac_policy",
+  "bomb_beta",
+  "bomb_impulse",
+  "curtain_hide",
+  "curtain_memory_v24",
+  "dock_rel",
+  "key_first",
+  "stack_early",
+  "stack_hide",
+  "unknown_hide",
+  "unknown_nobonus"
+ ],
+ "bot_rows_note": "doc 26 §11-1: 'rules only' file = full combination with behaviour items dropped, re-measured on levels where those items can act; the other levels' rows are copied from the full combination (items never fire there, same seeds -> identical rows), hence their tags",
+ "bot_protocol": "theta4x128_v1",
+ "bot_thetas": [
+  0.55,
+  0.65,
+  0.85,
+  1.0
+ ],
+ "bot_games_per_theta": 128,
+ "bot_seed_rule": "11,000,000 + level_index*1000 + game",
+ "train_data": {
+  "maps": "af_calibration/bot_v21/prep.json (build 1.1.0 shard b741f6a3)",
+  "shard_commit": "b741f6a3",
+  "af_level_metrics_generated_at": "2026-10-14 10:46:56",
+  "af_scope": {
+   "data_files": [
+    "android_in_app_events.csv.gz",
+    "android_organic_in_app_events.csv.gz",
+    "ios_in_app_events.csv.gz",
+    "ios_organic_in_app_events.csv.gz"
+   ],
+   "event_time_range_kst": [
+    "2026-09-08 18:31:56",
+    "2026-10-14 10:29:41"
+   ],
+   "run_build_mode": "level-keyed(같은 초 보정)",
+   "run_versions": [
+    "android|1.0.162",
+    "android|1.1.0",
+    "ios|2.1.0"
+   ],
+   "events_kept": 1333209,
+   "dup_dropped": 111188,
+   "runs_reconstructed": 552155,
+   "runs_infinite": 1951,
+   "runs_level_out_of_range": 56,
+   "official_runs": 550148,
+   "official_runs_by_version": {
+    "android|1.0.162": 385368,
+    "android|1.1.0": 152870,
+    "ios|2.1.0": 11910
+   },
+   "devices": 15762
+  },
+  "level_filter": "bot rows ∩ map_match==same ∩ first_try_ended≥100 ∩ not excluded ∩ clean_ft_n≥100 ∩ legacy predicted_clear_rate present",
+  "legacy_batch": "batch_1792056041502_cn5e4ny66.json",
+  "n_levels": 379,
+  "feature_parity_levels_checked": 469
+ },
+ "model": "c+ = mean(ridge, GBM) logits (residual_model.Ridge / GBM defaults); range80 = CQR(quantile GBM 0.1/0.9, inner 5-fold scores pooled over 3 splits); bound at target clip (0.01/0.99) shown as 0/1",
+ "kfold": {
+  "scheme": "map-hash group 5-fold × 4 repeats (RandomState(100+rep))",
+  "ft_any": {
+   "mae": 0.0311,
+   "bias": 0.0113,
+   "rho": 0.7629,
+   "hit05": 0.8443,
+   "hit10": 0.934,
+   "sd": {
+    "mae": 0.0001,
+    "bias": 0.0001,
+    "rho": 0.0071,
+    "hit05": 0.0089,
+    "hit10": 0.0072
+   }
+  },
+  "unaided_lb": {
+   "mae": 0.0779,
+   "bias": 0.0167,
+   "rho": 0.7303,
+   "hit05": 0.4485,
+   "hit10": 0.719,
+   "sd": {
+    "mae": 0.0009,
+    "bias": 0.0009,
+    "rho": 0.0073,
+    "hit05": 0.0093,
+    "hit10": 0.0029
+   }
+  },
+  "help_rate": {
+   "mae": 0.0565,
+   "bias": -0.0131,
+   "rho": 0.6807,
+   "hit05": 0.5613,
+   "hit10": 0.8311,
+   "sd": {
+    "mae": 0.0006,
+    "bias": 0.0006,
+    "rho": 0.0073,
+    "hit05": 0.0114,
+    "hit10": 0.0099
+   }
+  },
+  "ft_any_by_segment": {
+   "101-300": {
+    "mae": 0.0277,
+    "bias": 0.0118,
+    "rho": 0.7503,
+    "hit05": 0.8639,
+    "hit10": 0.9319,
+    "sd": {
+     "mae": 0.0003,
+     "bias": 0.0001,
+     "rho": 0.0062,
+     "hit05": 0.01,
+     "hit10": 0.0046
+    },
+    "n": 180
+   },
+   "301-500": {
+    "mae": 0.0372,
+    "bias": 0.012,
+    "rho": 0.6965,
+    "hit05": 0.8029,
+    "hit10": 0.925,
+    "sd": {
+     "mae": 0.0003,
+     "bias": 0.0001,
+     "rho": 0.0102,
+     "hit05": 0.0179,
+     "hit10": 0.0113
+    },
+    "n": 170
+   },
+   "32-100": {
+    "mae": 0.0163,
+    "bias": 0.0044,
+    "rho": 0.7236,
+    "hit05": 0.9655,
+    "hit10": 1.0,
+    "sd": {
+     "mae": 0.0005,
+     "bias": 0.0003,
+     "rho": 0.0413,
+     "hit05": 0.0,
+     "hit10": 0.0
+    },
+    "n": 29
+   }
+  },
+  "ft_any_by_actual": {
+   "ge0.96": {
+    "n": 201,
+    "mae": 0.0135,
+    "bias": -0.0098,
+    "hit05": 0.98
+   },
+   "0.92-0.96": {
+    "n": 80,
+    "mae": 0.0238,
+    "bias": 0.0028,
+    "hit05": 0.938
+   },
+   "0.85-0.92": {
+    "n": 58,
+    "mae": 0.0396,
+    "bias": 0.0291,
+    "hit05": 0.69
+   },
+   "lt0.85": {
+    "n": 40,
+    "mae": 0.1201,
+    "bias": 0.1089,
+    "hit05": 0.275
+   }
+  },
+  "ft_any_range80": {
+   "coverage": 0.818,
+   "mean_width": 0.096,
+   "median_width": 0.073,
+   "point_inside": 0.995,
+   "upper_at_clip_share": 0.734,
+   "cqr_width_logit_per_fold": [
+    0.072,
+    0.21,
+    0.158,
+    0.0,
+    0.01
+   ],
+   "coverage_101-300": 0.844,
+   "coverage_301-500": 0.788,
+   "coverage_32-100": 0.828
+  }
+ },
+ "baseline": {
+  "v23_E1_lightgbm": {
+   "mae": 0.032,
+   "bias": 0.0124,
+   "rho": 0.7584,
+   "hit05": 0.8377,
+   "hit10": 0.9301,
+   "sd": {
+    "mae": 0.0001,
+    "bias": 0.0006,
+    "rho": 0.0081,
+    "hit05": 0.0029,
+    "hit10": 0.0029
+   }
+  },
+  "v24_rules_only_E1_lightgbm": {
+   "mae": 0.032,
+   "bias": 0.0125,
+   "rho": 0.7578,
+   "hit05": 0.8384,
+   "hit10": 0.9301,
+   "sd": {
+    "mae": 0.0002,
+    "bias": 0.0006,
+    "rho": 0.0075,
+    "hit05": 0.0051,
+    "hit10": 0.0054
+   }
+  },
+  "source": "af_calibration/bot_v24/target/ftany2.json (doc 26 §11-2)"
+ },
+ "gates": {
+  "mae_le_gate": true,
+  "rho_ge_gate": true,
+  "mae_equiv_baseline": true,
+  "rho_equiv_baseline": true,
+  "tol_mae": 0.001,
+  "tol_rho": 0.0162,
+  "delta_mae": -0.0009,
+  "delta_rho": 0.0045,
+  "pass": true
+ },
+ "gate_thresholds": {
+  "mae_max": 0.035,
+  "rho_min": 0.72
+ },
+ "parity_max_abs_logit_diff": 1.7763568394002505e-15,
+ "model_json_sha256": "aeb2948e2e044a253fbb61da1cc74682f846cf81e1a6cd386da4d736a41070c2",
+ "bot_cache_sha256": "13c1b0f9633a9452759928e3989bf88a4b04f53132341557ec1386c721f9194a",
+ "trust_notes": "ft_any < 0.85 unreliable (doc 26 §11-9: +0.118 easy bias); ≥ 0.95 ceiling — low discrimination"
+}

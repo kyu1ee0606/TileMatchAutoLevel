@@ -61,3 +61,6 @@ backend/data/night_study.json
 
 # PV seed-variant sandbox (copies of production batches + evaluation outputs)
 backend/data/pv_sandbox/
+
+# 분석 전용 가상환경 (sklearn·lightgbm·shap — requirements-analysis.txt)
+analysis_venv/

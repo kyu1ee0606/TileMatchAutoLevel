@@ -724,6 +724,49 @@ V23_PARITY_ITEMS = (
     "chain_aware",     # (행동) 체인 해제·고립 위협도 v2.1 폭탄·풀처럼 턴 단위 인지 확률로만 고려 — 규칙 아닌 인지 항목
 )
 
+# [bot v2.4] 정보 정합 + 냥이 정책(26_bot_v24.md). v2.4 = v2.3 + 아래 항목. 항목별로 끌 수 있다:
+#   profile.gimmick_awareness["v24"] = 켤 항목 목록(None = 전부). v1·v2·v2.1·v2.3 에서는 항상 빈 집합.
+V24_ITEMS = (
+    "unknown_hide",     # 덮인(아직 공개 안 된) unknown 타일의 타입을 판단에 쓰지 않는다 (TileEffect.cs:924-943, 646-654)
+    "curtain_hide",     # 닫힌 커튼 타일의 타입을 판단에 쓰지 않는다(덮인 타일 해제 가점에서 새던 경로)
+    "unknown_nobonus",  # 노출된 unknown 은 이미 공개된 일반 타일 — v15.17 '조기 공개 가점'을 주지 않는다
+    "ac_policy",        # 냥이의 도움: savvy(독을 채운 뒤 마지막 뱃지 매칭) / naive(평소대로) 혼합, p_savvy
+    "stack_hide",       # 스택 아래 장 타입은 모른다(Q5): θ≤1.0 판단 경로는 원래 안 씀 → θ>1.0 롤아웃 사본에서 섞는다
+    "bomb_beta",        # 폭탄 인지 확률의 θ 기울기 β 를 가정값 4 대신 적합값으로(26 §10, 27 §3-5)
+    "ac_inner",         # 냥이 뱃지·짝 수집 대상에 스택 속·craft 상자 속 타일 포함 (Q14, TileList)
+    "dock_rel",         # 독 위험 감점·선읽기·후보 폭·패닉 임계를 잠기지 않은 칸 기준으로 (27 §3-13)
+    "curtain_memory_v24",  # 열린 커튼에서 본 타입을 기억, 닫힌 뒤 θ·경과 턴에 따라 잊음. 기억한 노출 닫힌 커튼 = 다음 수에 열림 → 계획에 씀
+    # ── 행동 항목(기획자 답변 27 §5, 기본 꺼짐 — 채택된 것만 V24_DEFAULT 에 넣는다). 강도 s(θ)=clip((θ−0.5)/0.5, 0, 1).
+    "stack_early",      # Q4  비매치 스택 top 픽 가점 w·s·(빈 칸 − 3)·min(남은 장,3)/3
+    "covered_info",     # Q15 덮인 일반 타일 타입을 계획에 씀: 이 픽으로 완전히 드러나는 타일이 독 타입과 맞으면 가점, 사용 확률 σ(a + 4(θ−1))
+    "dock_avoid",       # Q2  독(잠긴 칸 반영) 4칸 이상에서 독에 없는 새 타입 비매치 픽 감점 w·s
+    "panic_calm",       # Q1  독 경고(빈 칸 ≤2) 이후 실수율 ×(1−k), 패닉(실수 증가·선읽기 감소) 대신
+    "bomb_impulse",     # Q8  즉시 3매치 수가 보이면 이번 턴 폭탄 인지를 확률 q 로 놓침
+    "bomb_precollect",  # Q9  빈 칸 ≥4 이고 노출 폭탄(카운트 ≥2) 타입이면 비매치 픽 가점 w·s
+    "tele_preempt",     # Q10 다음 클릭에 텔레포트 순환 → 독에 같은 타입이 있는 텔레포트 타일 픽 가점 w·s
+    "key_first",        # Q12 잠긴 칸이 있으면 key 픽 가점 w·s
+    "gc_naive",         # Q6  덮인 풀·체인 옆 픽 '진행' 가점을 (1−s(θ))·exp(−경험/τ) 로만 준다(아는 사람은 0) — 기존은 항상 1
+    "locality",         # Q7  직전 픽과 가까운 타일 가점 w/(1+맨해튼 거리) (θ 무관)
+)
+# 채택된 항목(None = 이 목록). 측정에서 효과를 확인한 뒤 갱신 — 26_bot_v24.md §10.
+_V24_BEHAV = frozenset(("stack_early", "covered_info", "dock_avoid", "bomb_precollect", "tele_preempt", "key_first",
+                        "locality"))
+V24_DEFAULT = ("unknown_hide", "curtain_hide", "unknown_nobonus",
+               "ac_inner", "stack_hide", "dock_rel")
+# ↑ 26 §11 사전 기준(목표 지표 E1 ablation) 적용 결과: 규칙 정합 항목만 기본. 행동 항목은 전부 꺼짐.
+#   보류(기본 꺼짐, 파라미터는 V24_BEHAV_DEFAULTS 에 적합값 유지): covered_info(§11-4: 채택 조합에서 빼면
+#   ft_any MAE 2sd 개선 ↔ lb MAE 2sd 악화 — 목표별 결론 엇갈림, 규칙 5)·bomb_beta·stack_early·bomb_impulse·
+#   key_first·curtain_memory_v24·ac_policy. 기각: dock_avoid·panic_calm·bomb_precollect·tele_preempt·gc_naive·locality.
+V24_BETA_BOMB = 0.0     # 폭탄 105레벨 θ0.65·0.85 × β{0,1,2,4,6} 64판, 2겹 CV: β0 (CV 손실 0.156 vs β4 0.202)
+# 적합값(64판 격자 + 2겹 CV, 26 §10): stack_early 8 · covered_info 1 · bomb_impulse 0.3 · key_first 30. 기각 항목은 0/기본.
+V24_BEHAV_DEFAULTS = {"stack_early_w": 8.0, "covered_info_a": 1.0, "dock_avoid_w": 0.0, "panic_calm_k": 0.5,
+                      "bomb_impulse_q": 0.3, "bomb_precollect_w": 0.0, "tele_preempt_w": 0.0, "key_first_w": 30.0,
+                      "locality_w": 0.0, "ac_savvy_b": 0.0,
+                      "gc_naive_tau": 10.0}
+# 커튼 기억 유지 확률 = σ(a + b·(θ−1) − c·경과턴). 26_bot_v24.md §9 (커튼 66레벨 θ1.0 격자 + 2겹 CV). cfg["curtain_mem"] 로 덮어쓴다.
+V24_CURTAIN_MEM = {"a": -2.0, "b": 4.0, "c": 0.0}   # 격자 최선(θ1.0 전체 적합). CV 상 기억 없음과 구분 안 됨
+V24_AC_P_SAVVY = 0.45   # savvy 유저 비율 기본값(26_bot_v24.md §3: θ1.0 냥이 41레벨 적합, CV상 식별 불가). cfg["ac_p_savvy"] 로 덮어쓴다.
+
 
 # [v15.15] Chain isolation danger awareness by bot type
 # Probability that bot recognizes picking a tile will isolate a chain
@@ -1782,6 +1825,8 @@ class BotSimulator:
         while not self._is_game_over(state):
             # Phase 5: Update curtain memory at start of each turn
             self._update_curtain_memory(state, profile)
+            if self._v24 and "curtain_memory_v24" in self._v24 and state.curtain_tiles:
+                self._v24_curtain_update(state)
 
             moves = self._get_available_moves(state)
 
@@ -1790,8 +1835,12 @@ class BotSimulator:
                 break
 
             # [bot v2.1] 이번 턴에 폭탄·풀 위협을 인지했는지 먼저 정한다(턴 단위 1회, v2.1에서만 난수 소비).
-            if getattr(profile, "bot_version", "v1") in ("v2.1", "v2.3"):
+            if getattr(profile, "bot_version", "v1") in ("v2.1", "v2.3", "v2.4"):
                 self._v21_draw_awareness(state, profile)
+                # [v2.4 bomb_impulse, Q8] 바로 3매치가 보이면 빨리 맞추려다 이번 턴 폭탄을 놓친다(확률 q).
+                if (self._v24 and "bomb_impulse" in self._v24 and self._v21_aware.get("bomb")
+                        and any(m.will_match for m in moves) and self._rng.random() < self._v24_bp["bomb_impulse_q"]):
+                    self._v21_aware["bomb"] = False
 
             # Score moves based on profile
             for move in moves:
@@ -1839,6 +1888,8 @@ class BotSimulator:
 
                 self._apply_move(state, selected_move)
                 state.moves_used += 1
+                if self._v24 and "locality" in self._v24 and selected_move.tile_state is not None:
+                    state._v24_last = (selected_move.tile_state.x_idx, selected_move.tile_state.y_idx)
 
                 # Process move effects (frog moves, bomb decreases, curtain toggle, etc.)
                 self._process_move_effects(state, exposed_bombs_before_move, exposed_curtains_before_move)
@@ -2187,6 +2238,11 @@ class BotSimulator:
             if self._can_pick_tile(state, tile):
                 type_counts[tile.tile_type] = type_counts.get(tile.tile_type, 0) + 1
 
+        # [bot v2.4 curtain_memory_v24] 기억한 노출 닫힌 커튼은 이번 클릭 뒤 열린다 → 계획용 개수에 넣는다.
+        known = getattr(state, "_v24_cmem_known", None)
+        if known and self._v24 and "curtain_memory_v24" in self._v24:
+            for tt in known:
+                type_counts[tt] = type_counts.get(tt, 0) + 1
         state._accessible_type_counts = type_counts
         return type_counts
 
@@ -3002,7 +3058,7 @@ class BotSimulator:
         """
         base_score = 1.0
         dock_count = len(state.dock_tiles)
-        v21 = getattr(profile, "bot_version", "v1") in ("v2.1", "v2.3")
+        v21 = getattr(profile, "bot_version", "v1") in ("v2.1", "v2.3", "v2.4")
         v23_chain = bool(self._par) and "chain_aware" in self._par
 
         # CRITICAL: Moves that complete a 3-match get MASSIVE bonus
@@ -3059,12 +3115,16 @@ class BotSimulator:
         # 낮은 risk_tolerance = 위험 상황에서 패널티 더 적용 (보수적 플레이)
         # ============================================================
         risk_penalty_factor = 1.5 - profile.risk_tolerance  # 0.5 ~ 1.45
-        if dock_count >= 6 and not move.will_match:
+        # [bot v2.4 dock_rel] 임계를 잠기지 않은 칸 기준으로: 잠긴 칸 수만큼 독이 더 찬 것으로 본다(7칸이면 동일).
+        dc_risk = dock_count + (self._v24_dock_shift(state) if self._v24 else 0)
+        if dc_risk >= 6 and not move.will_match:
             base_score -= 50.0 * risk_penalty_factor  # Critical danger
-        elif dock_count >= 5 and not move.will_match:
+        elif dc_risk >= 5 and not move.will_match:
             base_score -= 20.0 * risk_penalty_factor  # High danger
-        elif dock_count >= 4 and not move.will_match:
+        elif dc_risk >= 4 and not move.will_match:
             base_score -= profile.blocking_awareness * 5.0 * risk_penalty_factor
+        if self._v24 and self._v24 & _V24_BEHAV:
+            base_score += self._v24_behaviour_bonus(move, state, dock_count, dc_risk)
 
         # ENDGAME DOCK MANAGEMENT (for Optimal bot)
         # When dock is filling and we're not matching, prefer tiles that can SET UP matches
@@ -3231,7 +3291,8 @@ class BotSimulator:
                         for _p, _t in _lt.items():
                             if (not _t.picked and _t.tile_type == dispensed
                                     and not getattr(_t, "is_stack_tile", False)
-                                    and not getattr(_t, "is_craft_tile", False)):
+                                    and not getattr(_t, "is_craft_tile", False)
+                                    and not (self._v24 and self._v24_type_hidden(state, _t))):
                                 waiting += 1
                     # ② 이 컨테이너 잔여 내부 타일 수(tall stack일수록 ↑; 끝까지 배출 유지)
                     box_key = f"{move.layer_idx}_{ts.position_key}"
@@ -3533,7 +3594,9 @@ class BotSimulator:
             # UNKNOWN hides tile type - revealing early reduces uncertainty
             # Higher priority when dock is filling (need to plan matches)
             # ============================================================
-            if tile_state and tile_state.effect_type == TileEffectType.UNKNOWN:
+            # [bot v2.4 unknown_nobonus] 게임은 덮개가 사라지는 순간 unknown 을 공개한다 → 노출된 unknown 은 일반 타일.
+            if (tile_state and tile_state.effect_type == TileEffectType.UNKNOWN
+                    and not (self._v24 and "unknown_nobonus" in self._v24)):
                 unknown_bonus = 15.0 * profile.blocking_awareness
                 # Higher bonus when dock is filling - information is more valuable
                 if dock_count >= 4:
@@ -3645,19 +3708,50 @@ class BotSimulator:
 
     # ── [bot v2.3] 게임 규칙 정합 스위치 ─────────────────────────────────────────────────────────────
     _par: frozenset = frozenset()   # 켜진 정합 항목. v1/v2/v2.1 은 항상 빈 집합 → 기존 경로 그대로.
+    _v24: frozenset = frozenset()   # 켜진 v2.4 항목. v2.4 가 아니면 항상 빈 집합.
+    _v24_p_savvy: float = V24_AC_P_SAVVY
+    _v24_cmem_par: dict = V24_CURTAIN_MEM
+    _v24_theta: float = 1.0
+    _v24_bp: dict = V24_BEHAV_DEFAULTS
+
+    def _v24_skill(self) -> float:
+        return max(0.0, min(1.0, (self._v24_theta - 0.5) / 0.5))
     _v23_hint: bool = False         # 냥이 수집 픽 처리 중(게임의 m_SelectedByHint) — v2.3 auto_collect 에서만 True
 
     def set_rule_parity(self, profile) -> None:
         """Enable v2.3 parity items for this profile (call before _create_initial_state for init-time items)."""
-        if getattr(profile, "bot_version", "v1") != "v2.3":
+        ver = getattr(profile, "bot_version", "v1")
+        if ver not in ("v2.3", "v2.4"):
             self._par = frozenset()
+            self._v24 = frozenset()
             return
         cfg = getattr(profile, "gimmick_awareness", None) or {}
         items = cfg.get("parity")
         self._par = frozenset(V23_PARITY_ITEMS if items is None else items)
+        v24 = cfg.get("v24")
+        self._v24 = frozenset(V24_DEFAULT if v24 is None else v24) if ver == "v2.4" else frozenset()
+        self._v24_bp = dict(V24_BEHAV_DEFAULTS, **(cfg.get("v24_par") or {}))
+        self._v24_p_savvy = float(cfg.get("ac_p_savvy", V24_AC_P_SAVVY))
+        self._v24_cmem_par = dict(V24_CURTAIN_MEM, **(cfg.get("curtain_mem") or {}))
+        self._v24_theta = float(cfg.get("theta", 1.0))
         # 냥이의 도움은 레벨 설정(autoCollectCount)이 있어야 켜진다 — 호출자가 cfg["auto_collect"] 로 넘긴다.
         if not cfg.get("auto_collect"):
             self._par = self._par - {"auto_collect"}
+
+    def _v24_type_hidden(self, state: GameState, tile) -> bool:
+        """[bot v2.4] 플레이어가 이 타일의 타입을 볼 수 없는가.
+        unknown: 덮개가 있는 동안 '?'로 가려지고, 덮개가 사라지면 공개된다(TileEffect.cs:924-943, 646-654).
+        닫힌 커튼: 타입이 가려진다. 일반 덮인 타일은 타입이 보인다(가정 — 26 문서 §1)."""
+        et = tile.effect_type
+        if et == TileEffectType.UNKNOWN:
+            return "unknown_hide" in self._v24 and self._is_blocked_by_upper(state, tile)
+        if et == TileEffectType.CURTAIN:
+            if tile.effect_data.get("is_open", True):
+                return False
+            if "curtain_memory_v24" in self._v24:          # 닫힌 커튼: 기억하고 있으면 보인 셈, 아니면 모름
+                return f"{tile.layer_idx}_{tile.position_key}" not in (getattr(state, "_v24_cmem_keys", None) or ())
+            return "curtain_hide" in self._v24
+        return False
 
     def _v23_cover_positions(self, state: GameState, layer_idx: int, x: int, y: int):
         """Upper-layer cells that cover cell (layer_idx, x, y) — same rule as _is_blocked_by_upper's fallback."""
@@ -3729,6 +3823,13 @@ class BotSimulator:
             state.max_dock_slots = sum(1 for sl in state.dock if not sl.is_locked)
         if "auto_collect" in self._par:
             state._ac = {"buffer": {}, "badge": {}, "phase": "playing"}
+            if self._v24 and "ac_policy" in self._v24:      # 유저 1명 = 판 1개: 규칙을 아는지 판마다 추첨
+                p = self._v24_p_savvy
+                if self._v24_bp.get("ac_savvy_b"):                 # Q13 θ 의존: logit p = logit(p0) + b(θ−1)
+                    import math
+                    z = math.log(p / (1 - p)) + self._v24_bp["ac_savvy_b"] * (self._v24_theta - 1.0)
+                    p = 1.0 / (1.0 + math.exp(-z))
+                state._ac["savvy"] = self._rng.random() < p
             self._v23_ac_new_cycle(state)
 
     # ── [bot v2.3 auto_collect] 냥이의 도움 (AutoCollectController.cs) ────────────────────────────────
@@ -3739,6 +3840,9 @@ class BotSimulator:
     #   독이 비면 새 사이클(:621, :807). 근사: 수집 대상은 보드 위 타일만(스택 속·craft 박스 속 제외),
     #   수집 픽은 클릭 효과(폭탄 카운트·텔레포트 카운트)를 내지 않고 개구리만 한 번 움직인다.
     def _v23_ac_pick(self, state: GameState, tile) -> None:
+        if self._v24 and "ac_inner" in self._v24 and state.tiles.get(tile.layer_idx, {}).get(tile.position_key) is not tile:
+            self._v24_pick_inner(state, tile)
+            return
         self._v23_hint = True
         try:
             self._apply_move(state, Move(layer_idx=tile.layer_idx, position=tile.position_key, tile_type=tile.tile_type,
@@ -3747,6 +3851,8 @@ class BotSimulator:
             self._v23_hint = False
 
     def _v23_ac_field(self, state: GameState) -> List:
+        if self._v24 and "ac_inner" in self._v24:
+            return self._v24_ac_field(state)
         return [t for li in sorted(state.tiles) for t in state.tiles[li].values() if not t.picked
                 and t.tile_type in self.MATCHABLE_TYPES]
 
@@ -3810,6 +3916,217 @@ class BotSimulator:
         else:
             ac["phase"] = "wait_empty"
 
+    def _v24_ac_field(self, state: GameState) -> List:
+        """[bot v2.4 ac_inner] 게임 냥이의 필드 = TileGroup.TileList(GetComponentsInChildren<Tile>) — 스택의 모든 장과
+        craft 상자 속 타일 포함(TileGroup.cs:1266-1272, TileRow.cs:97-188; AutoCollectController.cs:1522-1555, 1668-1713).
+        순서 근사: 레이어 → 칸, 스택 칸은 맨 아래 장부터 위로, craft 상자 속 미배출 타일은 그 레이어 끝."""
+        out = []
+        for li in sorted(state.tiles):
+            seen = set()
+            for t in state.tiles[li].values():
+                if t.is_stack_tile and not t.is_craft_tile:
+                    chain, cur = [], t
+                    while cur is not None:
+                        chain.append(cur)
+                        cur = state.stacked_tiles.get(cur.under_stacked_tile_key) if cur.under_stacked_tile_key else None
+                    out.extend(c for c in reversed(chain) if not c.picked and c.tile_type in self.MATCHABLE_TYPES)
+                elif not t.picked and t.tile_type in self.MATCHABLE_TYPES:
+                    out.append(t)
+                seen.add(id(t))
+            for box_key, keys in state.craft_boxes.items():
+                if int(box_key.split("_")[0]) != li:
+                    continue
+                for k in keys:
+                    t = state.stacked_tiles.get(k)
+                    if (t is not None and t.is_craft_tile and not t.picked and not t.is_crafted and id(t) not in seen
+                            and t.tile_type in self.MATCHABLE_TYPES):
+                        out.append(t)
+        return out
+
+    def _v24_pick_inner(self, state: GameState, tile) -> None:
+        """[bot v2.4 ac_inner] 냥이가 스택 속·craft 상자 속 타일을 끌어온다: 사슬에서 빼고 독에 넣는다(힌트 픽)."""
+        key = next((k for k, t in state.stacked_tiles.items() if t is tile), None)
+        # 위 장 = 이 타일을 under 로 가리키는 타일(보드 위 맨 위 장은 stacked_tiles 에 없고 upper 링크도 비어 있을 수 있음)
+        ups = [t for layer in state.tiles.values() for t in layer.values() if key and t.under_stacked_tile_key == key]
+        ups += [t for t in state.stacked_tiles.values() if key and t.under_stacked_tile_key == key and t not in ups]
+        down = state.stacked_tiles.get(tile.under_stacked_tile_key) if tile.under_stacked_tile_key else None
+        for up in ups:
+            up.under_stacked_tile_key = tile.under_stacked_tile_key
+        if down is not None:
+            down.upper_stacked_tile_key = tile.upper_stacked_tile_key
+        tile.picked = True
+        state._blocking_cache.clear()
+        state._accessible_cache = None
+        state._accessible_type_counts = None
+        if tile.tile_type in state.all_tile_type_counts:
+            state.all_tile_type_counts[tile.tile_type] = max(0, state.all_tile_type_counts[tile.tile_type] - 1)
+        state.dock_tiles.append(tile)
+        cleared = self._process_dock_matches(state)
+        n = sum(cleared.values())
+        state.total_tiles_cleared += n
+        if n >= 3:
+            state.combo_count += 1
+        for tt, c in cleared.items():
+            if tt in state.goals_remaining:
+                state.goals_remaining[tt] = max(0, state.goals_remaining[tt] - c)
+
+    def _v24_behaviour_bonus(self, move: Move, state: GameState, dock_count: int, dc_risk: int) -> float:
+        """[bot v2.4] 기획자 답변(27 §5) 행동 항목의 점수 항 합. 항목별 파라미터는 self._v24_bp."""
+        import math
+        bp, sk, v = self._v24_bp, self._v24_skill(), self._v24
+        ts = move.tile_state
+        bonus = 0.0
+        unlocked = sum(1 for sl in state.dock if not sl.is_locked)
+        free = unlocked - dock_count
+        dock_types: Dict[str, int] = {}
+        for t in state.dock_tiles:
+            dock_types[t.tile_type] = dock_types.get(t.tile_type, 0) + 1
+        if "stack_early" in v and bp["stack_early_w"] and ts is not None and ts.is_stack_tile \
+                and not ts.is_craft_tile and not move.will_match:
+            depth, cur = 0, ts
+            while cur is not None and depth < 3:
+                depth += 1
+                cur = state.stacked_tiles.get(cur.under_stacked_tile_key) if cur.under_stacked_tile_key else None
+            bonus += bp["stack_early_w"] * sk * (free - 3) * depth / 3.0
+        if "covered_info" in v and ts is not None and dock_types:
+            p = 1.0 / (1.0 + math.exp(-(bp["covered_info_a"] + 4.0 * (self._v24_theta - 1.0))))
+            rmap, bmap = state._reverse_blocking_map, state._blocking_map
+            if rmap and bmap and p > 1e-3:
+                me = ts.full_key
+                gain = 0.0
+                for lk in rmap.get(me, ()):
+                    parts = lk.split("_")
+                    low = state.tiles.get(int(parts[0]), {}).get(f"{parts[1]}_{parts[2]}")
+                    if low is None or low.picked or low.full_key != lk or self._v24_type_hidden(state, low):
+                        continue
+                    others = [b for b in bmap.get(lk, ()) if b != me]
+                    if any((bt := state.tiles.get(int(b.split("_")[0]), {}).get("_".join(b.split("_")[1:3]))) is not None
+                           and not bt.picked for b in others):
+                        continue                                         # 이 픽만으로는 안 드러남
+                    c = dock_types.get(low.tile_type, 0)
+                    gain += 2.0 if c >= 2 else (1.0 if c == 1 else 0.0)
+                bonus += 10.0 * p * gain
+        if "dock_avoid" in v and bp["dock_avoid_w"] and not move.will_match and dc_risk >= 4 \
+                and dock_types.get(move.tile_type, 0) == 0:
+            bonus -= bp["dock_avoid_w"] * sk
+        if "bomb_precollect" in v and bp["bomb_precollect_w"] and state.bomb_tiles and free >= 4 and not move.will_match \
+                and (ts is None or ts.effect_type != TileEffectType.BOMB):
+            for bk, rem in state.bomb_tiles.items():
+                if rem < 2:
+                    continue
+                parts = bk.split("_")
+                bt = state.tiles.get(int(parts[0]), {}).get(f"{parts[1]}_{parts[2]}")
+                if bt is not None and not bt.picked and bt.tile_type == move.tile_type and not self._is_blocked_by_upper(state, bt):
+                    bonus += bp["bomb_precollect_w"] * sk
+                    break
+        if "tele_preempt" in v and bp["tele_preempt_w"] and state.teleport_tiles and state.teleport_click_count == 2 \
+                and ts is not None and ts.effect_type == TileEffectType.TELEPORT and dock_types.get(move.tile_type, 0) >= 1:
+            bonus += bp["tele_preempt_w"] * sk
+        if "key_first" in v and bp["key_first_w"] and move.tile_type == "key" and unlocked < len(state.dock):
+            bonus += bp["key_first_w"] * sk
+        if "locality" in v and bp["locality_w"] and ts is not None:
+            last = getattr(state, "_v24_last", None)
+            if last is not None:
+                bonus += bp["locality_w"] / (1.0 + abs(ts.x_idx - last[0]) + abs(ts.y_idx - last[1]))
+        return bonus
+
+    def _v24_naive(self, profile, gimmick: str) -> float:
+        """[v2.4 gc_naive, Q6] '덮인 풀·체인 옆을 집으면 풀린다'고 착각할 확률(기댓값 가중) = (1 − s(θ))·exp(−n/τ).
+        n = 이 기믹이 나온 이전 레벨 수(첫 등장 후 경험), τ = 학습 속도(적합)."""
+        import math
+        cfg = getattr(profile, "gimmick_awareness", None) or {}
+        n = float((cfg.get("v24_expo") or {}).get(gimmick, 0))
+        tau = max(1e-6, self._v24_bp["gc_naive_tau"])
+        return (1.0 - self._v24_skill()) * math.exp(-n / tau)
+
+    def _v24_dock_shift(self, state: GameState) -> int:
+        """[bot v2.4 dock_rel] 잠긴 독 칸 수(7칸 기준 임계를 잠기지 않은 칸 기준으로 옮기는 양). 항목 꺼짐 → 0."""
+        if "dock_rel" not in self._v24:
+            return 0
+        return sum(1 for sl in state.dock if sl.is_locked)
+
+    def _v24_curtain_update(self, state: GameState) -> None:
+        """[bot v2.4 curtain_memory_v24] 턴 시작마다 커튼 기억 갱신.
+        열린 커튼(덮였어도 아이콘이 보임)은 타입을 본다. 닫힌 커튼은 마지막으로 본 뒤 경과 턴 k 에 대해
+        기억 유지 확률 σ(a + b(θ−1) − c·k). 닫힐 때 u~U(0,1) 를 한 번 뽑아 u < p(k) 인 동안만 기억(단조), 잊으면 다시 열릴 때까지 모름.
+        한 번도 열린 걸 못 본 닫힌 커튼은 처음부터 모름."""
+        import math
+        mem = getattr(state, "_v24_cmem", None)
+        if mem is None:
+            mem = state._v24_cmem = {}
+        a, b, c = self._v24_cmem_par["a"], self._v24_cmem_par["b"], self._v24_cmem_par["c"]
+        keys, known = set(), []
+        for key in list(state.curtain_tiles.keys()):
+            parts = key.split('_')
+            tile = state.tiles.get(int(parts[0]), {}).get(f"{parts[1]}_{parts[2]}")
+            if tile is None or tile.picked or tile.effect_type != TileEffectType.CURTAIN:
+                mem.pop(key, None)
+                continue
+            if tile.effect_data.get("is_open", True):
+                mem[key] = [tile.tile_type, state.moves_used, None]
+                continue
+            m = mem.get(key)
+            if m is None:
+                continue
+            if m[2] is None:
+                m[2] = self._rng.random()
+            z = a + b * (self._v24_theta - 1.0) - c * (state.moves_used - m[1])
+            if m[2] >= 1.0 / (1.0 + math.exp(-z)):
+                del mem[key]                                   # 잊음
+                continue
+            keys.add(key)
+            if not self._is_blocked_by_upper(state, tile):
+                known.append(m[0])
+        state._v24_cmem_keys = keys
+        state._v24_cmem_known = known
+        state._accessible_type_counts = None
+
+    def _v24_move_types(self, state: GameState, move: Move) -> List[str]:
+        return [move.tile_type] + [state.tiles[li][lp].tile_type for li, lp in move.linked_tiles
+                                   if state.tiles.get(li, {}).get(lp) is not None]
+
+    def _v24_savvy_select(self, moves: List[Move], state: GameState) -> Optional[Move]:
+        """[bot v2.4 ac_policy] savvy 유저의 냥이 수(AutoCollectController.cs:549-564, 973-987).
+        마지막 뱃지가 매칭되는 순간 이번 사이클 버퍼의 미완성 타입마다 3−r 장을 필드에서 채워 준다.
+        → 마지막 뱃지를 끝내는 수(트리거)가 보이면, 독이 (잠기지 않은 칸 − 1)까지 찰 때까지 미루고
+          그동안 독에 없는 새 타입(완성 시 2장 무료)을 우선 집는다. 트리거가 안 보이면 평소대로(None)."""
+        ac = getattr(state, "_ac", None)
+        if not ac or not ac.get("savvy") or ac["phase"] != "playing" or sum(ac["badge"].values()) <= 0:
+            return None
+
+        def trigger(m):
+            buf, badge = dict(ac["buffer"]), dict(ac["badge"])
+            for tt in self._v24_move_types(state, m):
+                buf[tt] = buf.get(tt, 0) + 1
+                if buf[tt] >= 3:
+                    buf[tt] -= 3
+                    badge[tt] = badge.get(tt, 0) - min(badge.get(tt, 0), 3)
+            return sum(badge.values()) <= 0
+
+        T = [m for m in moves if trigger(m)]
+        if not T:
+            return None
+        target = sum(1 for sl in state.dock if not sl.is_locked) - 1
+        if len(state.dock_tiles) >= target:
+            return max(T, key=lambda m: m.score)
+        dock_cnt: Dict[str, int] = {}
+        for t in state.dock_tiles:
+            dock_cnt[t.tile_type] = dock_cnt.get(t.tile_type, 0) + 1
+
+        def dock_after(m):
+            c = dict(dock_cnt)
+            for tt in self._v24_move_types(state, m):
+                c[tt] = c.get(tt, 0) + 1
+                if c[tt] >= 3:
+                    c[tt] -= 3
+            return sum(c.values())
+
+        ok = [m for m in moves if m not in T and m.score > -100.0 and dock_after(m) <= target]
+        if not ok:
+            return max(T, key=lambda m: m.score)
+        fresh = [m for m in ok if not m.linked_tiles and dock_cnt.get(m.tile_type, 0) == 0]
+        return max(fresh or ok, key=lambda m: m.score)
+
     def _v23_curtain_rules(self, state: GameState) -> None:
         """TileGroup.AddClickCount curtain rules (after every click)."""
         remain = [t for layer in state.tiles.values() for t in layer.values() if not t.picked]
@@ -3848,7 +4165,10 @@ class BotSimulator:
         import math
         cfg = getattr(profile, "gimmick_awareness", None) or V21_AWARENESS_DEFAULTS
         theta = float(cfg.get("theta", 1.0))
-        z = (cfg["alpha"][gimmick] + cfg["beta"] * (theta - 1.0)
+        beta = cfg["beta"]
+        if gimmick == "bomb" and self._v24 and "bomb_beta" in self._v24:
+            beta = float(cfg.get("beta_bomb", V24_BETA_BOMB))   # [v2.4 bomb_beta] 폭탄 레벨 θ0.65/0.85 격자 + CV 적합
+        z = (cfg["alpha"][gimmick] + beta * (theta - 1.0)
              + (cfg["gamma"][gimmick] if imminent else 0.0))
         p = 1.0 / (1.0 + math.exp(-z))
         exposure = cfg.get("exposure")
@@ -3950,7 +4270,9 @@ class BotSimulator:
                     else:
                         # Chain is HIDDEN (blocked), but this move helps progress toward unlock
                         # Base: 20, with neighbor multiplier: 20-40
-                        chain_unlock_bonus = max(chain_unlock_bonus, 20.0 * neighbor_multiplier * profile.blocking_awareness * gimmick_bonus_multiplier)
+                        # [v2.4 gc_naive, Q6] 게임은 덮인 체인을 풀지 않는다 — 이 가점은 규칙을 모르는 사람의 착각이다.
+                        naive = self._v24_naive(profile, "chain") if self._v24 and "gc_naive" in self._v24 else 1.0
+                        chain_unlock_bonus = max(chain_unlock_bonus, 20.0 * neighbor_multiplier * profile.blocking_awareness * gimmick_bonus_multiplier * naive)
 
         if chain_unlock_bonus > 0:
             # [v15.31] Balance chain unlock bonus with type matching priority
@@ -4102,7 +4424,8 @@ class BotSimulator:
                         else:
                             # HIDDEN (blocked): still helps progress
                             # Base: 5, with adj multiplier: 5-10
-                            grass_reduce_bonus = max(grass_reduce_bonus, 5.0 * adj_multiplier * profile.blocking_awareness * gimmick_bonus_multiplier)
+                            naive = self._v24_naive(profile, "grass") if self._v24 and "gc_naive" in self._v24 else 1.0   # [v2.4 gc_naive]
+                            grass_reduce_bonus = max(grass_reduce_bonus, 5.0 * adj_multiplier * profile.blocking_awareness * gimmick_bonus_multiplier * naive)
 
         if grass_reduce_bonus > 0:
             # [v15.31] Balance grass reduce bonus with type matching priority
@@ -4279,7 +4602,7 @@ class BotSimulator:
         visible_depth = int(1 + profile.pattern_recognition * 5)  # 1-4 layers
         # [bot v2] 계단(θ≈0.34에서 2→3층 등) 대신 다음 층을 소수부 확률로 본다 → 연속.
         partial_prob = 0.0
-        if getattr(profile, "bot_version", "v1") in ("v2", "v2.1", "v2.3"):
+        if getattr(profile, "bot_version", "v1") in ("v2", "v2.1", "v2.3", "v2.4"):
             partial_prob = (1 + profile.pattern_recognition * 5) - visible_depth
 
         # Always keep matching moves
@@ -4545,7 +4868,7 @@ class BotSimulator:
         if not moves:
             return None
 
-        is_v2 = getattr(profile, "bot_version", "v1") in ("v2", "v2.1", "v2.3")
+        is_v2 = getattr(profile, "bot_version", "v1") in ("v2", "v2.1", "v2.3", "v2.4")
         raw_moves = moves
 
         # Phase 1: Apply attention zone filtering
@@ -4554,7 +4877,16 @@ class BotSimulator:
 
         # Phase 4: Apply dock panic effect
         dock_count = len(state.dock_tiles)
-        adjusted_mistake_rate, adjusted_lookahead = self._apply_dock_panic(profile, dock_count)
+        adjusted_mistake_rate, adjusted_lookahead = self._apply_dock_panic(
+            profile, dock_count + (self._v24_dock_shift(state) if self._v24 else 0))
+        if self._v24 and "panic_calm" in self._v24:
+            # [v2.4 panic_calm, Q1] 게임은 빈 칸 ≤2 에서 독을 맥동시켜 경고(Dock.cs:85, 1197-1204) → 사람은 오히려 신중해진다.
+            unlocked = sum(1 for sl in state.dock if not sl.is_locked)
+            if unlocked - dock_count <= 2:
+                adjusted_mistake_rate = profile.mistake_rate * (1.0 - self._v24_bp["panic_calm_k"])
+                adjusted_lookahead = profile.lookahead_depth
+            else:
+                adjusted_mistake_rate, adjusted_lookahead = profile.mistake_rate, profile.lookahead_depth
 
         # Check for mistake (random wrong choice) - using adjusted rate
         if self._rng.random() < adjusted_mistake_rate:
@@ -4563,6 +4895,12 @@ class BotSimulator:
                 # 뽑으면 θ↑ → 시야↑ → 무작위 수가 더 해로워져 실력이 비단조가 된다(12_bot_v2.md §2).
                 return self._rng.choice(self._v2_random_pool(raw_moves, state))
             return self._rng.choice(moves)
+
+        # [bot v2.4 ac_policy] 냥이 규칙을 아는 유저(savvy): 마지막 뱃지 매칭을 미루고 독을 채운 뒤 터뜨린다.
+        if self._v24 and "ac_policy" in self._v24:
+            savvy = self._v24_savvy_select(moves, state)
+            if savvy is not None:
+                return savvy
 
         # [bot v2] θ>1.0 확장 등급: 독이 3칸 이상 찼을 때 후보 수마다 짧은 롤아웃으로 실제 결과를 본다.
         if is_v2 and getattr(profile, "search_rollouts", 0) > 0 and len(state.dock_tiles) >= 3:
@@ -4760,10 +5098,31 @@ class BotSimulator:
             return self._rng.choice(moves[:3])
         return moves[0]
 
+    def _v24_determinize(self, state: GameState) -> None:
+        """[bot v2.4 unknown_hide] 롤아웃 사본에서 가려진 unknown 타일끼리 타입을 섞는다(실제 배치를 모르는 상태로 굴림)."""
+        hidden = [t for li in sorted(state.tiles) for t in state.tiles[li].values()
+                  if not t.picked and t.effect_type == TileEffectType.UNKNOWN and self._v24_type_hidden(state, t)]
+        if "curtain_memory_v24" in self._v24:          # 잊었거나 본 적 없는 닫힌 커튼도 모르는 타일로 섞는다
+            hidden += [t for li in sorted(state.tiles) for t in state.tiles[li].values()
+                       if not t.picked and t.effect_type == TileEffectType.CURTAIN and self._v24_type_hidden(state, t)]
+        if "stack_hide" in self._v24 and state.stacked_tiles:   # 스택 아래 장(맨 위 제외)은 타입이 안 보인다(Q5)
+            on_board = {t.full_key for layer in state.tiles.values() for t in layer.values()}
+            hidden += [t for k, t in sorted(state.stacked_tiles.items())        # 보드 위(맨 위 장)가 아닌 미픽 스택 타일
+                       if not t.picked and t.is_stack_tile and not t.is_craft_tile and t.full_key not in on_board]
+        if len(hidden) >= 2:
+            types = [t.tile_type for t in hidden]
+            self._rng.shuffle(types)
+            for t, tt in zip(hidden, types):
+                t.tile_type = tt
+
     def _v2_rollout_value(self, state: GameState, move: Move, profile: BotProfile) -> float:
         total = 0.0
         for _ in range(profile.search_rollouts):
             s = self._v2_copy_state(state)
+            if self._v24 and ("unknown_hide" in self._v24 or "curtain_memory_v24" in self._v24
+                              or "stack_hide" in self._v24):
+                s._v24_cmem_keys = getattr(state, "_v24_cmem_keys", None)
+                self._v24_determinize(s)
             if not self._v2_step(s, move):
                 return -1.0
             for _k in range(self.V2_SEARCH_LEN):
@@ -4807,7 +5166,7 @@ class BotSimulator:
             for tile in layer.values()
             if not tile.picked
         )
-        dock_size = len(state.dock_tiles)
+        dock_size = len(state.dock_tiles) + (self._v24_dock_shift(state) if self._v24 else 0)   # [v2.4 dock_rel]
 
         # Base depth from remaining tiles (more aggressive reduction)
         if remaining_tiles > 120:
@@ -4852,7 +5211,7 @@ class BotSimulator:
         if len(sorted_moves) == 1:
             return sorted_moves
 
-        dock_size = len(state.dock_tiles)
+        dock_size = len(state.dock_tiles) + (self._v24_dock_shift(state) if self._v24 else 0)   # [v2.4 dock_rel]
 
         # [독압박 예외] "지금 매치되는 수가 있으면 그것만 본다"는 근시안이다. 색 종류가 독 칸수를
         # 넘는 레벨에선 '지금 매치'보다 '나중에 3개째가 올 색을 담는가'가 승부를 가른다. 그 판단을
@@ -5865,6 +6224,8 @@ class BotSimulator:
         # Dock fill danger assessment
         current_dock_size = len(state.dock_tiles)
         projected_dock_size = current_dock_size + 1 if not move.will_match else max(0, current_dock_size - 2)
+        if self._v24:
+            projected_dock_size += self._v24_dock_shift(state)          # [v2.4 dock_rel]
 
         if projected_dock_size >= 6:
             score -= 40.0  # Critical danger

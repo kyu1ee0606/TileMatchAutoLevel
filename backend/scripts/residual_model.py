@@ -184,10 +184,13 @@ def build(bot_path):
             fr = rr["fail_reasons"]
             r["bot_bomb_share"] = fr.get("Bomb", 0) / fails
             r["bot_grass_share"] = fr.get("Grass", 0) / fails
+            r["bot_chain_share"] = fr.get("Chain", 0) / fails      # 26 문서 §5 (v2.3 chain_aware 가 만든 실패 형태)
+            r["bot_ice_share"] = fr.get("Ice", 0) / fails
             left = rr.get("fail_tiles_left_board") or [max(0, x - 7) for x in rr.get("fail_tiles_left", [])]
             r["bot_left_rel"] = float(np.median(left)) / max(1, f["tiles"]) if left else 0.0
         else:
             r["bot_bomb_share"] = r["bot_grass_share"] = r["bot_left_rel"] = float("nan")
+            r["bot_chain_share"] = r["bot_ice_share"] = float("nan")
         recs.append(r)
     return recs
 
@@ -198,7 +201,9 @@ F_STRUCT = ["tiles", "layers", "types", "tiles_per_type", "unlockTile", "is_boss
 F_GIM = ([f"has_{g}" for g in GIMMICKS] + [f"n_{g}" for g in GIMMICKS] +
          ["stack_inner", "craft_inner", "bomb_min", "bomb_sum", "n_gimmick_types"])
 F_NOV = ["gimmick_first", "novel_any", "novelty"]
-F_BOT = ["lg055", "lg065", "lg085", "lg100", "bot_bomb_share", "bot_grass_share", "bot_left_rel"]
+# 추가 봇 실패형태 특징(26 문서 §5): 환경변수 RM_EXTRA_FEATS="bot_chain_share[,bot_ice_share]" 일 때만 쓴다(기본 = 21·23 과 동일).
+EXTRA_BOT = [c for c in os.environ.get("RM_EXTRA_FEATS", "").split(",") if c]
+F_BOT = ["lg055", "lg065", "lg085", "lg100", "bot_bomb_share", "bot_grass_share", "bot_left_rel"] + EXTRA_BOT
 FEATS_ALL = F_SEG + F_STRUCT + F_GIM + F_NOV + F_BOT
 FEATS_NOBOT = F_SEG + F_STRUCT + F_GIM + F_NOV
 

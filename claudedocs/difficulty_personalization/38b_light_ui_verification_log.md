@@ -231,3 +231,70 @@ cd backend && venv/bin/python -m pytest \
 ### 미검증 (정적 감사로 대체 불가 — 기존 표 유지)
 - 위 §항목별 표 1·2(화면)·5~10·C준비 전부 그대로 **미검증**. 이번 감사는 코드 경로만 봤고 실제 IndexedDB 트랜잭션·React 렌더 순서·네트워크 요청 0건은 확인하지 않음.
 - 백엔드 pytest·tsc·프런트 모델/곡선 테스트 미실행.
+
+---
+
+## 국소 수정 B3·F1·G1 (2026-10-16 20:10 Codex 후속 지시, 하위세션 "정적감사")
+
+> **작성만, 실행 0회**(tsc·node test·빌드·서버·브라우저·봇 없음). 모델·판정 기준·수치 신뢰도 변경 없음 — 버전·맵 확인 전 UI 과신 차단과 배치 전환 경계 처리만. 문서 38 은 상단 '최신 인계'(사용자 미커밋)와 같은 파일이라 **수정하지 않음** — 38 §10-4·§12-3 보정 문안은 아래 "38 보정 사항"에 둠(사용자 커밋 뒤 반영 권장).
+> **정적 검토 결과 ≠ 실제 UI PASS.** 아래 근거는 호출 경로·상태 전이 읽기이며 테스트는 작성만 함.
+
+### 변경 파일
+| 파일 | 변경 |
+|---|---|
+| `frontend/src/components/ProductionDashboard/BatchVerifyPanel.tsx` | `levelsRevision` 상태(36-37줄), 재생성 검증 `finally`(184줄)·중앙정렬 `finally`(232줄)에서 `+1`, 섹션 호출(591-592줄) `key={batchId} levelsRevision levelsChanging={isVerifying}` |
+| `frontend/src/components/ClearRate/clearRateVerifyModel.ts` | `Validity` 에 `unconfirmed`, `RunState` 에 `checking`(25-26줄)·라벨(30·35줄); `CurrentContext.mapHash: string\|null`·`modelVersion` null 의미 변경(153·157줄); `assessRecord`: mapHash null → unconfirmed(164줄), 모드 A 버전 null → unconfirmed(172-175줄), 버전 비교 무조건화(177-178줄); `displayVerdict` "확인 불가:" 접두(200-202줄); `runState` mapHash null + done → `checking`(205줄) |
+| `frontend/src/components/ClearRate/ClearRateVerifySection.tsx` | props `levelsRevision/levelsChanging`(64-70줄); `loadedRev`·`levelsError`·`infoError`(72-74·90줄); 세대 `gen`·`live()`·`mapEpoch`·`polling`·`planRef`·`mapsConfirmed`(94-102줄); `persistJob/refreshJobs` 세대·배치 확인 + 조회 중복 방지(104-124줄); 레벨 읽기 effect 분리(134-146줄); 맵 갱신 시 계획 폐기 effect(148-152줄); 복원 effect cleanup 에서 `gen++`, info 실패 기록(154-175줄); 모든 비동기 핸들러 세대·맵세대 확인(181-337줄); `curMap`·`runLocked`(341·355줄); 상태 문구 `cr-info-error/cr-info-loading/cr-levels-error/cr-map-checking`(369-379줄); 실행 버튼 잠금(462-465·486줄); 행 실행 상태 `runState(ref, curMap(n), n)`(521줄) |
+| `frontend/tests/clearRateVerifyModel.test.ts` | 81줄 기대값 `current` → 별도 테스트로 `unconfirmed`; 테스트 2개 추가 + 배지 테스트 보강 |
+
+### B3 — 배치 전환
+- 재현 조건(수정 전): 검증 탭에서 [A 탐색]/[C 판정]/[C 준비] 응답 대기·C 실행 루프·작업 폴링 중 상단 배치 `<select>` 변경.
+- 수정: ① `key={batchId}` → 배치가 바뀌면 섹션 전체 재마운트(모든 상태 초기화, 이전 폴링 interval 은 effect cleanup 으로 `clearInterval`). ② key 만 믿지 않음: 복원 effect cleanup 에서 `gen.current++`. 모든 비동기 핸들러(`doPreview·applyCurve·applyB·runExploration·prepareC·executeC·cancelC·judgeC·refreshJobs`)는 시작 시 `g=gen.current` 를 잡고, `await` 뒤 `live(g)` 가 거짓이면 **setState 안 함 + 루프는 다음 요청 전에 `return`**(새 측정 `submitConfirm`·판정·조회 요청 없음).
+- 저장소 쓰기 정책: 이미 서버가 만든 C 작업의 참조(`putJobRef`)와 이미 받은 판정 기록(`putRecord`)은 **원래 배치 키**로 IndexedDB 에 남김(추적 유지 — 다른 배치 키로 쓰는 경로 없음). 화면 상태 반영은 현재 세대 + `ref.batch_id === batchId` 일 때만(`persistJob` 106줄). 세대가 바뀐 폴링 응답은 저장소에도 쓰지 않음(117줄 `return`).
+- 매핑 키 확인: `jobs`·`rowError` 상태 키는 여전히 레벨 번호이나, 인스턴스가 배치마다 새로 만들어지고(key) 쓰기는 세대·배치 확인을 거치므로 다른 배치 값이 들어갈 경로 없음. `records` 키는 원래 배치 포함. `doneCount`·`judgeC` 대상도 `ref.batch_id === batchId` 추가(318·354줄). `locks` 는 인스턴스별 ref.
+- 비실행 검토 근거(상태 전이): 배치 X→Y: 부모 렌더 → key 변경 → X 인스턴스 언마운트(cleanup: `alive=false`, `gen++`, interval 해제) → X 의 대기 중 `await` 복귀 → `live(g)` 거짓 → 화면 미반영·후속 요청 없음. Y 인스턴스는 새 `gen=0`·빈 상태에서 복원.
+- 남은 위험: 언마운트 직전에 이미 전송된 요청 1건(예: `submitConfirm`)은 취소되지 않음(AbortController 미도입 — 서버 작업 생성은 사용자 클릭에서 시작된 것이고 참조는 원래 배치 키로 저장됨). 폴링 응답 순서 역전(R2-2)은 중복 조회 방지(`polling` ref)로 줄였으나 `cancelC` 응답과 진행 중 조회의 역전은 남음(자체 회복).
+
+### F1 — 버전 확인 전·실패 시 초록 합격 금지
+- 재현 조건(수정 전): `/verify/info` 응답 전 또는 실패 상태로 복원 → 이전 모델 C `PASS` 가 초록 "합격" + 집계 "합격 n".
+- 수정: `assessRecord` 모드 A 에서 `ctx.modelVersion == null || ctx.judgeVersion == null` → `unconfirmed`(사유 "현재 모델·판정 기준 버전 확인 불가"). `displayVerdict` → 회색 `확인 불가: 합격`. 집계 `counts` 는 `current` 만이라 자동 제외. 화면: 조회 중 `cr-info-loading`, 실패 `cr-info-error`(오류 내용 + "회색 표시·합격 집계 제외"). 판정식·임계·모델·기준 버전 값 변경 없음.
+- 순서: 맵·위치·봇 변경 검사(측정 무효)가 먼저 → 버전을 몰라도 맵이 바뀐 기록은 "측정 무효". 모드 B 는 합격 색이 없는 별도 칸이라 버전 확인 대상에서 제외(B 의 봇 버전/프로토콜 비교는 info 없으면 생략 — 남은 간극, 초록 표시 경로 아님).
+- 비실행 검토 근거: 행 렌더 → `ctxFor(n)`(info 없으면 version null) → `assessRecord` → `unconfirmed` → `displayVerdict` 회색, `counts` 미포함, 셀 `opacity-60`.
+
+### G1 — 같은 배치에서 맵이 바뀐 뒤 최신 level_json 다시 읽기
+- 재현 조건(수정 전): 같은 검증 탭에서 BatchVerifyPanel [검증+재생성] 또는 [중앙정렬]이 `level_json` 을 저장 → 섹션은 옛 `levels` 그대로 → 옛 맵 해시로 "현재 유효", [C 판정]·[실행]이 옛 `level_json` 전송.
+- 수정: 부모가 저장 작업 중이면 `levelsChanging=isVerifying`, 끝나면(`finally`, 오류·부분 완료 포함) `levelsRevision+1`. 섹션은 `[batchId, levelsRevision]` effect 로 `getProductionLevelsByBatch` 를 **실제로 다시 읽고**, 다 읽은 revision 을 `loadedRev` 에 기록. `mapsConfirmed = loadedRev === levelsRevision && !levelsChanging` — revision 이 올라간 렌더부터 읽기 완료 전까지 1프레임도 확인 완료로 보지 않음. 확인 전: `ctx.mapHash=null` → 판정 `unconfirmed`(회색), 완료 C 작업 실행 상태 "맵 확인 중"(`checking`, [C 판정] 대상 아님), A·B·C 실행 버튼 잠금(`runLocked`), 문구 `cr-map-checking`. 읽기 실패 시 `cr-levels-error` 표시 + 계속 잠금.
+- C 계획 무효화: `[levelsRevision, levelsChanging]` effect 가 `mapEpoch++` 하고 준비된 계획이 있으면 폐기 + 안내 문구. `prepareC` 응답이 맵세대 변경 뒤 도착하면 계획을 띄우지 않음. `executeC`·`judgeC`·`runExploration` 루프는 매 항목 전 맵세대 확인 → 바뀌었으면 남은 요청 중단.
+- 갱신 비용: 저장 작업 1회 종료당 IndexedDB 배치 읽기 1회 + 맵 해시 재계산(레벨 수만큼). 폴링·매 프레임 없음.
+- 비실행 검토 근거(상태 전이): 중앙정렬 클릭 → `setIsVerifying(true)` → 섹션 `levelsChanging=true` → `mapsConfirmed=false`, 맵세대++ / 계획 폐기 → 저장들 → `finally`: `isVerifying=false`, `levelsRevision=r+1`(같은 배치 렌더) → `loadedRev(r) ≠ r+1` 이므로 여전히 확인 전 → 다시 읽기 완료 → `loadedRev=r+1` → 새 해시로 `assessRecord` → 바뀐 레벨은 "측정 무효", 완료 작업은 "결과 오래됨".
+- 남은 위험: 섹션 밖 다른 탭(테스트·검토 등)이 레벨을 바꾸는 경우는 탭 전환으로 섹션이 재마운트되어 다시 읽힘(대시보드는 탭별 조건부 렌더) — 같은 화면 동시 변경 경로는 BatchVerifyPanel 뿐으로 확인. 다른 브라우저 탭/서버 pull 에 의한 변경은 감지하지 않음(기존과 동일). 기존 배치 검증 [배치 검증](재생성 없음)은 메타만 바꾸므로 revision 을 올리지 않으나 실행 중 `isVerifying` 으로 잠금은 걸림.
+
+### 작성한 테스트 (미실행)
+`frontend/tests/clearRateVerifyModel.test.ts` — 실행 명령(승인 시): `cd frontend && node --experimental-strip-types --test tests/clearRateVerifyModel.test.ts`
+- 수정: `model or judgment criteria change → evaluation stale` (null 케이스 제거)
+- 신규: `unknown current versions (/verify/info loading or failed) → unconfirmed, never current` (4 조합 + 맵 변경 우선)
+- 신규: `latest map not yet confirmed (mapHash null) → unconfirmed; done job → checking, not judgeable`
+- 보강: `no PASS badge under new conditions` (`unconfirmed` 회색·"확인 불가:" + 버전 null assess→display 연결)
+- React 컴포넌트(B3 세대 경계·G1 갱신 경로)는 단위 테스트 수단 없음(테스트 런너는 node 내장, DOM 없음) → 브라우저 검증 항목으로 남김(아래 fixture).
+
+### 38 보정 사항 (사용자 미커밋 상단과 같은 파일이라 미반영 — 반영 권장 문안)
+- §10-4 실행 상태 목록에 `맵 확인 중(최신 맵 다시 읽기 전 — 완료 작업도 판정 대상 아님)` 추가.
+- §12-3 표에 행 추가: `최신 맵 확인 전 · 현재 모델/기준 버전 조회 전·실패 | unconfirmed | "현재 상태 확인 불가" — 회색 "확인 불가: …", 집계 제외, 실행 버튼 잠금(맵 확인 전)`. 표 아래 "모델 버전 없으면 오래됨 처리"는 기록 쪽 값이 없을 때(그대로), 현재 쪽 값을 모를 때는 unconfirmed 로 구분.
+- §10-4 하단: "배치 전환 시 섹션 재마운트(key) + 진행 중 비동기 작업은 세대 확인으로 화면 쓰기·후속 요청 중단".
+
+### 브라우저 fixture 인계 (향후 별도 테스트 컨텍스트용 — 이번에 주입·실행 안 함)
+**격리 원칙**: IndexedDB 는 origin(호스트:포트)별이다. 운영 화면 `localhost:5173` 과 다른 포트(예: 워크트리 프런트 `:5174`)의 **새 브라우저 프로필**에서만 주입한다. 대시보드는 마운트 시 `syncBidirectional()` → 로컬에만 있는 배치를 **연결된 백엔드 생산 저장소로 push**(`pushLocalMissingToServer`, `productionServerSync.ts:226-245`)하므로, 프런트 `:5174` 의 `/api` 프록시는 반드시 **워크트리 백엔드 `:8001`**(저장 위치 `TileMatchAutoLevel_wt_clearrate/backend/data/production/`, git-ignored·현재 없음 — 메인 `:8000` 의 운영 저장소와 별개)로 향해야 한다. 메인 `:8000` 에 연결된 화면에서는 주입 금지.
+**주입 대상** (DB `TileMatchProduction` v1, `storage/productionStorage.ts:20-62`)
+| 스토어 | 키 | 최소 레코드 |
+|---|---|---|
+| `batches` | keyPath `id` | `{ id:'batch_fixture_cr_<날짜>', name:'[fixture] CR 검증 3레벨', created_at, updated_at, total_levels:3, levels_per_set:10, total_sets:1, generated_count:3, playtest_count:0, approved_count:0, rejected_count:0, exported_count:0, saved_level_count:3, difficulty_start:0.3, difficulty_end:0.3, use_sawtooth:false }` (그 밖의 `ProductionBatch` 선택 필드 생략 가능 — `types/production.ts:248~`) |
+| `levels` | keyPath `['batch_id','meta.level_number']`, 인덱스 `batch_id` | `{ batch_id, meta:{ level_number, set_index:0, local_index, generated_at, target_difficulty:0.3, actual_difficulty:0.3, grade:'B', status:'generated', status_updated_at, playtest_required:false, playtest_priority:0, playtest_results:[] }, level_json }` (필수 meta 는 `types/production.ts:128-239` 중 `?` 없는 필드) |
+**레벨 JSON 출처(봇·생성 없이)**: 저장소 골든 `backend/tests/golden/clear_rate_L237.json` 의 `level_json`(키 `layer, layer_0~2, useTileCount, unlockTile, randSeed, shuffleTile, typeImbalance, timea, autoCollectCount`, `placement_level=237`, 모델 캐시 적중 → [A 탐색]이 숫자 결과를 냄). 권장 3~5레벨:
+1. L237 = 골든 그대로(캐시 적중, 탐색 결과·C 준비 확인용)
+2. L238 = 같은 JSON(배치 위치 다름 → cond_hash 다름, 캐시 미스 "측정 없음" 확인용)
+3. L239 = 같은 JSON 에서 `randSeed` 만 +1(맵 해시 다름 — 무효화 비교용)
+4. (선택) L240·L241 = 같은 JSON(목표 곡선 구간·주기·개별 우선순위 확인용)
+또는 기존 운영 배치의 레벨을 **읽기만** 해서(운영 화면 DevTools 에서 `levels` 인덱스 `batch_id` getAll → JSON 복사) 위 형식으로 테스트 프로필에 붙여 넣는다(운영 DB 쓰기 없음).
+**주입 절차**: ① 워크트리 백엔드 `:8001`·프런트 `:5174`(별도 승인 필요, 38b 앞 절의 임시 vite 설정 방식) ② 새 프로필로 `http://localhost:5174` 를 열되 대시보드 진입 전 빈 페이지에서 DevTools 콘솔로 `indexedDB.open('TileMatchProduction',1)` — 스토어가 없으면 `onupgradeneeded` 에서 위 keyPath·인덱스대로 생성(앱 코드와 동일하게: `batches`(keyPath id), `levels`(keyPath ['batch_id','meta.level_number'] + 인덱스 batch_id·status·level_number·grade·playtest_required), `playtest_queue`(keyPath ['batch_id','level_number'] + 인덱스 priority)) ③ readwrite 트랜잭션으로 batch 1건 + level 3~5건 `put`, `oncomplete` 확인 ④ 생산 대시보드 → 배치 선택 → 검증 탭. (주입은 앱 저장 함수를 거치지 않으므로 자동 push 알림은 안 생기지만, 대시보드 마운트 시 `syncBidirectional` 은 `:8001` 로 push 함 — 그래서 ①의 백엔드 분리가 필수.)
+**정리**: 테스트 프로필 삭제(또는 DevTools Application → IndexedDB `TileMatchProduction`·`TileMatchClearRateVerify` 삭제) + 워크트리 `backend/data/production/batch_fixture_cr_*`(push 사본)·`backend/data/clear_rate_verify/`(C 작업·측정 — C 실행 안 했으면 없음) 삭제. 운영(메인) 저장소·`:5173` IndexedDB 는 손대지 않음.
+**검증 항목 매핑**: B3 = fixture 배치 + 아무 다른 배치 1개(빈 배치도 가능) 사이 전환 중 대기 응답 확인 / F1 = DevTools 네트워크에서 `/api/clear-rate/verify/info` 차단 후 복원 → 회색 "확인 불가"·`cr-info-error` / G1 = fixture 에서 [중앙정렬] → `cr-map-checking` → 갱신 후 바뀐 레벨 "측정 무효"(중앙정렬은 봇 없음, 레벨 데이터 변경이므로 fixture 에서만).

@@ -7,6 +7,11 @@
  * - 실행 상태(미측정/대기/측정 중/완료/실패/취소/결과 오래됨)와 판정(합격/불합격/근거 부족)은 다른 칸.
  * - A 결과가 근거 부족이어도 B 로 자동 전환하지 않는다. B 는 별도 칸·별도 목표, 회색 "실측 미검증" 배지 고정.
  * - C 측정은 봇 측정 재현성 확인이며 실유저 클리어율 독립 검증이 아니다.
+ * - 배치 전환(문서 38b B3): 부모가 key={batchId} 로 다시 마운트. 이미 시작한 비동기 작업은 세대 번호(gen)로 걸러
+ *   언마운트·배치 변경 뒤에는 화면 상태를 쓰지 않고 다음 요청(측정·판정·조회)도 보내지 않는다.
+ * - 버전 확인(F1): /verify/info 조회 전·실패면 모드 A 기록은 "현재 상태 확인 불가"(회색, 집계 제외), 실패는 화면 표시.
+ * - 맵 갱신(G1): 같은 화면의 기존 검증 재생성·중앙정렬이 맵을 바꾸는 동안(levelsChanging)·끝난 뒤 다시 읽기 전
+ *   (levelsRevision)에는 최신 맵 확인 전 → 판정 "확인 불가", 실행 버튼 잠금, 준비된 C 계획 폐기.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getProductionLevelsByBatch } from '../../storage/productionStorage';
@@ -38,10 +43,11 @@ import {
 
 type Busy = null | 'A' | 'B' | 'preview' | 'plan' | 'submit' | 'judge';
 const POLL_MS = 3000;
+const MAP_CHANGED_MSG = '기존 배치 검증(재생성·중앙정렬)으로 맵이 바뀔 수 있어 C 준비 결과를 비움 — 최신 맵 확인 후 다시 준비';
 const SOURCE_LABEL: Record<string, string> = { override: '개별', cycle: '주기', segment: '구간' };
 const RUN_CLASS: Record<RunState, string> = {
   not_measured: 'text-gray-500', queued: 'text-amber-300', running: 'text-sky-300', done: 'text-gray-200',
-  failed: 'text-red-300', cancelled: 'text-gray-400', stale: 'text-amber-400',
+  failed: 'text-red-300', cancelled: 'text-gray-400', stale: 'text-amber-400', checking: 'text-gray-400',
 };
 
 const errText = (e: unknown): string => {
@@ -55,8 +61,17 @@ const errText = (e: unknown): string => {
 const pct = (t: number | null | undefined) => (t == null ? '—' : `${Math.round(t * 1000) / 10}%`);
 const nowIso = () => new Date().toISOString();
 
-export function ClearRateVerifySection({ batchId }: { batchId: string }) {
+export function ClearRateVerifySection({ batchId, levelsRevision = 0, levelsChanging = false }: {
+  batchId: string;
+  /** 부모(BatchVerifyPanel)가 level_json 저장을 마칠 때마다 증가 → 최신 레벨 다시 읽기 */
+  levelsRevision?: number;
+  /** 부모가 레벨을 바꾸는 작업 중 → 최신 맵 확인 전으로 취급 */
+  levelsChanging?: boolean;
+}) {
   const [levels, setLevels] = useState<ProductionLevel[]>([]);
+  /** 마지막으로 다 읽은 levelsRevision. 현재 revision 과 같아야 최신 맵 확인 완료(렌더 1프레임 틈도 막음) */
+  const [loadedRev, setLoadedRev] = useState<number | null>(null);
+  const [levelsError, setLevelsError] = useState<string | null>(null);
   const [curve, setCurve] = useState<TargetCurve | null>(null);
   const [segDraft, setSegDraft] = useState<SegmentDraft[]>([emptySegmentDraft()]);
   const [ovDraft, setOvDraft] = useState<OverrideDraft[]>([]);
@@ -72,40 +87,76 @@ export function ClearRateVerifySection({ batchId }: { batchId: string }) {
   const [busy, setBusy] = useState<Busy>(null);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [info, setInfo] = useState<VerifyInfo | null>(null);
+  const [infoError, setInfoError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const locks = useRef(new Set<string>());
+  /** 세대 번호: 언마운트·배치 변경 시 증가. 비동기 작업은 시작 때 값을 잡고, 다르면 화면 쓰기·후속 요청을 멈춘다 */
+  const gen = useRef(0);
+  const live = (g: number) => gen.current === g;
+  /** 맵 세대: 부모가 레벨을 바꾸기 시작하거나 다시 읽을 때 증가. 다르면 C 준비·실행·판정을 멈춘다 */
+  const mapEpoch = useRef(0);
+  const polling = useRef(false);
+  const planRef = useRef(plan);
+  planRef.current = plan;
+  const mapsConfirmed = loadedRev === levelsRevision && !levelsChanging;
 
-  const persistJob = useCallback(async (ref: ConfirmJobRef) => {
-    setJobs(prev => ({ ...prev, [ref.level_number]: ref }));
-    try { await putJobRef(ref); } catch (e) { setSaveError(`작업 참조 저장 실패: ${errText(e)}`); }
-  }, []);
+  /** 작업 참조: 저장소(IndexedDB, 해당 배치 키)는 항상 기록, 화면 상태는 현재 세대·같은 배치일 때만 */
+  const persistJob = useCallback(async (ref: ConfirmJobRef, g: number) => {
+    if (gen.current === g && ref.batch_id === batchId) setJobs(prev => ({ ...prev, [ref.level_number]: ref }));
+    try { await putJobRef(ref); } catch (e) { if (gen.current === g) setSaveError(`작업 참조 저장 실패: ${errText(e)}`); }
+  }, [batchId]);
 
-  const refreshJobs = useCallback(async (refs: ConfirmJobRef[]) => {
-    const got = await queryConfirmJobs(refs.map(r => r.job.job_id));
-    for (const r of refs) {
-      const j = got[r.job.job_id];
-      if (j && (j.status !== r.job.status || j.games_done !== r.job.games_done || j.cancel_requested !== r.job.cancel_requested)) {
-        await persistJob({ ...r, job: j });
+  /** 상태 조회(측정 아님). 겹치는 조회는 건너뛰고, 응답이 왔을 때 세대가 바뀌었으면 버린다 */
+  const refreshJobs = useCallback(async (refs: ConfirmJobRef[], g: number) => {
+    if (polling.current || gen.current !== g) return;
+    polling.current = true;
+    try {
+      const got = await queryConfirmJobs(refs.map(r => r.job.job_id));
+      for (const r of refs) {
+        if (gen.current !== g) return;
+        const j = got[r.job.job_id];
+        if (j && (j.status !== r.job.status || j.games_done !== r.job.games_done || j.cancel_requested !== r.job.cancel_requested)) {
+          await persistJob({ ...r, job: j }, g);
+        }
       }
-    }
+    } finally { polling.current = false; }
   }, [persistJob]);
 
-  // 진행 중 작업만 상태 조회(폴링). 측정을 새로 요청하지 않는다.
+  // 진행 중 작업만 상태 조회(폴링). 측정을 새로 요청하지 않는다. 언마운트 시 interval 정리.
   const activeRefs = useMemo(() => Object.values(jobs).filter(r => isActiveJob(r.job)), [jobs]);
   useEffect(() => {
     if (activeRefs.length === 0) return;
-    const t = setInterval(() => { refreshJobs(activeRefs).catch(() => undefined); }, POLL_MS);
+    const t = setInterval(() => { refreshJobs(activeRefs, gen.current).catch(() => undefined); }, POLL_MS);
     return () => clearInterval(t);
   }, [activeRefs, refreshJobs]);
 
-  // ── 복원 (측정 요청 없음: 레벨·저장 상태 읽기 + 작업 상태 조회 + 현재 모델/기준 버전 조회) ─────────────────
+  // ── 레벨 읽기 (배치 진입 + 부모의 재생성·중앙정렬 저장 완료마다). 다 읽기 전에는 최신 맵 확인 전 ─────────────
   useEffect(() => {
     let alive = true;
-    setRecords({}); setJobs({}); setPlan(null); setPreview(null); setSelected(new Set()); setRowError({});
+    const rev = levelsRevision;
     getProductionLevelsByBatch(batchId)
-      .then(ls => { if (alive) setLevels([...ls].sort((x, y) => x.meta.level_number - y.meta.level_number)); })
-      .catch(err => console.error('[ClearRateVerify] load levels failed:', err));
+      .then(ls => {
+        if (!alive) return;
+        setLevels([...ls].sort((x, y) => x.meta.level_number - y.meta.level_number));
+        setLevelsError(null); setLoadedRev(rev);
+      })
+      .catch(err => { if (alive) setLevelsError(errText(err)); });
+    return () => { alive = false; };
+  }, [batchId, levelsRevision]);
+
+  // 맵이 바뀌기 시작하거나 다시 읽으면: 진행 중 C 준비·실행·판정 루프 중단 신호 + 준비된 C 계획 폐기
+  useEffect(() => {
+    mapEpoch.current++;
+    if (planRef.current) { setPlan(null); setMessage(MAP_CHANGED_MSG); }
+  }, [levelsRevision, levelsChanging]);
+
+  // ── 복원 (측정 요청 없음: 저장 상태 읽기 + 작업 상태 조회 + 현재 모델/기준 버전 조회) ─────────────────────────
+  useEffect(() => {
+    let alive = true;
+    const g = gen.current;
+    setRecords({}); setJobs({}); setPlan(null); setPreview(null); setSelected(new Set()); setRowError({});
+    setInfo(null); setInfoError(null); setBusy(null);
     loadBatchVerifyState(batchId).then(st => {
       if (!alive) return;
       setCurve(st.curve);
@@ -115,10 +166,11 @@ export function ClearRateVerifySection({ batchId }: { batchId: string }) {
       setRecords(Object.fromEntries(st.records.map(r => [r.key, r])));
       setJobs(Object.fromEntries(st.jobs.map(j => [j.level_number, j])));
       if (st.skipped) setMessage(`이전 저장 항목 ${st.skipped}개는 형식이 맞지 않아 무시함`);
-      if (st.jobs.length) refreshJobs(st.jobs).catch(() => undefined);
-    }).catch(err => setSaveError(`저장소 읽기 실패: ${errText(err)}`));
-    getVerifyInfo().then(i => { if (alive) setInfo(i); }).catch(() => undefined);
-    return () => { alive = false; };
+      if (st.jobs.length) refreshJobs(st.jobs, g).catch(() => undefined);
+    }).catch(err => { if (alive) setSaveError(`저장소 읽기 실패: ${errText(err)}`); });
+    getVerifyInfo().then(i => { if (alive) setInfo(i); })
+      .catch(err => { if (alive) setInfoError(errText(err)); });
+    return () => { alive = false; gen.current++; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [batchId]);
 
@@ -126,12 +178,14 @@ export function ClearRateVerifySection({ batchId }: { batchId: string }) {
   const cHash = useMemo(() => curveHash(curve), [curve]);
   const bTarget = parseTargetPercent(bInput);
 
-  const saveRec = async (rec: EvaluationRecord) => {
-    setRecords(prev => ({ ...prev, [rec.key]: rec }));
+  /** 판정 기록: 저장소(해당 배치 키)는 기록, 화면 상태는 현재 세대일 때만 */
+  const saveRec = async (rec: EvaluationRecord, g: number) => {
+    if (live(g)) setRecords(prev => ({ ...prev, [rec.key]: rec }));
     try {
       await putRecord(rec);
-      setUnsaved(prev => { const n = new Set(prev); n.delete(rec.key); return n; });
+      if (live(g)) setUnsaved(prev => { const n = new Set(prev); n.delete(rec.key); return n; });
     } catch (e) {
+      if (!live(g)) return;
       setUnsaved(prev => new Set(prev).add(rec.key));
       setSaveError(`판정 기록 저장 실패(화면에만 있음): ${errText(e)}`);
     }
@@ -146,39 +200,46 @@ export function ClearRateVerifySection({ batchId }: { batchId: string }) {
     const all = [...errors, ...v.errors.map(e => e.message)];
     setPreview({ curve: c, rows, errors: all, unset: v.unset, checks: {} });
     if (all.length) return;
+    const g = gen.current;
     setBusy('preview');
     try {
       const items = rows.filter(r => r.target != null).map(r => ({ placement_level: r.level, target: r.target as number }));
       const res = items.length ? await checkTargets(items) : { items: [] as TargetCheckItem[] };
-      setPreview(p => p && ({ ...p, checks: Object.fromEntries(res.items.map(i => [i.placement_level, i])) }));
+      if (live(g)) setPreview(p => p && ({ ...p, checks: Object.fromEntries(res.items.map(i => [i.placement_level, i])) }));
     } catch (e) {
-      setPreview(p => p && ({ ...p, checkError: errText(e) }));
-    } finally { setBusy(null); }
+      if (live(g)) setPreview(p => p && ({ ...p, checkError: errText(e) }));
+    } finally { if (live(g)) setBusy(null); }
   };
 
   const applyCurve = async () => {
     if (!preview || preview.errors.length) return;
+    const g = gen.current;
     try {
       await saveCurve(batchId, preview.curve);
+      if (!live(g)) return;   // 저장은 원래 배치 키로 끝남 — 다른 배치 화면에는 적용하지 않음
       setCurve(preview.curve);
       setPreview(null);
       setMessage(`A 목표 곡선 v${preview.curve.version} 적용 — 기존 판정은 "재평가 필요"로 표시(측정 자동 실행 없음)`);
-    } catch (e) { setSaveError(`목표 곡선 저장 실패(적용 안 됨): ${errText(e)}`); }
+    } catch (e) { if (live(g)) setSaveError(`목표 곡선 저장 실패(적용 안 됨): ${errText(e)}`); }
   };
 
   const applyB = async () => {
-    try { await saveBTarget(batchId, bTarget); setMessage('B 봇 목표 저장'); }
-    catch (e) { setSaveError(`B 목표 저장 실패: ${errText(e)}`); }
+    const g = gen.current;
+    try { await saveBTarget(batchId, bTarget); if (live(g)) setMessage('B 봇 목표 저장'); }
+    catch (e) { if (live(g)) setSaveError(`B 목표 저장 실패: ${errText(e)}`); }
   };
 
   // ── A 탐색(캐시) / B 계산 — 봇 실행 없음 ─────────────────────────────────────────────────────────────────
   const runExploration = async (mode: 'A' | 'B') => {
-    if (busy) return;
+    if (busy || !mapsConfirmed) return;
+    const g = gen.current, epoch = mapEpoch.current;
     const targets = levels.map(l => ({ lv: l, t: mode === 'A' ? resolveTarget(curve, l.meta.level_number) : null }))
       .filter(x => (mode === 'A' ? x.t?.target != null : bTarget != null));
     if (targets.length === 0) return;
     setBusy(mode); setProgress({ done: 0, total: targets.length });
     for (let i = 0; i < targets.length; i++) {
+      if (!live(g)) return;                       // 배치 변경·언마운트 → 남은 요청 중단
+      if (mapEpoch.current !== epoch) { setMessage(`${mode} 계산 중 맵 갱신 감지 — 남은 레벨 중단`); break; }
       const { lv, t } = targets[i];
       const n = lv.meta.level_number;
       try {
@@ -187,36 +248,43 @@ export function ClearRateVerifySection({ batchId }: { batchId: string }) {
             level_json: lv.level_json, placement_level: n, use_cached_measurement: true });
           await saveRec(recordFromUserExpected({ batchId, level: n, levelJson: lv.level_json, kind: 'exploration',
             result: res.user_expected!, target: { target: t!.target, source: t!.source, curveHash: cHash, curveVersion: curve?.version ?? null },
-            judgeVersion: info?.judge_version ?? null, now: nowIso() }));
+            judgeVersion: info?.judge_version ?? null, now: nowIso() }), g);
         } else {
           const res = await evaluateClearRateTarget({ target_mode: 'bot_virtual', target: bTarget as number,
             level_json: lv.level_json, placement_level: n });
-          await saveRec(recordFromBotVirtual({ batchId, level: n, levelJson: lv.level_json, result: res.bot_virtual!, now: nowIso() }));
+          await saveRec(recordFromBotVirtual({ batchId, level: n, levelJson: lv.level_json, result: res.bot_virtual!, now: nowIso() }), g);
         }
-        setRowError(prev => { const x = { ...prev }; delete x[n]; return x; });
-      } catch (e) { setRowError(prev => ({ ...prev, [n]: `${mode}: ${errText(e)}` })); }
-      setProgress({ done: i + 1, total: targets.length });
+        if (live(g)) setRowError(prev => { const x = { ...prev }; delete x[n]; return x; });
+      } catch (e) { if (live(g)) setRowError(prev => ({ ...prev, [n]: `${mode}: ${errText(e)}` })); }
+      if (live(g)) setProgress({ done: i + 1, total: targets.length });
     }
-    setBusy(null);
+    if (live(g)) setBusy(null);
   };
 
   // ── C 확인 측정: 준비(plan, 봇 실행 없음) → 확인 → 실행 ───────────────────────────────────────────────────
   const prepareC = async () => {
-    if (busy || selected.size === 0) return;
+    if (busy || selected.size === 0 || !mapsConfirmed) return;
+    const g = gen.current, epoch = mapEpoch.current;
     setBusy('plan');
     try {
       const items = levels.filter(l => selected.has(l.meta.level_number)).map(l => ({
         level_json: l.level_json, placement_level: l.meta.level_number,
         map_id: `${batchId}:${l.meta.level_number}`, batch_id: batchId }));
-      setPlan(await planConfirm(items));
-    } catch (e) { setMessage(`C 준비 실패: ${errText(e)}`); } finally { setBusy(null); }
+      const res = await planConfirm(items);
+      if (!live(g)) return;                        // 다른 배치 화면에 이전 배치 계획을 띄우지 않음
+      if (mapEpoch.current !== epoch) setMessage(MAP_CHANGED_MSG);   // 준비 중 맵 갱신 → 계획 폐기
+      else setPlan(res);
+    } catch (e) { if (live(g)) setMessage(`C 준비 실패: ${errText(e)}`); } finally { if (live(g)) setBusy(null); }
   };
 
   const executeC = async () => {
-    if (!plan || busy) return;
+    if (!plan || busy || !mapsConfirmed) return;
+    const g = gen.current, epoch = mapEpoch.current;
     setBusy('submit');
     const byLevel = Object.fromEntries(levels.map(l => [l.meta.level_number, l]));
     for (const it of plan.items) {
+      if (!live(g)) return;                        // 배치 변경·언마운트 → 남은 측정 요청 보내지 않음
+      if (mapEpoch.current !== epoch) { setMessage(`${MAP_CHANGED_MSG} (남은 C 요청 중단)`); break; }
       const lv = byLevel[it.placement_level];
       if (!lv || !it.cond_hash || it.error || it.blocking?.length || it.protocol_problems?.length) continue;
       const lock = confirmLockKey(batchId, it.placement_level, it.cond_hash);
@@ -225,46 +293,54 @@ export function ClearRateVerifySection({ batchId }: { batchId: string }) {
       try {
         const r = await submitConfirm({ level_json: lv.level_json, placement_level: it.placement_level,
           map_id: it.map_id, batch_id: batchId, expected_cond_hash: it.cond_hash });
+        // 이미 만들어진 서버 작업은 언마운트 뒤에도 해당 배치 키로 참조를 저장(추적 유지), 화면은 현재 세대만
         await persistJob({ schema: 1, key: jobRefKey(batchId, it.placement_level), batch_id: batchId,
-          level_number: it.placement_level, map_hash: hashes[it.placement_level], job: r.job });
+          level_number: it.placement_level, map_hash: hashes[it.placement_level], job: r.job }, g);
       } catch (e) {
-        setRowError(prev => ({ ...prev, [it.placement_level]: `C 요청: ${errText(e)}` }));
+        if (live(g)) setRowError(prev => ({ ...prev, [it.placement_level]: `C 요청: ${errText(e)}` }));
       } finally { locks.current.delete(lock); }
     }
-    setPlan(null); setBusy(null);
+    if (live(g)) { setPlan(null); setBusy(null); }
   };
 
   const cancelC = async (ref: ConfirmJobRef) => {
-    try { await persistJob({ ...ref, job: await cancelConfirm(ref.job.job_id) }); }
-    catch (e) { setRowError(prev => ({ ...prev, [ref.level_number]: `취소: ${errText(e)}` })); }
+    const g = gen.current;
+    try { await persistJob({ ...ref, job: await cancelConfirm(ref.job.job_id) }, g); }
+    catch (e) { if (live(g)) setRowError(prev => ({ ...prev, [ref.level_number]: `취소: ${errText(e)}` })); }
   };
 
   /** 완료 C 측정으로 현재 목표 판정(봇 실행 없음). 맵이 바뀐 작업·목표 미설정 레벨은 건너뛴다 */
   const judgeC = async () => {
-    if (busy) return;
+    if (busy || !mapsConfirmed) return;
+    const g = gen.current, epoch = mapEpoch.current;
     const todo = levels.filter(l => {
       const n = l.meta.level_number, ref = jobs[n];
-      return ref && isCompletedC(ref.job) && runState(ref, hashes[n], n) === 'done' && resolveTarget(curve, n).target != null;
+      return ref && ref.batch_id === batchId && isCompletedC(ref.job) && runState(ref, hashes[n], n) === 'done'
+        && resolveTarget(curve, n).target != null;
     });
     if (todo.length === 0) return;
     setBusy('judge'); setProgress({ done: 0, total: todo.length });
     for (let i = 0; i < todo.length; i++) {
+      if (!live(g)) return;
+      if (mapEpoch.current !== epoch) { setMessage('C 판정 중 맵 갱신 감지 — 남은 레벨 중단(최신 맵 확인 후 다시 판정)'); break; }
       const lv = todo[i], n = lv.meta.level_number, ref = jobs[n], t = resolveTarget(curve, n);
       try {
         const res = await evaluateConfirm({ job_id: ref.job.job_id, target: t.target as number, level_json: lv.level_json, placement_level: n });
         await saveRec(recordFromUserExpected({ batchId, level: n, levelJson: lv.level_json, kind: 'confirm',
           result: res.user_expected, target: { target: t.target, source: t.source, curveHash: cHash, curveVersion: curve?.version ?? null },
-          judgeVersion: res.provenance.judge_version, job: ref.job, provenance: res.provenance, now: nowIso() }));
-        setRowError(prev => { const x = { ...prev }; delete x[n]; return x; });
-      } catch (e) { setRowError(prev => ({ ...prev, [n]: `C 판정: ${errText(e)}` })); }
-      setProgress({ done: i + 1, total: todo.length });
+          judgeVersion: res.provenance.judge_version, job: ref.job, provenance: res.provenance, now: nowIso() }), g);
+        if (live(g)) setRowError(prev => { const x = { ...prev }; delete x[n]; return x; });
+      } catch (e) { if (live(g)) setRowError(prev => ({ ...prev, [n]: `C 판정: ${errText(e)}` })); }
+      if (live(g)) setProgress({ done: i + 1, total: todo.length });
     }
-    setBusy(null);
+    if (live(g)) setBusy(null);
   };
 
   // ── 표시 ──────────────────────────────────────────────────────────────────────────────────────────────
+  // 최신 맵 확인 전이면 mapHash=null → 판정 "확인 불가", 완료 작업 "맵 확인 중". info 없음(조회 전·실패) → 모드 A "확인 불가"
+  const curMap = (n: number): string | null => (mapsConfirmed ? hashes[n] ?? null : null);
   const ctxFor = (n: number) => ({
-    mapHash: hashes[n], level: n, target: resolveTarget(curve, n).target, curveHash: cHash,
+    mapHash: curMap(n), level: n, target: resolveTarget(curve, n).target, curveHash: cHash,
     modelVersion: info?.model_version ?? null, judgeVersion: info?.judge_version ?? null,
     botVersion: info?.bot_version ?? null, botProtocol: info?.bot_protocol ?? null,
   });
@@ -275,7 +351,8 @@ export function ClearRateVerifySection({ batchId }: { batchId: string }) {
     return c;
   }, {} as Record<string, number>);
   const summary = plan ? planSummary(plan.items) : null;
-  const doneCount = levels.filter(l => { const r = jobs[l.meta.level_number]; return r && isCompletedC(r.job); }).length;
+  const doneCount = levels.filter(l => { const r = jobs[l.meta.level_number]; return r && r.batch_id === batchId && isCompletedC(r.job); }).length;
+  const runLocked = busy !== null || !mapsConfirmed;
   const toggle = (n: number) => setSelected(prev => { const s = new Set(prev); if (s.has(n)) s.delete(n); else s.add(n); return s; });
   const btn = 'px-3 py-1 rounded bg-slate-600 hover:bg-slate-500 disabled:opacity-40 text-white text-xs';
   const inp = 'px-1 py-0.5 text-xs border rounded bg-gray-700 border-gray-600';
@@ -288,6 +365,18 @@ export function ClearRateVerifySection({ batchId }: { batchId: string }) {
       </div>
       <div className="text-[11px] text-amber-200/80" data-testid="cr-c-note">{C_NOTE}</div>
       {saveError && <div className="text-xs text-red-300" data-testid="cr-save-error">{saveError}</div>}
+      {infoError && (
+        <div className="text-xs text-red-300" data-testid="cr-info-error">
+          현재 모델·판정 기준 버전 조회 실패: {infoError} — 모드 A 판정은 "현재 상태 확인 불가"(회색)로 표시, 합격 집계 제외
+        </div>
+      )}
+      {!info && !infoError && <div className="text-[11px] text-gray-500" data-testid="cr-info-loading">현재 모델·판정 기준 버전 확인 중 — 확인 전 판정은 "확인 불가"(회색)</div>}
+      {levelsError && <div className="text-xs text-red-300" data-testid="cr-levels-error">최신 레벨 읽기 실패: {levelsError} — 판정 "확인 불가", 실행 잠금</div>}
+      {!mapsConfirmed && !levelsError && (
+        <div className="text-[11px] text-amber-300" data-testid="cr-map-checking">
+          {levelsChanging ? '기존 배치 검증이 맵을 바꾸는 중' : '최신 맵 읽는 중'} — 판정 "확인 불가"(회색), A·B·C 실행 잠금
+        </div>
+      )}
       {message && <div className="text-xs text-gray-300" data-testid="cr-message">{message}</div>}
 
       {/* A 목표 곡선 */}
@@ -370,10 +459,10 @@ export function ClearRateVerifySection({ batchId }: { batchId: string }) {
 
       {/* 실행 */}
       <div className="flex flex-wrap items-center gap-2">
-        <button className={btn} data-testid="cr-run-A" disabled={busy !== null || !curve || levels.length === 0} onClick={() => runExploration('A')}>A 탐색 계산(캐시 측정·C 아님)</button>
-        <button className={btn} data-testid="cr-c-prepare" disabled={busy !== null || selected.size === 0} onClick={prepareC}>C 확인 측정 준비 ({selected.size}개 선택)</button>
-        <button className={btn} data-testid="cr-c-judge" disabled={busy !== null || !curve || doneCount === 0} onClick={judgeC}>C 판정 (완료 {doneCount}개 · 측정 없음)</button>
-        <button className={btn} data-testid="cr-run-B" disabled={busy !== null || bTarget == null || levels.length === 0} onClick={() => runExploration('B')}>B 봇 가상 계산</button>
+        <button className={btn} data-testid="cr-run-A" disabled={runLocked || !curve || levels.length === 0} onClick={() => runExploration('A')}>A 탐색 계산(캐시 측정·C 아님)</button>
+        <button className={btn} data-testid="cr-c-prepare" disabled={runLocked || selected.size === 0} onClick={prepareC}>C 확인 측정 준비 ({selected.size}개 선택)</button>
+        <button className={btn} data-testid="cr-c-judge" disabled={runLocked || !curve || doneCount === 0} onClick={judgeC}>C 판정 (완료 {doneCount}개 · 측정 없음)</button>
+        <button className={btn} data-testid="cr-run-B" disabled={runLocked || bTarget == null || levels.length === 0} onClick={() => runExploration('B')}>B 봇 가상 계산</button>
         <button className="text-[11px] text-gray-400 hover:text-gray-200" onClick={() => setSelected(new Set(levels.filter(l => resolveTarget(curve, l.meta.level_number).target != null).map(l => l.meta.level_number)))}>목표 설정된 레벨 선택</button>
         <button className="text-[11px] text-gray-400 hover:text-gray-200" onClick={() => setSelected(new Set())}>선택 해제</button>
       </div>
@@ -394,7 +483,7 @@ export function ClearRateVerifySection({ batchId }: { batchId: string }) {
             </div>
           ))}
           <div className="flex gap-2">
-            <button className={btn} data-testid="cr-c-execute" disabled={busy !== null || summary.runnable === 0} onClick={executeC}>실행</button>
+            <button className={btn} data-testid="cr-c-execute" disabled={runLocked || summary.runnable === 0} onClick={executeC}>실행</button>
             <button className={btn} onClick={() => setPlan(null)}>취소</button>
           </div>
         </div>
@@ -429,7 +518,7 @@ export function ClearRateVerifySection({ batchId }: { batchId: string }) {
               const n = lv.meta.level_number;
               const t = resolveTarget(curve, n);
               const ref = jobs[n];
-              const rs = runState(ref, hashes[n], n);
+              const rs = runState(ref, curMap(n), n);
               const rec = records[recordKey(batchId, n, 'A', 'confirm')] ?? records[recordKey(batchId, n, 'A', 'exploration')];
               const recB = records[recordKey(batchId, n, 'B', 'exploration')];
               const ctx = ctxFor(n);

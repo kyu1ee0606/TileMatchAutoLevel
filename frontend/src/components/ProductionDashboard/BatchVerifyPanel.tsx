@@ -33,6 +33,8 @@ export function BatchVerifyPanel({ batchId, onComplete, onStatsUpdate }: BatchVe
   const [verifyProgress, setVerifyProgress] = useState({ current: 0, total: 0, phase: 'verify' as 'verify' | 'regenerate' | 'centering' });
   // [v15.40] 중앙정렬 수정 상태
   const [centeringResult, setCenteringResult] = useState<{ total: number; modified: number; timeMs: number } | null>(null);
+  // 재생성·중앙정렬이 level_json 저장을 마칠 때마다 +1 → 실유저 클리어율 섹션이 최신 레벨을 다시 읽는다(문서 38b G1)
+  const [levelsRevision, setLevelsRevision] = useState(0);
 
   // 검증 설정
   const [config, setConfig] = useState({
@@ -179,6 +181,7 @@ export function BatchVerifyPanel({ batchId, onComplete, onStatsUpdate }: BatchVe
       console.error('Batch verification failed:', err);
     } finally {
       setIsVerifying(false);
+      setLevelsRevision(r => r + 1);
     }
   };
 
@@ -226,6 +229,7 @@ export function BatchVerifyPanel({ batchId, onComplete, onStatsUpdate }: BatchVe
       console.error('[FixCentering] Error:', error);
     } finally {
       setIsVerifying(false);
+      setLevelsRevision(r => r + 1);
     }
   };
 
@@ -584,7 +588,8 @@ export function BatchVerifyPanel({ batchId, onComplete, onStatsUpdate }: BatchVe
       </div>
 
       {/* [문서 38] 실유저 예상 클리어율 참고 판정 — 위 배치 검증·verification_passed 와 무관 */}
-      <ClearRateVerifySection batchId={batchId} />
+      <ClearRateVerifySection key={batchId} batchId={batchId}
+        levelsRevision={levelsRevision} levelsChanging={isVerifying} />
     </div>
   );
 }

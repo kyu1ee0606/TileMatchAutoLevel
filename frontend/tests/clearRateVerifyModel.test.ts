@@ -75,10 +75,30 @@ test('map / placement / bot protocol change → measurement invalid', () => {
   assert.equal(assessRecord(confirmRec(), ctx({ botVersion: 'v2.5' })).validity, 'measurement_invalid');
 });
 
-test('model or judgment criteria change → evaluation stale (unknown versions are not compared)', () => {
+test('model or judgment criteria change → evaluation stale', () => {
   assert.equal(assessRecord(confirmRec(), ctx({ modelVersion: 'cr-next' })).validity, 'evaluation_stale');
   assert.equal(assessRecord(confirmRec(), ctx({ judgeVersion: 'judge-b' })).validity, 'evaluation_stale');
-  assert.equal(assessRecord(confirmRec(), ctx({ modelVersion: null, judgeVersion: null })).validity, 'current');
+});
+
+test('unknown current versions (/verify/info loading or failed) → unconfirmed, never current', () => {
+  for (const over of [{ modelVersion: null, judgeVersion: null }, { modelVersion: null }, { judgeVersion: null },
+                      { modelVersion: null, judgeVersion: null, botVersion: null, botProtocol: null }]) {
+    const a = assessRecord(confirmRec('PASS'), ctx(over));
+    assert.equal(a.validity, 'unconfirmed', JSON.stringify(over));
+    assert.ok(a.reasons[0].includes('버전'));
+  }
+  // 맵이 바뀐 것은 버전을 몰라도 측정 무효로 먼저 보인다
+  assert.equal(assessRecord(confirmRec(), ctx({ modelVersion: null, mapHash: mapHash({ ...LJ, randSeed: 9 }) })).validity,
+               'measurement_invalid');
+});
+
+test('latest map not yet confirmed (mapHash null) → unconfirmed; done job → checking, not judgeable', () => {
+  const a = assessRecord(confirmRec('PASS'), ctx({ mapHash: null }));
+  assert.equal(a.validity, 'unconfirmed');
+  assert.ok(a.reasons[0].includes('맵'));
+  const ref: ConfirmJobRef = { schema: 1, key: 'b|237', batch_id: 'b', level_number: 237, map_hash: mapHash(LJ), job: job() };
+  assert.equal(runState(ref, null, 237), 'checking');
+  assert.equal(runState({ ...ref, job: job({ status: 'running' }) }, null, 237), 'running');   // 진행 표시는 유지
 });
 
 test('target-only change → needs rejudge (measurement kept); no target → target_unset', () => {
@@ -96,6 +116,11 @@ test('no PASS badge under new conditions', () => {
     const d = displayVerdict(r, v);
     assert.ok(!d.cls.includes('emerald') && d.past && d.label.startsWith('과거:'), v);
   }
+  const u = displayVerdict(r, 'unconfirmed');
+  assert.ok(!u.cls.includes('emerald') && u.past && u.label.startsWith('확인 불가:'));
+  // 버전 조회 전·실패 상태에서 과거 PASS 는 초록이 아니다 (assess → display 연결)
+  const d0 = displayVerdict(r, assessRecord(r, ctx({ modelVersion: null, judgeVersion: null })).validity);
+  assert.ok(!d0.cls.includes('emerald'));
 });
 
 test('run state is separate from verdict; done job on a changed map is stale', () => {

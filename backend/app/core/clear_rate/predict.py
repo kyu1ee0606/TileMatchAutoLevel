@@ -65,6 +65,7 @@ class ClearRatePrediction:
     expected_unaided_lb: Optional[float] = None
     expected_help_rate: Optional[float] = None
     confidence: Optional[str] = None
+    reliability: Optional[Dict[str, Any]] = None   # training OOF error for this predicted zone / gimmick combo / segment
     measurement: Optional[Dict[str, str]] = None
     bot_unaided_win_rate: Dict[str, float] = field(default_factory=dict)
     conditions: Dict[str, Any] = field(default_factory=dict)          # final game conditions the prediction is for
@@ -135,6 +136,9 @@ def predict_level(model: ClearRateModel, game_map: Dict[str, Any], conditions: D
     expected = model.predict("ft_any", feats)
     lo, hi = model.range80("ft_any", feats)
     flags += guard.value_flags(expected)
+    combo = "+".join(g for g in present_gimmicks(map_features(game_map)) if g != "craft") or "none"
+    out.reliability = guard.reliability(sup, expected, combo, segment_of(L), (lo, hi))
+    flags += guard.reliability_flags(out.reliability)
     out.expected_ft_any, out.range80_ft_any = round(expected, 4), (round(lo, 4), round(hi, 4))
     out.expected_unaided_lb = round(model.predict("unaided_lb", feats), 4)
     out.expected_help_rate = round(model.predict("help_rate", feats), 4)

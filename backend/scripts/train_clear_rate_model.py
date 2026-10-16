@@ -273,7 +273,37 @@ def evaluate(rows, X):
     for s in segs:
         mk = np.array([r["seg"] == s for r in rows])
         res["ft_any_range80"][f"coverage_{s}"] = round(float(((y[mk] >= plo[mk]) & (y[mk] <= phi[mk])).mean()), 3)
+    res["reliability"] = reliability_tables(rows, oof["ft_any"].mean(0), y, plo, phi)
     return res, Y
+
+
+PRED_BINS = [0.0, 0.88, 0.92, 0.95, 0.97, 1.0001]  # bins on the *predicted* value (known at serving time)
+
+
+def combo_key(gims):
+    g = [x for x in gims if x != "craft"]
+    return "+".join(g) if g else "none"
+
+
+def reliability_tables(rows, pm, y, plo, phi):
+    """Out-of-fold error by things known before release: predicted-value bin, gimmick combination, segment.
+    (Not by the actual value — that is unknown for a new map.)"""
+    def stats(mk):
+        e = pm[mk] - y[mk]
+        return {"n": int(mk.sum()), "mae": round(float(np.abs(e).mean()), 4), "bias": round(float(e.mean()), 4),
+                "coverage80": round(float(((y[mk] >= plo[mk]) & (y[mk] <= phi[mk])).mean()), 3)}
+    out = {"pred_bins": [], "combo": {}, "segment": {}, "basis": "repeat-mean OOF point, rep-0 OOF CQR range"}
+    for lo, hi in zip(PRED_BINS[:-1], PRED_BINS[1:]):
+        mk = (pm >= lo) & (pm < hi)
+        if mk.any():
+            out["pred_bins"].append({"lo": lo, "hi": min(hi, 1.0), **stats(mk)})
+    keys = np.array([combo_key(r["gims"]) for r in rows])
+    for k in sorted(set(keys)):
+        out["combo"][k] = stats(keys == k)
+    segs = np.array([r["seg"] for r in rows])
+    for k in sorted(set(segs)):
+        out["segment"][k] = stats(segs == k)
+    return out
 
 
 def baseline():
@@ -310,7 +340,7 @@ def j_gbm(G):
     return {"feats": list(G.feats), "base": float(G.base), "lr": float(G.lr), "trees": [j_tree(t) for t in G.trees]}
 
 
-def fit_export(rows, X, Y, expo, af, prep, bot_rows):
+def fit_export(rows, X, Y, expo, af, prep, bot_rows, reliability):
     heads, np_pred = {}, {}
     for h in ("ft_any", "unaided_lb", "help_rate"):
         m = point_model().fit(X, Y[h], FEATS)
@@ -341,6 +371,7 @@ def fit_export(rows, X, Y, expo, af, prep, bot_rows):
             "time_limit": int(sum(int(float(prep[r["L"]]["row"].get("timea") or 0)) > 0 for r in rows)),
         },
         "min_condition_levels": 10,
+        "reliability": reliability,
     }
     position = {"exposure": {str(L): v for L, v in sorted(expo.items())},
                 "gimmick_first_levels": sorted(L for L in af if af[L].get("is_gimmick_first")),
@@ -398,8 +429,8 @@ def main():
 
     rows, X, prep, af, bot_rows, LM_doc, expo, n_feat_checked = build_dataset()
     if a.check:
-        Y = {h: ytarget(rows, k) for h, k in (("ft_any", "ft_any"), ("unaided_lb", "lb"), ("help_rate", "help"))}
-        model, cache, np_pred = fit_export(rows, X, Y, expo, af, prep, bot_rows)
+        ev, Y = evaluate(rows, X)  # reliability tables come from the K-fold OOF → re-run it too
+        model, cache, np_pred = fit_export(rows, X, Y, expo, af, prep, bot_rows, ev["reliability"])
         out = MODELS / a.version
         same_m = dumps(model) == (out / "model.json").read_text(encoding="utf-8")
         same_c = dumps(cache) == (out / "bot_cache.json").read_text(encoding="utf-8")
@@ -413,7 +444,7 @@ def main():
     if not g["pass"]:
         log("gates failed — model not saved")
         sys.exit(2)
-    model, cache, np_pred = fit_export(rows, X, Y, expo, af, prep, bot_rows)
+    model, cache, np_pred = fit_export(rows, X, Y, expo, af, prep, bot_rows, ev["reliability"])
     pdiff = parity(model, rows, np_pred)
     assert pdiff < 1e-9, f"pure-python predictor differs from numpy by {pdiff}"
     tags = sorted({t for r in rm.load(CAL / BOT_FILE)["rows"] for t in (r.get("v24") or [])})

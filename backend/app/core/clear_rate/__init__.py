@@ -5,13 +5,14 @@ validation / selection (docs 31 / 33).
   predict_editor_level(level_json, placement_level, bot_measurement=None, upload_opts=None)
   finalize_game_conditions(level_json, slot_number, upload_opts=None)        → (game_map, conditions) as uploaded
   cond_hash(game_map, conditions)                                            tag for bot measurements
-  judge(prediction, target, support, half_width_logit=0.7)                   PASS / FAIL / INSUFFICIENT_EVIDENCE
+  select(preds, target, k) / score(pred, target)                             rank in-support candidates
+  verdict(pred_c, target, support)                                           PASS / FAIL / INSUFFICIENT_EVIDENCE
 """
 from .conditions import GAME_FIELDS, cond_hash, finalize_game_conditions
-from .judge import ClearRateVerdict, judge
+from .select import ClearRateVerdict, score, select, verdict
 from .model import ClearRateModel, load_model
 from .predict import BotMeasurement, ClearRatePrediction, predict_level
 from .service import predict_editor_level
 
-__all__ = ["GAME_FIELDS", "cond_hash", "finalize_game_conditions", "judge", "ClearRateVerdict", "ClearRateModel", "load_model",
+__all__ = ["GAME_FIELDS", "cond_hash", "finalize_game_conditions", "score", "select", "verdict", "ClearRateVerdict", "ClearRateModel", "load_model",
            "BotMeasurement", "ClearRatePrediction", "predict_level", "predict_editor_level"]

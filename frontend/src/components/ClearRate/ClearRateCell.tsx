@@ -29,6 +29,10 @@ const FLAG_LABEL: Record<string, string> = {
   NOVELTY_HIGH: '기믹 노출 적음',
   GIMMICK_BOT_WEAK: '봇 약점 기믹',
   STORED_CONDITION_DIFFERS: '저장값≠업로드값',
+  PRED_ZONE_HIGH_ERROR: '이 예측 구간 오차 큼',
+  PRED_ZONE_MID_ERROR: '이 예측 구간 오차 중간',
+  SIMILAR_MAPS_FEW: '유사 맵 적음',
+  COMBO_HIGH_ERROR: '기믹 조합 오차 큼',
 };
 
 const CONF_LABEL = { high: '높음', medium: '중간', low: '낮음' } as const;

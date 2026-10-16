@@ -806,3 +806,4 @@ class ClearRatePredictResponse(BaseModel):
     bot_unaided_win_rate: Dict[str, float] = Field(default_factory=dict, description="Bot (unaided) win rate per θ — model input, not a clear rate")
     conditions: Dict[str, Any] = Field(default_factory=dict, description="Final game conditions (upload values) the prediction is for")
     upload_assumption: Optional[Dict[str, Any]] = Field(default=None, description="Upload-panel options assumed")
+    reliability: Optional[Dict[str, Any]] = Field(default=None, description="Training out-of-fold error for this predicted zone / gimmick combination / segment (known before release)")

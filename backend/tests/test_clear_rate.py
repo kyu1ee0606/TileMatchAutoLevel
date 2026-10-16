@@ -9,11 +9,11 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app.core.clear_rate import (BotMeasurement, cond_hash, finalize_game_conditions, judge, load_model,
+from app.core.clear_rate import (BotMeasurement, cond_hash, finalize_game_conditions, load_model, select, verdict,
                                  predict_editor_level, predict_level)
 from app.core.clear_rate import guard
 from app.core.clear_rate.features import FEATS, expit
-from app.core.clear_rate.judge import p_in_band, target_band
+from app.core.clear_rate.select import p_in_band, score, target_band
 from app.core.clear_rate.model import MODELS_DIR, gbm_predict, ridge_predict
 from app.core.clear_rate.predict import ClearRatePrediction
 from app.core.clear_rate.service import random_layout
@@ -257,16 +257,43 @@ def test_feature_flags_and_confidence():
     assert guard.confidence([]) == "high"
 
 
-# ── verdict (library only) ───────────────────────────────────────────────────────────────────────
-def _pred(expected, rng, conf="high", in_support=True, L_=200):
+# ── support-based reliability ────────────────────────────────────────────────────────────────────
+def test_reliability_tables_are_by_predicted_value_not_actual(mdl):
+    rel = mdl.model["support"]["reliability"]
+    zones = rel["pred_bins"]
+    assert zones[0]["lo"] == 0.0 and zones[-1]["hi"] >= 1.0 and sum(z["n"] for z in zones) == 379
+    assert zones[0]["mae"] > zones[-1]["mae"]  # low predictions carry the big errors (doc 26 §11-9 seen from the model side)
+
+
+def test_reliability_flags_catch_low_true_rate_hidden_above_085():
+    """0.85 is not a safety line: a prediction of 0.90 still lands in a high-error zone → confidence low."""
+    sup = {"reliability": {"pred_bins": [{"lo": 0.88, "hi": 0.92, "n": 41, "mae": 0.047, "bias": 0.019, "coverage80": 0.73}],
+                           "combo": {"link": {"n": 30, "mae": 0.019, "bias": 0.009, "coverage80": 0.83}}, "segment": {}}}
+    rel = guard.reliability(sup, 0.90, "link", "101-300", (0.85, 0.94))
+    fl = guard.reliability_flags(rel)
+    assert codes(fl) == ["PRED_ZONE_HIGH_ERROR"] and guard.confidence(fl) == "low"
+    assert not guard.value_flags(0.90)  # the <0.85 rule alone would have missed it
+    rel2 = guard.reliability(sup, 0.90, "ice+bomb", "101-300", (0.85, 0.94))
+    assert "SIMILAR_MAPS_FEW" in codes(guard.reliability_flags(rel2))
+
+
+def test_prediction_carries_reliability():
+    r = predict_editor_level(LJ, L)
+    assert r.reliability["pred_zone"]["lo"] <= r.expected_ft_any
+    assert r.reliability["combo"]["key"] and r.reliability["range80_width"] == round(r.range80_ft_any[1] - r.range80_ft_any[0], 4)
+
+
+# ── selection / verdict (library only) ───────────────────────────────────────────────────────────
+def _pred(expected, rng, conf="high", in_support=True, L_=200, band="C"):
     return ClearRatePrediction(model_version="m", target_metric="ft_any_v1", bot_version="v2.4", bot_protocol="p",
                                placement_level=L_, cond_hash="h", status="ok" if in_support else "insufficient_evidence",
                                in_support=in_support, insufficient_reasons=[] if in_support else ["FEATURE_OOD"],
-                               expected_ft_any=expected if in_support else None, range80_ft_any=rng, confidence=conf)
+                               expected_ft_any=expected if in_support else None, range80_ft_any=rng, confidence=conf,
+                               measurement={"source": "request", "bot_version": "v2.4", "protocol": "p",
+                                            "seed_band": band, "cond_hash": "h"})
 
 
 def test_p_in_band_symmetric_normal():
-    # symmetric range in logit with sd 1 → band = ±1 sd → 0.6827
     import math
     mu, s = 1.0, 1.0
     rng = (expit(mu - 1.2815515655446004 * s), expit(mu + 1.2815515655446004 * s))
@@ -274,30 +301,50 @@ def test_p_in_band_symmetric_normal():
     assert abs(p - math.erf(1 / math.sqrt(2))) < 1e-9
 
 
-def test_judge_rules():
-    sup = dict(SUP, target_p05_p95_by_segment={"101-300": [0.80, 0.99]})
-    assert judge(_pred(0.90, (0.87, 0.93)), 0.90, sup).verdict == "PASS"
-    v = judge(_pred(0.90, (0.87, 0.93)), 0.97, sup)
+SUP_V = dict(SUP, target_p05_p95_by_segment={"101-300": [0.80, 0.99]})
+
+
+def test_verdict_rules():
+    v = verdict(_pred(0.90, (0.87, 0.93)), 0.90, SUP_V)
+    assert v.verdict == "PASS" and v.bot_seed_confirmed and v.gap_prob == 0.0
+    v = verdict(_pred(0.90, (0.87, 0.93)), 0.97, SUP_V)
     assert v.verdict == "FAIL" and v.p_in_band < 0.5
-    assert judge(_pred(0.90, (0.87, 0.93), in_support=False), 0.90, sup).verdict == "INSUFFICIENT_EVIDENCE"
-    assert judge(_pred(0.90, (0.87, 0.93), conf="low"), 0.90, sup).verdict == "INSUFFICIENT_EVIDENCE"
-    assert judge(_pred(0.90, (0.87, 0.93)), 0.82, sup).verdict == "INSUFFICIENT_EVIDENCE"     # target < 0.85
-    assert judge(_pred(0.90, (0.87, 0.93)), 0.995, sup).verdict == "INSUFFICIENT_EVIDENCE"    # target out of support
-    lo, hi = target_band(0.9)
-    assert lo < 0.9 < hi
+    assert verdict(_pred(0.90, (0.87, 0.93), in_support=False), 0.90, SUP_V).verdict == "INSUFFICIENT_EVIDENCE"
+    assert verdict(_pred(0.90, (0.87, 0.93), conf="low"), 0.90, SUP_V).verdict == "INSUFFICIENT_EVIDENCE"
+    assert verdict(_pred(0.90, (0.87, 0.93)), 0.82, SUP_V).verdict == "INSUFFICIENT_EVIDENCE"     # target < 0.85
+    assert verdict(_pred(0.90, (0.87, 0.93)), 0.995, SUP_V).verdict == "INSUFFICIENT_EVIDENCE"    # target out of support
 
 
-def test_judge_on_real_prediction(mdl):
-    r = predict_editor_level(LJ, L)
-    v = judge(r, r.expected_ft_any, mdl.model["support"])
-    assert v.verdict in ("PASS", "INSUFFICIENT_EVIDENCE") and v.p_in_band is not None
+def test_verdict_needs_confirmation_seed_band():
+    v = verdict(_pred(0.90, (0.87, 0.93), band="S"), 0.90, SUP_V)
+    assert v.verdict == "INSUFFICIENT_EVIDENCE" and not v.bot_seed_confirmed
+    assert "SELECTION_UNCONFIRMED" in codes(v.target_flags) and "실유저 검증이 아님" in v.reason
+
+
+def test_in_range80_alone_never_passes():
+    """Wide range containing the target, but most mass outside the target band → FAIL, not PASS."""
+    v = verdict(_pred(0.97, (0.80, 0.995)), 0.85, SUP_V)
+    assert v.in_range80_reference is True and v.verdict == "FAIL"
+
+
+def test_select_drops_unsupported_and_ranks():
+    a, b = _pred(0.90, (0.88, 0.92)), _pred(0.95, (0.93, 0.97))
+    c = _pred(0.90, (0.80, 0.97))       # same centre, wider range → worse score
+    out = select([b, _pred(0.9, None, in_support=False), c, a], 0.90, k=2)
+    assert out == [a, c] and score(a, 0.9) < score(c, 0.9) < score(b, 0.9)
+
+
+def test_verdict_on_real_prediction_is_unconfirmed(mdl):
+    r = predict_editor_level(LJ, L)                     # cache = training seed band, not a confirmation band
+    v = verdict(r, r.expected_ft_any, mdl.model["support"])
+    assert v.verdict == "INSUFFICIENT_EVIDENCE" and v.p_in_band is not None
 
 
 # ── API schema ───────────────────────────────────────────────────────────────────────────────────
 RESPONSE_KEYS = {"model_version", "target_metric", "bot_version", "bot_protocol", "placement_level", "cond_hash",
                  "status", "in_support", "insufficient_reasons", "evidence_flags", "expected_ft_any", "range80_ft_any",
                  "expected_unaided_lb", "expected_help_rate", "confidence", "measurement", "bot_unaided_win_rate",
-                 "conditions", "upload_assumption"}
+                 "conditions", "upload_assumption", "reliability"}
 
 
 def test_api_predict(client):

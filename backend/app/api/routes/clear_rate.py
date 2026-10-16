@@ -1,6 +1,6 @@
 """Real-user clear-rate prediction endpoint — parallel display next to the legacy predicted_clear_rate (docs 31 / 33).
 
-Display only: returns no pass/fail verdict (clear_rate.judge exists for the later selection path but is not used
+Display only: returns no pass/fail verdict (clear_rate.select.verdict exists for the later selection path but is not used
 here), and the legacy predicted_clear_rate / verification / upload values are untouched.
 """
 from fastapi import APIRouter, HTTPException

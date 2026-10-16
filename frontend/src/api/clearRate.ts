@@ -15,7 +15,8 @@ export interface ClearRateEvidenceFlag {
    *  hard(예측 대신 사유): PLACEMENT_MISSING, LEVEL_OUT_OF_RANGE, GIMMICK_UNSEEN, GIMMICK_LOW_TRAIN, FEATURE_OOD,
    *  BOT_PROTOCOL_MISMATCH, BOT_CONDITION_MISMATCH, BOT_SOURCE_UNKNOWN, MEASUREMENT_MISSING, UNSOLVED,
    *  CAT_HELP_UNSUPPORTED(냥이 autoCollectCount>0), TIME_LIMIT_UNSUPPORTED(timea>0)
-   *  soft: LOW_CONFIDENCE, NEAR_CEILING, GIMMICK_FIRST, NOVELTY_HIGH, GIMMICK_BOT_WEAK */
+   *  soft: LOW_CONFIDENCE, NEAR_CEILING, GIMMICK_FIRST, NOVELTY_HIGH, GIMMICK_BOT_WEAK, PRED_ZONE_HIGH_ERROR,
+   *  PRED_ZONE_MID_ERROR, SIMILAR_MAPS_FEW, COMBO_HIGH_ERROR, STORED_CONDITION_DIFFERS */
   code: string;
   severity: 'hard' | 'soft';
   detail: string;
@@ -88,6 +89,16 @@ export interface ClearRatePredictResponse {
   conditions: Record<string, number | string>;
   /** 가정한 업로드 패널 옵션 — 실제 업로드 옵션이 다르면 cond_hash 가 달라져 예측 무효 */
   upload_assumption: { auto_collect_mode: string; auto_collect_value: number } | null;
+  /** 운영 시 알 수 있는 근거: 예측값 구간·기믹 조합·위치 구간별 학습 OOF 오차, 80% 범위 폭 (그 맵의 실측은 쓰지 않음) */
+  reliability: ClearRateReliability | null;
+}
+
+export interface ClearRateErrorStats { n: number; mae?: number; bias?: number; coverage80?: number }
+export interface ClearRateReliability {
+  pred_zone: (ClearRateErrorStats & { lo: number; hi: number }) | null;
+  combo: ClearRateErrorStats & { key: string };
+  segment: ClearRateErrorStats | null;
+  range80_width: number;
 }
 
 export async function predictClearRate(req: ClearRatePredictRequest): Promise<ClearRatePredictResponse> {

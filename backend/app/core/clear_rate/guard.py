@@ -1,16 +1,17 @@
 """Evidence flags + confidence for the clear-rate prediction (doc 31 §3-2 codes + measurement-condition codes).
 
 A "suppressing" flag (SUPPRESS) means the model has no support for this input, so the prediction carries the
-reason instead of a number (user decision (e), doc 33 §11). PASS/FAIL lives in judge.py.
-Target flags (target_flags) belong to the verdict (judge.py), not to the prediction.
+reason instead of a number (user decision (e), doc 33 §11). PASS/FAIL lives in select.verdict.
+Target flags (target_flags) belong to the verdict (select.py), not to the prediction.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .features import FEATS, THETAS
 
-LOW_CONF_BELOW = 0.85    # doc 26 §11-9: actual < 0.85 → mean easy bias +0.12, unreliable
+LOW_CONF_BELOW = 0.85    # doc 26 §11-9: actual < 0.85 → mean easy bias +0.12. Kept, but NOT a safety line: an actual
+                         # 0.80 map predicted 0.90 passes it — the support-based rules below cover that case
 CEILING_FROM = 0.95      # doc 31 §3-2 NEAR_CEILING (⑤ median 0.963: selection ≈ random)
 NOVELTY_HIGH = 0.5
 SUPPRESS = {"PLACEMENT_MISSING", "LEVEL_OUT_OF_RANGE", "GIMMICK_UNSEEN", "GIMMICK_LOW_TRAIN", "FEATURE_OOD",
@@ -104,7 +105,7 @@ def value_flags(expected: float) -> List[Dict[str, str]]:
 
 
 def target_flags(target: float, support: Dict[str, Any], segment: Optional[str]) -> List[Dict[str, str]]:
-    """Flags about a target value (used by judge.judge, never by the prediction itself)."""
+    """Flags about a target value (used by select.verdict, never by the prediction itself)."""
     out = []
     if target < LOW_CONF_BELOW:
         out.append(flag("LOW_CONFIDENCE", "soft", f"목표 {target:.3f} < {LOW_CONF_BELOW} — 이 구간 예측은 신뢰 불가"))
@@ -117,15 +118,52 @@ def target_flags(target: float, support: Dict[str, Any], segment: Optional[str])
     return out
 
 
+# Support-based reliability (doc 35 / user rule: judge trust from what is known before release — never from the
+# map's actual clear or help rate). Thresholds are PROPOSALS from the training OOF tables (model support
+# "reliability"), not guarantees.
+ZONE_LOW = {"mae_ge": 0.045, "coverage80_lt": 0.75}   # OOF: pred < 0.88 MAE 0.091 / cov 0.66; 0.88–0.92 0.047 / 0.73
+ZONE_MEDIUM = {"mae_ge": 0.035}                        # 0.92–0.95 MAE 0.039
+COMBO_FEW_LT = 5                                       # same gimmick combination in training
+COMBO_MAE_GE = 0.05                                    # e.g. grass+link 0.059, stack+chain 0.110
+
+
+def reliability(support: Dict[str, Any], expected: float, combo: str, segment: Optional[str],
+                range80: Tuple[float, float]) -> Dict[str, Any]:
+    rel = support.get("reliability") or {}
+    zone = next((b for b in rel.get("pred_bins", []) if b["lo"] <= expected < b["hi"] or
+                 (b["hi"] >= 1.0 and expected >= b["lo"])), None)
+    return {"pred_zone": zone, "combo": {"key": combo, **(rel.get("combo", {}).get(combo) or {"n": 0})},
+            "segment": rel.get("segment", {}).get(segment or ""), "range80_width": round(range80[1] - range80[0], 4)}
+
+
+def reliability_flags(rel: Dict[str, Any]) -> List[Dict[str, str]]:
+    out = []
+    z = rel.get("pred_zone")
+    if z:
+        d = (f"예측 {z['lo']:.2f}~{z['hi']:.2f} 구간 학습 OOF: n {z['n']}, MAE {z['mae']:.3f}, 편향 {z['bias']:+.3f}, "
+             f"80% 범위 포함 {z['coverage80']:.2f}")
+        if z["mae"] >= ZONE_LOW["mae_ge"] or z["coverage80"] < ZONE_LOW["coverage80_lt"]:
+            out.append(flag("PRED_ZONE_HIGH_ERROR", "soft", d + " — 오차 큼·범위가 좁게 나옴(넓히는 보정은 하지 않음)"))
+        elif z["mae"] >= ZONE_MEDIUM["mae_ge"]:
+            out.append(flag("PRED_ZONE_MID_ERROR", "soft", d))
+    c = rel["combo"]
+    if c["n"] < COMBO_FEW_LT:
+        out.append(flag("SIMILAR_MAPS_FEW", "soft", f"같은 기믹 조합({c['key']}) 학습 {c['n']}레벨 (< {COMBO_FEW_LT})"))
+    elif c["mae"] >= COMBO_MAE_GE:
+        out.append(flag("COMBO_HIGH_ERROR", "soft", f"기믹 조합 {c['key']} 학습 OOF MAE {c['mae']:.3f} (n {c['n']})"))
+    return out
+
+
 def suppressed(flags: List[Dict[str, str]]) -> bool:
     return any(f["code"] in SUPPRESS for f in flags)
 
 
 def confidence(flags: List[Dict[str, str]]) -> str:
     codes = {f["code"] for f in flags}
-    if codes & {"LOW_CONFIDENCE", "GIMMICK_FIRST", "NOVELTY_HIGH"}:
+    if codes & {"LOW_CONFIDENCE", "GIMMICK_FIRST", "NOVELTY_HIGH", "PRED_ZONE_HIGH_ERROR", "SIMILAR_MAPS_FEW",
+                 "COMBO_HIGH_ERROR"}:
         return "low"
-    if "GIMMICK_BOT_WEAK" in codes:
+    if codes & {"GIMMICK_BOT_WEAK", "PRED_ZONE_MID_ERROR"}:
         return "medium"
     return "high"
 

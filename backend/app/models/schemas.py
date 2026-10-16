@@ -804,3 +804,5 @@ class ClearRatePredictResponse(BaseModel):
     confidence: Optional[Literal["high", "medium", "low"]] = None
     measurement: Optional[ClearRateMeasurementMeta] = None
     bot_unaided_win_rate: Dict[str, float] = Field(default_factory=dict, description="Bot (unaided) win rate per θ — model input, not a clear rate")
+    conditions: Dict[str, Any] = Field(default_factory=dict, description="Final game conditions (upload values) the prediction is for")
+    upload_assumption: Optional[Dict[str, Any]] = Field(default=None, description="Upload-panel options assumed")

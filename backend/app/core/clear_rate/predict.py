@@ -67,6 +67,8 @@ class ClearRatePrediction:
     confidence: Optional[str] = None
     measurement: Optional[Dict[str, str]] = None
     bot_unaided_win_rate: Dict[str, float] = field(default_factory=dict)
+    conditions: Dict[str, Any] = field(default_factory=dict)          # final game conditions the prediction is for
+    upload_assumption: Optional[Dict[str, Any]] = None                # upload-panel options assumed (editor path)
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -97,7 +99,7 @@ def predict_level(model: ClearRateModel, game_map: Dict[str, Any], conditions: D
     out = ClearRatePrediction(model_version=model.version, target_metric=man["target_metric"],
                               bot_version=man["bot_version"], bot_protocol=man["bot_protocol"],
                               placement_level=placement_level, cond_hash=h, status=STATUS_OK, in_support=False,
-                              measurement=measurement.meta() if measurement else None)
+                              measurement=measurement.meta() if measurement else None, conditions=cond)
     flags = guard.input_flags(sup, placement_level=placement_level, gimmicks=present_gimmicks(map_features(game_map)),
                              conditions=cond)
     rows = list(measurement.rows) if measurement else []

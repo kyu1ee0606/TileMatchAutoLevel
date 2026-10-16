@@ -28,6 +28,7 @@ const FLAG_LABEL: Record<string, string> = {
   GIMMICK_FIRST: '기믹 첫 등장',
   NOVELTY_HIGH: '기믹 노출 적음',
   GIMMICK_BOT_WEAK: '봇 약점 기믹',
+  STORED_CONDITION_DIFFERS: '저장값≠업로드값',
 };
 
 const CONF_LABEL = { high: '높음', medium: '중간', low: '낮음' } as const;

@@ -84,6 +84,10 @@ export interface ClearRatePredictResponse {
   measurement: ClearRateMeasurementMeta | null;
   /** 봇(무도움) 승률 θ별 — 모델 입력, 클리어율 아님 */
   bot_unaided_win_rate: Record<string, number>;
+  /** 예측 기준 최종 게임 조건(업로드 값: useTileCount 재계산 등) */
+  conditions: Record<string, number | string>;
+  /** 가정한 업로드 패널 옵션 — 실제 업로드 옵션이 다르면 cond_hash 가 달라져 예측 무효 */
+  upload_assumption: { auto_collect_mode: string; auto_collect_value: number } | null;
 }
 
 export async function predictClearRate(req: ClearRatePredictRequest): Promise<ClearRatePredictResponse> {
@@ -95,7 +99,7 @@ export async function predictClearRate(req: ClearRatePredictRequest): Promise<Cl
 export function toClearRateMeta(res: ClearRatePredictResponse): Pick<ProductionLevelMeta,
   'expected_clear_rate_v1' | 'clear_rate_range80' | 'clear_rate_confidence' | 'clear_rate_evidence_flags' |
   'unaided_lb_expected' | 'help_rate_expected' | 'clear_rate_model_version' | 'clear_rate_status' |
-  'clear_rate_placement_level'> {
+  'clear_rate_placement_level' | 'clear_rate_cond_hash'> {
   return {
     expected_clear_rate_v1: res.expected_ft_any,
     clear_rate_range80: res.range80_ft_any,
@@ -106,5 +110,6 @@ export function toClearRateMeta(res: ClearRatePredictResponse): Pick<ProductionL
     clear_rate_model_version: res.model_version,
     clear_rate_status: res.status,
     clear_rate_placement_level: res.placement_level,
+    clear_rate_cond_hash: res.cond_hash,
   };
 }

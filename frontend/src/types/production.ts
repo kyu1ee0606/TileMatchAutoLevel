@@ -207,6 +207,7 @@ export interface ProductionLevelMeta {
   clear_rate_model_version?: string;
   clear_rate_status?: ClearRateStatus;
   clear_rate_placement_level?: number | null;      // 예측에 쓴 배치 레벨 (옮기면 재예측)
+  clear_rate_cond_hash?: string;                   // 예측한 최종 게임 조건 해시 (다시 계산해 다르면 무효·재측정)
 
   // 상태 관리
   status: LevelStatus;

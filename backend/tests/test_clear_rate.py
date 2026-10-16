@@ -91,7 +91,10 @@ def test_pure_function_equals_editor_path(mdl):
     gm, cond = finalize_game_conditions(LJ, L)
     meas = BotMeasurement.from_dict(cached_measurement(mdl), source="cache")
     a = predict_level(mdl, gm, cond, L, meas, random_layout=random_layout(gm))
-    assert a == predict_editor_level(LJ, L)
+    b = predict_editor_level(LJ, L)
+    assert b.upload_assumption is not None and a.upload_assumption is None  # only the editor path assumes upload opts
+    b.upload_assumption = None
+    assert a == b
 
 
 def test_deterministic():
@@ -126,6 +129,36 @@ def test_changed_game_condition_needs_measurement(field, value):
     r = predict_editor_level(lj, L)
     assert r.status == "measurement_required" and r.expected_ft_any is None
     assert r.insufficient_reasons == ["MEASUREMENT_MISSING"]
+
+
+def test_g2_conditions_are_the_upload_values():
+    """G2: final conditions = the upload converter's output (useTileCount re-derived from the tiles)."""
+    from app.api.routes.gboost import _convert_to_townpop_format
+    stale = dict(copy.deepcopy(LJ), useTileCount=int(LJ["useTileCount"]) + 3)
+    sent = _convert_to_townpop_format(dict(stale, layer=int(stale["layer"]), autoCollectCount=0))
+    gm, cond = finalize_game_conditions(stale, L)
+    assert cond["useTileCount"] == int(sent["useTileCount"]) != stale["useTileCount"]
+    for k in ("unlockTile", "randSeed", "shuffleTile", "timea"):
+        assert cond[k] == int(sent[k])
+    r = predict_editor_level(stale, L)
+    assert r.conditions["useTileCount"] == int(sent["useTileCount"])
+    assert "STORED_CONDITION_DIFFERS" in [f["code"] for f in r.evidence_flags]
+    assert r.status == predict_editor_level(LJ, L).status  # same uploaded level → same measurement/prediction
+    assert r.expected_ft_any == predict_editor_level(LJ, L).expected_ft_any
+    assert r.upload_assumption == {"auto_collect_mode": "multiples10", "auto_collect_value": 3}
+
+
+def test_g2_upload_rule_mirror_has_not_drifted():
+    """Drift guard: the frontend upload path that finalize_game_conditions mirrors (read-only check)."""
+    root = BACKEND.parent
+    exp = (root / "frontend/src/components/ProductionDashboard/ProductionExport.tsx").read_text(encoding="utf-8")
+    assert "useState<AutoCollectMode>('multiples10')" in exp and "useState(3)" in exp
+    assert "slotNumber > 0 && slotNumber % 10 === 0" in exp
+    assert "uploadJson.autoCollectCount = overrideAutoCollect" in exp
+    assert "await saveToGBoost(gboostBoardId, targetId, uploadJson)" in exp
+    gb = (BACKEND / "app/api/routes/gboost.py").read_text(encoding="utf-8")
+    assert "level_json = _convert_to_townpop_format(request.level_json)" in gb
+    assert '"useTileCount": str(derived_use_tile_count)' in gb
 
 
 def test_g1_cat_help_level_is_insufficient(mdl):
@@ -263,7 +296,8 @@ def test_judge_on_real_prediction(mdl):
 # ── API schema ───────────────────────────────────────────────────────────────────────────────────
 RESPONSE_KEYS = {"model_version", "target_metric", "bot_version", "bot_protocol", "placement_level", "cond_hash",
                  "status", "in_support", "insufficient_reasons", "evidence_flags", "expected_ft_any", "range80_ft_any",
-                 "expected_unaided_lb", "expected_help_rate", "confidence", "measurement", "bot_unaided_win_rate"}
+                 "expected_unaided_lb", "expected_help_rate", "confidence", "measurement", "bot_unaided_win_rate",
+                 "conditions", "upload_assumption"}
 
 
 def test_api_predict(client):

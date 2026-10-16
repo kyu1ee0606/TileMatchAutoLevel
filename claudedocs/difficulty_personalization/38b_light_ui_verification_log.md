@@ -310,3 +310,88 @@ cd backend && venv/bin/python -m pytest \
 - 결과: **14/14 PASS, fail 0**, exit 0, 129ms. 신규·수정 테스트(버전 모름 → unconfirmed, 맵 확인 전 → unconfirmed/checking, 배지 회색) 포함.
 - 자원: 전 20:39:36 — free% 36, swap used 54088.31M / 55296M (free 1207.69M) · 후 20:39:36 — free% 36, swap 동일(54088.31M, free 1207.69M). 변화 없음.
 - 다른 테스트 파일·tsc·빌드·서버(8001/5174)·브라우저·봇 실행 없음.
+
+---
+
+## 서버 측 UI fixture 준비 (2026-10-16 21:10 KST, Codex 21:10 지시) — 파일 준비만, 서버·브라우저·API 호출 0회
+
+> 배경: Codex 브라우저는 DevTools JS 로 IndexedDB 주입 불가 → 대시보드의 **기존 동기화 UI**(마운트 시 `syncBidirectional` → `pullAllToLocal`)가 워크트리 백엔드 `:8001` 저장소에서 읽어 가도록 서버 파일을 둔다. fixture 결과는 실제 레벨·실측이 아니다.
+
+### 형식 근거 (읽기만)
+| 항목 | 근거 |
+|---|---|
+| 저장 위치 | `backend/app/api/routes/production_store.py:25-27` `_STORE_DIR = <backend>/data/production`, 파일명 `{batch_id}.json`(`:41-42`), id 는 `/ \ .. \0` 금지(`:34-38`) |
+| 파일 스키마 | PUT 저장 형식 그대로 `{batch_id, batch, levels, saved_at, version}`(`:511-517`). 서버는 batch/levels 를 opaque JSON 으로 보관(`:8-9`) |
+| 목록 | `GET /api/production/batches`(`:546-601`): 디렉터리 스캔, `_index.json` 은 (mtime,size) 캐시일 뿐 — 없거나 미스면 그 파일을 파싱해 인덱스 재작성(`:569-584`) → **index 수동 갱신 불필요**(생성하지 않음) |
+| 조회 | `GET /api/production/batches/{id}`(`:604-611`) 파일 그대로 반환 |
+| 프런트 pull | `productionServerSync.ts:198-224` `pullAllToLocal`: 서버 목록 중 로컬에 없는 배치 → `pullBatchToLocal`(`:162-171`): `putBatchRaw({...batch, __server_version: version})` + `saveProductionLevels(batchId, levels, {silent:true})`(쓰기 알림 없음 → 자동 push 없음). 레벨 레코드 = `{batch_id, ...level}`(`productionStorage.ts:244-248`), 키 `[batch_id, meta.level_number]` |
+| 마운트 동작 | `PD:1039` `syncBidirectional()` = `pushLocalMissingToServer`(로컬에만 있는 배치를 **연결된 서버로 강제 업로드**, `productionServerSync.ts:226-245`) → `pullAllToLocal` |
+| 필수 필드 | `ProductionBatch`(`types/production.ts:248-294`, `?` 없는 것): id·name·created_at·updated_at·total_levels·levels_per_set·total_sets·generated/playtest/approved/rejected/exported_count·difficulty_start/end·use_sawtooth·gimmick_unlock_levels. `ProductionLevelMeta`(`:128-239`): level_number·set_index·local_index·generated_at·target_difficulty·actual_difficulty·grade·status·status_updated_at·playtest_required·playtest_priority·playtest_results. `calculateProductionStats`(`productionStorage.ts:633~`)가 `by_status[status]`·`by_grade[grade]` 를 세므로 enum 값 필요 |
+
+### 생성 파일 (git-ignored 확인: `.gitignore:52 backend/data/production/` · `git status --ignored` → `!!`) — 미추적·커밋 안 함
+디렉터리는 원래 없었음(`ls` → No such file) → 새로 만듦, 덮어쓴 파일 없음. 메인 트리 `backend/data/production` 은 읽지도 쓰지도 않음.
+| 파일 | id | 내용 |
+|---|---|---|
+| `TileMatchAutoLevel_wt_clearrate/backend/data/production/codex_ui_fixture_20261016_a.json` | `codex_ui_fixture_20261016_a` | 이름 `[FIXTURE] codex_ui_20261016_a — L237 골든×3 (238/239=같은 맵)`, version 1, 레벨 3개 L237·L238·L239 |
+| `…/backend/data/production/codex_ui_fixture_20261016_empty.json` | `codex_ui_fixture_20261016_empty` | 이름 `[FIXTURE] codex_ui_20261016_empty — 전환용 빈 배치`, version 1, `levels: []`(서버 `levels` 기본값 빈 배열 허용, `:90`), total_levels 0 |
+
+### 골든 사용 방식 (결정 근거)
+- 저장소 골든 중 **배치 위치 237~239 에 해당하는 맵은 `backend/tests/golden/clear_rate_L237.json` 하나뿐**(그 밖의 골든: `bot_v2/v1_golden.json` L55·L123, `bot_v2/v21_bomb_level.json` L302, `pv_t0/inputs` r_level_0004~ — 레벨 번호가 다름). L237 골든은 모델 캐시가 있어 [A 탐색]이 숫자 결과를 낸다(문서 38 §14 근거 맵).
+- 결정: **3레벨 모두 L237 골든 `level_json` 을 변경 없이 복사**, 배치 위치(meta.level_number)만 237/238/239. randSeed 변형 등 데이터 가공 안 함. 238·239 는 **실제 238/239 맵이 아님**을 배치 이름과 각 레벨 `meta.fixture_note` 에 명시.
+- 의미: L238/L239 는 같은 맵이 다른 배치 위치에 놓인 것 → cond_hash 가 달라 캐시 미스("봇 측정 없음") 예상(배치 위치 무효화·캐시 미스 표시 확인용). 맵 변경 무효화(G1)는 fixture 에서 [중앙정렬] 결과에 의존하며, L237 골든이 중앙정렬 대상이 아닐 수 있음 → 그 경우 G1 은 "변경 0건 → 무효화 없음" 확인만 가능(미검증으로 남김).
+- 허위 값 없음: `bot_clear_rates`·`match_score`·`verified`·`verification_passed`·`predicted_clear_rate`·`target_clear_rate(s)`·보상·RL 필드 **미포함**. `status` 는 `'generated'`(타입 주석 "생성됨 (봇 검증 완료)", `types/production.ts:13`)가 검증 완료를 암시하므로 쓰지 않고 `'needs_rework'` 사용. 타입 필수 숫자 `target_difficulty=0`·`actual_difficulty=0`·`grade='S'` 는 **자리채움**(측정·예측 아님)으로 `fixture_note` 에 명시. 배치 카운터는 0, `difficulty_start/end=0`.
+- 주의: fixture 레벨은 `bot_clear_rates` 가 없어 BatchVerifyPanel 의 "미검증 레벨" 목록에 나타남 — **[배치 검증]·[검증+재생성]은 봇 실행이므로 누르지 말 것.** [중앙정렬]은 봇 없음이나 레벨 데이터 변경(fixture 에서만).
+
+### 다음 검증 턴 기동 명령 (지금 실행 안 함 — 별도 승인 턴에서)
+(a) 백엔드 `:8001` (메인 venv, 워크트리 코드·워크트리 `data/`):
+```
+cd /Users/casualdev/TileMatchAutoLevel_wt_clearrate/backend && \
+nohup /Users/casualdev/TileMatchAutoLevel/backend/venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8001 \
+  > /tmp/wt_clearrate_backend.log 2>&1 &  echo "backend PID $!"
+curl -s 127.0.0.1:8001/api/production/batches   # fixture 2개만 보여야 함(봇 없음, 목록 조회)
+```
+(`--reload` 없음. `requirements.txt` 메인=워크트리 동일 — 앞 절 기록.)
+
+(b) 프런트 `:5174` — 임시 설정 `/tmp/wt_clearrate_vite.config.ts` 전체 내용:
+```ts
+import { defineConfig, mergeConfig } from 'vite'
+import base from '/Users/casualdev/TileMatchAutoLevel_wt_clearrate/frontend/vite.config.ts'
+
+export default mergeConfig(base, defineConfig({
+  server: {
+    port: 5174,
+    strictPort: true,
+    proxy: {
+      '/api': { target: 'http://127.0.0.1:8001', changeOrigin: true },
+    },
+  },
+}))
+```
+실행(앞 절과 같은 이유로 `/tmp` 설정의 모듈 해석을 위해 `NODE_PATH` 지정):
+```
+cd /Users/casualdev/TileMatchAutoLevel_wt_clearrate/frontend && \
+NODE_PATH=$PWD/node_modules nohup npx vite --config /tmp/wt_clearrate_vite.config.ts \
+  > /tmp/wt_clearrate_frontend.log 2>&1 &  echo "frontend PID $!"
+curl -s -o /dev/null -w '%{http_code}\n' localhost:5174/            # 200
+curl -s localhost:5174/api/production/batches                       # (a)와 같은 응답 = proxy→8001 확인
+```
+`mergeConfig` 는 `server.proxy['/api']` 객체를 병합 → target 만 8001 로 바뀜(원 설정 8000 덮어씀). **기동 직후 반드시 위 두 번째 curl 로 8001 경유를 확인**한 뒤 브라우저를 연다.
+
+(c) 종료(PID 기준, 기동 때 출력한 PID):
+```
+kill <backend PID>; kill <frontend PID>          # npx 래퍼면 자식 vite node 도: pgrep -f "vite --config /tmp/wt_clearrate_vite" | xargs kill
+lsof -nP -iTCP:8001 -sTCP:LISTEN; lsof -nP -iTCP:5174 -sTCP:LISTEN   # 출력 없음 확인
+rm -f /tmp/wt_clearrate_vite.config.ts /tmp/wt_clearrate_backend.log /tmp/wt_clearrate_frontend.log
+```
+메인 `:8000`/`:5173` 프로세스는 건드리지 않는다.
+
+### 브라우저 주의 (필수)
+- **반드시 `http://localhost:5174` + 새(빈) 브라우저 프로필.** 대시보드 마운트 시 `pushLocalMissingToServer` 가 그 프로필 IndexedDB 의 로컬 배치를 연결된 서버로 강제 업로드한다. `:5173`(운영 origin)을 열거나 기존 프로필로 `:5174` 를 열면 다른 배치가 `:8001` 저장소로 복사될 수 있고, 반대로 `:5174` 가 `:8000` 으로 프록시되면 fixture·검증 결과가 운영 저장소에 섞인다.
+- 새 프로필 `:5174` 첫 진입 → pull 로 fixture 2개가 로컬 IndexedDB(`localhost:5174` origin)에 생김 → 생산 대시보드 배치 선택에서 `[FIXTURE] …` 선택 → 검증 탭.
+- 위험 버튼(앞 절 표) 금지. C [실행]은 별도 승인 전 금지.
+
+### 정리(삭제) 방법
+1. 서버 종료(위 c).
+2. fixture·push 사본 삭제: `rm -r /Users/casualdev/TileMatchAutoLevel_wt_clearrate/backend/data/production`(이번에 새로 만든 디렉터리 — 이 안에는 fixture 2개와 실행 중 생긴 `_index.json`·push 사본만 있어야 함, 지우기 전 `ls` 로 확인). C 를 실행했다면 `backend/data/clear_rate_verify/{jobs,measurements}.json` 도 확인 후 삭제(현재 없음).
+3. 테스트 브라우저 프로필 삭제(또는 `localhost:5174` origin 의 IndexedDB `TileMatchProduction`·`TileMatchClearRateVerify` 삭제).
+4. 메인 트리 `backend/data/production`·`:5173` IndexedDB 는 손대지 않음.

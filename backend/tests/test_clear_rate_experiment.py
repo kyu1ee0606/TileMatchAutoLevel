@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.core.clear_rate import BotMeasurement, cond_hash, finalize_game_conditions, load_model
 from app.core.clear_rate import experiment as X
+from app.core.clear_rate import guard
 from app.core.clear_rate import virtual as V
 from app.core.clear_rate.measure import (MeasurementStore, bot_config, bot_exposure, config_hash, measure,
                                          measure_theta)
@@ -241,3 +242,34 @@ def test_isolated_generation_is_reproducible():
     a, b = P2.generate_isolated(req, 7), P2.generate_isolated(req, 7)
     assert a["ok"] and json.dumps(a["level_json"], sort_keys=True) == json.dumps(b["level_json"], sort_keys=True)
     assert req["target_difficulty"] < 0.6 and req["max_layers"] <= 5
+
+
+def test_seed_bands_avoid_other_experiments():
+    """Pilot bands vs bands used elsewhere (bot_v24 training 11M, natural experiments 13M / 23M, pv pilots 1–9.1M)."""
+    from app.core.clear_rate.measure import LAYOUTS, PROTOCOLS, SEED_BANDS
+    span = (LAYOUTS - 1) * 1000 + max(g for _, g in PROTOCOLS.values())
+    external = [1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000, 6_000_000, 7_000_000, 8_000_000, 9_100_000,
+                13_000_000, 23_000_000]
+    for name, b in SEED_BANDS.items():
+        if name == "seed11M":
+            continue
+        assert all(abs(b - e) > span for e in external), name
+    assert {"S3", "C3"} <= set(SEED_BANDS) and SEED_BANDS["S3"] != SEED_BANDS["C3"]
+
+
+def test_a85_gate_and_band_do_not_overlap(mdl):
+    """Doc 33 §15-1: with the active model the 80% upper bound is always 1 (quantile head at the target clip), and a
+    prediction that passes the confidence gate is ≥ 0.92 > the 0.85 band top — so P(in band) < 0.5 for target 0.85.
+    Pins the finding; if the model or zone table changes this test shows the analysis must be redone."""
+    import math
+    from app.core.clear_rate.select import target_band
+    h = mdl.model["heads"]["ft_any"]
+
+    def leaves(t):
+        return leaves(t[3]) + leaves(t[4]) if t[0] == "node" else [t[1]]
+    G = h["q_hi"]
+    lower = G["base"] + G["lr"] * sum(min(leaves(t)) for t in G["trees"])
+    assert lower + h["cqr_w"] >= math.log(0.99 / 0.01) - 1e-9   # model.range_to_prob → upper bound 1 for every input
+    zones_low = [z for z in mdl.model["support"]["reliability"]["pred_bins"]
+                 if z["mae"] >= guard.ZONE_LOW["mae_ge"] or z["coverage80"] < guard.ZONE_LOW["coverage80_lt"]]
+    assert max(z["hi"] for z in zones_low) > target_band(0.85)[1]

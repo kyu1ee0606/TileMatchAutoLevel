@@ -135,7 +135,9 @@ def cmd_gen1(a):
         resp = r["response"]
         out.update(level_json=resp.level_json, legacy_grade=resp.grade,
                    playability_warning=bool(getattr(resp, "playability_warning", False)))
-    Path(a.out).write_text(json.dumps(out, ensure_ascii=False))
+    # generator metadata may hold sets (e.g. with an explicit pattern_index) — serialise them as sorted lists
+    Path(a.out).write_text(json.dumps(out, ensure_ascii=False,
+                                      default=lambda o: sorted(o, key=str) if isinstance(o, (set, frozenset)) else str(o)))
 
 
 def generate_isolated(request, seed):

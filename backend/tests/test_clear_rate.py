@@ -400,3 +400,60 @@ def test_training_reproduces_saved_model(mdl):
 
 def test_active_version_registered():
     assert json.loads((MODELS_DIR / "active.json").read_text())["version"] == load_model().version
+
+
+# ── candidate models A1 / A2 (doc 33 §12) — never active ─────────────────────────────────────────
+CANDIDATES = {"cr-ftany-v24r-cand-20261016-a1": 383, "cr-ftany-v24r-cand-20261016-a1a2": 394,
+              "cr-ftany-v24r-cand-20261016-a1a2x": 392}
+A2_LEVELS = {505, 507, 521, 531, 537, 551, 558, 566, 568, 577, 578}
+
+
+@pytest.mark.parametrize("version,n", sorted(CANDIDATES.items()))
+def test_candidate_model_loads_and_reproduces_check_rows(version, n):
+    cand = load_model(version)
+    m = cand.manifest
+    assert m["model_version"] == version and m["n_levels"] == n == len(m["train_levels"])
+    assert "NOT active" in m["status"] and m["independent_validation"] is False
+    assert json.loads((MODELS_DIR / "active.json").read_text())["version"] != version
+    raw = (cand.dir / "model.json").read_text(encoding="utf-8")
+    assert hashlib.sha256(raw.encode()).hexdigest() == m["model_json_sha256"]
+    assert cand.model["features"] == FEATS and cand.model["support"]["level_range"] == [32, 500]
+    gm, cond = finalize_game_conditions(LJ, L)
+    meas = BotMeasurement.from_dict(copy.deepcopy(cand.bot_cache[cond_hash(gm, cond)]), source="cache")
+    r = predict_level(cand, gm, cond, L, meas, random_layout=random_layout(gm))
+    chk = next(c for c in cand.model["check"] if c["L"] == L)
+    assert r.status == "ok" and abs(r.expected_ft_any - round(expit(chk["ft_logit"]), 4)) < 1e-9
+    a2 = {v["L"] for v in cand.bot_cache.values()} & A2_LEVELS
+    assert a2 == (A2_LEVELS if any(int(k) in A2_LEVELS for k in m["added_levels"]) else set())
+    for v in cand.bot_cache.values():
+        if v["L"] in A2_LEVELS:
+            assert v["bot_version"] == "v2.4" and v["protocol"] == "theta4x128_v1" and v["seed_band"] == "seed11M"
+            assert [r_["theta"] for r_ in v["rows"]] == [0.55, 0.65, 0.85, 1.0] and all(r_["games"] == 128 for r_ in v["rows"])
+
+
+CAND_PY = Path(os.environ.get("CLEAR_RATE_TRAIN_PYTHON", str(BACKEND.parent.parent / "TileMatchAutoLevel/analysis_venv/bin/python")))
+CAND_DATA = Path(os.environ.get("CR_DATA_ROOT", str(BACKEND.parent.parent / "TileMatchAutoLevel/backend/data")))
+CAND_FILES = [CAND_DATA / "pv_sandbox/af_calibration/cand_a1a2/bot_v24_rules_A2.json",
+              CAND_DATA / "pv_sandbox/af_calibration/bot_v24/bot_v2.4f_no_rules_only.json",
+              CAND_DATA / "production/batch_1792056041502_cn5e4ny66.json"]
+needs_cand_data = pytest.mark.skipif(not CAND_PY.exists() or not all(p.exists() for p in CAND_FILES),
+                                     reason="needs a numpy python and the local AF/bot sandbox data (CR_DATA_ROOT)")
+
+
+def _cand_script(*args):
+    return subprocess.run([str(CAND_PY), "-W", "ignore", str(BACKEND / "scripts/clear_rate_cand_a1a2.py"), *args],
+                          capture_output=True, text=True, timeout=900, cwd=str(BACKEND.parent))
+
+
+@needs_cand_data
+def test_candidate_training_reproduces_saved_files():
+    out = _cand_script("export", "--check", "--only", "C2")
+    assert out.returncode == 0, out.stdout[-2000:] + out.stderr[-2000:]
+    assert json.loads(out.stdout.strip().splitlines()[-1]) == {"candidates_identical": True}
+
+
+@needs_cand_data
+def test_active_model_bytes_unchanged_by_candidates():
+    out = _cand_script("check-base")
+    assert out.returncode == 0, out.stdout[-2000:] + out.stderr[-2000:]
+    assert json.loads(out.stdout.strip().splitlines()[-1]) == {"model_json_identical": True, "bot_cache_identical": True}

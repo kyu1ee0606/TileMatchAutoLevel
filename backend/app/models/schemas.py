@@ -825,6 +825,7 @@ class ClearRateTargetEvalRequest(BaseModel):
     bot_measurement_search: Optional[ClearRateBotMeasurement] = Field(default=None, description="Seed band S measurement (selection)")
     bot_measurement_confirm: Optional[ClearRateBotMeasurement] = Field(default=None, description="Seed band C measurement (verdict; bot-stability check only, not real-user validation)")
     upload_opts: Optional[ClearRateUploadOpts] = None
+    use_cached_measurement: bool = Field(default=False, description="Mode A only, opt-in (validation tab, doc 38): when no S/C measurement is supplied, use the model's live-build measurement cache (same lookup as /predict). The cache is not a confirm seed band, so the verdict stays INSUFFICIENT_EVIDENCE. Ignored by mode B")
 
 
 class ClearRateTargetEvalResponse(BaseModel):

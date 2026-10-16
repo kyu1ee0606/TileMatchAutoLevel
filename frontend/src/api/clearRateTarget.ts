@@ -22,6 +22,9 @@ export interface ClearRateTargetEvalRequest {
   /** 확인 시드 묶음 C 측정 (판정용 — 봇 측정 안정성 확인일 뿐 실유저 검증 아님) */
   bot_measurement_confirm?: ClearRateBotMeasurement | null;
   upload_opts?: { auto_collect_mode: 'multiples10' | 'preserve'; auto_collect_value: number } | null;
+  /** A 전용 opt-in(검증 탭, 문서 38): S/C 측정이 없으면 /predict 와 같은 모델 측정 캐시 사용.
+   *  캐시는 확인 시드(C)가 아니므로 판정은 근거 부족으로 남는다. B 는 무시 */
+  use_cached_measurement?: boolean;
 }
 
 export type UserExpectedVerdict = 'PASS' | 'FAIL' | 'INSUFFICIENT_EVIDENCE';
@@ -41,6 +44,8 @@ export interface UserExpectedResult {
     in_range80_reference: boolean | null;
     bot_seed_confirmed: boolean;
     confidence: string | null;
+    support_reasons?: string[];
+    target_flags?: { code: string; severity: 'hard' | 'soft'; detail: string }[];
     [k: string]: unknown;
   };
   criteria: string;

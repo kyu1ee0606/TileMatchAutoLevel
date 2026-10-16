@@ -4,36 +4,11 @@
  */
 import type { ClearRateEvidenceFlag } from '../../api/clearRate';
 import type { ProductionLevelMeta } from '../../types/production';
+import { FLAG_LABEL } from './clearRateLabels';
 
 export type ClearRateCellProps = Pick<ProductionLevelMeta,
   'expected_clear_rate_v1' | 'clear_rate_range80' | 'clear_rate_confidence' | 'clear_rate_evidence_flags' |
   'unaided_lb_expected' | 'help_rate_expected' | 'clear_rate_status' | 'clear_rate_model_version'>;
-
-const FLAG_LABEL: Record<string, string> = {
-  PLACEMENT_MISSING: '배치 위치 없음',
-  LEVEL_OUT_OF_RANGE: '학습 범위 밖 레벨',
-  GIMMICK_UNSEEN: '학습에 없는 기믹',
-  GIMMICK_LOW_TRAIN: '기믹 데이터 부족',
-  FEATURE_OOD: '학습 범위 밖 특징',
-  BOT_PROTOCOL_MISMATCH: '봇 측정 불일치',
-  MEASUREMENT_MISSING: '봇 측정 없음',
-  BOT_CONDITION_MISMATCH: '측정 조건 불일치',
-  BOT_SOURCE_UNKNOWN: '측정 출처 불명',
-  UNSOLVED: '봇 클리어 0',
-  CAT_HELP_UNSUPPORTED: '냥이 레벨 학습 없음',
-  TIME_LIMIT_UNSUPPORTED: '시간 제한 학습 없음',
-  TARGET_OUT_OF_SUPPORT: '목표 범위 밖',
-  LOW_CONFIDENCE: '신뢰 낮음',
-  NEAR_CEILING: '천장',
-  GIMMICK_FIRST: '기믹 첫 등장',
-  NOVELTY_HIGH: '기믹 노출 적음',
-  GIMMICK_BOT_WEAK: '봇 약점 기믹',
-  STORED_CONDITION_DIFFERS: '저장값≠업로드값',
-  PRED_ZONE_HIGH_ERROR: '이 예측 구간 오차 큼',
-  PRED_ZONE_MID_ERROR: '이 예측 구간 오차 중간',
-  SIMILAR_MAPS_FEW: '유사 맵 적음',
-  COMBO_HIGH_ERROR: '기믹 조합 오차 큼',
-};
 
 const CONF_LABEL = { high: '높음', medium: '중간', low: '낮음' } as const;
 const CONF_CLASS = { high: 'text-emerald-300', medium: 'text-yellow-300', low: 'text-orange-300' } as const;

@@ -273,3 +273,45 @@ def test_a85_gate_and_band_do_not_overlap(mdl):
     zones_low = [z for z in mdl.model["support"]["reliability"]["pred_bins"]
                  if z["mae"] >= guard.ZONE_LOW["mae_ge"] or z["coverage80"] < guard.ZONE_LOW["coverage80_lt"]]
     assert max(z["hi"] for z in zones_low) > target_band(0.85)[1]
+
+
+# ── validation tab (doc 38): opt-in cache measurement for mode A ─────────────────────────────────────────────
+def test_api_target_eval_default_does_not_use_cache(client):
+    body = {"target_mode": "user_expected", "target": 0.9, "level_json": LJ, "placement_level": L}
+    a = client.post("/api/clear-rate/target-eval", json=body).json()["user_expected"]
+    assert a["prediction"]["expected_ft_any"] is None and a["prediction"]["measurement"] is None
+    assert a["verdict"]["verdict"] == "INSUFFICIENT_EVIDENCE"
+
+
+def test_api_target_eval_cached_measurement_never_confirms(client, mdl, fin):
+    gm, cond = fin
+    assert cond_hash(gm, cond) in mdl.bot_cache
+    body = {"target_mode": "user_expected", "target": 0.9, "level_json": LJ, "placement_level": L,
+            "use_cached_measurement": True}
+    a = client.post("/api/clear-rate/target-eval", json=body).json()["user_expected"]
+    pred = client.post("/api/clear-rate/predict", json={"level_json": LJ, "placement_level": L}).json()
+    assert a["prediction"]["measurement"]["source"] == "cache"
+    assert a["prediction"]["expected_ft_any"] == pred["expected_ft_any"]  # same number as the existing /predict
+    assert a["verdict"]["bot_seed_confirmed"] is False
+    assert a["verdict"]["verdict"] == "INSUFFICIENT_EVIDENCE"  # cache band is not C → never PASS/FAIL
+
+
+def test_api_target_eval_supplied_measurement_wins_over_cache_flag(client, mdl, fin):
+    gm, cond = fin
+    cached = mdl.bot_cache[cond_hash(gm, cond)]
+    body = {"target_mode": "user_expected", "target": 0.9, "level_json": LJ, "placement_level": L,
+            "use_cached_measurement": True,
+            "bot_measurement_confirm": {**{k: cached[k] for k in ("bot_version", "protocol", "cond_hash", "rows")},
+                                        "seed_band": "C"}}
+    a = client.post("/api/clear-rate/target-eval", json=body).json()["user_expected"]
+    assert a["prediction"]["measurement"]["source"] == "request"
+    assert a["verdict"]["bot_seed_confirmed"] is True
+
+
+def test_api_target_eval_cache_flag_does_not_touch_mode_b(client):
+    body = {"target_mode": "bot_virtual", "target": 0.5, "level_json": LJ, "placement_level": L}
+    b0 = client.post("/api/clear-rate/target-eval", json=body).json()
+    b1 = client.post("/api/clear-rate/target-eval", json={**body, "use_cached_measurement": True}).json()
+    assert b0 == b1 and b1["user_expected"] is None
+    assert b1["bot_virtual"]["bot_virtual_verdict"] == V.INSUFFICIENT
+    assert b1["bot_virtual"]["real_user_status"] == "unverified"

@@ -42,7 +42,15 @@ def target_eval(req: ClearRateTargetEvalRequest) -> ClearRateTargetEvalResponse:
     if mode == X.USER_EXPECTED:
         if req.placement_level is None:
             raise HTTPException(status_code=422, detail="user_expected needs placement_level")
-        out = X.evaluate_user_expected(load_model(), game_map, cond, req.placement_level, c or s, req.target,
+        mdl = load_model()
+        meas = c or s
+        if meas is None and req.use_cached_measurement:
+            # Opt-in (validation tab, doc 38): same cache lookup as /predict. Cache band is not a confirm band,
+            # so the verdict stays INSUFFICIENT_EVIDENCE (SELECTION_UNCONFIRMED) — judgment logic unchanged.
+            from ...core.clear_rate import cond_hash
+            hit = mdl.bot_cache.get(cond_hash(game_map, cond))
+            meas = BotMeasurement.from_dict(hit, source="cache") if hit else None
+        out = X.evaluate_user_expected(mdl, game_map, cond, req.placement_level, meas, req.target,
                                        random_layout=random_layout(game_map))
         return ClearRateTargetEvalResponse(target_mode=mode, user_expected=out)
     return ClearRateTargetEvalResponse(target_mode=mode,

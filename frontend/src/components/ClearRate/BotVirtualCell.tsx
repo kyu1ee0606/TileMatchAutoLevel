@@ -18,7 +18,7 @@ const VERDICT_LABEL: Record<BotVirtualVerdict, string> = {
 };
 
 /** 고정 배지 — 실유저 기준은 항상 실측 미검증 */
-function UnverifiedBadge() {
+export function UnverifiedBadge() {
   return (
     <span className="px-1 rounded border border-gray-500 bg-gray-700 text-gray-200 text-[10px] leading-4 whitespace-nowrap"
       title={TOOLTIP}>

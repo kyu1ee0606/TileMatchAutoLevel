@@ -17,6 +17,7 @@ import {
   BatchVerifyRegenerateResultItem,
   fixCentering,
 } from '../../api/analyze';
+import { ClearRateVerifySection } from '../ClearRate/ClearRateVerifySection';
 
 interface BatchVerifyPanelProps {
   batchId: string;
@@ -581,6 +582,9 @@ export function BatchVerifyPanel({ batchId, onComplete, onStatsUpdate }: BatchVe
           </Button>
         )}
       </div>
+
+      {/* [문서 38] 실유저 예상 클리어율 참고 판정 — 위 배치 검증·verification_passed 와 무관 */}
+      <ClearRateVerifySection batchId={batchId} />
     </div>
   );
 }

@@ -38,6 +38,9 @@ interface Props {
 export function FixedLevelEditor({ level, onClose, onSaved }: Props) {
   const [base, setBase] = useState(6);          // 바닥(짝수층) 격자 S
   const [layerCount, setLayerCount] = useState(2);
+  // 색 종류(useTileCount). 예전엔 저장 시 6 으로 하드코딩돼, 초반 레벨을 3~5색으로 낮춰도
+  // 에디터에서 한 번 저장하면 6 으로 되돌아갔다. 불러온 값을 유지하고 화면에서 조정한다.
+  const [useTileCount, setUseTileCount] = useState(6);
   const [active, setActive] = useState(0);      // 편집 중인 층
   const [layers, setLayers] = useState<Layers>({ 0: {}, 1: {} });
   const [paintColor, setPaintColor] = useState<string>('t0');
@@ -81,6 +84,7 @@ export function FixedLevelEditor({ level, onClose, onSaved }: Props) {
           if (i % 2 === 0) b = Math.max(b, c);
         }
         setBase(b || 6);
+        setUseTileCount(Number(lj.useTileCount) || 6);
         setLayerCount(n);
         setLayers(nl);
         setActive(0);
@@ -110,7 +114,7 @@ export function FixedLevelEditor({ level, onClose, onSaved }: Props) {
   const buildJson = useCallback(() => {
     const lj: Record<string, unknown> = {
       layer: layerCount, row: String(base), col: String(base),
-      useTileCount: 6, randSeed: 0, autoCollectCount: 0,
+      useTileCount, randSeed: 0, autoCollectCount: 0,
     };
     for (let i = 0; i < layerCount; i++) {
       const c = colOf(i);
@@ -118,7 +122,7 @@ export function FixedLevelEditor({ level, onClose, onSaved }: Props) {
       lj[`layer_${i}`] = { col: String(c), row: String(c), num: String(Object.keys(tiles).length), tiles };
     }
     return lj;
-  }, [layerCount, base, layers, colOf]);
+  }, [layerCount, base, layers, colOf, useTileCount]);
 
   // 실시간 검증(디바운스) — 저장 전에 규칙 위반을 즉시 보여준다
   useEffect(() => {
@@ -215,6 +219,12 @@ export function FixedLevelEditor({ level, onClose, onSaved }: Props) {
               층수
               <input type="number" min={1} max={8} value={layerCount}
                 onChange={e => setLayerCount(Math.max(1, Math.min(8, parseInt(e.target.value) || 1)))}
+                className="w-14 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white" />
+            </label>
+            <label className="flex items-center gap-1" title="t0 랜덤 칸에 쓰일 색 종류 수. 낮을수록 쉬움(Lv1~3 은 3~4).">
+              색 종류
+              <input type="number" min={3} max={15} value={useTileCount}
+                onChange={e => setUseTileCount(Math.max(3, Math.min(15, parseInt(e.target.value) || 3)))}
                 className="w-14 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white" />
             </label>
             <span className="text-gray-500">헤더는 짝홀 교대로 자동: {

@@ -287,7 +287,7 @@ cd backend && venv/bin/python -m pytest \
 **주입 대상** (DB `TileMatchProduction` v1, `storage/productionStorage.ts:20-62`)
 | 스토어 | 키 | 최소 레코드 |
 |---|---|---|
-| `batches` | keyPath `id` | `{ id:'batch_fixture_cr_<날짜>', name:'[fixture] CR 검증 3레벨', created_at, updated_at, total_levels:3, levels_per_set:10, total_sets:1, generated_count:3, playtest_count:0, approved_count:0, rejected_count:0, exported_count:0, saved_level_count:3, difficulty_start:0.3, difficulty_end:0.3, use_sawtooth:false }` (그 밖의 `ProductionBatch` 선택 필드 생략 가능 — `types/production.ts:248~`) |
+| `batches` | keyPath `id` | `{ id:'batch_fixture_cr_<날짜>', name:'[fixture] CR 검증 3레벨', created_at, updated_at, total_levels:3, levels_per_set:10, total_sets:1, generated_count:3, playtest_count:0, approved_count:0, rejected_count:0, exported_count:0, saved_level_count:3, difficulty_start:0.3, difficulty_end:0.3, use_sawtooth:false, gimmick_unlock_levels:{} }` (필수 필드는 `types/production.ts:248-294` 중 `?` 없는 것 — 위가 전부, `tile_type_profile`·`__server_version` 등은 선택) |
 | `levels` | keyPath `['batch_id','meta.level_number']`, 인덱스 `batch_id` | `{ batch_id, meta:{ level_number, set_index:0, local_index, generated_at, target_difficulty:0.3, actual_difficulty:0.3, grade:'B', status:'generated', status_updated_at, playtest_required:false, playtest_priority:0, playtest_results:[] }, level_json }` (필수 meta 는 `types/production.ts:128-239` 중 `?` 없는 필드) |
 **레벨 JSON 출처(봇·생성 없이)**: 저장소 골든 `backend/tests/golden/clear_rate_L237.json` 의 `level_json`(키 `layer, layer_0~2, useTileCount, unlockTile, randSeed, shuffleTile, typeImbalance, timea, autoCollectCount`, `placement_level=237`, 모델 캐시 적중 → [A 탐색]이 숫자 결과를 냄). 권장 3~5레벨:
 1. L237 = 골든 그대로(캐시 적중, 탐색 결과·C 준비 확인용)

@@ -66,7 +66,8 @@ def replay_reps(base, y_true, oof_d, reps):
     """target_metric_eval.replay_ftany 의 nearest_D 규칙을 반복마다(rep 0..reps-1) 같은 추첨(random.seed(7),
     후보 20 × 3000회, random 규칙의 choice 까지 같은 난수 소비)으로 재현 → 반복 평균·sd (원 스크립트는 rep 0 만)."""
     import random
-    targets = {"t0.92": 0.92, "t0.963": 0.963, "t0.983": 0.983}
+    # 0.85(p10, ±5%p 안 49레벨)·0.88(76레벨) = 비천장 다른 목표 구간(26 §11, 선별 견고성)
+    targets = {"t0.85": 0.85, "t0.88": 0.88, "t0.92": 0.92, "t0.963": 0.963, "t0.983": 0.983}
     out = {}
     for tname, t in targets.items():
         for w in (0.05, 0.10):

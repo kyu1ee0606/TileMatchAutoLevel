@@ -752,10 +752,11 @@ V24_ITEMS = (
 _V24_BEHAV = frozenset(("stack_early", "covered_info", "dock_avoid", "bomb_precollect", "tele_preempt", "key_first",
                         "locality"))
 V24_DEFAULT = ("unknown_hide", "curtain_hide", "unknown_nobonus",
-               "ac_inner", "stack_hide", "dock_rel", "covered_info")
-# ↑ 26 §11 사전 기준(목표 지표 E1 ablation) 적용 결과: 행동 항목 중 covered_info 만 채택.
-#   보류(기본 꺼짐, 파라미터는 V24_BEHAV_DEFAULTS 에 적합값 유지): bomb_beta·stack_early·bomb_impulse·key_first·
-#   curtain_memory_v24·ac_policy. 기각: dock_avoid·panic_calm·bomb_precollect·tele_preempt·gc_naive·locality.
+               "ac_inner", "stack_hide", "dock_rel")
+# ↑ 26 §11 사전 기준(목표 지표 E1 ablation) 적용 결과: 규칙 정합 항목만 기본. 행동 항목은 전부 꺼짐.
+#   보류(기본 꺼짐, 파라미터는 V24_BEHAV_DEFAULTS 에 적합값 유지): covered_info(§11-4: 채택 조합에서 빼면
+#   ft_any MAE 2sd 개선 ↔ lb MAE 2sd 악화 — 목표별 결론 엇갈림, 규칙 5)·bomb_beta·stack_early·bomb_impulse·
+#   key_first·curtain_memory_v24·ac_policy. 기각: dock_avoid·panic_calm·bomb_precollect·tele_preempt·gc_naive·locality.
 V24_BETA_BOMB = 0.0     # 폭탄 105레벨 θ0.65·0.85 × β{0,1,2,4,6} 64판, 2겹 CV: β0 (CV 손실 0.156 vs β4 0.202)
 # 적합값(64판 격자 + 2겹 CV, 26 §10): stack_early 8 · covered_info 1 · bomb_impulse 0.3 · key_first 30. 기각 항목은 0/기본.
 V24_BEHAV_DEFAULTS = {"stack_early_w": 8.0, "covered_info_a": 1.0, "dock_avoid_w": 0.0, "panic_calm_k": 0.5,

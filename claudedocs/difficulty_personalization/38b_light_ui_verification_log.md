@@ -298,3 +298,15 @@ cd backend && venv/bin/python -m pytest \
 **주입 절차**: ① 워크트리 백엔드 `:8001`·프런트 `:5174`(별도 승인 필요, 38b 앞 절의 임시 vite 설정 방식) ② 새 프로필로 `http://localhost:5174` 를 열되 대시보드 진입 전 빈 페이지에서 DevTools 콘솔로 `indexedDB.open('TileMatchProduction',1)` — 스토어가 없으면 `onupgradeneeded` 에서 위 keyPath·인덱스대로 생성(앱 코드와 동일하게: `batches`(keyPath id), `levels`(keyPath ['batch_id','meta.level_number'] + 인덱스 batch_id·status·level_number·grade·playtest_required), `playtest_queue`(keyPath ['batch_id','level_number'] + 인덱스 priority)) ③ readwrite 트랜잭션으로 batch 1건 + level 3~5건 `put`, `oncomplete` 확인 ④ 생산 대시보드 → 배치 선택 → 검증 탭. (주입은 앱 저장 함수를 거치지 않으므로 자동 push 알림은 안 생기지만, 대시보드 마운트 시 `syncBidirectional` 은 `:8001` 로 push 함 — 그래서 ①의 백엔드 분리가 필수.)
 **정리**: 테스트 프로필 삭제(또는 DevTools Application → IndexedDB `TileMatchProduction`·`TileMatchClearRateVerify` 삭제) + 워크트리 `backend/data/production/batch_fixture_cr_*`(push 사본)·`backend/data/clear_rate_verify/`(C 작업·측정 — C 실행 안 했으면 없음) 삭제. 운영(메인) 저장소·`:5173` IndexedDB 는 손대지 않음.
 **검증 항목 매핑**: B3 = fixture 배치 + 아무 다른 배치 1개(빈 배치도 가능) 사이 전환 중 대기 응답 확인 / F1 = DevTools 네트워크에서 `/api/clear-rate/verify/info` 차단 후 복원 → 회색 "확인 불가"·`cr-info-error` / G1 = fixture 에서 [중앙정렬] → `cr-map-checking` → 갱신 후 바뀐 레벨 "측정 무효"(중앙정렬은 봇 없음, 레벨 데이터 변경이므로 fixture 에서만).
+
+---
+
+## 단위 테스트 1회 실행 — clearRateVerifyModel.test.ts (2026-10-16 20:39 KST, Codex 20:40 지시)
+
+> **단위 테스트(순수 함수) PASS ≠ React/IndexedDB 실UI 검증.** 이번 결과는 `assessRecord`·`displayVerdict`·`runState` 등 순수 함수만 확인. B3(배치 전환 세대 경계)·G1(레벨 다시 읽기·버튼 잠금)·F1 화면 문구·IndexedDB 저장/복원·네트워크 요청 0건은 여전히 **미검증**(브라우저 필요).
+
+- 실행 전 runtime import 확인(grep `import|require|fetch|axios|apiClient|indexedDB|setTimeout|setInterval|Worker`): 테스트 → `node:test`, `node:assert/strict`, `clearRateVerifyModel.ts` → runtime: `clearRateLabels.ts`, `targetCurve.ts`(→ `clearRateLabels.ts`)만. `api/clearRateVerify`·`api/clearRateTarget` 는 **type-only**(strip 시 제거). fetch/axios/IndexedDB/타이머 호출 0건 → 실행.
+- 명령: `cd TileMatchAutoLevel_wt_clearrate/frontend && node --experimental-strip-types --test tests/clearRateVerifyModel.test.ts` (node v22.22.3), 1회.
+- 결과: **14/14 PASS, fail 0**, exit 0, 129ms. 신규·수정 테스트(버전 모름 → unconfirmed, 맵 확인 전 → unconfirmed/checking, 배지 회색) 포함.
+- 자원: 전 20:39:36 — free% 36, swap used 54088.31M / 55296M (free 1207.69M) · 후 20:39:36 — free% 36, swap 동일(54088.31M, free 1207.69M). 변화 없음.
+- 다른 테스트 파일·tsc·빌드·서버(8001/5174)·브라우저·봇 실행 없음.

@@ -55,7 +55,7 @@ export const A_VERDICT_CLASS: Record<UserExpectedVerdict, string> = {
 
 export const LEGACY_TARGET_TOOLTIP = '기존 목표 곡선 값(봇 척도) — 실유저 목표 아님, 참고만 (문서 31 §2)';
 export const SECTION_NOTE =
-  '참고 표시 — 기존 배치 검증(봇 매치 점수)·verification_passed·업로드 값과 무관. 결과는 저장하지 않음.';
+  '참고 표시 — 기존 배치 검증(봇 매치 점수)·verification_passed·업로드 값과 무관. 결과는 검증 탭 전용 저장소에만 저장.';
 
 /** 퍼센트 입력("85", "85.5") → 0~1. 빈 값·범위 밖(0 이하, 100 이상)·숫자 아님은 null (기본값 없음) */
 export function parseTargetPercent(input: string): number | null {

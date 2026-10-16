@@ -293,3 +293,11 @@ def test_api_target_check_separates_entry_from_judgeability(api):
 def test_api_cancel_unknown_job(api):
     client, _, _ = api
     assert client.post("/api/clear-rate/verify/jobs/nope/cancel").status_code == 404
+
+
+def test_api_info_reports_versions_without_running(api, mdl):
+    client, _, runner = api
+    r = client.get("/api/clear-rate/verify/info").json()
+    assert r["model_version"] == mdl.version and r["judge_version"] == CF.judge_version()
+    assert r["seed_band"] == "CV" and r["games_per_map"] == 512 and r["protocol_problems"] == []
+    assert runner.calls == 0

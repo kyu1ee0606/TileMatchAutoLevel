@@ -163,3 +163,17 @@ def verify_target_check(req: ClearRateTargetCheckRequest) -> ClearRateTargetChec
         items.append({"placement_level": it.placement_level, "target": it.target, "codes": codes,
                       "judgeable": not codes})
     return ClearRateTargetCheckResponse(model_version=mdl.version, items=items)
+
+
+@router.get("/verify/info")
+def verify_info():
+    """Current model / judgment-criteria versions for stale checks on restored results. Runs no bot."""
+    from ...core.clear_rate import confirm as CF
+    from ...core.clear_rate import load_model
+    from ...core.clear_rate import measure as M
+    mdl = load_model()
+    thetas, games = M.PROTOCOLS.get(mdl.manifest["bot_protocol"], ((), 0))
+    return {"model_version": mdl.version, "judge_version": CF.judge_version(), "seed_band": CF.CONFIRM_BAND,
+            "max_concurrent": CF.MAX_CONCURRENT, "bot_version": mdl.manifest["bot_version"],
+            "bot_protocol": mdl.manifest["bot_protocol"], "games_per_map": len(thetas) * games,
+            "protocol_problems": CF.protocol_problems(mdl), "note": C_NOTE}

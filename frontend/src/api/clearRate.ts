@@ -57,7 +57,8 @@ export interface ClearRatePredictRequest {
 }
 
 export interface ClearRateMeasurementMeta {
-  source: 'cache' | 'request';
+  /** store = 검증 탭 C 확인 측정(서버 저장소, /clear-rate/verify/evaluate) */
+  source: 'cache' | 'request' | 'store';
   bot_version: string;
   protocol: string;
   seed_band: string;

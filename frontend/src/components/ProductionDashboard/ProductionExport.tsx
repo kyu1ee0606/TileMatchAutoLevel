@@ -4,7 +4,7 @@
  */
 
 import { useState, useEffect } from 'react';
-import { ProductionStats, ProductionExportConfig, ProductionLevel } from '../../types/production';
+import { ProductionStats, ProductionExportConfig, ProductionLevel, PRODUCTION_MAX_LEVEL } from '../../types/production';
 import { TileData, LevelJSON } from '../../types';
 import { Button } from '../ui';
 import { useUIStore } from '../../stores/uiStore';
@@ -282,7 +282,8 @@ export function ProductionExport({
   const [gboostBoardId, setGboostBoardId] = useState('levels');
   const [gboostLevelPrefix, setGboostLevelPrefix] = useState('level_');
   const [gboostStartIndex, setGboostStartIndex] = useState(1);
-  // [무한 레벨] 1~1500 완주 유저용. 원본 501~1500 을 `infinity_1..1000` 으로 **복사 추가**한다.
+  // [무한 레벨] 정식 최대(PRODUCTION_MAX_LEVEL=1530) 완주 유저용. 원본 501~1530 을 `infinity_1..1030` 으로 **복사 추가**한다.
+  // (1500 시절 infinity_1..1000 은 번호 그대로 유지되고 1501~1530 → infinity_1001..1030 이 뒤에 붙는다)
   // 오프셋 500 이 10의 배수라 `원본 % 10 === index % 10` → 보스/스페셜/autoCollect 정렬이
   // 원본과 그대로 일치하므로 보상·자동수집 규칙을 원본 레벨번호 기준으로 적용하면 된다.
   // off=원본만 · append=원본+무한 · only=무한만(원본 제외)
@@ -299,8 +300,11 @@ export function ProductionExport({
     try { localStorage.setItem(INFINITY_KEY, infinityMode); } catch { /* ignore */ }
   }, [infinityMode]);
   const [infinityPrefix, setInfinityPrefix] = useState('infinity_');
-  const [infinitySourceStart, setInfinitySourceStart] = useState(501);
-  const [infinitySourceEnd, setInfinitySourceEnd] = useState(1500);
+  // 라이브 무한 레벨은 원본 501부터 매겨져 있다(infinity_N = 원본 500+N). 이 값을 바꾸면 기존 번호가
+  // 다른 레벨로 바뀌어 라이브 무한 풀을 덮어쓴다 → 1501~1530 만 올릴 때도 501 유지 + '범위'로 좁힌다.
+  const INFINITY_SOURCE_START_DEFAULT = 501;
+  const [infinitySourceStart, setInfinitySourceStart] = useState(INFINITY_SOURCE_START_DEFAULT);
+  const [infinitySourceEnd, setInfinitySourceEnd] = useState(PRODUCTION_MAX_LEVEL);
   const [gboostHealthy, setGboostHealthy] = useState(false);
 
   // Range selection
@@ -456,10 +460,16 @@ export function ProductionExport({
       const src = levels
         .filter(l => l.meta.level_number >= infinitySourceStart && l.meta.level_number <= infinitySourceEnd)
         .sort((a, b) => a.meta.level_number - b.meta.level_number);
-      src.forEach((l, i) => out.push({
-        targetId: `${infinityPrefix}${i + 1}`,
-        level: l, sourceLevel: l.meta.level_number, slotNumber: i + 1, isInfinity: true,
-      }));
+      // 번호는 목록 순번(i+1)이 아니라 원본 번호로 계산한다. getExportableLevels 가 범위 필터를
+      // 먼저 거는데, 순번으로 매기면 범위 1501~1530 업로드 시 사본이 infinity_1~30 이 되어
+      // 기존 무한 레벨(원본 501~530)을 새 레벨로 덮어쓴다.
+      src.forEach(l => {
+        const slot = l.meta.level_number - infinitySourceStart + 1;
+        out.push({
+          targetId: `${infinityPrefix}${slot}`,
+          level: l, sourceLevel: l.meta.level_number, slotNumber: slot, isInfinity: true,
+        });
+      });
     }
     return out;
   };
@@ -1147,8 +1157,14 @@ export function ProductionExport({
                     ))}
                     {infinityEnabled && (
                       <span className="text-xs text-gray-400">
-                        원본 {infinitySourceStart}~{infinitySourceEnd} → {infinityPrefix}1~{infinityPrefix}
-                        {Math.max(0, infinitySourceEnd - infinitySourceStart + 1)}
+                        {/* 실제 업로드 대상 기준으로 표시한다. 예전 문구는 개수만 보고 항상 infinity_1 부터
+                            찍어서, 범위 1501~1530 업로드(실제 infinity_1001~1030)도 1~30 으로 보였다. */}
+                        {(() => {
+                          const inf = previewTargetIds.filter(id => id.startsWith(infinityPrefix));
+                          return inf.length > 0
+                            ? <>업로드될 무한 사본: {inf[0]} ~ {inf[inf.length - 1]} ({inf.length}개) · 규칙 {infinityPrefix}N = 원본 {infinitySourceStart - 1}+N</>
+                            : <>원본 {infinitySourceStart}~{infinitySourceEnd} 중 업로드할 무한 사본 없음</>;
+                        })()}
                       </span>
                     )}
                   </div>
@@ -1182,6 +1198,17 @@ export function ProductionExport({
                           ? ' 오프셋이 10의 배수라 보스(10배수)·스페셜(끝자리9)·autoCollect 위치가 원본과 그대로 정렬됩니다.'
                           : ' ⚠️ 시작−1 이 10의 배수가 아니라 보스/자동수집 위치가 원본과 어긋납니다(권장: 501).'}
                       </p>
+                      {infinitySourceStart !== INFINITY_SOURCE_START_DEFAULT && (
+                        <p className="text-[11px] text-red-400 font-medium">
+                          🔴 원본 시작이 {INFINITY_SOURCE_START_DEFAULT} 이 아닙니다 — 라이브 무한 레벨 번호가 다른 레벨로 바뀌어 기존 {infinityPrefix}N 을 덮어씁니다.
+                          {' '}1501~1530 만 올리려면 원본 시작은 {INFINITY_SOURCE_START_DEFAULT} 로 두고 아래 '범위'를 1501~1530 으로 지정하세요
+                          {' '}(→ {infinityPrefix}1001~1030).
+                          <button type="button" onClick={() => setInfinitySourceStart(INFINITY_SOURCE_START_DEFAULT)}
+                            className="ml-2 px-1.5 py-0.5 rounded bg-red-900/60 border border-red-700 text-red-200 hover:bg-red-800">
+                            {INFINITY_SOURCE_START_DEFAULT} 으로 되돌리기
+                          </button>
+                        </p>
+                      )}
                     </>
                   )}
                 </div>

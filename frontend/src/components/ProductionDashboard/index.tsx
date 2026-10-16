@@ -28,6 +28,9 @@ import {
   LevelStatus,
   ProductionGenerationProgress,
   PRODUCTION_1500_PRESETS,
+  PRODUCTION_MAX_LEVEL,
+  DIFFICULTY_CURVE_SETS,
+  PRODUCTION_EXTENSION_START,
   shouldRequirePlaytest,
 } from '../../types/production';
 import {
@@ -58,6 +61,7 @@ import { BatchApprovalPanel } from './BatchApprovalPanel';
 import { BatchVerifyPanel } from './BatchVerifyPanel';
 import { MetaIntegrityPanel, checkTileDivisibility, detectOOBTiles } from './MetaIntegrityPanel';
 import { LevelDistributionChart } from './LevelDistributionChart';
+import { PvSeedPlayPanel } from './PvSeedPlayPanel';
 // PatternSelector import removed - using inline grid instead
 import { getPatternByIndex, BOSS_PATTERNS, SPECIAL_PATTERNS, PATTERN_CATEGORIES } from '../../constants/patterns';
 
@@ -535,7 +539,7 @@ function findLevelsWithWrongTileCount(levels: ProductionLevel[]): ProductionLeve
   });
 }
 
-type DashboardTab = 'overview' | 'generate' | 'verify' | 'test' | 'playtest' | 'review' | 'export';
+type DashboardTab = 'overview' | 'generate' | 'verify' | 'test' | 'playtest' | 'review' | 'export' | 'pvplay';
 
 // [등껍질 침식] GET /debug/turtle-patterns 응답 항목.
 // coef = 1 − mean(avg봇 클리어율)  … 클수록 어려움. by_v = 색 종류(V)별 실측 클리어율.
@@ -1077,9 +1081,9 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
     try {
       const batch = await createProductionBatch({
         name: `${presetConfig.name} - ${new Date().toLocaleDateString()}`,
-        total_levels: 1500,
+        total_levels: PRODUCTION_MAX_LEVEL,
         levels_per_set: 10,
-        total_sets: 150,
+        total_sets: Math.ceil(PRODUCTION_MAX_LEVEL / 10),
         generated_count: 0,
         playtest_count: 0,
         approved_count: 0,
@@ -1102,10 +1106,38 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
     }
   }, [addNotification]);
 
+  // [1530 확장] 기존 1500 배치를 정식 최대(PRODUCTION_MAX_LEVEL)로 늘린다. 레벨은 건드리지 않고
+  // 메타만 바꿔 '이어서 생성'이 빈 1501~1530 만 만들게 한다(이미 있는 레벨은 스킵).
+  // 난이도 곡선 분모는 DIFFICULTY_CURVE_SETS 고정이라 1~1500 목표 난이도는 그대로다.
+  const handleExtendBatch = useCallback(async () => {
+    if (!selectedBatchId) return;
+    const b = batches.find(x => x.id === selectedBatchId);
+    if (!b || b.total_levels >= PRODUCTION_MAX_LEVEL) return;
+    if (!window.confirm(
+      `"${b.name}"\n${b.total_levels} → ${PRODUCTION_MAX_LEVEL} 레벨로 확장합니다.\n`
+      + `기존 레벨은 그대로 두고, '이어서 생성'으로 ${b.total_levels + 1}~${PRODUCTION_MAX_LEVEL} 만 만듭니다.`,
+    )) return;
+    const updates = {
+      total_levels: PRODUCTION_MAX_LEVEL,
+      total_sets: Math.ceil(PRODUCTION_MAX_LEVEL / Math.max(1, b.levels_per_set)),
+    };
+    try {
+      await updateProductionBatch(b.id, updates);
+      setBatches(prev => prev.map(x => (x.id === b.id ? { ...x, ...updates } : x)));
+      // 메타만 바뀌어 레벨 dirty 가 없다 → 자동 push 는 건너뛰므로 전량 push 로 서버에 반영한다.
+      pushBatchToServer(b.id, { full: true }).catch(() => { /* 서버 미가동 시 다음 저장 때 반영 */ });
+      addNotification('success',
+        `${PRODUCTION_MAX_LEVEL}레벨로 확장 — '이어서 생성'으로 ${b.total_levels + 1}~${PRODUCTION_MAX_LEVEL} 을 만드세요`);
+    } catch (err) {
+      addNotification('error', `확장 실패: ${(err as Error).message}`);
+    }
+  }, [selectedBatchId, batches, addNotification]);
+
   // Generate levels for batch
   const handleStartGeneration = useCallback(async (
     playtestConfig: PlaytestQueueConfig,
     overrideBatchId?: string,  // [자동큐] 지정 시 이 배치로 생성(selectedBatchId 상태 비의존)
+    levelRange?: { min: number; max: number },  // [구간 생성] 지정 시 이 구간의 빈 레벨만 생성(예: 1501~1530)
   ): Promise<boolean> => {
     // [자동큐] 명시 batchId 우선 — 루프에서 setSelectedBatchId 비동기 반영을 기다리지 않고 즉시 생성.
     const activeBatchId = overrideBatchId ?? selectedBatchId;
@@ -1152,7 +1184,9 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
           const setIdx = Math.floor((level - 1) / batch.levels_per_set);
           const localIdx = ((level - 1) % batch.levels_per_set) + 1;
           const baseDifficulty = batch.difficulty_start +
-            (batch.difficulty_end - batch.difficulty_start) * setIdx / Math.max(1, batch.total_sets - 1);
+            // 곡선 분모는 1500(150세트) 기준 고정 — 1530 확장 배치에서도 1~1500 목표 불변, 1501+ 는 끝값.
+            (batch.difficulty_end - batch.difficulty_start)
+            * Math.min(1, setIdx / Math.max(1, Math.min(batch.total_sets, DIFFICULTY_CURVE_SETS) - 1));
           let targetDifficulty = baseDifficulty;
           if (batch.use_sawtooth) {
             const localProgress = (localIdx - 1) / (batch.levels_per_set - 1);
@@ -1277,6 +1311,12 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
     try {
       for (let setIdx = 0; setIdx < batch.total_sets; setIdx++) {
         if (signal.aborted) throw new Error('cancelled');
+        // [구간 생성] 구간과 겹치지 않는 세트는 통째로 건너뛴다(세트마다 패턴 목록 API 를 호출하므로).
+        if (levelRange) {
+          const setFirst = setIdx * batch.levels_per_set + 1;
+          const setLast = (setIdx + 1) * batch.levels_per_set;
+          if (setLast < levelRange.min || setFirst > levelRange.max) continue;
+        }
 
         updateProgressThrottled(prev => ({
           ...prev,
@@ -1284,7 +1324,9 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
         }));
 
         // Calculate difficulty for this set
-        const setProgress = setIdx / (batch.total_sets - 1);
+        // 곡선 분모는 1500(150세트) 기준 고정 — total_sets 를 쓰면 1530 확장 시 기존 1~1500 목표가 달라진다.
+        // 1501+ 는 1 로 클램프(곡선 끝값).
+        const setProgress = Math.min(1, setIdx / Math.max(1, Math.min(batch.total_sets, DIFFICULTY_CURVE_SETS) - 1));
         let baseDifficulty: number;
 
         if (batch.use_sawtooth) {
@@ -1388,6 +1430,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
         for (let localIdx = 1; localIdx <= batch.levels_per_set; localIdx++) {
           const levelNumber = setIdx * batch.levels_per_set + localIdx;
           if (existingLevelNumbers.has(levelNumber)) continue;  // [이어서 생성] 이미 있는 레벨 스킵
+          if (levelRange && (levelNumber < levelRange.min || levelNumber > levelRange.max)) continue;  // [구간 생성]
           let targetDifficulty = baseDifficulty;
           if (batch.use_sawtooth) {
             const localProgress = (localIdx - 1) / (batch.levels_per_set - 1);
@@ -2058,6 +2101,36 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
     addNotification('info', '생성 중지됨');
   }, [addNotification, resetGenerationProgress]);
 
+  // [구간 생성] PRODUCTION_EXTENSION_START~PRODUCTION_MAX_LEVEL(1501~1530)의 빈 레벨만 생성한다.
+  // 배치가 1530 미만이면 메타만 먼저 확장한다. 기존 1~1500 은 스킵되므로 건드리지 않는다.
+  // handleStartGeneration 을 참조하므로 반드시 그 선언 뒤에 둔다(useCallback deps TDZ 방지).
+  const handleGenerateExtensionRange = useCallback(async (config: PlaytestQueueConfig) => {
+    if (!selectedBatchId || isGenerating) return;
+    const b = await getProductionBatch(selectedBatchId);
+    if (!b) return;
+    const range = { min: PRODUCTION_EXTENSION_START, max: PRODUCTION_MAX_LEVEL };
+    const needsExtend = b.total_levels < range.max;
+    if (!window.confirm(
+      `"${b.name}"\nLv${range.min}~${range.max} 중 비어 있는 레벨만 생성합니다.`
+      + (needsExtend ? `\n배치를 ${b.total_levels} → ${range.max} 레벨로 먼저 확장합니다.` : '')
+      + `\n기존 Lv1~${range.min - 1} 은 건드리지 않습니다.`,
+    )) return;
+    if (needsExtend) {
+      const updates = {
+        total_levels: range.max,
+        total_sets: Math.ceil(range.max / Math.max(1, b.levels_per_set)),
+      };
+      try {
+        await updateProductionBatch(b.id, updates);
+        setBatches(prev => prev.map(x => (x.id === b.id ? { ...x, ...updates } : x)));
+      } catch (err) {
+        addNotification('error', `확장 실패: ${(err as Error).message}`);
+        return;
+      }
+    }
+    await handleStartGeneration(config, b.id, range);
+  }, [selectedBatchId, isGenerating, handleStartGeneration, addNotification]);
+
   // [자동 연속생성 큐] preset 배치를 target개(0=무한)까지 순차 자동 생성. 각 배치 완료 후 다음 생성.
   // 자리비움 야간 운용용. 로컬 CPU 상한이라 병렬 아닌 back-to-back.
   const handleAutoQueueStart = useCallback(async (
@@ -2077,9 +2150,9 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
         // 1) 새 배치 생성(메타)
         const batch = await createProductionBatch({
           name: `${presetConfig.name} [자동 ${made + 1}] - ${new Date().toLocaleString()}`,
-          total_levels: 1500,
+          total_levels: PRODUCTION_MAX_LEVEL,
           levels_per_set: 10,
-          total_sets: 150,
+          total_sets: Math.ceil(PRODUCTION_MAX_LEVEL / 10),
           generated_count: 0,
           playtest_count: 0,
           approved_count: 0,
@@ -2450,6 +2523,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
           { id: 'playtest', label: '플레이테스트' },
           { id: 'review', label: '검토' },
           { id: 'export', label: '내보내기' },
+          { id: 'pvplay', label: '시드 변형 플레이' },
         ].map((tab) => (
           <button
             key={tab.id}
@@ -2506,6 +2580,8 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             autoQueueTarget={autoQueueTarget}
             onAutoQueueStart={handleAutoQueueStart}
             onAutoQueueStop={handleAutoQueueStop}
+            onExtendBatch={handleExtendBatch}
+            onGenerateRange={handleGenerateExtensionRange}
           />
         )}
 
@@ -2562,7 +2638,9 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
           />
         )}
 
-        {!selectedBatch && !isLoading && (
+        {activeTab === 'pvplay' && <PvSeedPlayPanel />}
+
+        {!selectedBatch && !isLoading && activeTab !== 'pvplay' && (
           <div className="flex flex-col items-center justify-center h-64 text-gray-500">
             <p>배치가 없습니다.</p>
             <p className="text-sm mt-2">위의 버튼으로 새 1500 레벨 배치를 생성하세요.</p>
@@ -2716,6 +2794,9 @@ function OverviewTab({ stats, batch, batchId }: { stats: ProductionStats; batch:
             match_score: undefined,
             status_updated_at: new Date().toISOString(),
             regen_attempts: (level.meta.regen_attempts || 0) + 1,
+            // [배포 게이트] 이전 데이터 기준 위반 표시는 재생성으로 무효 — 비운다.
+            //   (실제 위반이면 저장 시 서버가 다시 붙이고, 게이트도 level_json 을 직접 스캔한다.)
+            rule_violations: undefined, divisibility_violation: undefined, solver_verdict: undefined,
           },
           level_json: result.level_json,
         }]);
@@ -2907,6 +2988,8 @@ function GenerateTab({
   autoQueueTarget,
   onAutoQueueStart,
   onAutoQueueStop,
+  onExtendBatch,
+  onGenerateRange,
 }: {
   batch: ProductionBatch;
   progress: ProductionGenerationProgress;
@@ -2941,6 +3024,8 @@ function GenerateTab({
   autoQueueTarget: number;
   onAutoQueueStart: (preset: keyof typeof PRODUCTION_1500_PRESETS, targetCount: number, config: PlaytestQueueConfig) => void;
   onAutoQueueStop: () => void;
+  onExtendBatch?: () => void;
+  onGenerateRange?: (config: PlaytestQueueConfig) => void;
 }) {
   const [playtestStrategy, setPlaytestStrategy] = useState<PlaytestStrategy>('sample_boss');
   // [자동 연속생성] 프리셋 + 목표 배치수(0/빈=무한). localStorage 유지.
@@ -3300,7 +3385,10 @@ function GenerateTab({
       {/* [이어서 생성] progress 는 비영속(탭 리로드 시 idle 로 초기화)이라 이 패널을
           progress.status 로만 게이팅하면, 리로드 후 '▶️ 이어서 생성' 버튼까지 통째로 사라져
           미완성 배치를 재개할 방법이 없어진다. 배치 레코드 기준 '미완성' 도 표시 조건에 포함. */}
-      {(isGenerating || progress.status !== 'idle' || batchIncomplete) && (() => {
+      {/* [1530 확장] 1500 완료 배치는 batchIncomplete=false 라 패널이 숨는다 → 확장/구간 생성 버튼이
+          보이도록 '정식 최대 미만 배치' 도 표시 조건에 포함한다. */}
+      {(isGenerating || progress.status !== 'idle' || batchIncomplete
+        || (!!batch && batch.total_levels < PRODUCTION_MAX_LEVEL)) && (() => {
         // 평균 속도 계산 (레벨/분)
         const avgSpeed = progress.elapsed_ms > 0
           ? (progress.completed_levels / (progress.elapsed_ms / 60000))
@@ -3468,6 +3556,17 @@ function GenerateTab({
                   {!isGenerating && (progress.status === 'paused' || incomplete) && (
                     <Button onClick={() => onStart({ strategy: playtestStrategy })} className="flex-1">
                       ▶️ 이어서 생성{batch ? ` (${savedCount}/${batch.total_levels})` : ''}
+                    </Button>
+                  )}
+                  {!isGenerating && onExtendBatch && batch && batch.total_levels < PRODUCTION_MAX_LEVEL && (
+                    <Button onClick={onExtendBatch} variant="secondary" className="flex-1">
+                      ➕ {PRODUCTION_MAX_LEVEL}레벨로 확장 (+{PRODUCTION_MAX_LEVEL - batch.total_levels})
+                    </Button>
+                  )}
+                  {!isGenerating && onGenerateRange && batch && (
+                    <Button onClick={() => onGenerateRange({ strategy: playtestStrategy })} variant="secondary" className="flex-1"
+                      title={`Lv${PRODUCTION_EXTENSION_START}~${PRODUCTION_MAX_LEVEL} 중 비어 있는 레벨만 생성합니다. 배치가 ${PRODUCTION_MAX_LEVEL} 미만이면 먼저 확장합니다. 기존 레벨은 건드리지 않습니다.`}>
+                      🆕 {PRODUCTION_EXTENSION_START}~{PRODUCTION_MAX_LEVEL} 생성
                     </Button>
                   )}
                   {!isGenerating && fullyDone && (
@@ -4104,6 +4203,9 @@ function TestTab({
             match_score: undefined,
             template_id: undefined, // 보스 템플릿 출처는 level_json._boss_template_id 로 보존
             regen_attempts: (lv.meta.regen_attempts || 0) + 1,
+            // [배포 게이트] 이전 데이터 기준 위반 표시는 재생성으로 무효 — 비운다.
+            //   (실제 위반이면 저장 시 서버가 다시 붙이고, 게이트도 level_json 을 직접 스캔한다.)
+            rule_violations: undefined, divisibility_violation: undefined, solver_verdict: undefined,
           },
           level_json: levelJson,
         }]);
@@ -4155,6 +4257,9 @@ function TestTab({
           // 색배치 조정분 → 재검증 대상(순차검증이 확정). 모양/난이도목표는 유지.
           verified: false, verification_passed: undefined, match_score: undefined,
           regen_attempts: (level.meta.regen_attempts || 0) + 1,
+          // [배포 게이트] 이전 데이터 기준 위반 표시는 재생성으로 무효 — 비운다.
+          //   (실제 위반이면 저장 시 서버가 다시 붙이고, 게이트도 level_json 을 직접 스캔한다.)
+          rule_violations: undefined, divisibility_violation: undefined, solver_verdict: undefined,
         },
         level_json: r.best_level_json as ProductionLevel['level_json'],
       }]);
@@ -4313,6 +4418,9 @@ function TestTab({
                 status_updated_at: new Date().toISOString(),
                 verified: false, verification_passed: undefined, match_score: undefined,
                 regen_attempts: (level.meta.regen_attempts || 0) + 1,
+                // [배포 게이트] 이전 데이터 기준 위반 표시는 재생성으로 무효 — 비운다.
+                //   (실제 위반이면 저장 시 서버가 다시 붙이고, 게이트도 level_json 을 직접 스캔한다.)
+                rule_violations: undefined, divisibility_violation: undefined, solver_verdict: undefined,
               },
               level_json: r.best_level_json as ProductionLevel['level_json'],
             }]);
@@ -4443,6 +4551,9 @@ function TestTab({
           status_updated_at: new Date().toISOString(),
           verified: false, verification_passed: undefined, match_score: undefined,
           regen_attempts: (selectedLevel.meta.regen_attempts || 0) + 1,
+          // [배포 게이트] 이전 데이터 기준 위반 표시는 재생성으로 무효 — 비운다.
+          //   (실제 위반이면 저장 시 서버가 다시 붙이고, 게이트도 level_json 을 직접 스캔한다.)
+          rule_violations: undefined, divisibility_violation: undefined, solver_verdict: undefined,
         },
         level_json: selectedLevel.level_json,
       }]);
@@ -4491,6 +4602,9 @@ function TestTab({
           // 재타이핑 = 색 팔레트 변경 → 재검증 대상. 모양/난이도목표 유지.
           verified: false, verification_passed: undefined, match_score: undefined,
           regen_attempts: (selectedLevel.meta.regen_attempts || 0) + 1,
+          // [배포 게이트] 이전 데이터 기준 위반 표시는 재생성으로 무효 — 비운다.
+          //   (실제 위반이면 저장 시 서버가 다시 붙이고, 게이트도 level_json 을 직접 스캔한다.)
+          rule_violations: undefined, divisibility_violation: undefined, solver_verdict: undefined,
         },
         level_json: r.best_level_json as ProductionLevel['level_json'],
       }]);
@@ -4914,6 +5028,44 @@ function TestTab({
         next.delete(levelNumber);
         return next;
       });
+    }
+  };
+
+  /**
+   * [배포 표시 초기화] level_json 은 그대로 두고, 이전 판정으로 남은 배포 게이트 플래그만 비운다.
+   *
+   * 왜: 배치를 복사하면 원본의 `rule_violations` 까지 따라오고, 서버는 저장 시 해소된 플래그를
+   * 지우지만 로컬(IndexedDB) 메타에는 남는다 → 데이터가 멀쩡한데 업로드가 차단된다
+   * (실측: 3차 배치 Lv21 — 데이터는 stack 정상인데 2차에서 온 tutorial_missing 표시로 차단).
+   * 재생성으로도 풀리지만 그건 레벨 내용을 바꾼다. 수동 조정분을 지켜야 할 때 쓰는 최소 수단.
+   *
+   * 안전: 실제 위반이면 저장 시 서버가 다시 붙이고, 업로드 게이트의 level_json 직접 스캔도 그대로다.
+   */
+  const handleClearDeployFlags = async (targetLevelNumbers: number[]) => {
+    const nums = new Set(targetLevelNumbers);
+    const targets = levels.filter(l => nums.has(l.meta.level_number) && (
+      l.meta.rule_violations !== undefined
+      || l.meta.divisibility_violation !== undefined
+      || l.meta.solver_verdict !== undefined));
+    if (targets.length === 0) {
+      addNotification('info', '선택 레벨에 초기화할 배포 표시가 없습니다.');
+      return;
+    }
+    try {
+      await saveProductionLevels(batchId, targets.map(l => ({
+        meta: {
+          ...l.meta,
+          rule_violations: undefined,
+          divisibility_violation: undefined,
+          solver_verdict: undefined,
+        },
+        level_json: l.level_json,
+      })));
+      await loadLevels();
+      addNotification('success',
+        `배포 표시 초기화 ${targets.length}개 (Lv ${targets.map(t => t.meta.level_number).join(', ')}) — 레벨 데이터는 그대로`);
+    } catch (e) {
+      addNotification('error', `배포 표시 초기화 실패: ${(e as Error).message}`);
     }
   };
 
@@ -5910,6 +6062,9 @@ function TestTab({
             actual_difficulty: gen.actual_difficulty ?? level.meta.actual_difficulty,
             grade: (gen.grade || level.meta.grade) as DifficultyGrade,
             regen_attempts: (level.meta.regen_attempts || 0) + 1,
+            // [배포 게이트] 이전 데이터 기준 위반 표시는 재생성으로 무효 — 비운다.
+            //   (실제 위반이면 저장 시 서버가 다시 붙이고, 게이트도 level_json 을 직접 스캔한다.)
+            rule_violations: undefined, divisibility_violation: undefined, solver_verdict: undefined,
             match_score: undefined, verified: false, verification_passed: undefined,
             // 고정본은 템플릿 소유가 아니다. 남겨두면 다음 재생성이 from-template 분기를 타서
             // 고정 모양을 잃는다(이 분기가 먼저 걸리긴 하지만, 메타 정합성도 맞춰둔다).
@@ -5974,6 +6129,9 @@ function TestTab({
             grade: (gen.grade || level.meta.grade) as DifficultyGrade,
             status_updated_at: new Date().toISOString(),
             regen_attempts: (level.meta.regen_attempts || 0) + 1,
+            // [배포 게이트] 이전 데이터 기준 위반 표시는 재생성으로 무효 — 비운다.
+            //   (실제 위반이면 저장 시 서버가 다시 붙이고, 게이트도 level_json 을 직접 스캔한다.)
+            rule_violations: undefined, divisibility_violation: undefined, solver_verdict: undefined,
             match_score: undefined, verified: false, verification_passed: undefined,
           },
           level_json: levelJson,
@@ -6020,6 +6178,9 @@ function TestTab({
               grade: (resp.data.grade || level.meta.grade) as DifficultyGrade,
               status_updated_at: new Date().toISOString(),
               regen_attempts: (level.meta.regen_attempts || 0) + 1,
+              // [배포 게이트] 이전 데이터 기준 위반 표시는 재생성으로 무효 — 비운다.
+              //   (실제 위반이면 저장 시 서버가 다시 붙이고, 게이트도 level_json 을 직접 스캔한다.)
+              rule_violations: undefined, divisibility_violation: undefined, solver_verdict: undefined,
               match_score: undefined, verified: false, verification_passed: undefined,
             },
             level_json: levelJson,
@@ -6093,6 +6254,9 @@ function TestTab({
             match_score: undefined,
             status_updated_at: new Date().toISOString(),
             regen_attempts: (level.meta.regen_attempts || 0) + 1,
+            // [배포 게이트] 이전 데이터 기준 위반 표시는 재생성으로 무효 — 비운다.
+            //   (실제 위반이면 저장 시 서버가 다시 붙이고, 게이트도 level_json 을 직접 스캔한다.)
+            rule_violations: undefined, divisibility_violation: undefined, solver_verdict: undefined,
             regen_lower_bound: undefined,
             regen_upper_bound: undefined,
             // 템플릿 기반 표시 보존
@@ -6362,6 +6526,9 @@ function TestTab({
           match_score: undefined,
           status_updated_at: new Date().toISOString(),
           regen_attempts: (level.meta.regen_attempts || 0) + 1,
+          // [배포 게이트] 이전 데이터 기준 위반 표시는 재생성으로 무효 — 비운다.
+          //   (실제 위반이면 저장 시 서버가 다시 붙이고, 게이트도 level_json 을 직접 스캔한다.)
+          rule_violations: undefined, divisibility_violation: undefined, solver_verdict: undefined,
           regen_lower_bound: undefined,
           regen_upper_bound: undefined,
           // 패턴 정보 보존 (사용자 선택 또는 기존 패턴)
@@ -6679,6 +6846,9 @@ function TestTab({
           match_score: undefined,
           status_updated_at: new Date().toISOString(),
           regen_attempts: (level.meta.regen_attempts || 0) + 1,
+          // [배포 게이트] 이전 데이터 기준 위반 표시는 재생성으로 무효 — 비운다.
+          //   (실제 위반이면 저장 시 서버가 다시 붙이고, 게이트도 level_json 을 직접 스캔한다.)
+          rule_violations: undefined, divisibility_violation: undefined, solver_verdict: undefined,
           regen_lower_bound: undefined,
           regen_upper_bound: undefined,
           // 패턴 정보 보존
@@ -6830,6 +7000,9 @@ function TestTab({
               status_updated_at: new Date().toISOString(),
               actual_difficulty: actual, grade,
               regen_attempts: (level.meta.regen_attempts || 0) + 1,
+              // [배포 게이트] 이전 데이터 기준 위반 표시는 재생성으로 무효 — 비운다.
+              //   (실제 위반이면 저장 시 서버가 다시 붙이고, 게이트도 level_json 을 직접 스캔한다.)
+              rule_violations: undefined, divisibility_violation: undefined, solver_verdict: undefined,
               match_score: undefined, verified: false, verification_passed: undefined,
               // [중요] 이전 절차/템플릿 생성분의 `template_id` 가 남아있으면, 이후 순차검증
               // 재생성이 from-template 분기를 타서 방금 심은 고정 모양을 덮어쓴다. 여기서 끊는다.
@@ -7337,6 +7510,16 @@ function TestTab({
                   >
                     🎯 선택 {selectedSequentialLevels.size}개 처리
                   </Button>
+                  {selectedSequentialLevels.size > 0 && (
+                    <Button
+                      onClick={() => handleClearDeployFlags([...selectedSequentialLevels])}
+                      size="sm"
+                      className="flex-1 bg-slate-600 hover:bg-slate-500"
+                      title="레벨 데이터는 그대로 두고, 이전 판정으로 남은 배포 차단 표시(rule/÷3/solver)만 비웁니다. 복사한 배치에서 옛 표시로 업로드가 막힐 때 사용."
+                    >
+                      🧹 배포 표시 초기화 ({selectedSequentialLevels.size})
+                    </Button>
+                  )}
                   {(() => {
                     const oobNums = levels.filter(l => levelHasHeaderOob(l.level_json)).map(l => l.meta.level_number);
                     return oobNums.length > 0 ? (
@@ -7451,6 +7634,22 @@ function TestTab({
                 title="Lv1~31 구간만 RL 순차재검증."
               >
                 🔒 초반 재검증 ({levels.filter(l => l.meta.level_number >= 1 && l.meta.level_number <= 31).length})
+              </Button>
+            </div>
+
+            {/* [1530 확장 구간] 1501~1530 만 RL 순차검증 */}
+            <div className="flex items-center gap-2">
+              <Button
+                onClick={() => handleSequentialProcess(
+                  levels.filter(l => l.meta.level_number >= PRODUCTION_EXTENSION_START && l.meta.level_number <= PRODUCTION_MAX_LEVEL)
+                    .map(l => l.meta.level_number))}
+                disabled={isSequentialProcessing || bossRegen.running || isFixedRegenerating
+                  || levels.filter(l => l.meta.level_number >= PRODUCTION_EXTENSION_START && l.meta.level_number <= PRODUCTION_MAX_LEVEL).length === 0}
+                size="sm"
+                className="flex-1 bg-teal-800 hover:bg-teal-700"
+                title={`Lv${PRODUCTION_EXTENSION_START}~${PRODUCTION_MAX_LEVEL} 구간만 RL 순차검증. 생성 안 된 레벨은 대상에서 빠집니다.`}
+              >
+                🆕 {PRODUCTION_EXTENSION_START}~{PRODUCTION_MAX_LEVEL} 검증 ({levels.filter(l => l.meta.level_number >= PRODUCTION_EXTENSION_START && l.meta.level_number <= PRODUCTION_MAX_LEVEL).length})
               </Button>
             </div>
 

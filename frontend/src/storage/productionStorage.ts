@@ -753,15 +753,20 @@ export async function exportProductionLevels(
     const src = exportableLevels
       .filter(l => l.meta.level_number >= sourceStart && l.meta.level_number <= sourceEnd)
       .sort((a, b) => a.meta.level_number - b.meta.level_number);
-    const copies = src.map((l, i) => ({
-      ...l,
-      meta: {
-        ...l.meta,
-        infinity_id: `${prefix}${i + 1}`,
-        infinity_index: i + 1,
-        infinity_source_level: l.meta.level_number,
-      },
-    }));
+    // index 는 목록 순번(i+1)이 아니라 원본 번호로 계산한다. 순번으로 매기면 원본 일부가
+    // 미승인으로 빠졌을 때 뒤쪽 사본 번호가 당겨져 기존 infinity_N 을 다른 레벨로 덮는다.
+    const copies = src.map(l => {
+      const idx = l.meta.level_number - sourceStart + 1;
+      return {
+        ...l,
+        meta: {
+          ...l.meta,
+          infinity_id: `${prefix}${idx}`,
+          infinity_index: idx,
+          infinity_source_level: l.meta.level_number,
+        },
+      };
+    });
     // only=true 면 원본을 빼고 사본만 내보낸다(무한 레벨 단독 배포용).
     exportableLevels = only ? copies : exportableLevels.concat(copies);
   }

@@ -166,6 +166,10 @@ export interface ProductionLevelMeta {
   rl_unreliable?: boolean;
   rl_unreliable_reason?: string;
   solver_verdict?: string;                       // A* 판정 (측정했을 때만)
+  // [배포 게이트 플래그] 서버가 저장 시 스캔해 붙이고, 해소되면 지운다(production_store).
+  // 재생성으로 level_json 이 바뀌면 이전 판정은 무효 → 재생성 경로에서 함께 비운다.
+  rule_violations?: Record<string, unknown>;     // 기믹 규칙 위반 (예: tutorial_missing)
+  divisibility_violation?: Record<string, number>; // ÷3 위반 타입별 개수
 
   // [v15.35] 재생성 정보
   regenerated?: boolean;                         // 재생성 여부
@@ -321,7 +325,9 @@ export interface ProductionExportConfig {
 /**
  * [무한 레벨 복사 규칙]
  *   infinity_{index} = 원본 레벨 (sourceStart + index - 1)
- *   기본값 501~1500 → infinity_1 ~ infinity_1000
+ *   기본값 501~1530 → infinity_1 ~ infinity_1030
+ *   index 는 **원본 레벨번호로 계산**한다(목록 순번 아님) — 범위 업로드(1501~1530)에서도
+ *   infinity_1001~1030 이 되어 기존 infinity_1~30 을 덮지 않는다.
  *
  * 오프셋(sourceStart-1 = 500)이 10의 배수라 `원본레벨 % 10 === index % 10` 이 성립한다.
  * → 보스(10배수)·스페셜(끝자리9) 위치와 autoCollect 대상이 원본과 그대로 정렬되므로
@@ -392,6 +398,23 @@ export interface ProductionGenerationProgress {
   last_checkpoint_at?: string;
   checkpoint_interval_levels: number;  // 매 N개 레벨마다 체크포인트
 }
+
+/**
+ * 정식 레벨 최대치. 게임 uconfig `MaxOfficialLevel` 과 같아야 한다.
+ * 1500 → 1530: 꾸미기 star 소모 합(1,530)이 정식 레벨 공급(1,500)보다 30 많아 30레벨 추가
+ * (게임 DESIGN_DECORATION_STAR_DISTRIBUTION.md §0).
+ */
+export const PRODUCTION_MAX_LEVEL = 1530;
+
+/**
+ * 난이도 곡선 기준 세트 수(1~1500). 곡선 분모를 total_sets 에서 이 값으로 고정해
+ * 배치를 1530 으로 늘려도 기존 1~1500 의 목표 난이도가 바뀌지 않게 한다.
+ * 1501+ 는 곡선 끝값(difficulty_end)에 머문다.
+ */
+export const DIFFICULTY_CURVE_SETS = 150;
+
+/** 1530 확장 추가 구간 시작. 구간 생성·검증 버튼은 이 값 ~ PRODUCTION_MAX_LEVEL 만 다룬다. */
+export const PRODUCTION_EXTENSION_START = 1501;
 
 /**
  * 1500개 레벨 프리셋

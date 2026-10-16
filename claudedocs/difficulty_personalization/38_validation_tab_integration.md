@@ -120,3 +120,35 @@ A 판정: 합격 n · 불합격 n · 근거 부족 n
 - C 확인 측정을 생산 레벨에 공급·저장하는 경로(봇 측정 실행 + 메타 필드) — 없으면 검증 탭 A 판정은 계속 "근거 부족".
 - 결과 저장(레벨 메타) 여부 — `types/production.ts` 다른 세션 커밋 후.
 - A 목표를 레벨별 목표 곡선(문서 31 D13)으로 입력할지 — 현재 배치 공통 1값.
+
+## §재개 메모(검증탭2) — 2026-10-16 일시중지 (맥 재시작)
+
+> 2차 작업(C 확인 측정 연결 / 결과 저장·복원 / 레벨별 목표 곡선) 착수 직후 사용자 지시로 중단. **코드 변경 0줄** — 이 커밋은 재개 메모만 담는다. 실행(테스트·tsc·빌드·봇 측정) 0회.
+
+### 기능별 상태
+
+| 기능 | 상태 | 내용 |
+|---|---|---|
+| 1. C 확인 측정 연결 | **미착수** (읽기만 완료) | 재사용 대상 확인: `measure.py` `measure/measure_cached/MeasurementStore`(키 = cond_hash\|protocol\|seed_band\|bot_config_hash), `SEED_BANDS`(seed11M·S·C·S2·P2·S2B·C2·S3·C3), `PROTOCOLS`(theta4x128_v1 = A 모델 프로토콜), `guard.bot_flags`(버전·프로토콜·cond_hash·판 수 검사), `select.verdict(confirm_bands=...)`, 테스트 `test_seed_bands_do_not_overlap`·`test_seed_bands_avoid_other_experiments`(외부 대역 1–9.1M·13M·23M). 백엔드 비동기 작업 API·검증 탭 전용 C 대역 미추가 |
+| 2. 결과 저장·복원 | **미착수** | `productionStorage.ts`·`types/production.ts` 는 메인 작업트리에 다른 세션 미커밋 변경 → 별도 모듈(`ClearRate/clearRateStorage.ts` 등)로 분리 예정. 구조 미확인(IndexedDB 스토어 패턴 읽기 전) |
+| 3. 레벨별 목표 곡선 | **미착수** (조사 중) | 문서 31 §3-3 규칙 7·D13(레벨 번호별 계단식 목표 곡선, td→TARGET_CLEAR_CURVE 봇 척도 사용 금지) 확인. 기존 곡선 구현 후보: `types/production.ts:153,160` `target_clear_rates`/`target_clear_rate`(봇 척도 — A 목표로 변환 금지), `api/leveling.ts` `/leveling/difficulty-curve`, `models/leveling_config.py`, `routes/tune.py`, `rl_sim.py` TARGET_CLEAR_CURVE — 구조 재사용 가능 여부 미판정 |
+
+### 작성한 파일
+- 이 절(문서 38 §재개 메모) 1건뿐. 코드·테스트 파일 없음.
+
+### 재개 시 다음 순서
+1. 메인 `git status`/`git diff --stat` 재확인(다른 세션 index.tsx·productionStorage.ts·types/production.ts 커밋 여부 — 커밋됐으면 레벨 메타 필드 직접 추가 재검토).
+2. 기존 곡선 구현(`leveling_config.py`, `api/leveling.ts`, `tune.py`) 읽고 A 목표 곡선 데이터 구조 결정(구간 규칙 + 개별 레벨 override, 우선순위 override > 구간, 경계 포함 규칙 명시).
+3. `productionStorage.ts` 저장 패턴 확인 → 별도 `clearRateStorage.ts`(측정 참조·요약 + 평가 결과 분리, 무효화 키 = cond_hash·bot_config_hash·protocol·model_version·judge_version·target_curve_hash).
+4. 백엔드: 검증 탭 C 전용 시드 대역 추가(레지스트리 확장 + 충돌 테스트), 측정 종류(탐색/C) 명시 필드, 비동기 작업(작업 ID·상태·취소) 라우트 연결 코드 + 테스트.
+5. 프런트: 실행 상태(미측정/대기/측정 중/완료/실패/취소/오래됨)와 판정 분리 표시, 실행 전 확인 화면, 중복 실행 잠금.
+6. 문서 38 갱신 + 재시작 후 검증 체크리스트·명령·예산(맵 1개 × C 512판 등) → 로컬 커밋.
+
+### 다른 세션 파일 충돌 처리 현황
+- 메인 작업트리(`feature/pv-seed-variants`) 미커밋: `ProductionDashboard/index.tsx`, `ProductionExport.tsx`, `storage/productionStorage.ts`, `types/production.ts`, `main.py` 등 — **이번에 아무것도 건드리지 않음**.
+- 참고: 문서 33·35·36·37 은 이 워크트리에 없음(35·37 메인, 36 `feature/clear-rate-lowband`).
+
+### 남은 결정 (마더/사용자)
+- C 확인 측정 시드 대역: 검증 탭 전용 새 대역 할당(예: 22M대 — 외부 23M과 간격 검사 필요) vs 기존 C/C2/C3 재사용 금지 확인.
+- 결과 저장 위치: 레벨 메타 필드 추가(다른 세션 커밋 후) vs 별도 저장소(IndexedDB 별 스토어/백엔드 파일).
+- 목표 곡선 저장 범위: 배치 단위 vs 프로젝트 전역.

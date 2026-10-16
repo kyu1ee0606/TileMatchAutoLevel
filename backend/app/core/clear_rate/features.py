@@ -13,8 +13,6 @@ analysis venv), so it imports nothing from `app`.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import math
 import statistics
 from collections import Counter
@@ -81,35 +79,6 @@ def map_features(m: Dict[str, Any]) -> Counter:
 
 def present_gimmicks(mf: Counter) -> List[str]:
     return [g for g in GIMMICKS if mf.get(g, 0) > 0]
-
-
-# Game-behaviour fields of a level row that a bot measurement depends on (build-shard row keys; the map is hashed
-# separately). Display-only fields (tileSkin, backgroundIndex, visualTileSeed, difficulty, rewardCoin) are excluded.
-GAME_FIELDS = ("useTileCount", "unlockTile", "autoCollectCount", "randSeed", "shuffleTile", "typeImbalance", "timea")
-
-
-def _num(v: Any) -> int:
-    try:
-        return int(float(v))
-    except (TypeError, ValueError):
-        return 0
-
-
-def normalize_conditions(cond: Dict[str, Any]) -> Dict[str, Any]:
-    return {k: (str(cond.get(k) or "") if k == "typeImbalance" else _num(cond.get(k))) for k in GAME_FIELDS}
-
-
-def condition_hash(m: Dict[str, Any], cond: Dict[str, Any]) -> str:
-    """Hash of the final game conditions a bot measurement was taken under: map (layer count, per-layer
-    col/row/tiles) + GAME_FIELDS. A measurement is valid for a prediction only when this hash matches."""
-    n = int(m["layer"])
-    norm: Dict[str, Any] = {"layer": n, "fields": normalize_conditions(cond)}
-    for i in range(n):
-        layer = m.get(f"layer_{i}") or {}
-        tiles = layer.get("tiles", {})
-        norm[f"layer_{i}"] = {"col": str(layer.get("col", "")), "row": str(layer.get("row", "")),
-                              "tiles": tiles if isinstance(tiles, dict) else {}}
-    return hashlib.sha256(json.dumps(norm, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:20]
 
 
 def bot_by_theta(rows: Iterable[Dict[str, Any]]) -> Dict[float, Dict[str, Any]]:

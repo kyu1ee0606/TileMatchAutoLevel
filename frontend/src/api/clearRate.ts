@@ -13,7 +13,7 @@ export type ClearRateConfidence = 'high' | 'medium' | 'low';
 export interface ClearRateEvidenceFlag {
   /** 문서 31 §3-2 코드 + 측정 조건 코드.
    *  hard(예측 대신 사유): PLACEMENT_MISSING, LEVEL_OUT_OF_RANGE, GIMMICK_UNSEEN, GIMMICK_LOW_TRAIN, FEATURE_OOD,
-   *  BOT_PROTOCOL_MISMATCH, MEASUREMENT_MISSING, MEASUREMENT_CONDITION_MISMATCH, UNSOLVED
+   *  BOT_PROTOCOL_MISMATCH, BOT_CONDITION_MISMATCH, BOT_SOURCE_UNKNOWN, MEASUREMENT_MISSING, UNSOLVED
    *  soft: LOW_CONFIDENCE, NEAR_CEILING, GIMMICK_FIRST, NOVELTY_HIGH, GIMMICK_BOT_WEAK */
   code: string;
   severity: 'hard' | 'soft';
@@ -33,9 +33,10 @@ export interface ClearRateBotRow {
 export interface ClearRateBotMeasurement {
   bot_version: string;
   protocol: string;
-  /** 측정한 최종 게임 조건 해시 — 현재 조건 해시와 다르면 MEASUREMENT_CONDITION_MISMATCH */
-  condition_hash: string;
-  seed_set?: string;
+  /** 측정한 최종 게임 조건 해시 — 없거나 현재와 다르면 BOT_CONDITION_MISMATCH(예측 없음) */
+  cond_hash: string;
+  /** 시드 묶음 출처(학습 seed11M, 문서 35 S/C). 없으면 BOT_SOURCE_UNKNOWN. C 확인은 봇 측정 안정성 확인일 뿐 실유저 검증 아님 */
+  seed_band: string;
   rows: ClearRateBotRow[];
 }
 
@@ -45,14 +46,16 @@ export interface ClearRatePredictRequest {
   placement_level?: number | null;
   /** 생략하면 모델의 라이브 빌드 봇 측정 캐시(조건 해시로 조회)를 쓴다 */
   bot_measurement?: ClearRateBotMeasurement | null;
+  /** 업로드 패널 옵션 가정 (기본 = 패널 기본값 multiples10 / 3) */
+  upload_opts?: { auto_collect_mode: 'multiples10' | 'preserve'; auto_collect_value: number } | null;
 }
 
 export interface ClearRateMeasurementMeta {
   source: 'cache' | 'request';
   bot_version: string;
   protocol: string;
-  seed_set: string;
-  condition_hash: string;
+  seed_band: string;
+  cond_hash: string;
 }
 
 export interface ClearRatePredictResponse {
@@ -63,7 +66,7 @@ export interface ClearRatePredictResponse {
   bot_protocol: string;
   placement_level: number | null;
   /** 이 요청의 최종 게임 조건(업로드 변환 기준) 해시 */
-  condition_hash: string;
+  cond_hash: string;
   status: ClearRateStatus;
   /** false 면 숫자 없음 — 사유는 insufficient_reasons */
   in_support: boolean;

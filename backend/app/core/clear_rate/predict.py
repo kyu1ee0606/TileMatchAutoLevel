@@ -18,7 +18,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import guard
-from .features import condition_hash, level_features, map_features, normalize_conditions, present_gimmicks
+from .conditions import cond_hash, normalize_conditions
+from .features import level_features, map_features, present_gimmicks
 from .model import ClearRateModel
 
 STATUS_OK, STATUS_INSUFFICIENT, STATUS_NEED_MEASUREMENT = "ok", "insufficient_evidence", "measurement_required"
@@ -26,22 +27,25 @@ STATUS_OK, STATUS_INSUFFICIENT, STATUS_NEED_MEASUREMENT = "ok", "insufficient_ev
 
 @dataclass(frozen=True)
 class BotMeasurement:
-    """Bot measurement + protocol meta. `condition_hash` = features.condition_hash of the map/conditions measured."""
+    """Bot measurement + provenance. `cond_hash` = conditions.cond_hash of the final game conditions measured;
+    `seed_band` = seed range label (training "seed11M"; doc 35 S = search, C = confirmation). A confirmation band
+    only re-checks bot-measurement stability — it is not an independent real-user validation."""
     bot_version: str
     protocol: str
-    condition_hash: str
+    cond_hash: str
     rows: Tuple[Dict[str, Any], ...]
-    seed_set: str = ""
+    seed_band: str = ""
     source: str = "request"   # request | cache
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any], source: str = "request") -> "BotMeasurement":
-        return cls(bot_version=d["bot_version"], protocol=d["protocol"], condition_hash=d["condition_hash"],
-                   rows=tuple(d.get("rows") or ()), seed_set=d.get("seed_set") or "", source=source)
+        return cls(bot_version=d.get("bot_version") or "", protocol=d.get("protocol") or "",
+                   cond_hash=d.get("cond_hash") or "", rows=tuple(d.get("rows") or ()),
+                   seed_band=d.get("seed_band") or "", source=source)
 
     def meta(self) -> Dict[str, str]:
         return {"source": self.source, "bot_version": self.bot_version, "protocol": self.protocol,
-                "seed_set": self.seed_set, "condition_hash": self.condition_hash}
+                "seed_band": self.seed_band, "cond_hash": self.cond_hash}
 
 
 @dataclass
@@ -51,7 +55,7 @@ class ClearRatePrediction:
     bot_version: str
     bot_protocol: str
     placement_level: Optional[int]
-    condition_hash: str
+    cond_hash: str
     status: str
     in_support: bool                                   # False → no number; reasons in insufficient_reasons
     insufficient_reasons: List[str] = field(default_factory=list)
@@ -89,15 +93,15 @@ def predict_level(model: ClearRateModel, game_map: Dict[str, Any], conditions: D
     passed in so this function stays free of game-engine imports."""
     man, sup, pos = model.manifest, model.model["support"], model.model["position"]
     cond = normalize_conditions(conditions)
-    h = condition_hash(game_map, cond)
+    h = cond_hash(game_map, cond)
     out = ClearRatePrediction(model_version=model.version, target_metric=man["target_metric"],
                               bot_version=man["bot_version"], bot_protocol=man["bot_protocol"],
-                              placement_level=placement_level, condition_hash=h, status=STATUS_OK, in_support=False,
+                              placement_level=placement_level, cond_hash=h, status=STATUS_OK, in_support=False,
                               measurement=measurement.meta() if measurement else None)
     flags = guard.input_flags(sup, placement_level=placement_level, gimmicks=present_gimmicks(map_features(game_map)))
     rows = list(measurement.rows) if measurement else []
     if measurement:
-        flags += guard.bot_flags(man, measurement.bot_version, measurement.protocol, measurement.condition_hash, h, rows)
+        flags += guard.bot_flags(man, measurement, h)
         out.bot_unaided_win_rate = {f"theta{int(round(float(r['theta']) * 100)):03d}": round(r["wins"] / r["games"], 4)
                                     for r in rows if r.get("games")}
     else:

@@ -748,17 +748,28 @@ class ClearRateBotRow(BaseModel):
 
 
 class ClearRateBotMeasurement(BaseModel):
+    model_config = {"extra": "forbid"}
+
     bot_version: str = Field(..., description="Must match the model manifest (v2.4)")
     protocol: str = Field(..., description="Must match the model manifest (theta4x128_v1)")
-    condition_hash: str = Field(..., description="clear_rate.condition_hash of the game conditions measured; must equal the current one")
-    seed_set: str = Field(default="", description="Seed set label (selection S vs confirmation C)")
+    cond_hash: str = Field(default="", description="clear_rate.cond_hash of the final game conditions measured; missing or different → no prediction")
+    seed_band: str = Field(default="", description="Seed band label (training seed11M; doc 35 S = search, C = confirmation — bot-stability check only); missing → no prediction")
     rows: List[ClearRateBotRow]
 
 
+class ClearRateUploadOpts(BaseModel):
+    auto_collect_mode: Literal["multiples10", "preserve"] = "multiples10"
+    auto_collect_value: int = Field(default=3, ge=0)
+
+
 class ClearRatePredictRequest(BaseModel):
+    """extra="forbid": post-release values (observed help rate, actual clear rate, ...) cannot be sent as inputs."""
+    model_config = {"extra": "forbid"}
+
     level_json: Dict[str, Any] = Field(..., description="Editor level JSON (converted to upload/game conditions server-side)")
     placement_level: Optional[int] = Field(default=None, ge=1, description="Level number the map is placed at (required for a prediction)")
     bot_measurement: Optional[ClearRateBotMeasurement] = Field(default=None, description="Omit to use the model's live-build measurement cache")
+    upload_opts: Optional[ClearRateUploadOpts] = Field(default=None, description="Upload-panel options assumed for final conditions (default = panel default)")
 
 
 class ClearRateEvidenceFlag(BaseModel):
@@ -771,8 +782,8 @@ class ClearRateMeasurementMeta(BaseModel):
     source: Literal["cache", "request"]
     bot_version: str
     protocol: str
-    seed_set: str
-    condition_hash: str
+    seed_band: str
+    cond_hash: str
 
 
 class ClearRatePredictResponse(BaseModel):
@@ -781,7 +792,7 @@ class ClearRatePredictResponse(BaseModel):
     bot_version: str
     bot_protocol: str
     placement_level: Optional[int]
-    condition_hash: str = Field(..., description="Hash of the final game conditions of this request")
+    cond_hash: str = Field(..., description="Hash of the final game conditions of this request")
     status: Literal["ok", "insufficient_evidence", "measurement_required"]
     in_support: bool
     insufficient_reasons: List[str] = Field(default_factory=list)

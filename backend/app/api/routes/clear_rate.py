@@ -17,5 +17,6 @@ def predict_clear_rate(req: ClearRatePredictRequest) -> ClearRatePredictResponse
     if not isinstance(lj.get("layer"), (int, str)) or not any(k.startswith("layer_") for k in lj):
         raise HTTPException(status_code=422, detail="level_json must contain 'layer' and 'layer_N' entries")
     pred = predict_editor_level(lj, req.placement_level,
-                                bot_measurement=req.bot_measurement.model_dump() if req.bot_measurement else None)
+                                bot_measurement=req.bot_measurement.model_dump() if req.bot_measurement else None,
+                                upload_opts=req.upload_opts.model_dump() if req.upload_opts else None)
     return ClearRatePredictResponse(**pred.to_dict())

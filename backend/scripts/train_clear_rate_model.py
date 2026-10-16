@@ -48,6 +48,7 @@ def _load_by_path(name, path):  # bypass app/core/__init__ (heavy imports) — t
 
 FE = _load_by_path("clear_rate_features", BACKEND / "app/core/clear_rate/features.py")
 MD = _load_by_path("clear_rate_model", BACKEND / "app/core/clear_rate/model.py")
+CN = _load_by_path("clear_rate_conditions", BACKEND / "app/core/clear_rate/conditions.py")
 
 CAL = rm.CAL
 BOT_FILE = "bot_v24/bot_v2.4f_no_rules_only.json"
@@ -58,7 +59,7 @@ DEFAULT_VERSION = "cr-ftany-v24r-20261016"
 FEATS = FE.FEATS
 K, REPS = 5, 4
 GATE = {"mae_max": 0.035, "rho_min": 0.72}  # doc 31 §2-2 proposal (D9)
-PROTOCOL, SEED_SET = "theta4x128_v1", "seed11M"  # seeds 11,000,000 + level_index*1000 + game
+PROTOCOL, SEED_BAND = "theta4x128_v1", "seed11M"  # seeds 11,000,000 + level_index*1000 + game
 SHARD_COMMIT = "b741f6a3"  # bot_af_L32_500.SHARD_110 — build 1.1.0 maps = maps the AF runs were played on (doc 31 §2-2)
 T0 = time.time()
 
@@ -351,9 +352,9 @@ def fit_export(rows, X, Y, expo, af, prep, bot_rows):
     for L, th in sorted(by_L.items()):
         if L not in prep or not all(t in th for t in FE.THETAS):
             continue
-        h = FE.condition_hash(prep[L]["map"], prep[L]["row"])
-        cache[h] = {"L": L, "bot_version": "v2.4", "protocol": PROTOCOL, "seed_set": SEED_SET, "condition_hash": h,
-                    "conditions": FE.normalize_conditions(prep[L]["row"]),
+        h = CN.cond_hash(prep[L]["map"], prep[L]["row"])
+        cache[h] = {"L": L, "bot_version": "v2.4", "protocol": PROTOCOL, "seed_band": SEED_BAND, "cond_hash": h,
+                    "conditions": CN.normalize_conditions(prep[L]["row"]),
                     "rows": [{"theta": t, "games": th[t]["games"], "wins": th[t]["wins"],
                               "fail_reasons": th[t]["fail_reasons"],
                               **({"fail_tiles_left_board": th[t]["fail_tiles_left_board"]} if t == 1.0 else {})}
@@ -425,7 +426,7 @@ def main():
         "bot_rows_note": "doc 26 §11-1: 'rules only' file = full combination with behaviour items dropped, re-measured "
                          "on levels where those items can act; the other levels' rows are copied from the full "
                          "combination (items never fire there, same seeds -> identical rows), hence their tags",
-        "bot_protocol": PROTOCOL, "bot_seed_set": SEED_SET, "bot_thetas": list(FE.THETAS), "bot_games_per_theta": 128,
+        "bot_protocol": PROTOCOL, "bot_seed_band": SEED_BAND, "bot_thetas": list(FE.THETAS), "bot_games_per_theta": 128,
         "bot_seed_rule": "11,000,000 + level_index*1000 + game",
         "train_data": {"maps": f"af_calibration/bot_v21/prep.json (build 1.1.0 shard {SHARD_COMMIT})",
                        "shard_commit": SHARD_COMMIT, "af_level_metrics_generated_at": LM_doc.get("generated_at"),
@@ -440,7 +441,7 @@ def main():
         "parity_max_abs_logit_diff": pdiff,
         "model_json_sha256": hashlib.sha256(model_s.encode()).hexdigest(),
         "bot_cache_sha256": hashlib.sha256(cache_s.encode()).hexdigest(),
-        "condition_fields": list(FE.GAME_FIELDS),
+        "condition_fields": list(CN.GAME_FIELDS),
         "input_audit": "inputs = map structure/gimmicks, placement position (log L, segment, gimmick exposure and "
                        "first-appearance from the live schedule/unlock table, boss = autoCollectCount 1..3) and bot "
                        "measurement only; no AF value of the level itself (help rate, clear rate) is an input",

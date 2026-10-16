@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app.core.clear_rate import (BotMeasurement, condition_hash, game_conditions, judge, load_model,
+from app.core.clear_rate import (BotMeasurement, cond_hash, finalize_game_conditions, judge, load_model,
                                  predict_editor_level, predict_level)
 from app.core.clear_rate import guard
 from app.core.clear_rate.features import FEATS, expit
@@ -39,8 +39,8 @@ def codes(fl):
 
 
 def cached_measurement(mdl):
-    gm, cond = game_conditions(LJ, L)
-    return copy.deepcopy(mdl.bot_cache[condition_hash(gm, cond)])
+    gm, cond = finalize_game_conditions(LJ, L)
+    return copy.deepcopy(mdl.bot_cache[cond_hash(gm, cond)])
 
 
 # ── artifact ─────────────────────────────────────────────────────────────────────────────────────
@@ -50,8 +50,8 @@ def test_manifest_provenance(mdl):
     assert m["target_metric"] == "ft_any_v1"
     assert m["train_data"]["shard_commit"] == "b741f6a3" and m["train_data"]["n_levels"] == 379
     assert m["trained_at"] and m["gates"]["pass"]
-    assert m["condition_fields"] == ["useTileCount", "unlockTile", "autoCollectCount", "randSeed", "shuffleTile",
-                                     "typeImbalance", "timea"]
+    assert m["condition_fields"][:7] == ["useTileCount", "unlockTile", "autoCollectCount", "randSeed", "shuffleTile",
+                                         "typeImbalance", "timea"]
     raw = (mdl.dir / "model.json").read_text(encoding="utf-8")
     assert hashlib.sha256(raw.encode()).hexdigest() == m["model_json_sha256"]
     assert mdl.model["features"] == FEATS
@@ -78,7 +78,7 @@ def test_pure_python_matches_training_numpy(mdl):
 def test_editor_path_matches_training(mdl):
     r = predict_editor_level(LJ, L)
     assert r.status == "ok" and r.in_support and r.insufficient_reasons == []
-    assert r.measurement["source"] == "cache" and r.measurement["condition_hash"] == r.condition_hash
+    assert r.measurement["source"] == "cache" and r.measurement["cond_hash"] == r.cond_hash
     chk = next(c for c in mdl.model["check"] if c["L"] == L)
     assert abs(r.expected_ft_any - round(expit(chk["ft_logit"]), 4)) < 1e-9
     lo, hi = r.range80_ft_any
@@ -88,7 +88,7 @@ def test_editor_path_matches_training(mdl):
 
 
 def test_pure_function_equals_editor_path(mdl):
-    gm, cond = game_conditions(LJ, L)
+    gm, cond = finalize_game_conditions(LJ, L)
     meas = BotMeasurement.from_dict(cached_measurement(mdl), source="cache")
     a = predict_level(mdl, gm, cond, L, meas, random_layout=random_layout(gm))
     assert a == predict_editor_level(LJ, L)
@@ -99,8 +99,8 @@ def test_deterministic():
 
 
 def test_upload_auto_collect_rule_changes_conditions():
-    _, c237 = game_conditions(LJ, 237)
-    _, c240 = game_conditions(LJ, 240)
+    _, c237 = finalize_game_conditions(LJ, 237)
+    _, c240 = finalize_game_conditions(LJ, 240)
     assert c237["autoCollectCount"] == 0 and c240["autoCollectCount"] == 3
 
 
@@ -133,9 +133,9 @@ def test_measurement_condition_hash_must_match(mdl):
     ok = predict_editor_level(LJ, L, bot_measurement=meas)
     assert ok.status == "ok" and ok.measurement["source"] == "request"
     assert ok.expected_ft_any == predict_editor_level(LJ, L).expected_ft_any
-    stale = predict_editor_level(LJ, L, bot_measurement=dict(meas, condition_hash="0" * 20))
+    stale = predict_editor_level(LJ, L, bot_measurement=dict(meas, cond_hash="0" * 20))
     assert stale.status == "insufficient_evidence" and stale.expected_ft_any is None
-    assert "MEASUREMENT_CONDITION_MISMATCH" in stale.insufficient_reasons
+    assert "BOT_CONDITION_MISMATCH" in stale.insufficient_reasons
 
 
 def test_measurement_protocol_checked(mdl):
@@ -146,6 +146,23 @@ def test_measurement_protocol_checked(mdl):
     assert "BOT_PROTOCOL_MISMATCH" in short.insufficient_reasons
     unsolved = predict_editor_level(LJ, L, bot_measurement=dict(meas, rows=[dict(r, wins=0) for r in meas["rows"]]))
     assert "UNSOLVED" in unsolved.insufficient_reasons
+    nosrc = predict_editor_level(LJ, L, bot_measurement=dict(meas, seed_band=""))
+    assert "BOT_SOURCE_UNKNOWN" in nosrc.insufficient_reasons and nosrc.expected_ft_any is None
+    noth = predict_editor_level(LJ, L, bot_measurement=dict(meas, rows=[r for r in meas["rows"] if r["theta"] != 0.55]))
+    assert "BOT_PROTOCOL_MISMATCH" in noth.insufficient_reasons
+
+
+def test_cache_measurement_gets_same_checks(mdl):
+    """G3: a cached measurement whose stored cond_hash does not match is rejected exactly like a request one."""
+    from app.core.clear_rate.model import ClearRateModel
+    gm, cond = finalize_game_conditions(LJ, L)
+    h = cond_hash(gm, cond)
+    m2 = ClearRateModel.__new__(ClearRateModel)
+    m2.__dict__.update(mdl.__dict__)
+    m2.bot_cache = {h: dict(mdl.bot_cache[h], cond_hash="f" * 20, seed_band="")}
+    r = predict_editor_level(LJ, L, model=m2)
+    assert r.measurement["source"] == "cache" and r.expected_ft_any is None
+    assert {"BOT_CONDITION_MISMATCH", "BOT_SOURCE_UNKNOWN"} <= set(r.insufficient_reasons)
 
 
 # ── warning rules ────────────────────────────────────────────────────────────────────────────────
@@ -186,7 +203,7 @@ def test_feature_flags_and_confidence():
 # ── verdict (library only) ───────────────────────────────────────────────────────────────────────
 def _pred(expected, rng, conf="high", in_support=True, L_=200):
     return ClearRatePrediction(model_version="m", target_metric="ft_any_v1", bot_version="v2.4", bot_protocol="p",
-                               placement_level=L_, condition_hash="h", status="ok" if in_support else "insufficient_evidence",
+                               placement_level=L_, cond_hash="h", status="ok" if in_support else "insufficient_evidence",
                                in_support=in_support, insufficient_reasons=[] if in_support else ["FEATURE_OOD"],
                                expected_ft_any=expected if in_support else None, range80_ft_any=rng, confidence=conf)
 
@@ -220,7 +237,7 @@ def test_judge_on_real_prediction(mdl):
 
 
 # ── API schema ───────────────────────────────────────────────────────────────────────────────────
-RESPONSE_KEYS = {"model_version", "target_metric", "bot_version", "bot_protocol", "placement_level", "condition_hash",
+RESPONSE_KEYS = {"model_version", "target_metric", "bot_version", "bot_protocol", "placement_level", "cond_hash",
                  "status", "in_support", "insufficient_reasons", "evidence_flags", "expected_ft_any", "range80_ft_any",
                  "expected_unaided_lb", "expected_help_rate", "confidence", "measurement", "bot_unaided_win_rate"}
 
@@ -237,10 +254,14 @@ def test_api_predict(client):
 def test_api_rejects_bad_input(client, mdl):
     assert client.post("/api/clear-rate/predict", json={"level_json": {"foo": 1}, "placement_level": L}).status_code == 422
     assert client.post("/api/clear-rate/predict", json={"level_json": LJ, "placement_level": 0}).status_code == 422
-    meas = cached_measurement(mdl)
-    meas.pop("condition_hash")
     assert client.post("/api/clear-rate/predict", json={"level_json": LJ, "placement_level": L,
-                                                        "bot_measurement": meas}).status_code == 422
+                                                        "help_rate_observed": 0.2}).status_code == 422  # extra=forbid
+    meas = cached_measurement(mdl)
+    meas.pop("cond_hash")
+    body = client.post("/api/clear-rate/predict", json={"level_json": LJ, "placement_level": L,
+                                                        "bot_measurement": {k: v for k, v in meas.items()
+                                                                            if k in ("bot_version", "protocol", "seed_band", "rows")}}).json()
+    assert body["status"] == "insufficient_evidence" and "BOT_CONDITION_MISMATCH" in body["insufficient_reasons"]
     r = client.post("/api/clear-rate/predict", json={"level_json": LJ})
     assert r.status_code == 200 and r.json()["status"] == "insufficient_evidence"
 

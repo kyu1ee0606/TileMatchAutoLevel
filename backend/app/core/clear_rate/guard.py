@@ -14,7 +14,7 @@ LOW_CONF_BELOW = 0.85    # doc 26 §11-9: actual < 0.85 → mean easy bias +0.12
 CEILING_FROM = 0.95      # doc 31 §3-2 NEAR_CEILING (⑤ median 0.963: selection ≈ random)
 NOVELTY_HIGH = 0.5
 SUPPRESS = {"PLACEMENT_MISSING", "LEVEL_OUT_OF_RANGE", "GIMMICK_UNSEEN", "GIMMICK_LOW_TRAIN", "FEATURE_OOD",
-            "BOT_PROTOCOL_MISMATCH", "MEASUREMENT_MISSING", "MEASUREMENT_CONDITION_MISMATCH", "UNSOLVED"}
+            "BOT_PROTOCOL_MISMATCH", "BOT_CONDITION_MISMATCH", "BOT_SOURCE_UNKNOWN", "MEASUREMENT_MISSING", "UNSOLVED"}
 
 
 def flag(code: str, severity: str, detail: str = "") -> Dict[str, str]:
@@ -39,15 +39,22 @@ def input_flags(support: Dict[str, Any], *, placement_level: Optional[int], gimm
     return out
 
 
-def bot_flags(manifest: Dict[str, Any], bot_version: str, protocol: str, measured_hash: str, current_hash: str,
-              rows: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-    out = []
-    if bot_version != manifest["bot_version"] or protocol != manifest["bot_protocol"]:
+def bot_flags(manifest: Dict[str, Any], m: Any, current_hash: str) -> List[Dict[str, str]]:
+    """Same checks for cached and caller-supplied measurements (m: predict.BotMeasurement): game-condition hash,
+    bot version, protocol (θ grid × games), seed-band provenance."""
+    out, rows = [], list(m.rows)
+    if m.bot_version != manifest["bot_version"] or m.protocol != manifest["bot_protocol"]:
         out.append(flag("BOT_PROTOCOL_MISMATCH", "hard",
-                        f"측정 {bot_version}/{protocol} ≠ 모델 {manifest['bot_version']}/{manifest['bot_protocol']}"))
-    if measured_hash != current_hash:
-        out.append(flag("MEASUREMENT_CONDITION_MISMATCH", "hard",
-                        f"측정한 게임 조건 {measured_hash} ≠ 현재 {current_hash} (맵·useTileCount·시드 등이 바뀜)"))
+                        f"측정 {m.bot_version or '?'}/{m.protocol or '?'} ≠ 모델 {manifest['bot_version']}/{manifest['bot_protocol']}"))
+    if not m.cond_hash:
+        out.append(flag("BOT_CONDITION_MISMATCH", "hard", "측정에 게임 조건 해시가 없음 — 어떤 맵·조건에서 잰 값인지 확인 불가"))
+    elif m.cond_hash != current_hash:
+        out.append(flag("BOT_CONDITION_MISMATCH", "hard",
+                        f"측정한 게임 조건 {m.cond_hash} ≠ 현재 {current_hash} (맵·useTileCount·시드 등이 바뀜)"))
+    if not m.seed_band:
+        out.append(flag("BOT_SOURCE_UNKNOWN", "hard", "측정 시드 묶음(seed_band) 출처가 없음"))
+    if any(int(r.get("wins", 0)) > int(r.get("games", 0)) or int(r.get("wins", 0)) < 0 for r in rows):
+        out.append(flag("BOT_PROTOCOL_MISMATCH", "hard", "승수가 판 수보다 크거나 음수"))
     by_t = {round(float(r["theta"]), 2): r for r in rows}
     missing = [t for t in THETAS if t not in by_t]
     short = [t for t in THETAS if t in by_t and int(by_t[t]["games"]) < manifest["bot_games_per_theta"]]

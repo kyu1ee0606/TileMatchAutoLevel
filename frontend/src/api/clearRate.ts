@@ -39,6 +39,10 @@ export interface ClearRateBotMeasurement {
   cond_hash: string;
   /** 시드 묶음 출처(학습 seed11M, 문서 35 S/C). 없으면 BOT_SOURCE_UNKNOWN. C 확인은 봇 측정 안정성 확인일 뿐 실유저 검증 아님 */
   seed_band: string;
+  /** 봇 실력 설정 라벨(θ 격자는 rows[].theta). 비우면 프로토콜 기본 */
+  skill_config?: string;
+  /** 봇 시뮬레이션에서 부스터/부활 사용 여부. 모델은 무도움(없음/false)만 받음 */
+  aids_simulated?: { booster?: boolean; revive?: boolean } | null;
   rows: ClearRateBotRow[];
 }
 
@@ -58,6 +62,8 @@ export interface ClearRateMeasurementMeta {
   protocol: string;
   seed_band: string;
   cond_hash: string;
+  skill_config: string;
+  aids_simulated: { booster?: boolean; revive?: boolean } | null;
 }
 
 export interface ClearRatePredictResponse {

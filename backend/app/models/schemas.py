@@ -754,6 +754,8 @@ class ClearRateBotMeasurement(BaseModel):
     protocol: str = Field(..., description="Must match the model manifest (theta4x128_v1)")
     cond_hash: str = Field(default="", description="clear_rate.cond_hash of the final game conditions measured; missing or different → no prediction")
     seed_band: str = Field(default="", description="Seed band label (training seed11M; doc 35 S = search, C = confirmation — bot-stability check only); missing → no prediction")
+    skill_config: str = Field(default="", description="Bot skill setting label; empty = protocol default (θ grid is in rows)")
+    aids_simulated: Optional[Dict[str, bool]] = Field(default=None, description="Booster/revive simulated in the bot runs; model accepts only unaided (None/false)")
     rows: List[ClearRateBotRow]
 
 
@@ -784,6 +786,8 @@ class ClearRateMeasurementMeta(BaseModel):
     protocol: str
     seed_band: str
     cond_hash: str
+    skill_config: str = ""
+    aids_simulated: Optional[Dict[str, bool]] = None
 
 
 class ClearRatePredictResponse(BaseModel):

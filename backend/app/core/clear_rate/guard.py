@@ -62,6 +62,11 @@ def bot_flags(manifest: Dict[str, Any], m: Any, current_hash: str) -> List[Dict[
     elif m.cond_hash != current_hash:
         out.append(flag("BOT_CONDITION_MISMATCH", "hard",
                         f"측정한 게임 조건 {m.cond_hash} ≠ 현재 {current_hash} (맵·useTileCount·시드 등이 바뀜)"))
+    if m.aids_simulated and any(m.aids_simulated.values()):
+        out.append(flag("BOT_PROTOCOL_MISMATCH", "hard",
+                        f"부스터/부활을 쓴 봇 측정 {m.aids_simulated} — 모델은 무도움 봇 측정으로 학습됨"))
+    if m.skill_config and m.skill_config != manifest.get("bot_skill_config", ""):
+        out.append(flag("BOT_PROTOCOL_MISMATCH", "hard", f"봇 실력 설정 {m.skill_config} ≠ 모델 기본"))
     if not m.seed_band:
         out.append(flag("BOT_SOURCE_UNKNOWN", "hard", "측정 시드 묶음(seed_band) 출처가 없음"))
     if any(int(r.get("wins", 0)) > int(r.get("games", 0)) or int(r.get("wins", 0)) < 0 for r in rows):

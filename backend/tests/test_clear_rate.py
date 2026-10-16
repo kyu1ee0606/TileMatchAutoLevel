@@ -209,6 +209,17 @@ def test_measurement_protocol_checked(mdl):
     assert "BOT_PROTOCOL_MISMATCH" in noth.insufficient_reasons
 
 
+def test_bot_record_fields_and_no_bot_to_user_substitution(mdl):
+    """Bot record carries skill setting / aids flags; aided runs are rejected; when there is no user prediction
+    the bot win rate is still reported separately and never fills expected_ft_any."""
+    meas = cached_measurement(mdl)
+    aided = predict_editor_level(LJ, L, bot_measurement=dict(meas, aids_simulated={"booster": True, "revive": False}))
+    assert "BOT_PROTOCOL_MISMATCH" in aided.insufficient_reasons and aided.expected_ft_any is None
+    assert aided.bot_unaided_win_rate and aided.measurement["aids_simulated"] == {"booster": True, "revive": False}
+    ok = predict_editor_level(LJ, L, bot_measurement=dict(meas, aids_simulated={"booster": False, "revive": False}))
+    assert ok.status == "ok" and ok.expected_ft_any not in ok.bot_unaided_win_rate.values()
+
+
 def test_cache_measurement_gets_same_checks(mdl):
     """G3: a cached measurement whose stored cond_hash does not match is rejected exactly like a request one."""
     from app.core.clear_rate.model import ClearRateModel

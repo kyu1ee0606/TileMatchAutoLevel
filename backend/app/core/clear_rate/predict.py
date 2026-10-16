@@ -11,6 +11,8 @@ Naming keeps the targets apart:
   expected_unaided_lb               aux — real-user unaided first-try clear share (AF lower bound), predicted
   expected_help_rate                aux — real-user first-try help usage rate, predicted (output only, never an input)
   bot_unaided_win_rate              bot measurement (bot plays without help) — an input, not a clear rate
+The bot win rate is never substituted for the user clear rate: when the model cannot predict, expected_ft_any
+stays None (a future "bot virtual clear-rate" mode must use its own fields, not these).
 """
 from __future__ import annotations
 
@@ -36,16 +38,20 @@ class BotMeasurement:
     rows: Tuple[Dict[str, Any], ...]
     seed_band: str = ""
     source: str = "request"   # request | cache
+    skill_config: str = ""    # bot skill setting label (θ grid itself is in rows[].theta); "" = protocol default
+    aids_simulated: Optional[Dict[str, bool]] = None   # {"booster": .., "revive": ..}; None = protocol default (off)
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any], source: str = "request") -> "BotMeasurement":
         return cls(bot_version=d.get("bot_version") or "", protocol=d.get("protocol") or "",
                    cond_hash=d.get("cond_hash") or "", rows=tuple(d.get("rows") or ()),
-                   seed_band=d.get("seed_band") or "", source=source)
+                   seed_band=d.get("seed_band") or "", source=source, skill_config=d.get("skill_config") or "",
+                   aids_simulated=d.get("aids_simulated"))
 
-    def meta(self) -> Dict[str, str]:
+    def meta(self) -> Dict[str, Any]:
         return {"source": self.source, "bot_version": self.bot_version, "protocol": self.protocol,
-                "seed_band": self.seed_band, "cond_hash": self.cond_hash}
+                "seed_band": self.seed_band, "cond_hash": self.cond_hash, "skill_config": self.skill_config,
+                "aids_simulated": self.aids_simulated}
 
 
 @dataclass

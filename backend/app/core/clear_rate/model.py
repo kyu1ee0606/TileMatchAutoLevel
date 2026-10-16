@@ -67,8 +67,15 @@ class ClearRateModel:
 
     def range80(self, head: str, feats: Dict[str, float]) -> Tuple[float, float]:
         h = self.model["heads"][head]
+        kind = h.get("range_kind", "cqr")  # absent in the active model → unchanged behaviour
+        if kind == "resid_conformal":     # experimental R2 (doc 36 §9): point logit − d_lo / + d_hi
+            z = self.predict_logit(head, feats)
+            return range_to_prob(z - h["d_lo"], z + h["d_hi"])
         a = gbm_predict(h["q_lo"], self._vec(feats, h["q_lo"]["feats"]))
         b = gbm_predict(h["q_hi"], self._vec(feats, h["q_hi"]["feats"]))
+        if kind == "qgbm_on_point":       # experimental R1 (doc 36 §9): quantile heads boosted from the point logit
+            z = self.predict_logit(head, feats)
+            a, b = a + z, b + z
         return range_to_prob(min(a, b) - h["cqr_w"], max(a, b) + h["cqr_w"])
 
 

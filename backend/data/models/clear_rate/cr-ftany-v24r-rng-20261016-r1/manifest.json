@@ -1,0 +1,776 @@
+{
+ "model_version": "cr-ftany-v24r-rng-20261016-r1",
+ "trained_at": "2026-10-16T05:35:17+00:00",
+ "target_metric": "ft_any_v1",
+ "target_definition": "first-try clear rate incl. help = first-try clears / (clears + final fails); ended runs only, no_end excluded (af_level_metrics ft_clear_rate_any_help)",
+ "aux_targets": {
+  "unaided_lb": "unaided_clear_lower_bound",
+  "help_rate": "ft_help_rate"
+ },
+ "bot_version": "v2.4",
+ "bot_config": "rule-parity defaults (V24_DEFAULT @ 26dd967: unknown_hide, curtain_hide, unknown_nobonus, ac_inner, stack_hide, dock_rel); behaviour items off",
+ "bot_rows_file": "af_calibration/bot_v24/bot_v2.4f_no_rules_only.json",
+ "bot_rows_v24_tags_seen": [
+  "ac_inner",
+  "ac_policy",
+  "bomb_beta",
+  "bomb_impulse",
+  "curtain_hide",
+  "curtain_memory_v24",
+  "dock_rel",
+  "key_first",
+  "stack_early",
+  "stack_hide",
+  "unknown_hide",
+  "unknown_nobonus"
+ ],
+ "bot_rows_note": "doc 26 §11-1: 'rules only' file = full combination with behaviour items dropped, re-measured on levels where those items can act; the other levels' rows are copied from the full combination (items never fire there, same seeds -> identical rows), hence their tags",
+ "bot_protocol": "theta4x128_v1",
+ "bot_seed_band": "seed11M",
+ "bot_thetas": [
+  0.55,
+  0.65,
+  0.85,
+  1.0
+ ],
+ "bot_games_per_theta": 128,
+ "bot_seed_rule": "11,000,000 + level_index*1000 + game",
+ "train_data": {
+  "maps": "af_calibration/bot_v21/prep.json (build 1.1.0 shard b741f6a3)",
+  "shard_commit": "b741f6a3",
+  "af_level_metrics_generated_at": "2026-10-14 10:46:56",
+  "af_scope": {
+   "data_files": [
+    "android_in_app_events.csv.gz",
+    "android_organic_in_app_events.csv.gz",
+    "ios_in_app_events.csv.gz",
+    "ios_organic_in_app_events.csv.gz"
+   ],
+   "event_time_range_kst": [
+    "2026-09-08 18:31:56",
+    "2026-10-14 10:29:41"
+   ],
+   "run_build_mode": "level-keyed(같은 초 보정)",
+   "run_versions": [
+    "android|1.0.162",
+    "android|1.1.0",
+    "ios|2.1.0"
+   ],
+   "events_kept": 1333209,
+   "dup_dropped": 111188,
+   "runs_reconstructed": 552155,
+   "runs_infinite": 1951,
+   "runs_level_out_of_range": 56,
+   "official_runs": 550148,
+   "official_runs_by_version": {
+    "android|1.0.162": 385368,
+    "android|1.1.0": 152870,
+    "ios|2.1.0": 11910
+   },
+   "devices": 15762
+  },
+  "level_filter": "bot rows ∩ map_match==same ∩ first_try_ended≥100 ∩ not excluded ∩ clean_ft_n≥100 ∩ legacy predicted_clear_rate present",
+  "legacy_batch": "batch_1792056041502_cn5e4ny66.json",
+  "n_levels": 379,
+  "feature_parity_levels_checked": 469
+ },
+ "model": "c+ = mean(ridge, GBM) logits (residual_model.Ridge / GBM defaults); range80 = CQR(quantile GBM 0.1/0.9, inner 5-fold scores pooled over 3 splits); bound at target clip (0.01/0.99) shown as 0/1",
+ "kfold": {
+  "scheme": "map-hash group 5-fold × 4 repeats (RandomState(100+rep))",
+  "ft_any": {
+   "mae": 0.0311,
+   "bias": 0.0113,
+   "rho": 0.7629,
+   "hit05": 0.8443,
+   "hit10": 0.934,
+   "sd": {
+    "mae": 0.0001,
+    "bias": 0.0001,
+    "rho": 0.0071,
+    "hit05": 0.0089,
+    "hit10": 0.0072
+   }
+  },
+  "unaided_lb": {
+   "mae": 0.0779,
+   "bias": 0.0167,
+   "rho": 0.7303,
+   "hit05": 0.4485,
+   "hit10": 0.719,
+   "sd": {
+    "mae": 0.0009,
+    "bias": 0.0009,
+    "rho": 0.0073,
+    "hit05": 0.0093,
+    "hit10": 0.0029
+   }
+  },
+  "help_rate": {
+   "mae": 0.0565,
+   "bias": -0.0131,
+   "rho": 0.6807,
+   "hit05": 0.5613,
+   "hit10": 0.8311,
+   "sd": {
+    "mae": 0.0006,
+    "bias": 0.0006,
+    "rho": 0.0073,
+    "hit05": 0.0114,
+    "hit10": 0.0099
+   }
+  },
+  "ft_any_by_segment": {
+   "101-300": {
+    "mae": 0.0277,
+    "bias": 0.0118,
+    "rho": 0.7503,
+    "hit05": 0.8639,
+    "hit10": 0.9319,
+    "sd": {
+     "mae": 0.0003,
+     "bias": 0.0001,
+     "rho": 0.0062,
+     "hit05": 0.01,
+     "hit10": 0.0046
+    },
+    "n": 180
+   },
+   "301-500": {
+    "mae": 0.0372,
+    "bias": 0.012,
+    "rho": 0.6965,
+    "hit05": 0.8029,
+    "hit10": 0.925,
+    "sd": {
+     "mae": 0.0003,
+     "bias": 0.0001,
+     "rho": 0.0102,
+     "hit05": 0.0179,
+     "hit10": 0.0113
+    },
+    "n": 170
+   },
+   "32-100": {
+    "mae": 0.0163,
+    "bias": 0.0044,
+    "rho": 0.7236,
+    "hit05": 0.9655,
+    "hit10": 1.0,
+    "sd": {
+     "mae": 0.0005,
+     "bias": 0.0003,
+     "rho": 0.0413,
+     "hit05": 0.0,
+     "hit10": 0.0
+    },
+    "n": 29
+   }
+  },
+  "ft_any_by_actual": {
+   "ge0.96": {
+    "n": 201,
+    "mae": 0.0135,
+    "bias": -0.0098,
+    "hit05": 0.98
+   },
+   "0.92-0.96": {
+    "n": 80,
+    "mae": 0.0238,
+    "bias": 0.0028,
+    "hit05": 0.938
+   },
+   "0.85-0.92": {
+    "n": 58,
+    "mae": 0.0396,
+    "bias": 0.0291,
+    "hit05": 0.69
+   },
+   "lt0.85": {
+    "n": 40,
+    "mae": 0.1201,
+    "bias": 0.1089,
+    "hit05": 0.275
+   }
+  },
+  "ft_any_range80": {
+   "coverage": 0.818,
+   "mean_width": 0.096,
+   "median_width": 0.073,
+   "point_inside": 0.995,
+   "upper_at_clip_share": 0.734,
+   "cqr_width_logit_per_fold": [
+    0.072,
+    0.21,
+    0.158,
+    0.0,
+    0.01
+   ],
+   "coverage_101-300": 0.844,
+   "coverage_301-500": 0.788,
+   "coverage_32-100": 0.828
+  },
+  "reliability": {
+   "pred_bins": [
+    {
+     "lo": 0.0,
+     "hi": 0.88,
+     "n": 29,
+     "mae": 0.091,
+     "bias": 0.0407,
+     "coverage80": 0.655
+    },
+    {
+     "lo": 0.88,
+     "hi": 0.92,
+     "n": 41,
+     "mae": 0.047,
+     "bias": 0.0185,
+     "coverage80": 0.732
+    },
+    {
+     "lo": 0.92,
+     "hi": 0.95,
+     "n": 67,
+     "mae": 0.0392,
+     "bias": 0.0133,
+     "coverage80": 0.761
+    },
+    {
+     "lo": 0.95,
+     "hi": 0.97,
+     "n": 81,
+     "mae": 0.0297,
+     "bias": 0.014,
+     "coverage80": 0.802
+    },
+    {
+     "lo": 0.97,
+     "hi": 1.0,
+     "n": 161,
+     "mae": 0.0132,
+     "bias": 0.0021,
+     "coverage80": 0.901
+    }
+   ],
+   "combo": {
+    "bomb": {
+     "n": 24,
+     "mae": 0.0325,
+     "bias": 0.0113,
+     "coverage80": 0.792
+    },
+    "bomb+curtain": {
+     "n": 5,
+     "mae": 0.0419,
+     "bias": 0.0191,
+     "coverage80": 0.8
+    },
+    "bomb+frog": {
+     "n": 2,
+     "mae": 0.0316,
+     "bias": 0.0247,
+     "coverage80": 1.0
+    },
+    "bomb+link": {
+     "n": 6,
+     "mae": 0.0578,
+     "bias": -0.0028,
+     "coverage80": 0.667
+    },
+    "bomb+teleporter": {
+     "n": 7,
+     "mae": 0.0521,
+     "bias": 0.0346,
+     "coverage80": 0.857
+    },
+    "bomb+unknown": {
+     "n": 1,
+     "mae": 0.1157,
+     "bias": 0.1157,
+     "coverage80": 0.0
+    },
+    "chain": {
+     "n": 5,
+     "mae": 0.0227,
+     "bias": 0.0041,
+     "coverage80": 1.0
+    },
+    "chain+bomb": {
+     "n": 1,
+     "mae": 0.0868,
+     "bias": 0.0868,
+     "coverage80": 0.0
+    },
+    "chain+curtain": {
+     "n": 2,
+     "mae": 0.0149,
+     "bias": 0.0103,
+     "coverage80": 1.0
+    },
+    "chain+curtain+frog+link": {
+     "n": 1,
+     "mae": 0.0017,
+     "bias": -0.0017,
+     "coverage80": 1.0
+    },
+    "chain+curtain+link": {
+     "n": 3,
+     "mae": 0.0066,
+     "bias": -0.0049,
+     "coverage80": 1.0
+    },
+    "chain+frog+link": {
+     "n": 1,
+     "mae": 0.0381,
+     "bias": 0.0381,
+     "coverage80": 0.0
+    },
+    "chain+link": {
+     "n": 5,
+     "mae": 0.0073,
+     "bias": -0.0072,
+     "coverage80": 1.0
+    },
+    "curtain+frog": {
+     "n": 1,
+     "mae": 0.0017,
+     "bias": 0.0017,
+     "coverage80": 1.0
+    },
+    "curtain+link": {
+     "n": 10,
+     "mae": 0.0228,
+     "bias": 0.0109,
+     "coverage80": 0.9
+    },
+    "curtain+teleporter": {
+     "n": 1,
+     "mae": 0.0303,
+     "bias": -0.0303,
+     "coverage80": 0.0
+    },
+    "curtain+unknown": {
+     "n": 7,
+     "mae": 0.0085,
+     "bias": -0.0028,
+     "coverage80": 1.0
+    },
+    "frog+unknown": {
+     "n": 1,
+     "mae": 0.0259,
+     "bias": 0.0259,
+     "coverage80": 1.0
+    },
+    "grass": {
+     "n": 7,
+     "mae": 0.0846,
+     "bias": 0.0694,
+     "coverage80": 0.714
+    },
+    "grass+bomb": {
+     "n": 3,
+     "mae": 0.0378,
+     "bias": 0.0216,
+     "coverage80": 0.667
+    },
+    "grass+curtain": {
+     "n": 5,
+     "mae": 0.0237,
+     "bias": 0.0194,
+     "coverage80": 1.0
+    },
+    "grass+frog": {
+     "n": 2,
+     "mae": 0.022,
+     "bias": 0.0045,
+     "coverage80": 0.5
+    },
+    "grass+link": {
+     "n": 12,
+     "mae": 0.0592,
+     "bias": 0.0223,
+     "coverage80": 0.667
+    },
+    "grass+unknown": {
+     "n": 8,
+     "mae": 0.0534,
+     "bias": 0.0316,
+     "coverage80": 0.75
+    },
+    "ice+bomb": {
+     "n": 2,
+     "mae": 0.0716,
+     "bias": 0.0716,
+     "coverage80": 0.5
+    },
+    "ice+chain+curtain+link": {
+     "n": 2,
+     "mae": 0.0076,
+     "bias": -0.0076,
+     "coverage80": 1.0
+    },
+    "ice+curtain": {
+     "n": 1,
+     "mae": 0.0301,
+     "bias": -0.0301,
+     "coverage80": 0.0
+    },
+    "ice+curtain+link": {
+     "n": 1,
+     "mae": 0.0006,
+     "bias": -0.0006,
+     "coverage80": 1.0
+    },
+    "ice+frog": {
+     "n": 1,
+     "mae": 0.0119,
+     "bias": 0.0119,
+     "coverage80": 1.0
+    },
+    "ice+teleporter": {
+     "n": 3,
+     "mae": 0.0276,
+     "bias": 0.0104,
+     "coverage80": 0.667
+    },
+    "ice+unknown": {
+     "n": 1,
+     "mae": 0.0039,
+     "bias": -0.0039,
+     "coverage80": 1.0
+    },
+    "link": {
+     "n": 30,
+     "mae": 0.0192,
+     "bias": 0.0089,
+     "coverage80": 0.833
+    },
+    "link+unknown": {
+     "n": 9,
+     "mae": 0.0125,
+     "bias": -0.0074,
+     "coverage80": 1.0
+    },
+    "none": {
+     "n": 18,
+     "mae": 0.0124,
+     "bias": -0.0021,
+     "coverage80": 0.944
+    },
+    "stack": {
+     "n": 11,
+     "mae": 0.0162,
+     "bias": 0.0011,
+     "coverage80": 0.818
+    },
+    "stack+bomb": {
+     "n": 19,
+     "mae": 0.035,
+     "bias": 0.0089,
+     "coverage80": 0.842
+    },
+    "stack+bomb+curtain": {
+     "n": 4,
+     "mae": 0.0529,
+     "bias": 0.048,
+     "coverage80": 0.5
+    },
+    "stack+bomb+frog": {
+     "n": 3,
+     "mae": 0.0199,
+     "bias": -0.0199,
+     "coverage80": 1.0
+    },
+    "stack+bomb+link": {
+     "n": 5,
+     "mae": 0.0364,
+     "bias": -0.0171,
+     "coverage80": 0.6
+    },
+    "stack+bomb+teleporter": {
+     "n": 14,
+     "mae": 0.0274,
+     "bias": -0.0019,
+     "coverage80": 0.857
+    },
+    "stack+bomb+unknown": {
+     "n": 6,
+     "mae": 0.0532,
+     "bias": 0.0215,
+     "coverage80": 0.667
+    },
+    "stack+chain": {
+     "n": 7,
+     "mae": 0.1104,
+     "bias": 0.0733,
+     "coverage80": 0.571
+    },
+    "stack+chain+curtain": {
+     "n": 2,
+     "mae": 0.0099,
+     "bias": -0.0099,
+     "coverage80": 1.0
+    },
+    "stack+chain+frog": {
+     "n": 1,
+     "mae": 0.0175,
+     "bias": -0.0175,
+     "coverage80": 1.0
+    },
+    "stack+chain+link": {
+     "n": 7,
+     "mae": 0.0582,
+     "bias": 0.0473,
+     "coverage80": 0.714
+    },
+    "stack+chain+teleporter": {
+     "n": 1,
+     "mae": 0.0195,
+     "bias": -0.0195,
+     "coverage80": 1.0
+    },
+    "stack+curtain": {
+     "n": 3,
+     "mae": 0.01,
+     "bias": 0.0001,
+     "coverage80": 1.0
+    },
+    "stack+curtain+frog": {
+     "n": 2,
+     "mae": 0.0126,
+     "bias": -0.0051,
+     "coverage80": 1.0
+    },
+    "stack+curtain+link": {
+     "n": 8,
+     "mae": 0.0115,
+     "bias": -0.0039,
+     "coverage80": 0.875
+    },
+    "stack+curtain+unknown": {
+     "n": 5,
+     "mae": 0.0156,
+     "bias": 0.0112,
+     "coverage80": 1.0
+    },
+    "stack+frog+link": {
+     "n": 4,
+     "mae": 0.0143,
+     "bias": -0.0061,
+     "coverage80": 0.75
+    },
+    "stack+frog+unknown": {
+     "n": 3,
+     "mae": 0.0092,
+     "bias": -0.0042,
+     "coverage80": 1.0
+    },
+    "stack+grass": {
+     "n": 6,
+     "mae": 0.1098,
+     "bias": 0.0846,
+     "coverage80": 0.667
+    },
+    "stack+grass+bomb": {
+     "n": 3,
+     "mae": 0.0691,
+     "bias": -0.0468,
+     "coverage80": 1.0
+    },
+    "stack+grass+curtain": {
+     "n": 2,
+     "mae": 0.0234,
+     "bias": 0.0234,
+     "coverage80": 1.0
+    },
+    "stack+grass+frog": {
+     "n": 2,
+     "mae": 0.0468,
+     "bias": 0.0468,
+     "coverage80": 0.0
+    },
+    "stack+grass+link": {
+     "n": 8,
+     "mae": 0.0578,
+     "bias": 0.0362,
+     "coverage80": 0.625
+    },
+    "stack+grass+unknown": {
+     "n": 6,
+     "mae": 0.0328,
+     "bias": -0.0257,
+     "coverage80": 0.833
+    },
+    "stack+ice": {
+     "n": 1,
+     "mae": 0.0081,
+     "bias": -0.0081,
+     "coverage80": 1.0
+    },
+    "stack+ice+curtain": {
+     "n": 1,
+     "mae": 0.0324,
+     "bias": 0.0324,
+     "coverage80": 1.0
+    },
+    "stack+ice+teleporter": {
+     "n": 3,
+     "mae": 0.0248,
+     "bias": 0.003,
+     "coverage80": 0.667
+    },
+    "stack+link": {
+     "n": 25,
+     "mae": 0.0124,
+     "bias": 0.0035,
+     "coverage80": 0.84
+    },
+    "stack+link+unknown": {
+     "n": 4,
+     "mae": 0.0128,
+     "bias": 0.0058,
+     "coverage80": 0.75
+    },
+    "stack+teleporter": {
+     "n": 2,
+     "mae": 0.017,
+     "bias": -0.0071,
+     "coverage80": 1.0
+    },
+    "stack+teleporter+link": {
+     "n": 2,
+     "mae": 0.0156,
+     "bias": -0.013,
+     "coverage80": 1.0
+    },
+    "stack+teleporter+unknown": {
+     "n": 1,
+     "mae": 0.0273,
+     "bias": 0.0273,
+     "coverage80": 1.0
+    },
+    "stack+unknown": {
+     "n": 7,
+     "mae": 0.0059,
+     "bias": -0.0049,
+     "coverage80": 0.857
+    },
+    "teleporter": {
+     "n": 1,
+     "mae": 0.0136,
+     "bias": -0.0136,
+     "coverage80": 1.0
+    },
+    "teleporter+link": {
+     "n": 1,
+     "mae": 0.0116,
+     "bias": 0.0116,
+     "coverage80": 1.0
+    },
+    "teleporter+unknown": {
+     "n": 2,
+     "mae": 0.0049,
+     "bias": 0.002,
+     "coverage80": 1.0
+    },
+    "unknown": {
+     "n": 9,
+     "mae": 0.0112,
+     "bias": 0.0031,
+     "coverage80": 0.889
+    }
+   },
+   "segment": {
+    "101-300": {
+     "n": 180,
+     "mae": 0.0275,
+     "bias": 0.0118,
+     "coverage80": 0.844
+    },
+    "301-500": {
+     "n": 170,
+     "mae": 0.037,
+     "bias": 0.012,
+     "coverage80": 0.788
+    },
+    "32-100": {
+     "n": 29,
+     "mae": 0.0162,
+     "bias": 0.0044,
+     "coverage80": 0.828
+    }
+   },
+   "basis": "repeat-mean OOF point, rep-0 OOF CQR range"
+  }
+ },
+ "baseline": {
+  "v23_E1_lightgbm": {
+   "mae": 0.032,
+   "bias": 0.0124,
+   "rho": 0.7584,
+   "hit05": 0.8377,
+   "hit10": 0.9301,
+   "sd": {
+    "mae": 0.0001,
+    "bias": 0.0006,
+    "rho": 0.0081,
+    "hit05": 0.0029,
+    "hit10": 0.0029
+   }
+  },
+  "v24_rules_only_E1_lightgbm": {
+   "mae": 0.032,
+   "bias": 0.0125,
+   "rho": 0.7578,
+   "hit05": 0.8384,
+   "hit10": 0.9301,
+   "sd": {
+    "mae": 0.0002,
+    "bias": 0.0006,
+    "rho": 0.0075,
+    "hit05": 0.0051,
+    "hit10": 0.0054
+   }
+  },
+  "source": "af_calibration/bot_v24/target/ftany2.json (doc 26 §11-2)"
+ },
+ "gates": {
+  "mae_le_gate": true,
+  "rho_ge_gate": true,
+  "mae_equiv_baseline": true,
+  "rho_equiv_baseline": true,
+  "tol_mae": 0.001,
+  "tol_rho": 0.0162,
+  "delta_mae": -0.0009,
+  "delta_rho": 0.0045,
+  "pass": true
+ },
+ "gate_thresholds": {
+  "mae_max": 0.035,
+  "rho_min": 0.72
+ },
+ "parity_max_abs_logit_diff": 1.7763568394002505e-15,
+ "model_json_sha256": "d215607602fd63bf6f368da24a6f6aa320099a688b1638bac206f5daef8d7710",
+ "bot_cache_sha256": "4ed402a52a6c68cb8b352e011dffc317ab97f4fd7062884c75cd3c3405bf9019",
+ "condition_fields": [
+  "useTileCount",
+  "unlockTile",
+  "autoCollectCount",
+  "randSeed",
+  "shuffleTile",
+  "typeImbalance",
+  "timea",
+  "shuffleLayer",
+  "useInRandomizer",
+  "useTeleportInRandomizer",
+  "teleportRandSeed"
+ ],
+ "input_audit": "inputs = map structure/gimmicks, placement position (log L, segment, gimmick exposure and first-appearance from the live schedule/unlock table, boss = autoCollectCount 1..3) and bot measurement only; no AF value of the level itself (help rate, clear rate) is an input",
+ "trust_notes": "ft_any < 0.85 unreliable (doc 26 §11-9: +0.118 easy bias); ≥ 0.95 ceiling — low discrimination",
+ "status": "experimental range candidate — NOT active; point heads, aux heads, bot cache identical to cr-ftany-v24r-20261016",
+ "range_candidate": "R1",
+ "range_definition": "quantile GBM q0.1/q0.9 started at point OOF logit + residual quantile (inner map-group 5-fold RandomState(700)), CQR width as before",
+ "doc": "claudedocs/difficulty_personalization/36 §9-10",
+ "prereg_commit": "c11ce5e",
+ "independent_validation": false
+}

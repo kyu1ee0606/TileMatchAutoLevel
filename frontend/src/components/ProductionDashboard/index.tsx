@@ -56,6 +56,7 @@ import { syncBidirectional, pushBatchToServer, registerAutoSync, setConflictHand
 import { ProductionExport } from './ProductionExport';
 import { BatchApprovalPanel } from './BatchApprovalPanel';
 import { BatchVerifyPanel } from './BatchVerifyPanel';
+import { pickSelectedBatchId } from './batchSelection';
 import { MetaIntegrityPanel, checkTileDivisibility, detectOOBTiles } from './MetaIntegrityPanel';
 import { LevelDistributionChart } from './LevelDistributionChart';
 // PatternSelector import removed - using inline grid instead
@@ -1021,6 +1022,9 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
     setDivisibilityWarningHandler((_bid, flagged, levels) =>
       addNotification('warning', `⚠️ ÷3 위반(클리어 불가) ${flagged}개 레벨 검출 → verification_passed=false 처리됨${levels.length ? ` (예: ${levels.slice(0, 10).join(', ')}${levels.length > 10 ? '…' : ''})` : ''}. 재생성 필요.`));
 
+    // 언마운트 뒤 늦게 끝난 동기화가 상태를 덮지 않도록
+    let cancelled = false;
+
     async function init() {
       try {
         await initProductionDB();
@@ -1040,7 +1044,12 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
           .then(({ pushed, pulled }) => {
             if (pushed > 0 || pulled > 0) {
               addNotification('info', `서버 동기화: 업로드 ${pushed}개 · 다운로드 ${pulled}개`);
-              listProductionBatches().then(setBatches).catch(() => {});
+              listProductionBatches().then(bs => {
+                if (cancelled) return;
+                setBatches(bs);
+                // 현재 선택이 목록에 있으면 보존, 없을 때만 최신 배치(새 프로필 첫 pull 후 선택 null 방지)
+                setSelectedBatchId(cur => pickSelectedBatchId(cur, bs));
+              }).catch(() => {});
             }
           })
           .catch(() => { /* 서버 미가동 등 — 무시 */ });
@@ -1051,6 +1060,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
       }
     }
     init();
+    return () => { cancelled = true; };
   }, [addNotification]);
 
   // Load stats when batch changes
@@ -2335,6 +2345,8 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
                 onChange={(e) => setSelectedBatchId(e.target.value)}
                 className="flex-1 px-3 py-1 bg-gray-700 border border-gray-600 rounded text-sm text-white"
               >
+                {/* 선택 없음일 때 첫 항목이 선택된 것처럼 보이지 않게 (화면 = 상태) */}
+                {!selectedBatchId && <option value="" disabled>배치 선택</option>}
                 {/* [정렬] IndexedDB getAll() 은 **키(=id 문자열) 순**으로 돌려준다.
                     배치가 300개 넘게 쌓인 상태라 방금 만든 배치가 목록 중간에 파묻혀
                     "리스트에 없다"로 보인다 → 생성 최신순으로 뒤집어 맨 위에 오게 한다. */}

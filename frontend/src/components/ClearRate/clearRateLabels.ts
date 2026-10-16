@@ -57,6 +57,18 @@ export const LEGACY_TARGET_TOOLTIP = '기존 목표 곡선 값(봇 척도) — �
 export const SECTION_NOTE =
   '참고 표시 — 기존 배치 검증(봇 매치 점수)·verification_passed·업로드 값과 무관. 결과는 검증 탭 전용 저장소에만 저장.';
 
+// 목표 곡선 미리보기 — /verify/target-check(user_expected_precheck) 결과는 "입력 지원 범위"만 뜻한다(배치 위치·목표가
+// 학습 범위 안인지). 측정 후 예측 구간 신뢰도 게이트는 반영되지 않으므로 "신뢰 판정 가능"처럼 쓰지 않는다.
+// 모델 수치(구간 경계·오차)는 모델 교체 시 낡으므로 문구에 넣지 않는다.
+export const TARGET_SUPPORT_HEADER = '현 모델 입력 지원 범위';
+export const TARGET_SUPPORT_NOTE =
+  '입력 지원 범위 통과는 합격이나 높은 신뢰도를 보장하지 않습니다. 실제 판정은 측정 결과와 현재 모델의 신뢰도 기준을 함께 확인합니다.';
+/** target-check 항목 → 미리보기 칸 문구. 미조회는 "미확인" */
+export function targetSupportText(check: { judgeable: boolean; codes: string[] } | null | undefined): string {
+  if (!check) return '미확인';
+  return check.judgeable ? '범위 안' : `범위 밖(${check.codes.map(reasonLabel).join(', ')})`;
+}
+
 /** 퍼센트 입력("85", "85.5") → 0~1. 빈 값·범위 밖(0 이하, 100 이상)·숫자 아님은 null (기본값 없음) */
 export function parseTargetPercent(input: string): number | null {
   const s = input.trim();

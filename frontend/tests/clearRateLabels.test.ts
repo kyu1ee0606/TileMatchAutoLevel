@@ -3,8 +3,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  A_VERDICT_LABEL, FLAG_LABEL, TARGET_PROXIMITY_LABEL, TARGET_PROXIMITY_TOOLTIP,
-  formatProximity, parseTargetPercent, provenanceView, verdictReasonCodes, verdictView,
+  A_VERDICT_LABEL, FLAG_LABEL, TARGET_PROXIMITY_LABEL, TARGET_PROXIMITY_TOOLTIP, TARGET_SUPPORT_HEADER, TARGET_SUPPORT_NOTE,
+  formatProximity, parseTargetPercent, provenanceView, targetSupportText, verdictReasonCodes, verdictView,
 } from '../src/components/ClearRate/clearRateLabels.ts';
 
 const base = {
@@ -89,4 +89,18 @@ test('backend reason text shows the new proximity name (display only)', () => {
   assert.equal(v.rawReason, '목표 근접 지표 0.31 < 0.5 (제안 임계)');
   assert.equal(v.proximity, '0.31');
   assert.equal(v.label, '불합격');
+});
+
+test('target-check preview wording: input support range only, never "trusted judgment"', () => {
+  assert.equal(TARGET_SUPPORT_HEADER, '현 모델 입력 지원 범위');
+  assert.equal(targetSupportText(null), '미확인');
+  assert.equal(targetSupportText({ judgeable: true, codes: [] }), '범위 안');
+  const out = targetSupportText({ judgeable: false, codes: ['LOW_CONFIDENCE', 'UNKNOWN_CODE_X'] });
+  assert.ok(out.startsWith('범위 밖(') && out.includes(FLAG_LABEL.LOW_CONFIDENCE) && out.includes('UNKNOWN_CODE_X'));
+  for (const s of [TARGET_SUPPORT_HEADER, targetSupportText({ judgeable: true, codes: [] })]) {
+    assert.ok(!s.includes('신뢰') && !s.includes('가능') && !s.includes('합격'), s);
+  }
+  // 안내는 보장하지 않음을 말하고, 모델 수치(구간 경계·오차)를 하드코딩하지 않는다
+  assert.ok(TARGET_SUPPORT_NOTE.includes('보장하지 않'));
+  assert.ok(!/\d/.test(TARGET_SUPPORT_NOTE), TARGET_SUPPORT_NOTE);
 });

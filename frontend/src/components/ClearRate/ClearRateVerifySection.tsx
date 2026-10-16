@@ -26,7 +26,7 @@ import { ClearRateCell } from './ClearRateCell';
 import { BotVirtualCell, UnverifiedBadge } from './BotVirtualCell';
 import {
   LEGACY_TARGET_TOOLTIP, SECTION_NOTE, TARGET_PROXIMITY_LABEL, TARGET_PROXIMITY_TOOLTIP,
-  formatProximity, parseTargetPercent, reasonLabel,
+  TARGET_SUPPORT_HEADER, TARGET_SUPPORT_NOTE, formatProximity, parseTargetPercent, reasonLabel, targetSupportText,
 } from './clearRateLabels';
 import {
   curveHash, curveToDraft, draftToCurve, emptySegmentDraft, previewCurve, resolveTarget, validateCurve,
@@ -426,9 +426,10 @@ export function ClearRateVerifySection({ batchId, levelsRevision = 0, levelsChan
                 {preview.checkError && <span className="text-red-300"> · 판정 가능 여부 조회 실패: {preview.checkError}</span>}
               </div>
             )}
+            <div className="text-[10px] text-amber-200/80" data-testid="cr-target-support-note">{TARGET_SUPPORT_NOTE}</div>
             <div className="max-h-40 overflow-y-auto">
               <table className="text-[10px]">
-                <thead className="text-gray-500"><tr><th className="px-1">레벨</th><th className="px-1">목표</th><th className="px-1">출처</th><th className="px-1">입력</th><th className="px-1">현 모델로 신뢰 판정</th></tr></thead>
+                <thead className="text-gray-500"><tr><th className="px-1">레벨</th><th className="px-1">목표</th><th className="px-1">출처</th><th className="px-1">입력</th><th className="px-1">{TARGET_SUPPORT_HEADER}</th></tr></thead>
                 <tbody>
                   {preview.rows.map(r => {
                     const c = preview.checks[r.level];
@@ -438,7 +439,7 @@ export function ClearRateVerifySection({ batchId, levelsRevision = 0, levelsChan
                         <td className="px-1">{r.target == null ? '목표 미설정' : pct(r.target)}</td>
                         <td className="px-1">{r.source ? SOURCE_LABEL[r.source] : '—'}</td>
                         <td className="px-1">{r.target == null ? '—' : '입력 가능'}</td>
-                        <td className="px-1">{r.target == null ? '—' : !c ? '미확인' : c.judgeable ? '가능' : `불가: ${c.codes.map(reasonLabel).join(', ')}`}</td>
+                        <td className="px-1">{r.target == null ? '—' : targetSupportText(c)}</td>
                       </tr>
                     );
                   })}

@@ -832,3 +832,82 @@ class ClearRateTargetEvalResponse(BaseModel):
     target_mode: Literal["user_expected", "bot_virtual"]
     user_expected: Optional[Dict[str, Any]] = Field(default=None, description="Mode A only")
     bot_virtual: Optional[Dict[str, Any]] = Field(default=None, description="Mode B only — always real_user_status=unverified")
+
+
+# ── Validation tab C confirmation jobs (doc 38 §10) — mode A only; exploration (cache / pilot bands) is never C ──
+class ClearRateVerifyItem(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    level_json: Dict[str, Any]
+    placement_level: int = Field(..., ge=1)
+    upload_opts: Optional[ClearRateUploadOpts] = None
+    map_id: str = Field(default="", description="Caller map id (batch:level) — provenance only")
+    batch_id: str = ""
+
+
+class ClearRateVerifyPlanRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    items: List[ClearRateVerifyItem] = Field(..., min_length=1, max_length=500)
+
+
+class ClearRateVerifyPlanResponse(BaseModel):
+    items: List[Dict[str, Any]] = Field(..., description="Per map: cond_hash, bot_config_hash, job_key, games_planned, blocking, warnings, existing job")
+    seed_band: str
+    max_concurrent: int
+    judge_version: str
+    note: str
+
+
+class ClearRateVerifySubmitRequest(ClearRateVerifyItem):
+    target_mode: Literal["user_expected"] = Field(..., description="C confirmation exists for mode A only (no B fallback)")
+    expected_cond_hash: str = Field(..., min_length=1, description="cond_hash returned by /verify/plan — the map/conditions fixed before the request")
+
+
+class ClearRateVerifySubmitResponse(BaseModel):
+    job: Dict[str, Any]
+    created: bool
+    reused: Optional[Literal["active", "done"]] = Field(default=None, description="active = duplicate request joined the running/queued job; done = finished C reused (no re-measurement)")
+
+
+class ClearRateVerifyJobsQuery(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    job_ids: List[str] = Field(..., max_length=1000)
+
+
+class ClearRateVerifyJobsResponse(BaseModel):
+    jobs: Dict[str, Optional[Dict[str, Any]]] = Field(..., description="job_id → job (None = unknown id)")
+
+
+class ClearRateVerifyEvaluateRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    job_id: str
+    target: float = Field(..., gt=0.0, lt=1.0, description="Mode A target ft_any at this placement")
+    level_json: Dict[str, Any]
+    placement_level: int = Field(..., ge=1)
+    upload_opts: Optional[ClearRateUploadOpts] = None
+
+
+class ClearRateVerifyEvaluateResponse(BaseModel):
+    target_mode: Literal["user_expected"]
+    measurement_kind: Literal["confirm"]
+    user_expected: Dict[str, Any]
+    provenance: Dict[str, Any]
+
+
+class ClearRateTargetCheckItem(BaseModel):
+    placement_level: int = Field(..., ge=1)
+    target: float = Field(..., gt=0.0, lt=1.0)
+
+
+class ClearRateTargetCheckRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    items: List[ClearRateTargetCheckItem] = Field(..., max_length=2000)
+
+
+class ClearRateTargetCheckResponse(BaseModel):
+    model_version: str
+    items: List[Dict[str, Any]] = Field(..., description="placement_level, target, codes (user_expected_precheck), judgeable")

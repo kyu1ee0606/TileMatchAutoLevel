@@ -34,7 +34,10 @@ SEED_BANDS = {"seed11M": 11_000_000, "S": 15_000_000, "C": 16_000_000,
               # pilot 2 (doc 33 §14): new search / screening / confirmation bands — pilot 1 bands are not reused
               "S2": 17_000_000, "P2": 17_500_000, "S2B": 18_000_000, "C2": 19_000_000,
               # A90 search 3 (doc 33 §15): new search / confirmation bands
-              "S3": 20_000_000, "C3": 21_000_000}
+              "S3": 20_000_000, "C3": 21_000_000,
+              # validation tab C confirmation (doc 38 §10): only band the validation tab accepts as C. Never written by
+              # search / training / pilots; 22M + span stays below the external 23M natural-experiment band.
+              "CV": 22_000_000}
 # protocol → (θ list, games per θ). theta4x128_v1 = the model protocol (A, and B search). theta085x512_v1 = B confirm.
 # theta085x64_v1 = B low-cost screening only (never a model input, never a verdict input).
 PROTOCOLS: Dict[str, Tuple[Tuple[float, ...], int]] = {
@@ -163,11 +166,18 @@ def _row_task(args: Dict[str, Any]) -> Dict[str, Any]:
     return r
 
 
+class MeasurementCancelled(RuntimeError):
+    """Raised by measure() when `should_stop` returns True between θ rows. Partial rows are discarded."""
+
+
 def measure(game_map: Dict[str, Any], conditions: Dict[str, Any], *, exposure: Dict[str, Dict[str, int]],
-            protocol: str, seed_band: str, executor=None) -> Tuple[BotMeasurement, Dict[str, Any]]:
+            protocol: str, seed_band: str, executor=None, should_stop=None,
+            on_row=None) -> Tuple[BotMeasurement, Dict[str, Any]]:
     """Measure the final game conditions under `protocol` on `seed_band`. Returns the BotMeasurement (tagged with
     cond_hash / seed band / no aids) and run meta (bot config + hash, games, cpu seconds, peak worker RSS).
-    executor: optional ProcessPoolExecutor (θ rows run in parallel)."""
+    executor: optional ProcessPoolExecutor (θ rows run in parallel).
+    should_stop / on_row (sequential path only, validation-tab jobs): checked / called between θ rows —
+    should_stop() True → MeasurementCancelled (nothing returned, nothing stored); on_row(games_done_so_far)."""
     if protocol not in PROTOCOLS:
         raise ValueError(f"unknown protocol {protocol}")
     if seed_band not in SEED_BANDS:
@@ -177,7 +187,16 @@ def measure(game_map: Dict[str, Any], conditions: Dict[str, Any], *, exposure: D
     cfg = bot_config(exposure, cond)
     tasks = [{"map": game_map, "cond": cond, "theta": t, "games": games, "seed_base": SEED_BANDS[seed_band],
               "cfg": cfg} for t in thetas]
-    rows = list(executor.map(_row_task, tasks)) if executor else [_row_task(t) for t in tasks]
+    if executor:
+        rows = list(executor.map(_row_task, tasks))
+    else:
+        rows = []
+        for t in tasks:
+            if should_stop is not None and should_stop():
+                raise MeasurementCancelled(f"cancelled after {len(rows)}/{len(tasks)} θ rows")
+            rows.append(_row_task(t))
+            if on_row is not None:
+                on_row(sum(r["games"] for r in rows))
     m = BotMeasurement(bot_version=BOT_VERSION, protocol=protocol, cond_hash=cond_hash(game_map, cond),
                        rows=tuple({k: v for k, v in r.items() if k not in ("sec", "maxrss_mb")} for r in rows),
                        seed_band=seed_band, source="measure", aids_simulated=dict(NO_AIDS))
@@ -232,5 +251,5 @@ def measure_cached(store: Optional[MeasurementStore], game_map: Dict[str, Any], 
     return m, meta, False
 
 
-__all__ = ["BOT_VERSION", "PROTOCOLS", "SEED_BANDS", "MeasurementStore", "bot_config", "bot_exposure",
-           "config_hash", "measure", "measure_cached", "measure_theta"]
+__all__ = ["BOT_VERSION", "PROTOCOLS", "SEED_BANDS", "MeasurementCancelled", "MeasurementStore", "bot_config",
+           "bot_exposure", "config_hash", "measure", "measure_cached", "measure_theta"]

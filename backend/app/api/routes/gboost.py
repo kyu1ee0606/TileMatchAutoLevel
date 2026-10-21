@@ -28,6 +28,9 @@ from ...models.schemas import (
     UploadProgressItem,
 )
 from ...clients.gboost import GBoostClient, get_gboost_client, update_gboost_client
+from ...core.dda_seed_catalog import apply_export_fields as _apply_dda_export_fields
+from ...core import dda_seed_catalog as _dda
+from ...clients.gboost import GBoostLookupError
 from ..deps import get_gboost
 
 # Local levels directory (same as in simulate.py)
@@ -142,6 +145,19 @@ async def save_level_to_gboost(
 
     # Convert to TownPop format (adds map field with layer data)
     level_json = _convert_to_townpop_format(request.level_json)
+    # [DDA 문서 47] levels 보드면 ddaEasySeeds/ddaHardSeeds 를 항상 명시(유효 후보만 값, 그 외 "").
+    level_json = _apply_dda_export_fields(board_id, level_id, original_level_json, level_json)
+    # [DDA 문서 47 fail-closed] levels 보드: 기존 행을 strict 조회(실패=업로드 중단),
+    # 서버의 비어 있지 않은 시드를 비우거나 바꾸면 dda_confirm 필요.
+    if board_id == _dda.DDA_BOARD_ID:
+        try:
+            existing = await client.load_level(board_id, level_id, strict=True)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"기존 행 조회 실패 — 업로드 중단(재검사 필요): {e}")
+        guard = _dda.write_guard((existing or {}).get("level_json") if existing else None,
+                                 level_json, request.dda_confirm)
+        if guard:
+            raise HTTPException(status_code=409, detail=f"{guard}: 서버 DDA 시드를 비우거나 변경합니다 — 미리보기 확인 후 dda_confirm 필요")
 
     result = await client.save_level(board_id, level_id, level_json)
 
@@ -209,6 +225,7 @@ async def list_levels_from_gboost(
     prefix: str = Query(default="level_", description="Level ID prefix filter"),
     limit: int = Query(default=100, ge=1, le=10000, description="Maximum results"),
     project_id: str = Query(default="", description="Override project ID (다른 프로젝트에서 가져오기)"),
+    strict: bool = Query(default=False, description="[문서 47] 조회 실패를 빈 목록 대신 502 로 반환"),
     client: GBoostClient = Depends(get_gboost),
 ) -> GBoostListResponse:
     """
@@ -229,7 +246,13 @@ async def list_levels_from_gboost(
             detail="GBoost client not configured",
         )
 
-    levels = await client.list_levels(board_id, prefix, limit, project_id_override=project_id)
+    if strict:
+        try:
+            levels = await client.list_levels(board_id, prefix, limit, project_id_override=project_id, strict=True)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"서버 목록 조회 실패: {e}")
+    else:
+        levels = await client.list_levels(board_id, prefix, limit, project_id_override=project_id)
 
     return GBoostListResponse(
         levels=[
@@ -237,6 +260,8 @@ async def list_levels_from_gboost(
                 id=level.get("id", ""),
                 created_at=level.get("created_at", ""),
                 difficulty=level.get("difficulty"),
+                dda_easy_seeds=level.get("dda_easy_seeds"),
+                dda_hard_seeds=level.get("dda_hard_seeds"),
             )
             for level in levels
         ]
@@ -961,6 +986,25 @@ async def upload_local_to_gboost(
 
         # Convert to TownPop-compatible format
         level_json = _convert_to_townpop_format(level_json)
+        # [DDA 문서 47] levels 보드면 두 시드 필드 항상 명시(유효 후보만 값, 그 외 "").
+        level_json = _apply_dda_export_fields(request.board_id, target_id, original_level_json, level_json)
+        # [DDA 문서 47 fail-closed] levels 보드: 기존 행 strict 조회 실패 → 실패 처리(업로드 안 함),
+        # 서버 시드 비움/변경은 dda_confirm 없으면 건너뜀.
+        if request.board_id == _dda.DDA_BOARD_ID:
+            try:
+                existing_row = await client.load_level(request.board_id, target_id, strict=True)
+            except Exception as e:
+                results.append(UploadProgressItem(level_id=level_id, target_id=target_id, status="failed",
+                                                  message=f"기존 행 조회 실패 — 업로드 안 함: {e}"))
+                failed += 1
+                continue
+            guard = _dda.write_guard(existing_row.get("level_json") if existing_row else None,
+                                     level_json, request.dda_confirm)
+            if guard:
+                results.append(UploadProgressItem(level_id=level_id, target_id=target_id, status="skipped",
+                                                  message=f"{guard}: 서버 DDA 시드 비움/변경 — 확인 필요"))
+                skipped += 1
+                continue
 
         # Upload to GBoost
         result = await client.save_level(request.board_id, target_id, level_json)
@@ -1068,3 +1112,70 @@ async def upload_thumbnail(
         success=True,
         message=result.get("message", "Thumbnail uploaded successfully"),
     )
+
+
+# ── DDA 시드만 내보내기 (문서 47 §5) ─────────────────────────────────────────────
+class DdaSeedExportTarget(BaseModel):
+    target_id: str
+    level_json: dict
+    expected_server_digest: Optional[str] = None
+
+
+class DdaSeedExportRequest(BaseModel):
+    targets: list[DdaSeedExportTarget]
+    dry_run: bool = True
+    confirm: bool = False
+
+
+@router.post("/dda-seed-export")
+async def dda_seed_export(
+    request: DdaSeedExportRequest,
+    client: GBoostClient = Depends(get_gboost),
+):
+    """levels 보드 기존 행에서 ddaEasySeeds/ddaHardSeeds 두 컬럼만 바꿔 저장(read-modify-write).
+
+    dry_run=True: 서버 행 strict 조회 + 판정만(쓰기 없음) → serverDigest 반환.
+    dry_run=False: 대상마다 다시 strict 조회 → expected_server_digest 와 다르면 차단(새 미리보기 필요),
+                   비움/변경은 confirm 필요. 썸네일·변환·기본값 채움 없음. 조회 실패 = 해당 대상 업로드 안 함.
+    """
+    if not client.is_configured:
+        raise HTTPException(status_code=503, detail="GBoost client not configured")
+    out = []
+    for t in request.targets:
+        try:
+            existing = await client.load_level(_dda.DDA_BOARD_ID, t.target_id, strict=True)
+        except Exception as e:
+            out.append({"target_id": t.target_id, "blocked": True, "reason": "lookup_failed", "detail": str(e)})
+            continue
+        plan = _dda.seed_only_plan(t.target_id, t.level_json, _convert_to_townpop_format(dict(t.level_json)),
+                                   existing.get("level_json") if existing else None)
+        payload = plan.pop("payload", None)
+        if request.dry_run or plan["blocked"]:
+            plan["status"] = "blocked" if plan["blocked"] else "preview"
+            out.append(plan)
+            continue
+        if not t.expected_server_digest or t.expected_server_digest != plan["serverDigest"]:
+            plan.update({"blocked": True, "status": "blocked", "reason": "server_changed_since_preview"})
+            out.append(plan)
+            continue
+        if plan["change"] in ("clear", "change") and not request.confirm:
+            plan.update({"blocked": True, "status": "blocked", "reason": "needs_dda_confirm"})
+            out.append(plan)
+            continue
+        if plan["change"] == "same":
+            plan["status"] = "unchanged"
+            out.append(plan)
+            continue
+        # [§9] 부분 수정(두 필드만) — 누락 컬럼 보존 근거 확보 전까지 기본 차단
+        if not _dda.PARTIAL_UPDATE_VERIFIED:
+            plan.update({"blocked": True, "status": "blocked", "reason": "partial_update_unverified"})
+            out.append(plan)
+            continue
+        _dda.assert_partial_payload(payload)
+        # update 전용(new=0, '=upt' 확인, new=1 폴백 없음 — 중복 레코드 방지)
+        result = await client.update_existing_level(_dda.DDA_BOARD_ID, t.target_id, payload)
+        plan["status"] = "saved" if result.get("success") else "failed"
+        if not result.get("success"):
+            plan["detail"] = result.get("error", "")
+        out.append(plan)
+    return {"dry_run": request.dry_run, "results": out}

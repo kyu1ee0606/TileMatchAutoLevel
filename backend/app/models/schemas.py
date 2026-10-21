@@ -226,6 +226,7 @@ class SimulateResponse(BaseModel):
 class GBoostSaveRequest(BaseModel):
     """Request schema for saving level to GBoost."""
     level_json: Dict[str, Any] = Field(..., description="Level JSON to save")
+    dda_confirm: bool = Field(default=False, description="[DDA 문서 47] levels 보드에서 서버의 비어 있지 않은 시드를 비우거나 바꾸는 것을 사용자가 확인함")
 
 
 class GBoostSaveResponse(BaseModel):
@@ -246,6 +247,8 @@ class LevelListItem(BaseModel):
     id: str = Field(..., description="Level ID")
     created_at: str = Field(default="", description="Creation timestamp")
     difficulty: Optional[float] = Field(default=None, description="Cached difficulty score")
+    dda_easy_seeds: Optional[str] = Field(default=None, description="서버 levels.ddaEasySeeds 현재 값 (컬럼 없으면 null)")
+    dda_hard_seeds: Optional[str] = Field(default=None, description="서버 levels.ddaHardSeeds 현재 값 (컬럼 없으면 null)")
 
 
 class GBoostListResponse(BaseModel):
@@ -257,6 +260,7 @@ class UploadLocalToGBoostRequest(BaseModel):
     """Request schema for uploading local levels to GBoost server."""
     board_id: str = Field(..., description="Target board ID on GBoost server")
     level_ids: List[str] = Field(..., description="List of local level IDs to upload")
+    dda_confirm: bool = Field(default=False, description="[DDA 문서 47] 서버 시드 비움/변경 확인")
     target_prefix: str = Field(default="level_", description="Prefix for target level IDs on GBoost")
     rename_strategy: str = Field(
         default="keep",

@@ -65,6 +65,10 @@ def parse_gboost_response(data: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+class GBoostLookupError(Exception):
+    """strict 조회에서 서버 응답 실패/파싱 실패 — '없음'과 구분 (문서 47 fail-closed)."""
+
+
 class GBoostClient:
     """Client for communicating with GBoost server (townpop pattern)."""
 
@@ -209,6 +213,54 @@ class GBoostClient:
                 "error": f"Unexpected error: {str(e)}",
             }
 
+    async def update_existing_level(self, board_id: str, level_id: str, row: Dict[str, Any]) -> Dict[str, Any]:
+        """[DDA 문서 47 §8] 기존 행 update 전용 — new=0 1회, 응답 `<id>=upt` 일 때만 성공.
+
+        save_level 과 달리 존재 확인 실패/미확인 응답 시 new=1(새 레코드 추가) 폴백을 하지 않는다
+        (같은 id 중복 레코드 생성 위험 차단). 실패는 그대로 실패로 돌려준다.
+        """
+        if not self.is_configured:
+            return {"success": False, "error": "GBoost client not configured"}
+        form_data = {"act": "save", "gid": self.project_id, "bid": board_id, "new": "0",
+                     "json": json.dumps({level_id: row})}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(f"{self.base_url}/real_array.php", data=form_data,
+                                        timeout=aiohttp.ClientTimeout(total=30)) as response:
+                    text = await response.text()
+                    head = (text or "").split("\n", 1)[0].strip()
+                    ok = response.status == 200 and head == f"{level_id}=upt"
+                    return {"success": ok, "status": response.status, "head": head[:120],
+                            **({} if ok else {"error": f"update not confirmed: HTTP {response.status} {head[:120]!r}"})}
+        except Exception as e:
+            return {"success": False, "error": f"{type(e).__name__}: {e}"}
+
+    async def load_board_rows(self, board_id: str) -> Dict[str, Any]:
+        """[DDA 문서 47 §8] 보드 전체 행(real_array act=load id=) strict 조회.
+        반환: {"rows": {id: row}, "raw_sha256": .., "raw_bytes": ..}. 실패는 GBoostLookupError."""
+        import hashlib
+        if not self.is_configured:
+            raise GBoostLookupError("GBoost client not configured")
+        endpoint = f"{self.base_url}/real_array.php?act=load&gid={self.project_id}&bid={board_id}&id=&filter="
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(endpoint, timeout=aiohttp.ClientTimeout(total=90)) as response:
+                    if response.status != 200:
+                        raise GBoostLookupError(f"HTTP {response.status}")
+                    raw = await response.read()
+        except aiohttp.ClientError as e:
+            raise GBoostLookupError(str(e)) from e
+        if not raw.strip():
+            raise GBoostLookupError("empty response")
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as e:
+            raise GBoostLookupError(f"invalid JSON: {e}") from e
+        if not isinstance(data, dict) or "__keys" not in data or "__vals" not in data:
+            raise GBoostLookupError("unexpected format (no __keys/__vals)")
+        return {"rows": parse_gboost_response(data), "keys": data["__keys"],
+                "raw_sha256": hashlib.sha256(raw).hexdigest(), "raw_bytes": len(raw), "raw": raw}
+
     async def _exists(self, board_id: str, level_id: str) -> bool:
         """Lightweight existence check via load endpoint."""
         try:
@@ -245,6 +297,7 @@ class GBoostClient:
         board_id: str,
         level_id: str,
         project_id_override: str = "",
+        strict: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """
         Load level data from GBoost server using real_array.php API.
@@ -256,8 +309,11 @@ class GBoostClient:
 
         Returns:
             Level JSON data or None if not found.
+            strict=True: 404/빈 객체만 None(없음), 그 외 실패는 GBoostLookupError.
         """
         if not self.is_configured:
+            if strict:
+                raise GBoostLookupError("GBoost client not configured")
             return None
 
         array_id = level_id
@@ -274,6 +330,8 @@ class GBoostClient:
                         result_text = await response.text()
 
                         if not result_text or result_text.strip() == "" or result_text.strip() == "{}":
+                            if strict and (not result_text or not result_text.strip()):
+                                raise GBoostLookupError("empty response")
                             return None
 
                         try:
@@ -302,13 +360,19 @@ class GBoostClient:
                                 },
                             }
                         except json.JSONDecodeError:
+                            if strict:
+                                raise GBoostLookupError("invalid JSON")
                             return None
                     elif response.status == 404:
                         return None
                     else:
+                        if strict:
+                            raise GBoostLookupError(f"HTTP {response.status}")
                         return None
 
-        except (aiohttp.ClientError, json.JSONDecodeError):
+        except (aiohttp.ClientError, json.JSONDecodeError) as e:
+            if strict:
+                raise GBoostLookupError(str(e)) from e
             return None
 
     async def list_levels(
@@ -317,6 +381,7 @@ class GBoostClient:
         prefix: str = "level_",
         limit: int = 100,
         project_id_override: str = "",
+        strict: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         List levels from GBoost server.
@@ -328,8 +393,11 @@ class GBoostClient:
 
         Returns:
             List of level metadata.
+            strict=True: 서버/파싱 실패를 빈 목록 대신 GBoostLookupError 로 올린다.
         """
         if not self.is_configured:
+            if strict:
+                raise GBoostLookupError("GBoost client not configured")
             return []
 
         # Load all data from the board (empty id = all)
@@ -346,6 +414,8 @@ class GBoostClient:
                         result_text = await response.text()
 
                         if not result_text or result_text.strip() == "" or result_text.strip() == "{}":
+                            if strict and (not result_text or not result_text.strip()):
+                                raise GBoostLookupError("empty response")
                             return []
 
                         try:
@@ -379,6 +449,14 @@ class GBoostClient:
                                             except (ValueError, TypeError):
                                                 pass
 
+                                        # [DDA 문서 47] 서버 현재 시드 값 — 익스포트 미리보기에서 비움/변경 경고용.
+                                        # 컬럼이 없으면 키 생략(None), 있으면 문자열로 전달.
+                                        for src_key, dst_key in (("ddaEasySeeds", "dda_easy_seeds"),
+                                                                 ("ddaHardSeeds", "dda_hard_seeds")):
+                                            if src_key in value:
+                                                v = value[src_key]
+                                                level_info[dst_key] = "" if v is None else str(v)
+
                                     levels.append(level_info)
 
                             # Sort by level number
@@ -395,12 +473,18 @@ class GBoostClient:
                             return levels[:limit]
                         except json.JSONDecodeError as e:
                             print(f"JSON decode error: {e}")
+                            if strict:
+                                raise GBoostLookupError(f"invalid JSON: {e}") from e
                             return []
                     else:
+                        if strict:
+                            raise GBoostLookupError(f"HTTP {response.status}")
                         return []
 
         except aiohttp.ClientError as e:
             print(f"Client error: {e}")
+            if strict:
+                raise GBoostLookupError(str(e)) from e
             return []
 
     async def delete_level(

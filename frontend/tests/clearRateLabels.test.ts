@@ -59,6 +59,12 @@ test('insufficient reasons: support → hard target flags, soft flags ignored, d
   assert.equal(FLAG_LABEL.SELECTION_UNCONFIRMED, '확인 측정(C 시드) 없음');
 });
 
+test('P5 cache quarantine code reads as condition mismatch, not unknown source', () => {
+  const s = FLAG_LABEL.BOT_CACHE_CONDITION_MISMATCH;
+  assert.ok(s.includes('측정 조건 불일치') && s.includes('근거 부족'));
+  assert.ok(!s.includes('출처'));
+});
+
 test('low confidence without a code still gets a readable reason', () => {
   assert.deepEqual(verdictReasonCodes({ ...base, confidence: 'low' }), ['LOW_CONFIDENCE']);
   assert.deepEqual(verdictReasonCodes({ ...base, target_flags: [{ code: 'LOW_CONFIDENCE', severity: 'soft', detail: '' }] }),

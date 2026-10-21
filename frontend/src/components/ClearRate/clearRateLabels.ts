@@ -16,6 +16,7 @@ export const FLAG_LABEL: Record<string, string> = {
   MEASUREMENT_MISSING: '봇 측정 없음',
   BOT_CONDITION_MISMATCH: '측정 조건 불일치',
   BOT_SOURCE_UNKNOWN: '측정 출처 불명',
+  BOT_CACHE_CONDITION_MISMATCH: '측정 조건 불일치 → 근거 부족',
   UNSOLVED: '봇 클리어 0',
   CAT_HELP_UNSUPPORTED: '냥이 레벨 학습 없음',
   TIME_LIMIT_UNSUPPORTED: '시간 제한 학습 없음',

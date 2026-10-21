@@ -112,8 +112,9 @@ def predict_level(model: ClearRateModel, game_map: Dict[str, Any], conditions: D
     rows = list(measurement.rows) if measurement else []
     if measurement:
         flags += guard.bot_flags(man, measurement, h)
-        out.bot_unaided_win_rate = {f"theta{int(round(float(r['theta']) * 100)):03d}": round(r["wins"] / r["games"], 4)
-                                    for r in rows if r.get("games")}
+        if not guard.quarantined(man, measurement):   # P5: no bot numbers from a mismatched-setting measurement
+            out.bot_unaided_win_rate = {f"theta{int(round(float(r['theta']) * 100)):03d}":
+                                        round(r["wins"] / r["games"], 4) for r in rows if r.get("games")}
     else:
         flags.append(guard.flag("MEASUREMENT_MISSING", "hard", "이 게임 조건의 봇 측정이 없음"))
 

@@ -6,6 +6,8 @@ Target flags (target_flags) belong to the verdict (select.py), not to the predic
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any, Dict, List, Optional, Tuple
 
 from .features import FEATS, THETAS
@@ -16,7 +18,49 @@ CEILING_FROM = 0.95      # doc 31 §3-2 NEAR_CEILING (⑤ median 0.963: selectio
 NOVELTY_HIGH = 0.5
 SUPPRESS = {"PLACEMENT_MISSING", "LEVEL_OUT_OF_RANGE", "GIMMICK_UNSEEN", "GIMMICK_LOW_TRAIN", "FEATURE_OOD",
             "BOT_PROTOCOL_MISMATCH", "BOT_CONDITION_MISMATCH", "BOT_SOURCE_UNKNOWN", "MEASUREMENT_MISSING", "UNSOLVED",
-            "CAT_HELP_UNSUPPORTED", "TIME_LIMIT_UNSUPPORTED"}
+            "CAT_HELP_UNSUPPORTED", "TIME_LIMIT_UNSUPPORTED", "BOT_CACHE_CONDITION_MISMATCH"}
+
+# P5 (doc 42 §3 / §5): bot measurements in the active model's bot_cache taken under a different bot setting than the
+# model protocol — the rules-only ablation re-measured only levels with clean_ft_n ≥ 100, so these 8 rows were copied
+# from bot_v2.4f_no_covered_info.json (behaviour items on) while still labelled v2.4 / theta4x128_v1.
+# Evidence: eval_inputs/20261019/protocol_review.json sha256 edab94289e702e39e5a210c29dcaca2e0afe64ebe6b1908bf626d80a64b90a67
+# (main tree, doc 42). Matched on (model version, bot version, protocol, cond_hash [map + game conditions], rows
+# sha256) — never on the level number: the same map at another slot still matches; a changed map (other cond_hash)
+# or a new measurement (other rows) does not. seed_band is not in the key, so relabelling the same rows does not pass.
+QUARANTINE_MODEL = "cr-ftany-v24r-20261016"
+QUARANTINE_BOT = ("v2.4", "theta4x128_v1")
+QUARANTINED_MEASUREMENTS = {  # cond_hash → (L measured at, rows sha256, canonical map sha256 [record only])
+    "b8da6375a1eda55eb244": (429, "4ce6e075deca29b10c27a3e6d4c61a565572974b73f6ae3d7d55abaee9552176",
+                             "9b110c79fec19bc082f7398fe50193f63ee27c09af7de0749eca6772554ebcb0"),
+    "87abdec58af8245a37c9": (433, "ee7095e43cfb54b8353585457f56da641960a2893103847f050d920c1b5be94e",
+                             "2ff0e490f22287af2cb504686e98791435c97317a5fdd38f065be8b4a4f0781f"),
+    "d4532b050c07c9217038": (441, "0dc3dc20d9d85f22aec58fb9952ae3ad97fae38435c58d019ec4e249dcca883d",
+                             "ce857d326866e084fa1f241a5908d03c3867f391d65b1dac9aab9c4856f7561c"),
+    "25552b64400c77b21d82": (466, "0f88d8fc0b7de2c257c8f5f44bcc1fe571e499e3e71b1b0be8addd322263d646",
+                             "d829f60ce5c2bd0308dc1670f52be8f6d787e5bb6be8ae6476b60c10d0a98572"),
+    "16de259bbc57b338ce32": (479, "ddbaed5df4ab95872f067f2778111486036e619a2c06494a979cb8ca5a60f388",
+                             "ea2d088eef1c82f6813f4b6560ec9acb07fdab2e3fdfb35d83f3066493f7b293"),
+    "9853ef35ce9a074a17ca": (493, "e8f2a29bee5446ef783572c7a36ff863524a8118993eecfe339bbac0f451f2db",
+                             "edf57568ef318c46e5352ab7b8243e40a3d03208fd301db5e195822d5e34f888"),
+    "cecfd6d013a0d4b0f688": (494, "f14263624816ed9a282739ab758e2dd5ca2abf2c8415dc016d02f041ff2f9be2",
+                             "69efeaffd8bc0a9413f13653439d2109d59fac06dfac2154842793a7135ed2c6"),
+    "91d0ba6cf87f82cf012a": (499, "711ab12a69f4cfacce32f0580d1eeaa84f811e1961949183f024586855921464",
+                             "476493808d75c0f34c0f5eefae6e52689182e5471900816ce2c04df661442b94"),
+}
+
+
+def rows_sha256(rows: Any) -> str:
+    """Row content hash; None-valued keys dropped so a request copy (schema fills optional fields with None)
+    hashes like the cache row."""
+    norm = [{k: v for k, v in r.items() if v is not None} for r in rows]
+    return hashlib.sha256(json.dumps(norm, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def quarantined(manifest: Dict[str, Any], m: Any) -> bool:
+    """m (predict.BotMeasurement) is one of the P5 rows measured under a different bot setting."""
+    q = QUARANTINED_MEASUREMENTS.get(m.cond_hash)
+    return (bool(q) and manifest.get("model_version") == QUARANTINE_MODEL
+            and (m.bot_version, m.protocol) == QUARANTINE_BOT and rows_sha256(m.rows) == q[1])
 
 
 def flag(code: str, severity: str, detail: str = "") -> Dict[str, str]:
@@ -54,6 +98,9 @@ def bot_flags(manifest: Dict[str, Any], m: Any, current_hash: str) -> List[Dict[
     """Same checks for cached and caller-supplied measurements (m: predict.BotMeasurement): game-condition hash,
     bot version, protocol (θ grid × games), seed-band provenance."""
     out, rows = [], list(m.rows)
+    if quarantined(manifest, m):
+        out.append(flag("BOT_CACHE_CONDITION_MISMATCH", "hard",
+                        "측정 조건 불일치 → 근거 부족: 이 봇 측정은 모델과 다른 봇 설정(행동 항목 켬)으로 잰 값 (문서 42 P5)"))
     if m.bot_version != manifest["bot_version"] or m.protocol != manifest["bot_protocol"]:
         out.append(flag("BOT_PROTOCOL_MISMATCH", "hard",
                         f"측정 {m.bot_version or '?'}/{m.protocol or '?'} ≠ 모델 {manifest['bot_version']}/{manifest['bot_protocol']}"))

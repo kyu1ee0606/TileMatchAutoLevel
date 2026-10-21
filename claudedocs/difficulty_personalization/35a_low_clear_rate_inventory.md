@@ -1,5 +1,7 @@
 # 35a. 저성공률 레벨 전수 조사 — 379레벨 밖 후보 선별 (분석만)
 
+> **2026-10-19 후속 갱신:** 10/14 이후 원본을 반영한 별도 집계는 [40_af_lowband_refresh_20261019.md](40_af_lowband_refresh_20261019.md). 같은 맵 신규 저구간 표본 2,242건, 최신 `<85% & n≥100` 맵 57→60개. 본문의 10/14 기준 수치는 과거 기준선으로 보존하며 활성 모델은 변경하지 않았다.
+
 > 기록 2026-10-16 · 분석만, 새 봇 측정 없음 · 워크트리(`_wt_clearrate`) 미접촉
 > 스크립트 `backend/scripts/low_clear_inventory.py` + `backend/scripts/low_clear_diagnostics.py` (둘 다 `../analysis_venv/bin/python backend/scripts/<name>.py`)
 > 산출 `backend/data/pv_sandbox/af_calibration/{low_clear_inventory.json, low_clear_diagnostics.json}` (git 제외 샌드박스, 레벨별 원자료 전체 포함)

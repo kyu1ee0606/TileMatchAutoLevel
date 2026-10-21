@@ -3,7 +3,7 @@
  * 프로덕션 레벨 내보내기 (JSON, 로컬레벨, GBoost)
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { ProductionStats, ProductionExportConfig, ProductionLevel, PRODUCTION_MAX_LEVEL } from '../../types/production';
 import { TileData, LevelJSON } from '../../types';
 import { Button } from '../ui';
@@ -11,6 +11,8 @@ import { useUIStore } from '../../stores/uiStore';
 import { exportProductionLevels, getProductionLevelsByBatch, renameProductionBatch, saveProductionLevel } from '../../storage/productionStorage';
 import { saveLevelSetToStorage, saveLocalLevelToStorage } from '../../storage/levelStorage';
 import { checkGBoostHealth, listFromGBoost, loadFromGBoost, saveToGBoost } from '../../api/gboost';
+import { previewDdaExport } from '../../api/ddaSeeds';
+import { DdaSeedOnlyExport } from './DdaSeedOnlyExport';
 import { simulateLevelSkillSweep } from '../../api/rlSim';
 
 // ─────────────────────────────────────────────────────────────────────
@@ -346,6 +348,13 @@ export function ProductionExport({
   const [gboostPhase, setGboostPhase] = useState<GBoostPhase>('config');
   const [gboostProgress, setGboostProgress] = useState({ current: 0, total: 0 });
   const [conflictingLevels, setConflictingLevels] = useState<ConflictInfo[]>([]);
+  // [DDA 문서 47] 덮어쓸 행의 서버 ddaEasySeeds/ddaHardSeeds 와 이번 업로드 값 비교 (경고만, 차단 안 함)
+  const [ddaWarn, setDdaWarn] = useState<{
+    clear: string[]; change: string[]; fill: number; noColumn: number; error?: string;
+  } | null>(null);
+  // [DDA 문서 47 fail-closed] 직전 '충돌 검사'가 통과했는지. handleUpload 가 1회 소비 → 재시도는 새 검사 필요.
+  // confirm = 사용자가 DDA 비움/변경 경고를 본 상태(충돌 단계)에서 업로드를 눌렀음 → 백엔드 dda_confirm.
+  const ddaCheckRef = useRef<{ ok: boolean; confirm: boolean } | null>(null);
   const [backupProgress, setBackupProgress] = useState({ current: 0, total: 0 });
   const [uploadResult, setUploadResult] = useState({ success: 0, failed: 0, skipped: 0 });
 
@@ -383,9 +392,11 @@ export function ProductionExport({
 
   // Reset phase when config changes
   useEffect(() => {
+    ddaCheckRef.current = null;
     if (gboostPhase !== 'config') {
       setGboostPhase('config');
       setConflictingLevels([]);
+      setDdaWarn(null);
       setUploadResult({ success: 0, failed: 0, skipped: 0 });
     }
   }, [gboostBoardId, gboostLevelPrefix, gboostStartIndex, useRange, rangeStart, rangeEnd]);
@@ -642,6 +653,8 @@ export function ProductionExport({
 
     setGboostPhase('checking');
     setConflictingLevels([]);
+    setDdaWarn(null);
+    ddaCheckRef.current = null;
 
     try {
       // [v15.51] Conflict-check 대상 ID는 실제 업로드와 동일한 규칙 — 즉 각 레벨의
@@ -665,25 +678,63 @@ export function ProductionExport({
         uploadTargetsForCheck.map(t => (t.isInfinity ? infinityPrefix : gboostLevelPrefix))));
       const fetchLimit = Math.max(targetIds.length + 100, 2000);
       const existingIds = new Set<string>();
+      const serverDda = new Map<string, { easy?: string | null; hard?: string | null }>();
       for (const px of prefixes) {
-        const res = await listFromGBoost(gboostBoardId, px, fetchLimit);
-        res.levels.forEach(l => existingIds.add(l.id));
+        // strict: 조회 실패를 '없음'으로 오인해 경고 없이 덮어쓰지 않도록 오류로 받는다
+        const res = await listFromGBoost(gboostBoardId, px, fetchLimit, true);
+        res.levels.forEach(l => {
+          existingIds.add(l.id);
+          serverDda.set(l.id, { easy: l.dda_easy_seeds, hard: l.dda_hard_seeds });
+        });
       }
 
       // Find conflicts
       const conflicts = targetIds.filter(t => existingIds.has(t.targetId));
       setConflictingLevels(conflicts);
 
+      // [DDA 문서 47] 덮어쓸 행만: 서버 값 비움/변경 예정 경고 (업로드가 보낼 값 = 같은 백엔드 판정)
+      let ddaOk = true;
       if (conflicts.length > 0) {
+        try {
+          const conflictSet = new Set(conflicts.map(c => c.targetId));
+          const dp = await previewDdaExport(gboostBoardId, uploadTargetsForCheck
+            .filter(t => conflictSet.has(t.targetId))
+            .map(t => ({ target_id: t.targetId, level_json: t.level.level_json })));
+          if (dp.applies) {
+            const w = { clear: [] as string[], change: [] as string[], fill: 0, noColumn: 0 };
+            for (const r of dp.results) {
+              const s = serverDda.get(r.target_id);
+              if (!s || (s.easy === undefined && s.hard === undefined)) { w.noColumn++; continue; }
+              const srvE = s.easy ?? '', srvH = s.hard ?? '';
+              const srvHas = srvE !== '' || srvH !== '';
+              const newHas = r.ddaEasySeeds !== '' || r.ddaHardSeeds !== '';
+              if (srvHas && !newHas) w.clear.push(`${r.target_id}(${r.reason})`);
+              else if (srvHas && (srvE !== r.ddaEasySeeds || srvH !== r.ddaHardSeeds)) w.change.push(r.target_id);
+              else if (!srvHas && newHas) w.fill++;
+            }
+            setDdaWarn(w);
+            ddaOk = w.noColumn === 0;          // 부분 누락(서버 컬럼 미확인) → 차단
+          }
+        } catch (e) {
+          setDdaWarn({ clear: [], change: [], fill: 0, noColumn: 0, error: (e as Error).message });
+          ddaOk = false;                       // DDA 사전검사 실패 → 차단
+        }
+      }
+
+      if (conflicts.length > 0) {
+        ddaCheckRef.current = { ok: ddaOk, confirm: ddaOk };
         setGboostPhase('conflict');
       } else {
-        // No conflicts, proceed directly
+        // No conflicts, proceed directly (새 행 — 비울 서버 값 없음. 백엔드가 행별로 다시 확인)
+        ddaCheckRef.current = { ok: true, confirm: false };
         await handleUpload();
       }
     } catch (err) {
+      // [fail-closed] 예전엔 조회 실패 시 그대로 업로드했다 → 서버 값 확인 없이 덮어쓰기. 이제 중단.
       console.error('Failed to check conflicts:', err);
-      // If we can't check, proceed with upload
-      await handleUpload();
+      ddaCheckRef.current = null;
+      addNotification('error', `서버 목록 조회 실패 — 업로드하지 않았습니다. 연결 확인 후 다시 검사하세요: ${(err as Error).message}`);
+      setGboostPhase('config');
     }
   };
 
@@ -765,6 +816,14 @@ export function ProductionExport({
 
   // Upload to GBoost (saveToGBoost 직접 사용)
   const handleUpload = async () => {
+    // [DDA 문서 47 fail-closed] 직전 검사 통과가 필요하고 1회만 쓴다(재시도 = 새 검사).
+    const ddaGate = ddaCheckRef.current;
+    ddaCheckRef.current = null;
+    if (!ddaGate || !ddaGate.ok) {
+      addNotification('error', '서버/DDA 사전검사가 통과되지 않았습니다 — 다시 검사 후 업로드하세요.');
+      setGboostPhase('config');
+      return;
+    }
     setGboostPhase('uploading');
     setGboostProgress({ current: 0, total: 0 });
     setUploadResult({ success: 0, failed: 0, skipped: 0 });
@@ -897,7 +956,7 @@ export function ProductionExport({
 
         try {
           // saveToGBoost는 level_json을 직접 받아서 TownPop 변환 및 썸네일 생성
-          await saveToGBoost(gboostBoardId, targetId, uploadJson);
+          await saveToGBoost(gboostBoardId, targetId, uploadJson, ddaGate.confirm);
           successCount++;
         } catch (err) {
           console.error(`Failed to upload ${targetId}:`, err);
@@ -929,6 +988,8 @@ export function ProductionExport({
 
   // Reset to config
   const handleResetGBoost = () => {
+    ddaCheckRef.current = null;
+    setDdaWarn(null);
     setGboostPhase('config');
     setConflictingLevels([]);
     setGboostProgress({ current: 0, total: 0 });
@@ -1494,6 +1555,29 @@ export function ProductionExport({
                   )}
                 </div>
 
+                {ddaWarn && (
+                  <div className="bg-orange-900/30 border border-orange-600 rounded-lg p-2 text-xs space-y-1">
+                    <div className="text-orange-300 font-semibold">DDA 시드 (ddaEasySeeds/ddaHardSeeds)</div>
+                    {ddaWarn.error ? (
+                      <div className="text-red-300">서버 값 비교 실패: {ddaWarn.error} — 비움/변경 대상을 확인하지 못했습니다.</div>
+                    ) : (
+                      <>
+                        <div className={ddaWarn.clear.length ? 'text-red-300' : 'text-gray-400'}>
+                          서버 값 비움 예정 {ddaWarn.clear.length}
+                          {ddaWarn.clear.length > 0 && `: ${ddaWarn.clear.slice(0, 10).join(', ')}${ddaWarn.clear.length > 10 ? ' …' : ''}`}
+                        </div>
+                        <div className={ddaWarn.change.length ? 'text-orange-300' : 'text-gray-400'}>
+                          서버 값과 다른 값으로 변경 {ddaWarn.change.length}
+                          {ddaWarn.change.length > 0 && `: ${ddaWarn.change.slice(0, 10).join(', ')}${ddaWarn.change.length > 10 ? ' …' : ''}`}
+                        </div>
+                        <div className="text-gray-400">신규 기입 {ddaWarn.fill}{ddaWarn.noColumn > 0 && ` · 서버 컬럼 미확인 ${ddaWarn.noColumn}`}</div>
+                      </>
+                    )}
+                    <div className="text-gray-500">유효 후보가 아니면 두 필드를 빈 문자열로 보냅니다(오래된 서버 값 제거). 에디터 내부 값은 바꾸지 않습니다.</div>
+                    <div className="text-gray-500">주의: 재업로드로 행의 다른 컬럼이 바뀌면 런타임 조건 해시가 달라져 원본으로 폴백합니다 — 업로드·굽기 후 검증 목록 재생성이 필요합니다(문서 47).</div>
+                  </div>
+                )}
+
                 {backupBeforeOverwrite && (
                   <div className="bg-blue-900/30 border border-blue-700 rounded-lg p-2">
                     <p className="text-blue-300 text-xs">
@@ -1525,7 +1609,11 @@ export function ProductionExport({
                   >
                     취소
                   </Button>
-                  {overwrite ? (
+                  {(ddaWarn?.error || (ddaWarn?.noColumn ?? 0) > 0) ? (
+                    <Button onClick={handleCheckConflicts} className="flex-1">
+                      DDA 사전검사 실패 — 다시 검사
+                    </Button>
+                  ) : overwrite ? (
                     <Button
                       onClick={handleBackupAndUpload}
                       // 백업이 '진행 중'일 때만 잠근다. total>0 로 잠그면 백업이 끝난 뒤에도
@@ -1545,6 +1633,17 @@ export function ProductionExport({
                   )}
                 </div>
               </div>
+            )}
+
+            {/* [DDA 문서 47 §5] 시드만 내보내기 — 두 컬럼만 변경, 기존 행 보존 */}
+            {gboostPhase === 'config' && (
+              <DdaSeedOnlyExport
+                boardId={gboostBoardId}
+                enabled={gboostHealthy && gboostLevelPrefix === 'level_'}
+                getTargets={async () => (await getExportableLevels()).map(l => ({
+                  target_id: `level_${l.meta.level_number}`, level_json: l.level_json,
+                }))}
+              />
             )}
 
             {/* Uploading Phase */}

@@ -62,6 +62,7 @@ import { BatchVerifyPanel } from './BatchVerifyPanel';
 import { MetaIntegrityPanel, checkTileDivisibility, detectOOBTiles } from './MetaIntegrityPanel';
 import { LevelDistributionChart } from './LevelDistributionChart';
 import { PvSeedPlayPanel } from './PvSeedPlayPanel';
+import { DdaSeedRefreshPanel } from './DdaSeedRefreshPanel';
 // PatternSelector import removed - using inline grid instead
 import { getPatternByIndex, BOSS_PATTERNS, SPECIAL_PATTERNS, PATTERN_CATEGORIES } from '../../constants/patterns';
 
@@ -7393,6 +7394,15 @@ function TestTab({
           </span>
         </span>
       </div>
+
+      {/* [DDA 문서 47] DDA 시드 갱신 — 미리보기 → 확인 → 내부 레벨 설정만 저장 (서버 전송 없음) */}
+      <DdaSeedRefreshPanel
+        batchId={batchId}
+        busy={!!isGenerating || isSequentialProcessing || isBatchRegenerating || bossRegen.running
+          || isFixedRegenerating || isRepairing || isAutoTesting || batchTestProgress.status === 'running'}
+        unsavedLevelNumber={dialDirty && selectedLevel ? selectedLevel.meta.level_number : null}
+        onApplied={() => { void loadLevels(); }}
+      />
 
       {/* Sequential Auto Process Panel - auto_single mode */}
       {testMode === 'auto_single' && (() => {

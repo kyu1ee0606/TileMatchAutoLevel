@@ -23,6 +23,9 @@ export interface LevelJSON {
   useTileCount?: number;  // 타일 종류 수 (1-15)
   randSeed?: number;  // 랜덤 시드 = 배치/그룹 시드
   visualTileSeed?: number;  // 비주얼 타일 시드: 배치 고정 후 스프라이트 인덱스만 t1~15 풀에서 재매핑 (>=0 결정적/-1 런타임랜덤/없음=리맵 안 함)
+  // [DDA 문서 47] 검증된 시드 5개(쉼표 구분·공백 없음). 'DDA 시드 갱신' 버튼만 채운다. 익스포트는 유효할 때만 값, 아니면 "".
+  ddaEasySeeds?: string;
+  ddaHardSeeds?: string;
   unlockTile?: number;  // key 기믹: 버퍼 잠금 슬롯 수 (key 타일 3개로 1칸 해제)
   timea?: number;  // time_attack 기믹: 제한 시간 (초)
   rewardCoin?: number;  // GBoost 업로드용 리워드 코인 (없으면 백엔드 기본값 10)
@@ -154,6 +157,8 @@ export interface LevelMetadata {
   version?: string;
   difficulty?: number;
   thumbnail_data?: LevelJSON; // For thumbnail preview
+  dda_easy_seeds?: string | null; // [DDA 문서 47] 서버 levels.ddaEasySeeds 현재 값 (컬럼 없으면 null/없음)
+  dda_hard_seeds?: string | null;
 }
 
 // Tile type definitions

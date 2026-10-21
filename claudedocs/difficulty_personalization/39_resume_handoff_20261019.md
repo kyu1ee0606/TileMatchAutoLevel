@@ -91,5 +91,10 @@
 
 재부팅 후 측정 ①·② 와 비교해 개발 도구 실행분 증가량을 본다.
 
+## G. 출시 순서·DDA 세트 준비도 (2026-10-19 추가, 문서 43)
+- 순서: **신규 이벤트 안정화 → 실패 시 하트 소모 정책 테스트·안정화 → 동적 난이도 실제 실험**. DDA 준비는 계속하되 실제 적용은 하트 정책 안정화 이후 별도 승인으로만 한다.
+- 기존 AF는 전부 변경 전 하트 정책 시기 자료다. 변경 후 기준선 p0·보정 모델·β 0.43·파일럿 검정력·가드레일을 다시 확인한다(문서 43 §6).
+- R2 296세트: A 77 / B 78 / C 141. 가장 짧은 경로는 기존 파일럿 21(봇 0판). 준비 가능 ≠ 라이브 검증·출시 승인.
+
 ## 근거
 [문서 32](32_resume_handoff_20261016.md) · [26](26_bot_v24.md)(봇 v2.4, 원본은 `_wt_botv24`) · [29](29_pilot_handoff.md) · [31](31_target_clear_rate_design.md) · [33](33_parallel_display_scope.md) · [37](37_resource_baseline.md) · 문서 10 §9-8~12 · 문서 36(`/Users/casualdev/TileMatchAutoLevel_wt_lowband/claudedocs/difficulty_personalization/36_lowband_candidates.md`) · 문서 38·38b(`/Users/casualdev/TileMatchAutoLevel_wt_clearrate/claudedocs/difficulty_personalization/`). 이 문서는 모델 교체·기준 변경·병합·push 승인이 아니다.

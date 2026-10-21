@@ -1,5 +1,18 @@
 # 38b. 검증 탭 2차 구현 — 경량 검증 로그 (하위세션 "경량검증", 2026-10-16~)
 
+## Codex 실제 브라우저 경량 검증 — 2026-10-16 21:38~21:44 KST
+
+- 격리 환경: worktree uvicorn 8001(PID55943), Vite 5174(PID55970), IAB `http://127.0.0.1:5174`. `/api/production/batches` 프록시 응답 fixture 2개만 확인 후 진입. 첫 동기화 화면 업로드0/다운로드2 확인. 메인8000/5173 접근·변경 없음.
+- **실제 UI PASS:** 검증 탭 3레벨 표시; 구간237~239=95%, 주기10/위치8=90%, 개별238=88% 입력→미리보기에서237/239=95%(구간),238=88%(개별)→적용. `v1 · tc-b4966f0c` 표시.
+- **실제 IndexedDB 목표 복원 PASS:** 브라우저 새로고침 후 프로덕션→검증 재진입 시 입력값/해시/각 행 목표95·88·95 유지. 페이지 탭 자체는 기본 에디터로 돌아가므로 재진입해서 확인함.
+- **정상 배치 전환 PASS(경합 검증 아님):** 빈 fixture 선택 시 레벨 행 제거, 원래 fixture로 돌아오면 저장된 목표/행 복원. 진행 중 측정이나 지연 응답을 만들지 않았으므로 B3 비동기 경합 전체 PASS로 해석 금지.
+- **관측 범위 신규 봇/C 생성 요청0:** 이 서버 실행의 전체 access log는 production GET, gboost health GET, verify/info GET, target-check POST 1건뿐. verify/jobs 생성·autoplay·generate 호출 없음. A 탐색/C 준비·실행/판정/중앙정렬은 누르지 않음.
+- **미검증 유지:** 실제 C 기록/작업 복원, F1 실패응답의 실제 회색배지, G1 맵 변경, 지연응답 경합, 저장 실패. 미리보기 표가 88%에 `현 모델로 신뢰 판정: 가능`이라 표시됨: 입력 지원과 합격 가능성을 혼동할 여지가 있어 문구 의미 점검 필요(수치 기준 변경 금지).
+- 관찰: 최초 동기화 직후 배치 selector에 이름은 있지만 본문 `배치가 없습니다`가 나왔음. 빈 배치를 선택 후 돌아오면 정상, 새로고침 후 재진입은 정상. 새 배치 생성 버튼은 누르지 않음. fixture/기존 대시보드 초기선택 경로인지 후속 정적 조사 필요.
+- 자원: 시작 swap53149.06M/압박2 → 기동53221.75M/압박2 → UI검증53760.75M/압박2. 약612MiB 증가하여 검증을 짧게 종료. 종료직후53752.75M/압박2; 즉시 기준값 복귀했다고 주장하지 않음.
+- 정리: IAB 테스트 탭 닫음, 본인이 띄운 PID55943/55970만 TERM 종료,8001/5174 listener 없음 확인. fixture 파일과 검증 origin 목표 저장은 후속 재현용 보존. 임시 설정 `/tmp/codex-cr-20261016-vite.config.ts` 보존(서버 비실행). 코드 수정/커밋/푸시/전체테스트/봇 실행 없음.
+
+
 승인 범위: 메인 venv 재사용(백엔드 :8001) + 워크트리 `npm ci`(프론트 :5174, proxy→8001). 봇 측정·생성 탐색·재학습·전체 테스트/빌드·Unity·운영 데이터 변경·모델/기준 변경·병합/push 전부 금지. 문서 38 '최신 인계'(미커밋)는 읽기만, 수정 안 함.
 
 ## 단계별 기록
@@ -395,3 +408,268 @@ rm -f /tmp/wt_clearrate_vite.config.ts /tmp/wt_clearrate_backend.log /tmp/wt_cle
 2. fixture·push 사본 삭제: `rm -r /Users/casualdev/TileMatchAutoLevel_wt_clearrate/backend/data/production`(이번에 새로 만든 디렉터리 — 이 안에는 fixture 2개와 실행 중 생긴 `_index.json`·push 사본만 있어야 함, 지우기 전 `ls` 로 확인). C 를 실행했다면 `backend/data/clear_rate_verify/{jobs,measurements}.json` 도 확인 후 삭제(현재 없음).
 3. 테스트 브라우저 프로필 삭제(또는 `localhost:5174` origin 의 IndexedDB `TileMatchProduction`·`TileMatchClearRateVerify` 삭제).
 4. 메인 트리 `backend/data/production`·`:5173` IndexedDB 는 손대지 않음.
+
+---
+
+## 이번 작업 — 실제 UI 발견 2건 국소 수정 (2026-10-16 22:10 Codex 지시, 하위세션 "정적감사")
+
+> Codex 실제 UI 검증(8001/5174 격리)에서 발견된 문제의 **코드 수정만**. 수정 후 실제 UI 검증은 **별도(미실시)**. 서버·브라우저·tsc·테스트 실행 0회(테스트 작성만). 위 Codex 기록·문서 38 상단 미커밋분은 건드리지 않음(이 절은 파일 끝에 추가만). 착수 전 `git status`: `ProductionDashboard/index.tsx` clean 확인.
+
+### 1. 새 프로필 첫 동기화 직후 셀렉터에는 fixture 가 보이나 본문이 빔
+- 원인: 로컬 배치 0개 → 초기 선택 `null`. 백그라운드 `syncBidirectional` 후 `setBatches` 만 하고 선택은 그대로 → 셀렉터 `value=''` 에 해당 option 이 없어 브라우저가 첫 항목을 표시(상태는 null, 본문은 `selectedBatchId &&` 조건으로 미렌더). 같은 항목 재선택은 onChange 가 없어 복구 안 됨.
+- 수정:
+  - `frontend/src/components/ProductionDashboard/batchSelection.ts`(신규): `latestBatchId`, `pickSelectedBatchId(cur, batches)` — 현재 선택이 목록에 있으면 보존, 없을 때만 created_at 최신(없으면 null).
+  - `ProductionDashboard/index.tsx:59` import, `:1026` `let cancelled`, `:1047-1052` 동기화 후 `if (cancelled) return; setBatches(bs); setSelectedBatchId(cur => pickSelectedBatchId(cur, bs))`(함수형 — 그사이 사용자가 고른 배치 보존), `:1063` effect cleanup `cancelled = true`(언마운트 뒤 늦은 응답 무시), `:2349` 선택 없음일 때 `<option value="" disabled>배치 선택</option>`.
+- 재검증: 새 프로필 `:5174`+`:8001`(fixture 만) 첫 진입 → 동기화 알림 뒤 **새로고침 없이** 최신 fixture 가 선택되고 본문 표시 / 동기화 전에 다른 배치를 고른 경우 선택 유지 / 로컬·서버 모두 0개면 셀렉터 "배치 선택"·본문 없음.
+
+### 2. 목표 미리보기 "현 모델로 신뢰 판정: 가능" 과장
+- 원인: 칸은 `/verify/target-check` 의 `judgeable`(= `user_expected_precheck` 코드 없음: 배치 위치 학습 범위·목표 0.85 이상·구간 학습 p5~p95)만 반영. 측정 후 예측 구간 신뢰도 게이트(`guard.reliability_flags`)는 반영 안 됨 → "신뢰 판정 가능"은 과장.
+- 수정(문구만, API·스키마·모델·판정식 변경 없음, 모델 수치 하드코딩 없음):
+  - `ClearRate/clearRateLabels.ts:60-70` `TARGET_SUPPORT_HEADER='현 모델 입력 지원 범위'`, `TARGET_SUPPORT_NOTE`(입력 지원 범위 통과는 합격·높은 신뢰도를 보장하지 않음, 실제 판정은 측정 결과와 현재 모델 신뢰도 기준을 함께 확인), `targetSupportText()` → `미확인`/`범위 안`/`범위 밖(사유)`.
+  - `ClearRate/ClearRateVerifySection.tsx:29` import, `:429` 미리보기 고정 안내(`cr-target-support-note`), `:432` 헤더, `:442` 칸.
+- 재검증: 미리보기에서 88% 등 입력 → 헤더 "현 모델 입력 지원 범위", 칸 "범위 안", 안내 문구 표시 / 85% 미만 → "범위 밖(신뢰 낮음)".
+
+### 작성한 테스트 (미실행)
+- `frontend/tests/batchSelection.test.ts`(신규, 4건): 최신 선택·빈 목록 null / 새 프로필 첫 pull → 최신 / 현재 선택 보존 / 목록에 없으면 최신·빈 목록 null.
+- `frontend/tests/clearRateLabels.test.ts`(1건 추가): 헤더·칸 문구, "신뢰/가능/합격" 미사용, 안내에 숫자 없음.
+- 실행 명령(승인 시): `cd frontend && node --experimental-strip-types --test tests/batchSelection.test.ts tests/clearRateLabels.test.ts` (둘 다 runtime import 순수 모듈뿐 — `batchSelection.ts` import 없음, `clearRateLabels.ts` type-only import).
+- 남은 위험: `index.tsx` 는 확인된 시점(메인 HEAD `329a1a0`, 문서 38 §13)의 메인 커밋과 이 브랜치가 분기한 상태 — 병합 시 이번 5곳 충돌 확인 필요. (정정 2026-10-16 22:40: 현시점 메인 작업트리의 실제 `git status` 는 이번에 읽지 않았으므로 미커밋 여부·clean 여부를 단정하지 않음.) 타입 검사 미실행.
+
+---
+
+## 최종 상태표 (2026-10-16 22:40 작성 · 23:42 Codex UI 확인 결과로 갱신 — 문서 정리만, 실행·코딩 없음)
+
+**상태 구분: 경량 검증 부분 완료 — 전체 목표 완료 아님.**
+
+| 구분 | 항목 | 근거·조건 |
+|---|---|---|
+| 실제 UI PASS | 목표 곡선 저장·복원(구간·주기·개별 → 미리보기 → 적용 → 새로고침·재진입 복원) | Codex 브라우저(IAB), `:8001`/`:5174` 격리, fixture(`codex_ui_fixture_20261016_a/_empty`)만 |
+| 실제 UI PASS | 정상 배치 전환(빈 배치 ↔ 원배치, 행 없음 → 복원) | 같은 조건 |
+| 순수 함수 PASS | `frontend/tests/clearRateVerifyModel.test.ts` 14/14 | B3·F1·G1 수정 반영본(`413154e`) 기준, 20:39 1회 실행 |
+| 실제 UI PASS | 최신 `3b50d17` 최초 배치 선택(fixture pull 후 선택 조작·새로고침 없이 `fixture_a` 본문 표시) · 미리보기 문구("현 모델 입력 지원 범위"·"범위 안"·합격/고신뢰 보장 아님 안내, L237~239 88%) | 2026-10-16 23:42 Codex, `localhost:5174` 별도 origin + `:8001` fixture. 요청은 GET + target-check POST 1회, 봇·C 실행 0 |
+| 순수 함수 PASS | `tests/batchSelection.test.ts` + `tests/clearRateLabels.test.ts` 14/14 | 23:09 1회 실행 |
+| 미검증 | 실제 C 측정 기록·서버 재시작 복구 | 봇 측정 필요(별도 승인) |
+| 미검증 | F1 버전 조회 실패 표시(실UI) | 브라우저에서 `/verify/info` 차단 필요 |
+| 미검증 | G1 같은 배치 맵 변경 후 다시 읽기·무효화(실UI) | fixture 에서 중앙정렬 변경 발생 여부 불확실 |
+| 미검증 | 비동기 경합(배치 전환·맵 갱신 중 늦은 응답) 실UI | 정적 검토·코드 수정만 |
+
+### 다음 자원 안정 후 최소 순서 — **완료**(1단계 23:09 단위 테스트 14/14 · 2단계 23:42 Codex 실제 UI PASS)
+각 단계 전후로 시각·`memory_pressure` 요약·`sysctl vm.swapusage` 기록, 압박 악화(스왑 지속 증가·경고 상승·응답 저하) 시 즉시 중단.
+1. ✅ 최신 2파일 단위 테스트 1회: `cd TileMatchAutoLevel_wt_clearrate/frontend && node --experimental-strip-types --test tests/batchSelection.test.ts tests/clearRateLabels.test.ts` (실행 전 runtime import 순수 여부 재확인).
+2. ✅ `:5174` 새 프로필 + `:8001` fixture 로 첫 진입 배치 선택(새로고침 없이 본문 표시)·미리보기 문구("현 모델 입력 지원 범위"/"범위 안"/안내) UI 재검증 1회. 기동·종료 명령은 위 "서버 측 UI fixture 준비" 절. → 23:42 Codex PASS, 서버·탭 종료·포트 비어 있음, swap 52948.56→52940.56M·압박 2 유지(Codex 기록)
+
+### 38 상단 '최신 인계'(사용자 미커밋 — 수정 안 함) 갱신 필요 항목
+- "남은 한계" 의 "실제 UI 저장 복원은 아직 검증하지 않았다" → 부분 갱신 필요: 목표 곡선 저장·복원, 배치 전환, 최초 배치 선택, 미리보기 문구는 fixture 격리 환경 실제 UI PASS(38b 최종 상태표). 판정 기록·C 작업 참조 복원, 실제 C 실행·취소·서버 복구는 여전히 미검증.
+- "이번 기록 작업에서는 실행 검증을 하지 않았다"·경량 검증 범위 1~7 은 19시 시점 계획 — 이후 실행분(단위 테스트 2회, Codex 실제 UI 2회)은 38b 참조로 연결 필요.
+- 미리보기 칸 의미 변경("신뢰 판정 가능" → "입력 지원 범위", `3b50d17`)이 §11 [미리보기] 설명("현 모델로 신뢰 판정: 가능/불가")과 다름 → §11 문구도 맞출 필요(38 본문은 상단 미커밋과 같은 파일이라 이번에 수정 안 함).
+
+---
+
+## 최소 계획 1단계 — 최신 2파일 단위 테스트 1회 (2026-10-16 23:09 KST, Codex 23:09 지시)
+
+> **순수 함수 단위 테스트 PASS ≠ UI PASS.** 초기 배치 선택(동기화 후 화면 반영)·미리보기 문구 화면 표시는 2단계(5174 새 프로필 + 8001 fixture) 전까지 **미검증**.
+
+- 실행 전 runtime import 확인: `tests/batchSelection.test.ts` → `node:test`, `node:assert/strict`, `src/components/ProductionDashboard/batchSelection.ts`(import 없음). `tests/clearRateLabels.test.ts` → `node:test`, `node:assert/strict`, `src/components/ClearRate/clearRateLabels.ts`(`api/clearRateTarget` 은 **type-only**). 네트워크·IndexedDB·타이머·서버·봇 경로 0건.
+- 명령(1회): `cd TileMatchAutoLevel_wt_clearrate/frontend && node --experimental-strip-types --test tests/batchSelection.test.ts tests/clearRateLabels.test.ts`
+- 결과: **14/14 PASS, fail 0**, exit 0, 120ms (batchSelection 4건 + clearRateLabels 10건 — 기존 9 + 이번 문구 1).
+- 자원: 전 23:09:38 — free% 36, swap used 53105.00M / 54272M (free 1167.00M) · 후 23:09:38 — 동일. 변화 없음.
+- `clearRateVerifyModel.test.ts` 재실행·전체 테스트·tsc·빌드·서버·브라우저·봇 없음.
+
+## 최소 계획 2단계 — 실제 UI 재확인 (2026-10-16 23:38~23:42 KST, Codex)
+
+- `3b50d17` 기준, worktree 전용 8001/5174와 기존 fixture 두 개만 사용. 이전 `127.0.0.1:5174`와 저장소가 분리되는 `localhost:5174` origin으로 확인(새 브라우저 프로필로 표현하지 않음).
+- **실제 UI PASS:** 최초 프로덕션 진입·서버 fixture 동기화 후 선택 조작/새로고침 없이 fixture_a가 선택되고 본문 3개 레벨 표시. 이전 선택/본문 불일치 재현되지 않음.
+- **실제 UI PASS:** 검증 탭에서 L237~239 목표 88% 미리보기 → 헤더 `현 모델 입력 지원 범위`, 각 행 `범위 안`, 합격·높은 신뢰도를 보장하지 않는다는 고정 안내 확인. 적용 버튼은 누르지 않음.
+- 접근 로그: GET(배치 목록/fixture/health/verify info)와 `POST /api/clear-rate/verify/target-check` 1회뿐. 신규 봇·C 실행 요청 0건. 생성/중앙정렬/서버 저장 미실행.
+- 테스트 탭 종료, 직접 기동한 backend PID 67750/frontend PID 67777 종료. 메인 8000/5173 미변경.
+- 자원: 시작 swap used 52948.56M → 종료 직후 52940.56M, 압박 수준 2 유지. 자원 완전 정상화 판정은 하지 않음.
+- 위 이전 상태표의 `3b50d17 작성만·미실행`은 이 기록 및 23:09 순수 함수 PASS로 대체. 기존 C 실측/서버 복구, F1 실패 실UI, G1 변경 실UI, 비동기 경합은 여전히 미검증. 이번 확인 항목은 반복 실행하지 않음.
+
+---
+
+## 남은 미검증 재개 준비 — F1·G1·비동기 경합 (2026-10-18 11:15~ KST, 사용자 추가 승인, 기한 10-18 23:00)
+
+> 이 세션에는 브라우저 제어 도구가 없다 → **실제 UI 단계는 전부 Codex 브라우저 몫.** 여기서는 조사(읽기)·준비물·절차서만. 서버 기동·테스트 실행·API 호출·봇·C 0회. 커밋 안 함.
+
+### 0. 자원·프로세스 (11:15:38 KST)
+- `memory_pressure`: free 36% · `kern.memorystatus_vm_pressure_level` = 2(경고, 이전과 같음) · swap used 54744.25M / 55296M (**free 551.75M** — 10-16 23:09 의 1167M 대비 절반 이하) · `df -h /` 여유 49Gi(25%).
+- 판단: 압박 단계는 그대로지만 스왑 여유가 크게 줄어 **새 실행 없이 문서·파일 준비만**(신규 테스트 실행도 보류). Codex 기동 전 재측정 권장 — swap free 500M 미만이거나 압박 3 이면 기동 보류.
+- LISTEN: `:5173` node 34901, `:8000` Python 39400/90754(메인 — 손대지 않음). **`:8001`·`:5174` 없음**(이전 Codex 기동분 종료 확인, 중복 기동 없음).
+
+### 1. 주입 방법 조사 (읽기만)
+| 방법 | 가능 | 범위·위험 |
+|---|---|---|
+| (a) 프런트 기존 훅/환경 변수 | 부적합 | `api/client.ts:4` `VITE_API_URL`(전체 base 교체뿐), `:16-21` localStorage `remote_compute_url`(무거운 경로를 **원격으로 우회** — 새 프로필에서 비어 있는지 확인 필요, 주입 수단으로 쓰면 안 됨). 경로별 실패·지연 훅 없음 |
+| (b) `/tmp` vite 설정 플러그인 미들웨어 | **채택** | `configureServer` 에서 직접 `server.middlewares.use` 한 미들웨어는 vite 내부 미들웨어(프록시 포함)보다 먼저 실행 → 저장소 파일 수정 없이 `/api/*` 경로별 지연·500·403·응답 변조 가능. **비-GET 은 허용 목록 외 전부 403**(봇·C 작업 생성·생성·검증·RL·튜닝 차단), GET 은 `measure` 포함 경로 403. 런타임 토글은 브라우저로 `http://localhost:5174/__fault?...` 열기. 위험: axios 타임아웃 30s(`client.ts:12`) — 지연은 30s 미만으로(넘기면 타임아웃 오류 경로가 됨) |
+| (c) 8001 앞단 별도 지연 프록시 | 가능하나 불필요 | 프로세스 1개 추가(메모리), (b)와 기능 동일 |
+
+- **F1**: (b)로 `/api/clear-rate/verify/info` 만 500 또는 지연. 녹색 "합격" 오표시 차단을 실제로 보려면 PASS 기록이 필요하나 C 실행 금지 → 선택적 **mock**: (b)가 `/api/clear-rate/target-eval` 응답의 `user_expected.verdict.verdict` 를 `PASS` 로 바꿔 돌려줌(사유 앞에 `[MOCK PASS …]`) → 탐색 기록이 PASS 로 저장(테스트 프로필 IndexedDB 에만). 이 단계 결과는 **mock 검증**으로 구분.
+- **G1**: 봇·생성 없이 맵을 바꾸는 UI 경로 = BatchVerifyPanel [중앙정렬](`BVP:525-546` → `POST /api/analyze/fix-centering`, `routes/analyze.py:1389`, 봇 없음·레벨 변경). 정적 확인 결과 **L237 골든(fixture_a)은 `"layer": "3"`(문자열) → `_calc_visual_center_diff`(`analyze.py:1285-1287` `range(num_layers)`) 에서 TypeError → 500 예상** → fixture_a 로는 맵 변경 불가(그래도 `finally` 에서 `levelsRevision+1` → "맵 확인 중 → 다시 읽기" 경로는 탐). → G1 전용 fixture 를 새로 둠(아래). 정수 layer 로 보면 layer_2 시각 중심 4.0 vs layer_0 3.0 → `_fix_visual_centering`(`generator.py:14276~`)이 layer_2 를 1칸 이동할 것으로 정적 계산(실행 확인 아님). [재생성]·[배치 검증]은 생성/봇 → 금지(프록시도 403).
+- **경합**: (b)로 특정 경로만 지연(예: `target-eval`·`verify/plan`·`verify/info` 8~15s) → 지연 중 배치 전환·중앙정렬 → 늦은 응답이 새 화면에 쓰이는지 확인.
+
+### 2. 순수 함수·mock 범위 정리 (재실행 없음)
+- 이미 검증(10-16 20:39, `clearRateVerifyModel.test.ts` 14/14): 버전 null → `unconfirmed`(4조합) · 맵 미확인(mapHash null) → `unconfirmed`/완료 작업 `checking` · `unconfirmed` 배지 회색·"확인 불가:" · 버전 null 상태의 assess→display 회색 연결.
+- 컴포넌트 세대 경계(`gen`/`mapEpoch`)·레벨 다시 읽기는 React/DOM 필요 → 순수 함수로 더 뺄 부분 없음 → **신규 테스트 작성 없음**(자원 판단상 실행도 보류).
+
+### 3. 준비물
+**3-1. G1 fixture (생성함, 미추적 — `git status --ignored` → `!! backend/data/production/`)**
+`TileMatchAutoLevel_wt_clearrate/backend/data/production/codex_ui_fixture_20261018_g1.json` — id `codex_ui_fixture_20261018_g1`, 이름 `[FIXTURE] codex_ui_20261018_g1 — L237 골든(layer 정수화) 1레벨, 중앙정렬 G1용`, L237 1레벨. 골든 `level_json` 에서 `"layer": "3"` → `3` 만 변경(타일·좌표 무변경), `fixture_note` 에 실제 레벨 아님·변경 내용 명시. 허위 측정·검증·보상 필드 없음, status `needs_rework`. 기존 fixture 2개·`_index.json` 은 그대로.
+
+**3-2. 지연·실패 주입 + 위험 경로 차단 vite 설정** — `/tmp/wt_clearrate_vite.fault.config.ts` (Codex 가 heredoc 으로 생성; 이 세션은 만들지 않음):
+```ts
+import { defineConfig, mergeConfig, type Plugin } from 'vite'
+import { appendFileSync } from 'node:fs'
+import base from '/Users/casualdev/TileMatchAutoLevel_wt_clearrate/frontend/vite.config.ts'
+
+const BACKEND = 'http://127.0.0.1:8001'
+const LOG = '/tmp/wt_clearrate_fault.log'
+// 비-GET 허용 목록 — 이 밖의 비-GET /api 는 전부 403 (봇·C 작업 생성·생성·검증·RL·튜닝·야간학습 등)
+const ALLOW_WRITE: Array<[string, RegExp]> = [
+  ['POST', /^\/api\/clear-rate\/(target-eval|predict)$/],
+  ['POST', /^\/api\/clear-rate\/verify\/(plan|jobs\/query|evaluate|target-check)$/],
+  ['POST', /^\/api\/analyze\/fix-centering$/],
+  ['PUT', /^\/api\/production\/batches\/codex_ui_fixture_[A-Za-z0-9_]+$/],
+]
+const BLOCK_GET = /measure/i
+const state = { info: 'off', delays: {} as Record<string, number>, mockPass: false }
+const lines: string[] = []
+const log = (s: string) => {
+  const l = `${new Date().toISOString()} ${s}`
+  lines.push(l); if (lines.length > 500) lines.shift()
+  try { appendFileSync(LOG, l + '\n') } catch { /* ignore */ }
+}
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
+const readBody = (req: any) => new Promise<Buffer>((ok, bad) => {
+  const c: Buffer[] = []; req.on('data', (d: Buffer) => c.push(d)); req.on('end', () => ok(Buffer.concat(c))); req.on('error', bad)
+})
+const json = (res: any, status: number, body: unknown) => {
+  res.statusCode = status; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(body, null, 2))
+}
+
+function fault(): Plugin {
+  return {
+    name: 'wt-clearrate-fault',
+    configureServer(server) {
+      // 직접 use → vite 내부 미들웨어(/api 프록시 포함)보다 먼저 실행
+      server.middlewares.use(async (req: any, res: any, next: any) => {
+        const url = new URL(req.url ?? '/', 'http://x')
+        const path = url.pathname
+        const m = String(req.method ?? 'GET').toUpperCase()
+        if (path === '/__fault') {
+          const q = url.searchParams
+          if (q.has('reset')) { state.info = 'off'; state.delays = {}; state.mockPass = false }
+          if (q.has('info')) state.info = q.get('info')!                    // off | 500 | delay:<ms>
+          if (q.has('delay_path')) {                                         // 예: delay_path=/api/clear-rate/target-eval&ms=12000 (ms=0 해제)
+            const p = q.get('delay_path')!, ms = Number(q.get('ms') ?? 0)
+            if (ms > 0) state.delays[p] = ms; else delete state.delays[p]
+          }
+          if (q.has('mock_pass')) state.mockPass = q.get('mock_pass') === '1'
+          log(`CONTROL ${url.search}`)
+          return json(res, 200, { state, log: lines.slice(-80) })
+        }
+        if (!path.startsWith('/api/')) return next()
+        const blocked = m === 'GET' ? BLOCK_GET.test(path) : !ALLOW_WRITE.some(([mm, re]) => mm === m && re.test(path))
+        if (blocked) { log(`BLOCK403 ${m} ${path}`); return json(res, 403, { detail: 'blocked by wt-clearrate fault proxy' }) }
+        const d = state.delays[path]
+        if (d) { log(`DELAY ${d}ms ${m} ${path}`); await sleep(d) }
+        if (path === '/api/clear-rate/verify/info' && state.info !== 'off') {
+          if (state.info === '500') { log(`INFO500 ${m} ${path}`); return json(res, 500, { detail: 'injected failure (wt-clearrate fault proxy)' }) }
+          if (state.info.startsWith('delay:')) { const ms = Number(state.info.slice(6)); log(`INFODELAY ${ms}ms`); await sleep(ms) }
+        }
+        if (state.mockPass && m === 'POST' && path === '/api/clear-rate/target-eval') {
+          const body = await readBody(req)
+          const r = await fetch(BACKEND + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
+          const j: any = await r.json()
+          if (j?.user_expected?.verdict) {
+            j.user_expected.verdict.verdict = 'PASS'
+            j.user_expected.verdict.reason = '[MOCK PASS — fault proxy, 실제 판정 아님] ' + j.user_expected.verdict.reason
+          }
+          log(`MOCKPASS ${r.status} ${path}`)
+          return json(res, r.status, j)
+        }
+        log(`FWD ${m} ${path}`)
+        next()
+      })
+    },
+  }
+}
+
+export default mergeConfig(base, defineConfig({
+  plugins: [fault()],
+  server: { port: 5174, strictPort: true, proxy: { '/api': { target: BACKEND, changeOrigin: true } } },
+}))
+```
+(이 세션에서 실행·문법 검사 안 함. 기동 실패 시 로그 `/tmp/wt_clearrate_frontend.log` 확인.)
+
+### 4. Codex 절차서
+**기동**(앞 "서버 측 UI fixture 준비" 절과 같되 설정 파일만 교체):
+```
+# 0) 자원 재측정: date; memory_pressure | grep percentage; sysctl vm.swapusage kern.memorystatus_vm_pressure_level
+# 1) 백엔드 :8001
+cd /Users/casualdev/TileMatchAutoLevel_wt_clearrate/backend && nohup /Users/casualdev/TileMatchAutoLevel/backend/venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8001 > /tmp/wt_clearrate_backend.log 2>&1 & echo "backend PID $!"
+curl -s 127.0.0.1:8001/api/production/batches     # fixture 3개(a, empty, g1)만
+# 2) 위 3-2 내용을 /tmp/wt_clearrate_vite.fault.config.ts 로 저장 후 프런트 :5174
+cd /Users/casualdev/TileMatchAutoLevel_wt_clearrate/frontend && NODE_PATH=$PWD/node_modules nohup npx vite --config /tmp/wt_clearrate_vite.fault.config.ts > /tmp/wt_clearrate_frontend.log 2>&1 & echo "frontend PID $!"
+curl -s localhost:5174/api/production/batches     # (1)과 같음 = proxy→8001
+curl -s localhost:5174/__fault                    # {"state":{"info":"off",...}}
+curl -s -X POST localhost:5174/api/clear-rate/verify/jobs -o /dev/null -w '%{http_code}\n'   # 403 이어야 함(차단 확인, 백엔드 미도달)
+```
+브라우저: **새 프로필 `http://localhost:5174`** 만. 첫 진입 후 DevTools 없이도 확인 가능하도록 모든 판정은 화면 + `/__fault` 로그로 본다. 새 프로필의 localStorage `remote_compute_url` 은 비어 있어야 함(설정 화면에서 건드리지 말 것).
+
+**F1 — 버전 조회 실패·지연** (실제 UI)
+0. 사전: `__fault?reset=1` 상태에서 `fixture_a` 검증 탭 → 목표 곡선(예: 구간 237~239 95%) 적용 → [A 탐색 계산](봇 없음)으로 행 기록을 먼저 만든다(새 프로필엔 기록이 없음).
+1. 탭: `localhost:5174/__fault?info=500` → 대시보드 새로고침 → `fixture_a` → 검증 탭.
+2. 기대: `cr-info-error`("현재 모델·판정 기준 버전 조회 실패 … 회색 표시·합격 집계 제외") 표시. 기존 기록 행 판정은 "확인 불가: …" 회색, `cr-a-counts` 없음. 로그에 `INFO500`.
+3. `__fault?info=delay:12000` → 새로고침 → 12초 동안 `cr-info-loading` + 회색 "확인 불가"; 이후 문구 사라지고 정상 표시. 로그 `INFODELAY`.
+4. 판정: 2·3 화면대로면 **실제 UI PASS(F1 표시)**.
+5. (선택, **mock 검증**) `__fault?info=off&mock_pass=1` → 목표 곡선 적용 상태에서 [A 탐색 계산] → 행이 초록 "합격"(MOCK) → `__fault?info=500&mock_pass=0` → 새로고침 → 같은 행이 회색 "확인 불가: 합격", `cr-a-counts` 에 합격 미집계. → 결과는 "mock PASS"로만 보고(실제 판정 아님). 끝나면 테스트 프로필 폐기(MOCK 기록이 남음).
+
+**G1 — 같은 배치 맵 변경** (실제 UI)
+1. `__fault?reset=1` → `fixture_g1`(1레벨 L237) → 검증 탭 → 목표 곡선(예: 구간 237~237 95%) 적용 → [A 탐색 계산](target-eval, 봇 없음) → 행에 기록 생김(현재 유효 또는 근거 부족).
+2. 같은 화면 BatchVerifyPanel **[중앙정렬]** 클릭(봇 없음). 진행 중 섹션에 `cr-map-checking`("기존 배치 검증이 맵을 바꾸는 중"), A/B/C 버튼 비활성.
+3. 완료 후 `centeringResult` "1개 중 1개 수정됨" 기대 → 섹션이 레벨을 다시 읽고 해당 행이 **"측정 무효(맵·조건 변경)"** + 회색 "과거: …". 로그: `FWD POST /api/analyze/fix-centering`, `FWD PUT /api/production/batches/codex_ui_fixture_20261018_g1`(자동 push, 워크트리 저장소).
+4. 판정: 3이 맞으면 **실제 UI PASS(G1)**. "0개 수정됨"이거나 500 이면 맵 변경 없음 → G1 무효화 미검증 유지(단 2의 잠금·다시 읽기 문구가 보였으면 그 부분만 PASS로 기록). 정적 계산상 수정 1건 예상이나 실행 확인 아님.
+5. (C 준비 계획 폐기) 1 다음 L237 체크 → [C 확인 측정 준비](plan, 봇 없음) → 확인 패널 표시 상태에서 [중앙정렬] → 패널이 사라지고 "C 준비 결과를 비움" 문구. **[실행]은 절대 누르지 말 것**(프록시 403 이지만 누르지 않음).
+
+**비동기 경합** (실제 UI)
+- R1 탐색 중 배치 전환: `__fault?reset=1&delay_path=/api/clear-rate/target-eval&ms=12000` → `fixture_a`(3레벨) 곡선 적용 → [A 탐색 계산] → 2초 안에 상단 셀렉터로 `fixture_empty` 전환 → 15초 대기 → `fixture_a` 복귀. 기대: empty 화면에 행·오류·진행 문구 없음, 로그상 target-eval **1건만**(남은 2레벨 요청 없음), 복귀 후 a 화면 정상(늦게 끝난 1건은 a 기록으로만 저장돼도 됨).
+- R2 C 준비 응답 중 전환: `delay_path=/api/clear-rate/verify/plan&ms=12000` → a 에서 레벨 선택 → [C 확인 측정 준비] → 전환(empty) → 15초 → 기대: empty 에 확인 패널 없음, a 복귀 시에도 패널 없음(새 마운트).
+- R3 C 준비 응답 중 맵 갱신: g1 에서 `delay_path=/api/clear-rate/verify/plan&ms=12000` → [C 확인 측정 준비] → 곧바로 [중앙정렬] → 기대: plan 응답이 와도 패널 안 뜸 + "C 준비 결과를 비움" 문구.
+- R4 버전 지연 중 전환: `info=delay:12000` → a → 즉시 empty → 기대: empty 에 오류·잔상 없음.
+- 판정: 각 기대대로면 해당 R* **실제 UI PASS**. 하나라도 이전 배치 데이터가 새 화면에 보이면 FAIL — 화면·로그 캡처 후 보고.
+
+**종료·정리**
+```
+kill <backend PID> <frontend PID>; pgrep -f "vite --config /tmp/wt_clearrate_vite.fault" | xargs kill 2>/dev/null
+lsof -nP -iTCP:8001 -sTCP:LISTEN; lsof -nP -iTCP:5174 -sTCP:LISTEN     # 출력 없음
+cp /tmp/wt_clearrate_fault.log <기록 위치>   # 필요 시 38b 요약용
+rm -f /tmp/wt_clearrate_vite.fault.config.ts /tmp/wt_clearrate_fault.log /tmp/wt_clearrate_backend.log /tmp/wt_clearrate_frontend.log
+# 테스트 브라우저 프로필 삭제(MOCK 기록 포함). fixture 정리는 앞 절 방법(워크트리 backend/data/production 전체 삭제) — 이후 검증 계속하면 보존
+```
+
+### 5. 코드 읽기로 발견한 것 (수정 안 함, 보고만)
+- `POST /api/analyze/fix-centering`(`analyze.py:1285-1287` `_calc_visual_center_diff`, `generator.py:14285-14286` `num_layers < 2`)는 `level["layer"]` 가 **문자열이면 TypeError → 500**. 생산 레벨(에디터 형식)은 정수라 운영 영향은 확인 안 됨, 게임 빌드 형식(골든)에서만 재현 예상. 이번 범위(검증 탭) 밖 → 수정하지 않고 기록만. fixture_g1 은 이 때문에 정수 layer 로 둠.
+- 검증 탭 섹션 쪽 신규 결함은 이번 읽기에서 찾지 못함.
+
+### 이번 단계 실행·호출 내역
+서버 기동 0 · API 호출 0 · 봇 0 · C 0 · 테스트 실행 0 · 커밋 0. 실행한 것은 자원/포트 조회와 골든 JSON 읽기·fixture 파일 1개 쓰기(python 표준 라이브러리, 앱 모듈 import 없음)뿐.
+
+## 2026-10-19 Codex 경량 UI 재개 (10:18~10:22 KST)
+
+- 사용자 재승인으로 8001/5174만 실행. `/tmp/codex-cr-20261019.config.mts` 허용 목록 프록시 사용. 봇·생성·C 작업 제출 경로는 차단하고 호출하지 않음. 실제 봇 측정 0, C 준비 API만 사용. 게임·모델·판정 코드 변경 없음.
+- 실제 UI PASS(F1 부분): verify/info 500 및 12초 지연 주입 시 기존 캐시 판정이 `확인 불가: 근거 부족`로 표시. 오류/로딩 안내 확인. 기존 PASS를 회색으로 바꾸는 mock PASS 시험은 미실시. 지연 후 정상 복원 단독 시험도 미완료.
+- 실제 UI PASS(R1 부분): fixture_g1의 target-eval을 12초 지연하고 빈 배치로 전환. 늦은 응답 후 빈 배치에 레벨 행이 생기지 않음. 다중 레벨 후속 요청 중단 시험은 미실시(1레벨 사용).
+- 실제 UI PASS(R2): C plan을 12초 지연하고 빈 배치 전환. 응답 후 빈 배치 및 원래 배치 재진입에 C 실행 전 확인 패널이 남지 않음. C 실행 버튼은 누르지 않음.
+- 실제 UI PASS(G1): fixture_g1 목표 95% 적용·캐시 탐색 결과 생성·C 준비 패널 표시 후 중앙정렬. `전체 1개 중 1개 수정됨`, `측정 무효(맵·조건 변경)`, `C 준비 결과를 비움` 확인. 변경은 테스트 fixture/로컬 UI 저장에만 한정. 기존 fixture는 삭제하지 않음.
+- R3(지연된 plan 중 맵 갱신), R4(버전 지연 중 배치 전환), 실제 C 실측·서버 재시작 복구는 미검증 유지. 전체 경량 QA 완료로 보지 않음.
+- 실행 중 자원: 압박 1, swap used 22367.50 → 22271.50M. 앞선 경고 2 상태와 달리 이 실행에서는 정상 단계 확인. 재부팅/프로세스 강제 정리 수행 없음.
+- 초기 임시 Vite `.ts` 설정은 ESM 로딩 실패하여 `.mts`로 수정 후 기동. 전체 빌드·tsc·신규 테스트·커밋·푸시 없음.
+
+## 2026-10-19 P5 — 활성 bot_cache 8개 측정 격리 (미커밋)
+
+- 원인: 문서 42(메인) §3. L429·433·441·466·479·493·494·499 캐시 행이 행동 항목을 켠 봇 측정인데 라벨은 v2.4/`theta4x128_v1`/`seed11M`이다. 그래서 G3로 걸리지 않고 `/predict`·검증 탭 캐시 판정에 수치가 나왔다(변경 전 7/8은 `ok`, 예측값 표시).
+- 격리 키: 모델 `cr-ftany-v24r-20261016` + 봇 v2.4/`theta4x128_v1` + `cond_hash`(맵+조건) + 측정 행 sha256. 레벨 번호와 `seed_band`는 키에 넣지 않았다. 근거: `protocol_review.json` sha256 `edab9428…`.
+- 적용 위치: `guard.bot_flags` 1곳 → `/predict`와 `/target-eval use_cached_measurement` 공통. 새 hard 코드는 `BOT_CACHE_CONDITION_MISMATCH`("측정 조건 불일치 → 근거 부족")이다. 수치·봇 승률을 내지 않으며, 자동 측정·C로 넘어가지 않는다.
+- 변경: `guard.py` 9–10·21·23–63·101–103, `predict.py` 115–117, `clearRateLabels.ts` 19, `api/clearRate.ts` 17–18, `frontend/tests/clearRateLabels.test.ts` +1. 신규 파일: `backend/tests/test_clear_rate_p5_quarantine.py`, `backend/tests/golden/clear_rate_p5_quarantine.json`.
+- 경량 검증(봇·measure·C 경로를 호출 시 실패하게 패치): P5 테스트 24 passed. 기존 캐시 API 테스트 3 passed. 라벨 테스트 11/11. 정상 5맵은 변경 전 응답과 바이트 동일. 봇 0, 재학습 0. 활성 모델 4파일 sha256 불변. 압박 2, 스왑 여유 588→836MB.
+- 미검증: tsc·빌드·전체 테스트·UI 표시.

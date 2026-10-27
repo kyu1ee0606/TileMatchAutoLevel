@@ -496,4 +496,4 @@ QA 확인 항목:
 - **순서 변화**: 최종 실패·포기는 level_summary(하트 정산) → dda_play(DdaRuntime) 순, 클리어는 level_summary → dda_play(`OnClear`) 순. 분석은 순서에 의존하지 않는다.
 - 파라미터 22개·정의·운영 전송 OFF는 그대로.
 
-> **상태(2026-10-27)**: 게임 코드 구현 완료(sp_meowsgarden 1.1.2.90·.91·.94·.98 + DDA 옛 저장본 호환 1.1.2.95), 에디터 QA PASS 13/16 + .09 재검증 PASS, 외부 MMP 이벤트 시트 `level_summary` 행 사용자 입력 완료. 남은 것: .10 열쇠 해제 순번 k(수동 플레이)·.11 실수신(운영 전송 ON 후 AF/Firebase 수신 확인으로 대체)·.07 구간 내 undo·자동수집·.01 abandon. 운영 전송 ON(`ProductionSendApproved=true`)은 별도 승인.
+> **상태(2026-10-27)**: 게임 코드 구현 완료(sp_meowsgarden 1.1.2.90·.91·.94·.98 + DDA 옛 저장본 호환 1.1.2.95), 에디터 QA PASS 13/16 + .09 재검증 PASS, 외부 MMP 이벤트 시트 `level_summary` 행 사용자 입력 완료. 남은 것: .10 열쇠 해제 순번 k(수동 플레이)·.11 실수신(다음 배포 후 AF/Firebase 대시보드 확인)·.07 구간 내 undo·자동수집·.01 abandon. 별도 발송 게이트(`ProductionSendApproved`)는 1.1.2.100에서 제거 — 다른 MMP 이벤트와 동일 발송.

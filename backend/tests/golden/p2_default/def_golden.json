@@ -1,0 +1,94 @@
+{
+ "core": "39d2de55778afa1e1cc605b56c27773d2dcd961743b2e3dca52d79acc3a80c04",
+ "seedbase": 72000000,
+ "rows": [
+  {
+   "L": 374,
+   "theta": 0.85,
+   "ver": "v2.4",
+   "g": 0,
+   "seq": "33c619a420995671",
+   "n": 52,
+   "cleared": false,
+   "moves": 52,
+   "reason": "Normal"
+  },
+  {
+   "L": 374,
+   "theta": 1.2,
+   "ver": "v2.4",
+   "g": 0,
+   "seq": "ffa5d2dfe6028fb5",
+   "n": 66,
+   "cleared": true,
+   "moves": 66,
+   "reason": null
+  },
+  {
+   "L": 172,
+   "theta": 0.85,
+   "ver": "v2.4",
+   "g": 0,
+   "seq": "c88561de3a9615ba",
+   "n": 64,
+   "cleared": true,
+   "moves": 64,
+   "reason": null
+  },
+  {
+   "L": 172,
+   "theta": 1.2,
+   "ver": "v2.4",
+   "g": 0,
+   "seq": "23fa07d9b72e15f0",
+   "n": 64,
+   "cleared": true,
+   "moves": 64,
+   "reason": null
+  },
+  {
+   "L": 374,
+   "theta": 0.85,
+   "ver": "v1",
+   "g": 0,
+   "seq": "7d617bde000360ad",
+   "n": 49,
+   "cleared": false,
+   "moves": 49,
+   "reason": "Normal"
+  },
+  {
+   "L": 374,
+   "theta": 1.2,
+   "ver": "v1",
+   "g": 0,
+   "seq": "866f36ae6f5035d3",
+   "n": 49,
+   "cleared": false,
+   "moves": 49,
+   "reason": "Normal"
+  },
+  {
+   "L": 172,
+   "theta": 0.85,
+   "ver": "v1",
+   "g": 0,
+   "seq": "8a93d885691a0a3c",
+   "n": 64,
+   "cleared": true,
+   "moves": 64,
+   "reason": null
+  },
+  {
+   "L": 172,
+   "theta": 1.2,
+   "ver": "v1",
+   "g": 0,
+   "seq": "aafd1db3588fc378",
+   "n": 64,
+   "cleared": true,
+   "moves": 64,
+   "reason": null
+  }
+ ]
+}

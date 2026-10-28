@@ -1,9 +1,117 @@
 # TileMatchAutoLevel - TODO 리스트
 
+## 봇 계획 능력·craft 공개 추론 (2026-10-27)
+
+- [ ] **(재개 대기 2026-10-27 20:00)** A 완료(dev 96행·2,048판, pick **D3**) · B-1 코어 정렬 완료(코어 a89a29ab…, parity 통과), B-2 DDA 프로필 정렬 미착수(계획만). 남은 C(문서 70 PREREG, 다음 주)→D→E: [resume_note_20261027_2000](difficulty_personalization/resume_note_20261027_2000.md). 누적 약 130,456/195,000.
+
+- [x] `skill_planning`(#1)·`public_craft_belief`(#2) opt-in 구현, 테스트, 비용 측정(판당 ≤0.5초). 코어 4196e75a. [56](difficulty_personalization/56_bot_planning_craft_belief_20261027.md).
+- [x] PREREG 16,000판 완료: P1·P2·P12 모두 기계 판정 미지지. P2는 N TV 부동소수 오차(1e-16)만 실패. craft 맵 일반 실패 크게 감소. N 맵이 쉬운 초반 맵 위주라 검정력 부족. [56 §6~8](difficulty_personalization/56_bot_planning_craft_belief_20261027.md).
+- [x] P2 사후 허용오차(1e-12) 재판정: P2 지지(원판정 보존, 사후 적용 명시). [56 §6](difficulty_personalization/56_bot_planning_craft_belief_20261027.md).
+- [x] 열쇠 배치·독 잠금 게임 정합(사용자 승인 기본 반영, 코어 cbc2e652): golden 불일치 0, unlockTile=0·출하 key 맵 결과 불변. L138 원인 = 봇 전략(c). [26 상단](difficulty_personalization/26_bot_v24.md), [56 §9](difficulty_personalization/56_bot_planning_craft_belief_20261027.md).
+- [x] 자원 가드 변경: swap 0MB 환경 → `scripts/run_guard_20261027.py`(압력 critical 아님·가용 ≥1.5GB·디스크 ≥10GiB, 미달 시 대기/중지). [57 §2](difficulty_personalization/57_bot_hard_maps_key_prereg_20261027.md).
+- [x] 57 PREREG 측정 완료 21,120판(누적 약 60,700): H(어려운 미사용 10맵) P2·P12 미지지 / K(key 28맵) K1·K2 모두 지지(KN 클리어 MAE 37.3→14.5·14.8%p, L138 0.8→77~83%). [57 §6](difficulty_personalization/57_bot_hard_maps_key_prereg_20261027.md).
+- [ ] (사용자 결정) K1(key_first, 코어 변경 없음) 또는 K2(코어 이식 필요, 277·424 악화) 기본 채택 · P2 기본 채택(근거 엇갈림) · H 잔여 오차(풀 실패 과소·폭탄 과대).
+- [ ] 다음 러너부터 STOP 플래그 파일(행 경계에서 확인 후 정상 종료) 도입 — 57 러너는 SIGINT 무시로 SIGTERM 정지 필요했음(manifest/sha 고정 때문에 57 러너는 수정 안 함).
+- [x] Codex 리뷰(20261027-113836) 테스트 보강: g5 `key` 허용을 unlockTile>0으로 한정, 수정 전 코어(4196e75a) 스냅샷 `tests/golden/key_parity/legacy_4196e75a.json` 대비 unlockTile=0 2,009건 불변(문자열·카운트·잠금·RNG), 해석기 예외 강제 폴백 10건, t16·효과 key 혼재 정규화·3매치 해제. 회귀 4,393 PASS. 코어 무수정.
+- [ ] (기록) 기존 코어 특성: `all_tile_type_counts`가 스택 맨 위(state.tiles의 스택 타일)를 세지 않음(bot_simulator.py:1492-1503, 열쇠 수정과 무관·모든 스택 맵). 의도 여부 확인 필요.
+- [x] 58 풀·폭탄 PREREG 16,704판(누적 약 77,600): G(덮인 풀 무지각) gate 실패·미지지, C(폭탄 인지 유지) 클리어·폭탄 실패 오차 크게 개선했으나 실패 분포 TV 악화로 미지지, GC 동일, ALL(K1+P2+G+C) 보고 V 클리어 MAE 13.3→7.9%p. [58 §6](difficulty_personalization/58_bot_grass_bomb_perception_20261027.md).
+- [x] 59 채택 판정 PREREG(B vs COMBO=K1+P2+C) 11,520판(누적 약 89,150): **미지지** — craft 층 공동 MSE 2.5배(L82 P2 악화, 쉬운 맵이라 절대값 작음). 전체 클리어 MAE 15.2→10.6%p, key 19.8→8.4, bomb 18.5→9.5. [59 §7](difficulty_personalization/59_bot_combo_adoption_prereg_20261027.md).
+- [x] 60 K1C(K1+C) 소규모 채택 PREREG 8,320판(누적 약 97,470): **지지**(4조건). 클리어 MAE 23.8→12.2%p, 새 맵(폭탄 tier1 8) 15.2→8.8, key(재사용) 48.8→17.6. TV 악화(보고만), AF<.80 폭탄 맵은 범주 오차 악화. [60 §7](difficulty_personalization/60_bot_k1c_adoption_prereg_20261027.md).
+- [x] 61 plain 진단(784판, 누적 약 98,260): plain 오차는 L378(−47.7)·L388(+23.1) 두 맵(체인·링크·스택). 혼합 문제 기각. **stack_early(보류 옵션)로 L378 θ1.0 0→11/16·L57 →16/16** — 스택 파기 시점이 주원인 가설. 랜덤 배치 맵을 PREREG에서 배치 1개로 측정한 설계 문제 발견(L388·L292). [61](difficulty_personalization/61_bot_plain_diagnosis_20261027.md).
+- [ ] (사용자 결정) stack_early 재검증 PREREG(약 6,400판, 한도 상향 필요) · 랜덤 배치 맵 다중 배치 측정(다음 러너부터) · L275 커튼 소진단 · 체인 위험 무지각 가설(클릭 로그 후).
+- [x] **K1C 기본 채택 반영**(사용자 승인): C 코어 이식 + V24_DEFAULT에 key_first·bomb_count_awareness. 새 코어 `39d2de55…`(미커밋). 이식 정합 P1 220/220·문서60 재현 P2 15/15·OFF 불변 P3 90/90, 테스트 28건, 회귀 4,433 PASS. 측정 BASE(prior.BASE)·DDA 스크립트 v2.4 기본이 자동 반영, API/에디터(v1) 불변. [26 상단](difficulty_personalization/26_bot_v24.md).
+- [x] 62 stack_early 재검증 6,400판(누적 약 106,870/120,000): **미지지**(bomb/grass 층 L269 과대로 2.5배). 전체 클리어 MAE 15.4→7.3%p(목표 달성), 새 맵 9개 12.0→2.7. [62 §7](difficulty_personalization/62_bot_stack_early_prereg_20261027.md).
+- [x] 63 진단 2~4단계(3,456판, 누적 약 110,330/120,000): ① 랜덤 배치 착시 맵당 평균 |20.2|%p(최대 48), 16배치 기준 랜덤 맵 클리어 MAE 27.4%p, L388 과대는 실제(93 vs 65), 공통 유틸 `bot_layouts_util_20261027.py`(16배치) ② 체인: 봇은 미인지 턴에도 함정 수 94~100% 회피(비매치라 안 고름), θ1.2 롤아웃 상상 규칙 오인 시 L388 7/8→2/8 — 후보 `chain_cover_misbelief`(상수 q 1개) 설계 제안 ③ L275: 실패가 항상 남은 23타일 병목 독 가득, 정보 공개 무영향 — 병목 전 독 정리 가설. [63](difficulty_personalization/63_bot_layouts_chain_curtain_diag_20261027.md).
+- [ ] (사용자 결정) 5단계 모집단 재측정(θ.65/.85 32판+θ1.2 128판=맵당 192, 379맵 ≈72,800판, 한도 ~185,000 필요, stack_early 결정 후) · chain_cover_misbelief PREREG(q 결정 방식) · 병목 독 정리 후보 · 보정 모델 재학습(착수 조건 미충족).
+- [x] 64 stack_early 원인 추적(368판, 누적 약 110,700/120,000): 62의 L269 차이(+18%p)는 θ1.2 한 행 6판 차이가 거의 전부, 새 시드 44판에선 1판(+2%p) — **표본 잡음 수준**. 정보 이득 가설 기각(스택이 풀을 안 덮음, SE에서 풀 감소 오히려 늦음), 낮은 θ 독 압박은 방향 불일치. 62 판정 유지. [64](difficulty_personalization/64_bot_stack_early_cause_20261027.md).
+- [x] 65 SE 검정력 보완 재검증 7,296판(누적 약 118,000/120,000): **미지지(4조건 모두 실패)**. 미사용 스택 맵 15개(전부 AF≥.95). craft 없는 고정 스택 맵 6개 일관 개선(L137 61→93%), craft+스택 랜덤 맵 L208 74→32%(AF 99%) 큰 악화. 채택 안 함 권장. [65 §7](difficulty_personalization/65_bot_stack_early_power_prereg_20261027.md).
+- [x] 66 L208·L149 SE 악화 원인 추적(216판, 누적 약 118,210/120,000): L208 SE는 첫 수부터 스택 7연속 파기(S7→S1)로 독을 단일 타입으로 채우는데 짝이 craft 상자 속·덮인 보드에 있어 초반(남은 47~49) 독 가득 — 16배치 중 10곳에서 악화(배치 특이 아님), craft 픽 2.7 vs 6.0. L149 B′ 과소는 배치별 고정 병목(남은 38/41, 짝이 craft 상자에 갇힘) — L275 병목 계열, SE와 무관. [66](difficulty_personalization/66_bot_stack_early_craft_cause_20261027.md).
+- [x] (결정 2026-10-27) stack_early 기각 확정(62·65 미지지, 66 기전), V24_DEFAULT 불변. 누적 한도 120,000→195,000 상향(67 진단 + 5단계용, 5단계는 별도 지시 전 시작 금지).
+- [x] 67 랜덤 craft 맵 진단(576판, 누적 약 118,790/195,000): B′ θ1.2 탐색이 미방출 craft 있으면 결정화 거부(5589)로 86~99.5% 꺼짐 — 공개 정보(craft 남은 수, 게임 TileCraft.cs:827-831) 미사용. P2(공개 개수 표본)로 L208 23→29, L149 17→24, L256 15→24/32(정보 상한과 거의 같음). 66 롤아웃 낙관 추론 기각(정정 주석). 사람 가설 지표: craft 첫 오픈 33~44픽(늦음), 빈칸 1~2에서도 비매치 25~75%. [67](difficulty_personalization/67_bot_craft_random_maps_diag_20261027.md).
+- [ ] **(중단 2026-10-27 18:46, 재개 대기)** 5단계 dock_reserve_play dev(44/96행·928/2,048판, STOP 정상 정지). P2 채택 완료(코어 `4b31534c…`). 재개·sha·남은 순서·대기열(보정모델 재학습 착수 판단 문서): [resume_note_20261027_1846](difficulty_personalization/resume_note_20261027_1846.md). 누적 약 128,950/195,000(5단계 미포함·시작 금지).
+- [x] 68 P2 PREREG 완료(재개 후 8,064판): **지지(4조건)** — craft 20맵 클리어 MAE 10.5→5.8%p, 공동 MSE .0114→.0021. [68 §7](difficulty_personalization/68_bot_p2_craft_parity_prereg_20261027.md).
+- [x] 69 L82 추적(192판, P2 −1/48 잡음) · 열쇠 맵 탐색 거부(96판, 잠금 사유 0 → 열쇠 PREREG 불필요). [69](difficulty_personalization/69_bot_l82_trace_key_refusal_20261027.md).
+- [x] **P2 기본 채택**(사용자 사전 승인): V24_DEFAULT += public_craft_belief, 코어 `4b31534c…`(미커밋). parity A0✓·ON 9/9·OFF 9/9·V24_DEFAULT 단독 30/30·v1 8/8, 테스트 14건, 스위트 4,647 PASS(test_generator 기존 불안정). 누적 약 128,000/195,000. [26 상단](difficulty_personalization/26_bot_v24.md).
+- [ ] (결정 필요) V24_DEFAULT 단독 경로(DDA `make_skill_profile(θ,'v2.4')`, hcs 없음=레거시 롤아웃)와 측정 BASE 정렬 여부 — P2 이전부터의 차이. [69 §2](difficulty_personalization/69_bot_l82_trace_key_refusal_20261027.md).
+- [ ] (사용자 결정, 5단계 전) 규칙 정합 수정: 기본 결정화에서 craft 공개 개수 표본(P2 방식) PREREG(craft 맵 고정·랜덤 20맵×2셀×192 ≈7,700판) + 59 L82 악화 추적(~200판). 그 후 행동 후보 dock_reserve_play(새 상수 2, 설계만) 검토.
+- [ ] (보류·사후 가설) craft 없는 맵 한정 SE — 새 맵 PREREG 필요.
+- [ ] (사용자 결정) SE 보류 유지 vs craft 제외 범위 SE 새 PREREG(미사용 맵 소진·한도 상향 필요) · 랜덤 배치 craft 맵 오차(B′ 149: 49%, 208: 74% vs AF 98~99%) 진단.
+- [ ] (사용자 결정) 검정력 보완 SE 재검증 PREREG(θ1.2 128+θ.65/.85 32, 18맵 ≈6,900판, 한도 안) 또는 5단계 모집단 측정에 셀로 포함.
+- [ ] (사용자 결정) stack_early: 보류+원인 추적(~300판) 또는 기믹 범위 한정 새 PREREG(~4,000판). DDA 319레벨 재측정(별도 승인). 랜덤 배치 맵 다중 배치 원칙(62 러너 구현).
+- [ ] (기록) `test_generator.py` 3건 무작위 불안정 실패(이전 코어로도 재현) — 봇 변경과 무관, 별도 확인 필요.
+- [ ] (사용자 결정) K1C 기본 채택 → C 코어 이식·V24_DEFAULT/BASE/API 기본 반영·OFF/ON/이식 정합 테스트·DDA 시드 재측정(319레벨, 우선순위 60 §7-3) — 누적 한도 상향 필요.
+- [ ] (사용자 결정) K1+C(P2 제외) 채택용 새 PREREG 여부(누적 잔여 약 10,850판 — 한도 상향 또는 소규모), 채택 시 C 코어 이식·기본값 반영·DDA 시드 재측정(K1+C 319레벨, COMBO 689레벨).
+- [ ] (사용자 결정) C 채택(TV 조건 유지 여부)·ALL 조합 채택용 새 PREREG·G 기각 및 풀 과소 실패 새 가설(클릭 로그 필요)·폭탄 맵 남은 일반 실패 과대.
+- [ ] (사용자 결정 보류) P2 기본값 채택 · production 배치 약 27,575레벨(unlockTile>0+t0) 봇 결과 재검증 · 프론트 `tileDistributor.ts` 열쇠 배치 정합 · unlockTile=0인데 열쇠 있는 레벨 1개(v1/v2 봇 잠금 0칸).
+- [ ] (게임 계측 QA, 마더 전달) `c_KeyTileList`(GetComponentsInChildren)가 비활성 스택/craft 속 타일을 빼는지 런타임 확인 — 빠지면 게임 잠금 칸 0일 수 있음.
+
+## 봇 판 요약(level_summary 동일 정의) (2026-10-27)
+
+- [x] `backend/app/core/bot_play_summary.py`(코어 수정 없음) + 테스트 6건 + 검증 192판(강한 parity 96/96, 범위 위반 0). [26](difficulty_personalization/26_bot_v24.md).
+- [ ] (결정 필요) link 짝 포함 범위(cont_first·bomb_left_min), 힌트 폭탄 해제, key_unlock 기록 시점, 동시 종료 우선순위, −1 스캔 범위. 봇 개선 측정은 보류.
+
+## 폭탄+스택 원인 추적·G′ (2026-10-26)
+
+- [x] 리뷰 2 반영: 롤아웃 파기 상태 수정(타당), 잠긴 칸 지적은 해당 없음(테스트로 확인), trace를 강한 parity로 전환(기존 trace는 약한 parity로 표기), 재사용 키별 복사, judge gate 실패 처리. 코어 8592974.
+- [x] 원인 추적: 악화 판 18/18이 '미인지 노출 폭탄 + 파기 시작'에서 폭발. 새 seed에서는 악화가 재현되지 않음.
+- [x] G′(dig_bomb_yield) PREREG 6,832판: G′≈Gf로 미지지. 미사용 새 8맵에서 Gf가 B보다 악화(L304 73.9→6.1%). 기본 채택 없음.
+- [ ] (결정 필요) craft 맵 파기 악화(L304) 원인 추적. 파기 후보를 key·스택 맵으로 한정할지(맵별 예외가 아닌 컨테이너 종류 규칙) 결정. 누적 약 22,360판.
+
+## 파기 여유(container_dig_capacity) 2×2 (2026-10-26)
+
+- [x] opt-in 구현(코어 186b73ab, 기존 stack_early_w 재사용, RNG 미사용) + 테스트 4건. PREREG 2×2 새 실행 6,352판(누적 약 14,250).
+- [x] 판정: G·MG 모두 PREREG 미지지. 새 10맵 공동 MSE .0609→.0355, 클리어 MAE 37.8→30.1%p로 크게 개선. 그러나 일반 실패 개선 맵 5/9(<6/9), 폭탄 오차 악화. 기본 채택 없음.
+- [ ] (보류·결정 필요) 폭탄+스택 맵 악화 원인 추적(파기 가점과 폭탄 처리 순서의 경쟁 가설). 사후에 기준이나 설계를 고치면 새 PREREG·새 맵이 필요. 두 번째 후보·craft 공개 belief·독 이중 차감·L152는 보류 유지.
+
+## 기억 재측정·독 가득 원인 추적 (2026-10-26)
+
+- [x] `bomb_threat_memory` RNG 분리(코어 17f6445d) 후 기억 ON 2,000판 + regress 16판. 새 8맵 공동 MSE .0755→.0703, 폭탄 오차 8/8 감소 → PREREG 지지, 기본 채택 안 함. baseline은 같은 seed 짝 재사용(독립 재측정 아님).
+- [x] 독 가득 추적 160판(+대조 160판): L138 실패 32/37에서 열쇠 2장이 스택 파기 중 독에 고립. L292·306은 θ1.2 탐색이 craft 때문에 대체됨(102/103, 28/29). link·배출 새 타입이 독을 채움.
+- [x] `container_dig_capacity` 구현·PREREG 2×2 측정 완료(아래 '파기 여유 2×2' 절).
+- [ ] (미실행, 보류) 새 타입 투입량 기준 독 여유 평가. craft 공개 belief 지원 여부 결정.
+
+
+- [x] 원인 추적 80판(+무추적 대조 80판, 결과 일치): L293 폭탄 사망 = 턴별 독립 인지 재추첨으로 카운트1 턴에 놓침. L152 풀은 클릭 로그 없이 확인 불가, L161과 방향이 반대라 후보 없음.
+- [x] `bomb_threat_memory` opt-in(기본 OFF) PREREG 5,200판: 새 8맵 공동 MSE .0755→.0713, 폭탄 실패 오차 7/8 감소 → 사전 기준 충족, 기본 채택 안 함. L292·306은 일반 실패로 이동해 악화.
+- [x] key 새 6맵: 클리어 오차 감소 2/6 → 일반화 미지지.
+- [ ] (사용자 결정 대기) 레거시 hidden-info 공식의 독 이중 차감: 비실행 경로(ENABLE_HIDDEN_INFO_BLOCK=True라 도달하지 않음, 호출 0회). 현 상태 유지, 정리 여부 미정.
+- [ ] 새 맵 봇 과소 성공(클리어 MAE 약 35~46%p)의 주원인(독 관리·탐색) 조사. [26](difficulty_personalization/26_bot_v24.md). 게임·서버 불변, 재선정·업로드 보류, 운영 DDA OFF.
+
+## 공개 컨테이너 잔수 A2·폭탄 마감 (2026-10-26)
+
+- [x] A1(`public_deadline_20261026`) 부분 종료: 배출 좌표 조회 결함으로 실제 상자 조회 0건 → 유효한 잔수 실험 아님. 폭탄 B 무변화는 효과 없음 입증 아님.
+- [x] A2 `public_container_origin_value` 71조건·1,136판 완료(seed18M): 진단 공동 MSE .05801→.05808, 확인4맵 .02424→.02728 악화 → 미채택(기본 OFF). L161 +30.6%p·L294 −9.6%p 반대 방향.
+- [ ] L152 풀 실패 과소(봇0.8% vs AF58.6%)·폭탄 맵(293/294/449) 폭탄 실패 과대 원인 진단, key 추론 새 맵 일반화. [결과](difficulty_personalization/26_bot_v24.md). 게임·서버 불변, 재선정·업로드 보류, 운영 DDA OFF.
+
+## 행동 가설 분리 비교 (2026-10-26)
+
+- [x] 기억·판별 성향·공개 열쇠/스택 추론 3옵션 독립 비교. 71회귀 실행 PASS(상속 중복 포함),180조건3,840판 완료.
+- [x] 사전 기준으로 key 단일 후보 선택 후 새 난수 확인: L448 46.43→60.65%,6맵 MAE21.92→19.55%p. 나머지5맵 동일.
+- [ ] 기본 적용 보류: L152/284/293 오차 잔존, 다른 key/stack 맵 일반화 미확인. 기억/성향 미채택. 게임·서버 불변, 재선정·업로드 보류, 운영 DDA OFF. [결과](difficulty_personalization/26_bot_v24.md).
+
+## L152·448·284 기믹 판단 후속 (2026-10-26)
+
+- [x] 36판 추적 +12판 fallback 진단. 연결짝 위험 누락/unsupported 탐색 우회/잠금슬롯 압박 확인.
+- [x] `public_gimmick_planning` 비교옵션,53회귀검사 및6맵1,920판 paired 검증 완료.
+- [ ] 기본 봇 채택 보류: MAE23.58→24.18%p로 개선 미확인. L152 과대성공, L448/284 과소성공 잔존. [결과와 한계](difficulty_personalization/26_bot_v24.md). 재선정/업로드 보류·운영 DDA OFF.
+
+## 봇 풀 인지·숨김 탐색 국소 보완 (2026-10-26)
+
+- [x] `grass_skill_attention` / `hidden_common_samples` opt-in 구현, 고숙련 미인지·실수 유지, 공개 정보/스택 사본 회귀 42 PASS.
+- [x] L151·184·241·293 동일 난수·고정 혼합비 변경 전후 1,024판 비교 및 실패 원인 분포 기록. L293 개선, L184 과대성공 반전·L151/241 과대성공 잔존. [정본](difficulty_personalization/26_bot_v24.md).
+- [x] 풀 인지 상한3종·숙련도5종 공동 적합16맵/확인10맵, 5,504판·43건 회귀 완료. 후보 cap0.65·혼합 θ0.65/0.85/1.2=11.64/12.55/75.80%. 확인 MAE15.18→14.67%p, 실패분포 TV0.296→0.249이나 공동 MSE 소폭 악화.
+- [ ] L152·448·284 잔차 원인과 새 표본 일반화 검증. 기본 봇 교체·시드 재선정 재개 보류. 실제 업로드 보류, 운영 DDA OFF 유지.
+
 **최종 업데이트**: 2026-07-22
 **프로젝트 버전**: MVP + 레벨 생성 자동화 + 봇 시뮬레이터 + 난이도 튜너 + 패턴 합성 강화 + 커스텀 패턴 프로덕션 편입
 
 ---
+
+## ⏸ DDA 시드 전 범위 업로드 — 계획·로컬 준비 완료, 업로드 보류 (2026-10-23)
+- 계획·분류·드라이런: [52](difficulty_personalization/52_dda_fullrange_upload_plan_20261023.md), 산출물 `backend/data/dda_seeds/fullrange_plan_20261023/`. 서버 요청 0, 운영/무한 DDA OFF.
+- 난이도 확인(2026-10-26, 봇 기준): 선별→정밀 방식으로 실행 완료 [53](difficulty_personalization/53_dda_screen_then_refine_20261026.md), 산출물 `backend/data/dda_seeds/screen_refine_20261026/`. 선별통과 475 · 불확실 87 · 평가불가 356 · **재선별 후보(정밀 역전 유지) 58**(교차 역전 7, 업로드완료 L35·45·61·64·72·78·87·93·97 포함) · 정밀 해소/없음 16 · 불확실(정밀) 9 · 정밀 예산 초과 198. 시드 교체 없음.
+- 정책 변경(2026-10-26, `codex-dda-shared-official-infinity-20261026`): 목표 = 정식 L32~1530 전체 활성화(지금 아님, 운영·무한 DDA OFF 유지) · 정식/무한 **공통 진행**(DDA 단계·연승·다음 판 예약 공유) · 맵별 lock(시드·실패 횟수, 단계 변경은 다음 판부터) — ~~무한 별도 상태/원본 시작~~ 대체됨. 무한 시드 = `level_501~1530` 4필드 복사 계약 유지, 무한 스위치 별도 유지, 난이도 판단 = `level_{500+N}` 결과 재사용(53 §3-4). 런타임 구현·공통 진행/lock QA = Codex 담당(이 저장소 측정 범위 변화 없음). 상세 52 §1-1.
+- 승인 대기: 재선별 후보 58 처리 방식 · 예산 초과 198/불확실 87 추가 정밀 여부 · 평가불가 356 판단 방법 · planned_change 정책(reorder5/write3/미전송, 10필드·7레벨) · 업로드 대상 범위(53 분류 기준으로 재결정) · 무한 853행 복사용 업로더 변경 · 보류 레벨(L86 등 6행) 서버 시드 처리 · L158/L1466/L1523 · 새 manifest(fresh GET) 후 1행 probe.
 
 ## ✅ 완료 (2026-07-22)
 - **패턴 합성 강화**: 씨앗 기반 생성(A) `seed_positions`+`seed_strength`, 랜덤성 슬라이더, recombine ∪∩∖, template_ratio↑, `_build_seed_variants`(다운스케일 재연결). [문서](CHANGELOG_20260722_PATTERN_SYNTH_AND_FIXES.md)

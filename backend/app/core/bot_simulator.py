@@ -8,6 +8,7 @@ Based on sp_template TileGroup/Dock/TileEffect mechanics:
 """
 import random
 import math
+from collections import Counter
 from typing import Dict, List, Any, Optional, Tuple, Set
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
@@ -747,16 +748,39 @@ V24_ITEMS = (
     "key_first",        # Q12 잠긴 칸이 있으면 key 픽 가점 w·s
     "gc_naive",         # Q6  덮인 풀·체인 옆 픽 '진행' 가점을 (1−s(θ))·exp(−경험/τ) 로만 준다(아는 사람은 0) — 기존은 항상 1
     "locality",         # Q7  직전 픽과 가까운 타일 가점 w/(1+맨해튼 거리) (θ 무관)
+    "public_gimmick_planning",  # opt-in: linked grass risk, cover progress, public fallback/slot capacity
+    "grass_skill_attention",  # opt-in: novice baseline preserved; expert notices visible grass risk early
+    "hidden_common_samples",  # opt-in: public-information samples shared across search candidates
+    "grass_risk_memory",  # experiment: short global grass-attention episode
+    "public_goal_style",  # experiment: run-level public container preference
+    "public_key_stack_plan",  # experiment: infer hidden key count from public locks
+    "public_container_live_value",  # experiment: displayed craft count, not initial inventory
+    "public_container_origin_value",  # experiment A2: emitted tile resolves its original box
+    "public_bomb_deadline",  # experiment: urgency belongs to each surviving exposed bomb
+    "bomb_threat_memory",  # experiment: a noticed visible bomb stays in attention with skill-based retention
+    "container_dig_capacity",  # experiment: start/continue digging a visible container only with dock room; no new singles mid-dig
+    "dig_bomb_yield",  # experiment (with container_dig_capacity): dig yields to an exposed bomb deadline (public counters)
+    "skill_planning",  # experiment #1: theta<=1 also plans with 1 short rollout, horizon = 2 x lookahead_depth
+    "public_craft_belief",  # experiment #2: unspawned craft contents sampled from public counts (no hidden types)
+    "bomb_count_awareness",  # C (58·60, 2026-10-27 기본 채택): 폭탄별 인지 — 미인지 노출 폭탄은 매 수 후 전용 RNG로 인지 시도
+                             # p = 기존 인지식에서 γ·[c≤1] → γ/c (카운트↓ 인지↑), 인지하면 해제·폭발까지 유지. bomb_threat_memory 대체
 )
 # 채택된 항목(None = 이 목록). 측정에서 효과를 확인한 뒤 갱신 — 26_bot_v24.md §10.
 _V24_BEHAV = frozenset(("stack_early", "covered_info", "dock_avoid", "bomb_precollect", "tele_preempt", "key_first",
-                        "locality"))
+                        "locality", "container_dig_capacity"))
 V24_DEFAULT = ("unknown_hide", "curtain_hide", "unknown_nobonus",
-               "ac_inner", "stack_hide", "dock_rel")
+               "ac_inner", "stack_hide", "dock_rel",
+               "key_first", "bomb_count_awareness",   # 2026-10-27 K1C 채택(문서 60 PREREG 지지, 사용자 승인)
+               "public_craft_belief",   # 2026-10-27 P2 채택(문서 68 PREREG 지지, 사용자 사전 승인). 공개 표본 경로
+               "grass_skill_attention", "hidden_common_samples", "public_key_stack_plan")
+#   2026-10-27 B 정렬(사용자 결정): 마지막 3건은 측정 BASE(prior.BASE)가 더하던 항목 — 기본 설정을 측정 설정에 맞춤.
+#   측정 BASE = list(V24_DEFAULT)+같은 3건이라 중복이 생기지만 set_rule_parity 가 frozenset 으로 받아 동작 무관.
+#   DDA 원경로(make_skill_profile(θ,'v2.4')만)는 이제 공개 표본 경로를 쓴다 → 다음 DDA 실행부터 결과가 바뀐다.
 # ↑ 26 §11 사전 기준(목표 지표 E1 ablation) 적용 결과: 규칙 정합 항목만 기본. 행동 항목은 전부 꺼짐.
 #   보류(기본 꺼짐, 파라미터는 V24_BEHAV_DEFAULTS 에 적합값 유지): covered_info(§11-4: 채택 조합에서 빼면
 #   ft_any MAE 2sd 개선 ↔ lb MAE 2sd 악화 — 목표별 결론 엇갈림, 규칙 5)·bomb_beta·stack_early·bomb_impulse·
 #   key_first·curtain_memory_v24·ac_policy. 기각: dock_avoid·panic_calm·bomb_precollect·tele_preempt·gc_naive·locality.
+_C_SALT = 0x424F4D425F434F554E545F41574152454E455353   # "BOMB_COUNT_AWARENESS" — C 전용 RNG 파생 (58 서브클래스와 동일)
 V24_BETA_BOMB = 0.0     # 폭탄 105레벨 θ0.65·0.85 × β{0,1,2,4,6} 64판, 2겹 CV: β0 (CV 손실 0.156 vs β4 0.202)
 # 적합값(64판 격자 + 2겹 CV, 26 §10): stack_early 8 · covered_info 1 · bomb_impulse 0.3 · key_first 30. 기각 항목은 0/기본.
 V24_BEHAV_DEFAULTS = {"stack_early_w": 8.0, "covered_info_a": 1.0, "dock_avoid_w": 0.0, "panic_calm_k": 0.5,
@@ -1067,6 +1091,62 @@ class BotSimulator:
         bot_results.sort(key=lambda r: BotType.all_types().index(r.bot_type))
         return self._aggregate_results(bot_results, team, max_moves)
 
+    def _client_key_resolve(
+        self, level_json: Dict[str, Any], unlock_tile: Any
+    ) -> Tuple[Optional[Dict[str, Any]], int]:
+        """[2026-10-27 key parity] unlockTile>0 레벨의 t0 칸을 게임 클라이언트와 같은 결과로 확정한다.
+
+        반환: (t0가 모두 명시 타입으로 바뀐 level_json 사본, 보드 전체 열쇠 수). 게임이 재현 불가하거나
+        포팅이 지원하지 않는 입력(randSeed 0 = 시간 기반 시드, useTileCount<=0 = 스킨 표 필요, 클라이언트 예외)이면
+        (None, 0) → 호출자는 기존 경로를 그대로 쓴다. 효과 'key' 보드 타일도 게임처럼 열쇠로 바꾼다(출하 맵 0개).
+        """
+        from .pv.cs_shuffle import shuffle_empty_tiles, resolve_map
+        try:
+            if int(level_json.get("randSeed", 0) or 0) == 0:
+                return None, 0
+            res = shuffle_empty_tiles(
+                level_json,
+                rand_seed=level_json.get("randSeed", 0),
+                use_tile_count=level_json.get("useTileCount", 0),
+                unlock_tile=unlock_tile,
+                shuffle_tile=level_json.get("xShuffleTile", level_json.get("shuffleTile", 0)),
+                type_imbalance=level_json.get("xTypeImbalance", level_json.get("typeImbalance", 0)),
+                strict=False,
+            )
+        except Exception:  # noqa: BLE001 — PvError/CsClientCrash/malformed input: keep the legacy path
+            return None, 0
+        import copy
+        resolved = resolve_map(level_json, res) if res.slots else copy.deepcopy(level_json)
+        keys = 0
+        for lk, layer in resolved.items():
+            if not (isinstance(lk, str) and lk.startswith("layer_") and isinstance(layer, dict)):
+                continue
+            tiles = layer.get("tiles")
+            if not isinstance(tiles, dict):
+                continue
+            for tile in tiles.values():
+                if not isinstance(tile, list) or not tile:
+                    continue
+                is_container = isinstance(tile[0], str) and tile[0].startswith(("stack_", "craft_"))
+                eff = tile[1] if len(tile) > 1 and isinstance(tile[1], str) else ""
+                # CTile.isKeyTile (DB_Level.cs:234): id "t16" / "key"(대소문자 무시) 또는 effect "key"
+                if not is_container and (tile[0] == "t16" or str(tile[0]).lower() == "key" or eff.lower() == "key"):
+                    tile[0] = "key"
+                    if eff.lower() == "key":
+                        tile[1] = ""
+                    keys += 1
+                elif (is_container and len(tile) > 2
+                      and isinstance(tile[2], list) and len(tile[2]) >= 2 and isinstance(tile[2][1], str) and tile[2][1]):
+                    ids = ["key" if (x == "t16" or x.lower() == "key") else x for x in tile[2][1].split("_")]
+                    try:
+                        cnt = int(tile[2][0])
+                    except (TypeError, ValueError):
+                        cnt = -1
+                    if len(ids) == cnt:            # client adopts inner ids only when the count matches (DB_Level.cs:158-168)
+                        keys += ids.count("key")
+                        tile[2] = [tile[2][0], "_".join(ids)] + list(tile[2][2:])
+        return resolved, keys
+
     def _create_initial_state(
         self, level_json: Dict[str, Any], max_moves: int
     ) -> GameState:
@@ -1084,19 +1164,31 @@ class BotSimulator:
         # Try both field names for unlock tile (xUnlockTile or unlockTile)
         unlock_tile = level_json.get("xUnlockTile", level_json.get("unlockTile", 0))
 
+        # [2026-10-27 key parity, 사용자 승인 규칙 정합 — unlockTile>0 에서만]
+        # 게임은 열쇠(16)를 t0 칸에만 ShuffleEmptyTiles→DistributeTiles(specifiedCount=xUnlockTile)로 배정하고
+        # (DB_Level.cs:1167-1287, 1372-1499), 잠금 칸 수 = 보드 전체 열쇠 수 // 3 (TileGroup.cs:1335-1338).
+        # 예전 내부 분배(TileDistributor, 구 알고리즘)는 열쇠 위치가 게임과 달라서, 게임 비트 동일 포팅
+        # (pv/cs_shuffle, golden dll 대조)으로 t0를 먼저 확정한다. unlockTile=0 경로는 손대지 않는다.
+        lock_count = unlock_tile
+        if unlock_tile and unlock_tile > 0:
+            resolved, key_total = self._client_key_resolve(level_json, unlock_tile)
+            if resolved is not None:
+                level_json = resolved
+                lock_count = min(7, key_total // 3)
+
         # Initialize 7-slot dock
-        # CRITICAL: Last unlock_tile slots are locked by default
+        # CRITICAL: Last lock_count slots are locked by default
         # key 타일 3개 매칭시 1개씩 해제됨
         for i in range(7):
-            # Lock the last unlock_tile slots (slots 7-unlock_tile to 6)
-            # e.g., unlock_tile=1 -> slot 6 locked
-            # e.g., unlock_tile=2 -> slots 5,6 locked
-            is_locked = (i >= (7 - unlock_tile)) if unlock_tile > 0 else False
+            # Lock the last lock_count slots (slots 7-lock_count to 6)
+            # e.g., lock_count=1 -> slot 6 locked
+            # e.g., lock_count=2 -> slots 5,6 locked
+            is_locked = (i >= (7 - lock_count)) if lock_count > 0 else False
             state.dock.append(DockSlot(index=i, is_locked=is_locked))
 
         # CRITICAL: Initialize max_dock_slots to reflect locked slots
         # Without this, _is_dock_full() incorrectly uses 7 instead of actual available slots
-        state.max_dock_slots = 7 - unlock_tile
+        state.max_dock_slots = 7 - lock_count
 
         # Get level settings for t0 distribution (sp_template compatible)
         rand_seed = level_json.get("randSeed", 0)
@@ -1820,6 +1912,35 @@ class BotSimulator:
     def _play_game(self, state: GameState, profile: BotProfile) -> GameState:
         """Play through a game with the given bot profile."""
         self.set_rule_parity(profile)
+        if self._v24 and "bomb_count_awareness" in self._v24:
+            # [C] 판 시작: 인지 집합 초기화 + 전용 RNG(본판 RNG 상태를 복제해 파생 — 본판 RNG 소비 없음) + 첫 턴 인지 시도
+            self._c_profile = profile
+            c_rng = random.Random()
+            c_rng.setstate(self._rng.getstate())
+            c_rng.seed(c_rng.getrandbits(128) ^ _C_SALT)
+            state._c_rng = c_rng
+            state._c_noticed = frozenset()
+            self._v24_c_update(state)
+        else:
+            self._c_profile = None
+            state._c_rng = None
+            state._c_noticed = frozenset()
+        state._grass_attention_ttl = 0
+        state._bomb_noticed = frozenset()
+        state._bomb_mem_rng = None
+        state._dig_box = None
+        if "bomb_threat_memory" in self._v24:
+            # Dedicated retention RNG derived from the game seed without consuming the main RNG,
+            # so ON changes only the memory effect, not other decision draws.
+            mem_rng = random.Random()
+            mem_rng.setstate(self._rng.getstate())
+            mem_rng.seed(mem_rng.getrandbits(128) ^ 0x424F4D425F5448524541545F4D454D4F5259)
+            state._bomb_mem_rng = mem_rng
+        if "public_goal_style" in self._v24:
+            style_rng = random.Random()
+            style_rng.setstate(self._rng.getstate())
+            style_rng.seed(style_rng.getrandbits(128) ^ 0x5055424C49435F474F414C5F5354594C45)
+            state._container_style = .5 if style_rng.random() < .5 else 1.5
         if self._par and state.moves_used == 0:
             self._v23_game_start(state)
         while not self._is_game_over(state):
@@ -1886,8 +2007,10 @@ class BotSimulator:
                         state.tiles.get(li, {}).get(lp).tile_type for li, lp in selected_move.linked_tiles
                         if state.tiles.get(li, {}).get(lp) is not None]
 
+                dig_info = self._cdc_before_move(state, selected_move, selected_move.tile_state)
                 self._apply_move(state, selected_move)
                 state.moves_used += 1
+                self._cdc_after_move(state, dig_info)
                 if self._v24 and "locality" in self._v24 and selected_move.tile_state is not None:
                     state._v24_last = (selected_move.tile_state.x_idx, selected_move.tile_state.y_idx)
 
@@ -2444,6 +2567,15 @@ class BotSimulator:
                             break
                 new_state._blocking_cache[tile_key] = is_blocked
 
+        # [C] bomb_count_awareness 상태 사본 (판 시작에는 _play_game이 다시 초기화한다)
+        new_state._c_noticed = getattr(base_state, "_c_noticed", frozenset())
+        c_rng = getattr(base_state, "_c_rng", None)
+        if c_rng is not None:
+            new_state._c_rng = random.Random()
+            new_state._c_rng.setstate(c_rng.getstate())
+        else:
+            new_state._c_rng = None
+
         return new_state
 
     def _is_blocked_by_upper(self, state: GameState, tile: TileState) -> bool:
@@ -2984,6 +3116,8 @@ class BotSimulator:
                 state._blocking_cache.clear()          # 배출로 박스 덮임이 바뀌었을 수 있다
                 state._accessible_cache = None
                 state._accessible_type_counts = None
+        if self._v24 and "bomb_count_awareness" in self._v24:
+            self._v24_c_update(state)                  # [C] 카운트 감소 후 인지 시도 (본판·롤아웃 공통 전이)
 
     def _process_teleport(self, state: GameState) -> None:
         """Process teleport effect - activates every 3 moves.
@@ -3092,7 +3226,7 @@ class BotSimulator:
                 # Phase 3: Block hidden info if enabled (more realistic)
                 if profile.pattern_recognition >= 1.0 and not BotSimulatorConfig.ENABLE_HIDDEN_INFO_BLOCK:
                     # Optimal bot uses perfect information (legacy behavior)
-                    total_of_type = state.all_tile_type_counts.get(move.tile_type, 0)
+                    total_of_type = self._decision_tile_counts(state).get(move.tile_type, 0)
                     in_dock = dock_type_counts.get(move.tile_type, 0)
                     # Total includes this tile we're about to pick, so subtract 1
                     remaining_hidden = total_of_type - same_type_accessible - in_dock - 1
@@ -3190,7 +3324,7 @@ class BotSimulator:
         # Optimal bot uses perfect information about total tile counts
         # Phase 3: Only allow if ENABLE_HIDDEN_INFO_BLOCK is disabled (legacy behavior)
         if profile.pattern_recognition >= 1.0 and not BotSimulatorConfig.ENABLE_HIDDEN_INFO_BLOCK:
-            total_of_type = state.all_tile_type_counts.get(move.tile_type, 0)
+            total_of_type = self._decision_tile_counts(state).get(move.tile_type, 0)
             # Ensure dock_type_counts is computed for optimal bot
             if dock_type_counts is None:
                 dock_type_counts = {}
@@ -3248,7 +3382,7 @@ class BotSimulator:
             # This type has no other accessible tiles - check hidden tiles for optimal bot
             # Phase 3: Only allow if ENABLE_HIDDEN_INFO_BLOCK is disabled (legacy behavior)
             if profile.pattern_recognition >= 1.0 and not BotSimulatorConfig.ENABLE_HIDDEN_INFO_BLOCK:
-                total_of_type = state.all_tile_type_counts.get(move.tile_type, 0)
+                total_of_type = self._decision_tile_counts(state).get(move.tile_type, 0)
                 if dock_type_counts is None:
                     dock_type_counts = {}
                     for t in state.dock_tiles:
@@ -3297,6 +3431,15 @@ class BotSimulator:
                     # ② 이 컨테이너 잔여 내부 타일 수(tall stack일수록 ↑; 끝까지 배출 유지)
                     box_key = f"{move.layer_idx}_{ts.position_key}"
                     remaining_inner = len(state.craft_boxes.get(box_key, []))
+                    if "public_container_origin_value" in self._v24 and ts.is_craft_tile:
+                        original = ts.original_full_key or ts.full_key
+                        box_key = next((key for key, members in state.craft_boxes.items()
+                                        if original in members), None)
+                        remaining_inner = self._public_craft_count(state, box_key) if box_key is not None else 0
+                    elif "public_container_live_value" in self._v24 and ts.is_craft_tile:
+                        # TileCraft displays unspawned, unpicked count. Do not use
+                        # hidden types, or treat the immutable initial list as live.
+                        remaining_inner = self._public_craft_count(state, box_key)
                     # ③ 이 컨테이너가 덮고있는(제거시 노출) 타일 수
                     covered = 0
                     bmap = getattr(self, "_blocking_map", None)
@@ -3309,7 +3452,8 @@ class BotSimulator:
                                     covered += 1
                     # 임팩트 = 풀리는 타일 수. 무조건 아님(임팩트 0이면 보너스 0).
                     impact = waiting + remaining_inner + covered
-                    base_score += min(60.0, 6.0 * impact) * max(0.3, profile.goal_priority)
+                    style = getattr(state, "_container_style", 1.0) if "public_goal_style" in self._v24 else 1.0
+                    base_score += min(60.0, 6.0 * impact) * max(0.3, profile.goal_priority) * style
 
         # Layer blocking awareness - prefer clearing upper layers
         layer_bonus = move.layer_idx * profile.blocking_awareness * 0.3
@@ -3347,6 +3491,9 @@ class BotSimulator:
                     same_type_unblock = 0
 
                     for unblocked in tiles_to_unblock:
+                        if ("hidden_common_samples" in self._v24
+                                and self._v24_type_hidden(state, unblocked)):
+                            continue
                         utype = unblocked.tile_type
                         if utype in dock_types:
                             # Will unblock a tile that matches something in dock!
@@ -3691,9 +3838,14 @@ class BotSimulator:
             tile_state = move.tile_state
             if aware.get("grass") and tile_state:
                 base_score = self._grass_reduce_bonus(base_score, move, state, profile, dock_count)
-                base_score = self._grass_isolation_penalty(base_score, state, profile, tile_state)
+                if "public_gimmick_planning" in self._v24:
+                    base_score += self._public_grass_plan(move, state, profile)
+                else:
+                    base_score = self._grass_isolation_penalty(base_score, state, profile, tile_state)
             if aware.get("bomb") and state.bomb_tiles:
-                base_score = self._bomb_urgency(base_score, state, tile_state)
+                base_score = (self._public_bomb_deadline(base_score, state, move)
+                              if "public_bomb_deadline" in self._v24
+                              else self._bomb_urgency(base_score, state, tile_state))
             if v23_chain and aware.get("chain") and tile_state:
                 base_score = self._chain_unlock_bonus(base_score, move, state, profile, dock_count)
                 base_score = self._chain_isolation_penalty(base_score, state, profile, tile_state)
@@ -3737,6 +3889,13 @@ class BotSimulator:
         # 냥이의 도움은 레벨 설정(autoCollectCount)이 있어야 켜진다 — 호출자가 cfg["auto_collect"] 로 넘긴다.
         if not cfg.get("auto_collect"):
             self._par = self._par - {"auto_collect"}
+
+    def _decision_tile_counts(self, state: GameState) -> Dict[str, int]:
+        """Decision-only inventory; opt-in never exposes unseen stack/craft contents."""
+        if "hidden_common_samples" not in self._v24:
+            return state.all_tile_type_counts
+        return Counter(t.tile_type for layer in state.tiles.values() for t in layer.values()
+                       if not t.picked and not self._v24_type_hidden(state, t))
 
     def _v24_type_hidden(self, state: GameState, tile) -> bool:
         """[bot v2.4] 플레이어가 이 타일의 타입을 볼 수 없는가.
@@ -4028,7 +4187,91 @@ class BotSimulator:
             last = getattr(state, "_v24_last", None)
             if last is not None:
                 bonus += bp["locality_w"] / (1.0 + abs(ts.x_idx - last[0]) + abs(ts.y_idx - last[1]))
+        if "container_dig_capacity" in v and bp["stack_early_w"] and not move.will_match:
+            # Experiment (default OFF). Public info only: container membership and remaining height/count
+            # (stack layers / craft remain counter), never hidden types. Weight reuses stack_early_w, scaled by
+            # skill s(theta); selection noise/mistakes of the profile are untouched (experts can still err).
+            w = bp["stack_early_w"] * sk
+            info = self._cdc_container(state, ts)
+            dig = getattr(state, "_dig_box", None)
+            if dig is not None and self._cdc_remaining(state, dig) <= 0:
+                dig = None
+            # [dig_bomb_yield, experiment] public bomb counters: if an exposed bomb would go off before the dig
+            # can see its next layers (count <= min(rest,2)+1 moves), digging does not get priority and the
+            # bomb tile itself is never treated as a suppressed "new single". No new constants.
+            yield_on = "dig_bomb_yield" in v
+            dl = self._cdc_bomb_deadline(state) if yield_on else None
+            if info is not None and info[1] > 0:
+                box, rest = info
+                # room to take this tile and see up to the next two layers before committing
+                room = free - 1 >= min(rest, 2)
+                if dl is not None and dl <= min(rest, 2) + 1:
+                    bonus += 0.0 if room else -w
+                else:
+                    bonus += w if room else -w
+                    if dig == box:
+                        bonus += w
+            elif dig is not None and dock_types.get(move.tile_type, 0) == 0:
+                is_bomb = ts is not None and f"{ts.layer_idx}_{ts.position_key}" in state.bomb_tiles
+                dig_left = self._cdc_remaining(state, dig)
+                if not (yield_on and (is_bomb or (dl is not None and dl <= min(dig_left, 2) + 1))):
+                    bonus -= w                                 # new single while a dig is in progress
         return bonus
+
+    def _cdc_before_move(self, state: GameState, move: Move, tile):
+        """Container info of a non-match pick, captured before the move (dig bookkeeping; option only)."""
+        if not (self._v24 and "container_dig_capacity" in self._v24) or move.will_match:
+            return None
+        return self._cdc_container(state, tile)
+
+    def _cdc_after_move(self, state: GameState, dig_info) -> None:
+        """Deterministic dig state transition shared by the real game loop and search rollouts (no RNG):
+        a non-match pick from a container with tiles left starts/continues a dig; an exhausted dug container ends it."""
+        if not (self._v24 and "container_dig_capacity" in self._v24):
+            return
+        if dig_info is not None and dig_info[1] > 0:
+            state._dig_box = dig_info[0]
+        elif getattr(state, "_dig_box", None) is not None and self._cdc_remaining(state, state._dig_box) <= 0:
+            state._dig_box = None
+
+    def _cdc_bomb_deadline(self, state: GameState):
+        """Lowest public countdown among exposed (uncovered, unpicked) bombs, else None."""
+        dl = None
+        for bk, rem in state.bomb_tiles.items():
+            parts = bk.split("_")
+            if len(parts) < 3:
+                continue
+            bt = state.tiles.get(int(parts[0]), {}).get(f"{parts[1]}_{parts[2]}")
+            if bt is not None and not bt.picked and not self._is_blocked_by_upper(state, bt):
+                dl = rem if dl is None else min(dl, rem)
+        return dl
+
+    def _cdc_container(self, state: GameState, ts):
+        """(container key, public tiles left after taking ts) for a stack/craft tile, else None."""
+        if ts is None or not (ts.is_stack_tile or ts.is_craft_tile):
+            return None
+        original = ts.original_full_key or ts.full_key
+        box = next((k for k, members in state.craft_boxes.items() if original in members), None)
+        if box is None:
+            return None
+        return box, max(0, self._cdc_remaining(state, box) - (0 if ts.is_craft_tile else 1))
+
+    def _cdc_remaining(self, state: GameState, box: str) -> int:
+        """Public remaining count: craft = unspawned+unpicked counter; stack = unpicked layers."""
+        members = state.craft_boxes.get(box, [])
+        if any((t := state.stacked_tiles.get(k)) is not None and t.is_craft_tile for k in members):
+            return self._public_craft_count(state, box)
+        alive = 0
+        for k in members:
+            t = state.stacked_tiles.get(k)
+            if t is None:
+                parts = k.split("_")
+                t = state.tiles.get(int(parts[0]), {}).get(f"{parts[1]}_{parts[2]}") if len(parts) >= 3 else None
+                if t is not None and t.full_key != k:
+                    t = None
+            if t is not None and not t.picked:
+                alive += 1
+        return alive
 
     def _v24_naive(self, profile, gimmick: str) -> float:
         """[v2.4 gc_naive, Q6] '덮인 풀·체인 옆을 집으면 풀린다'고 착각할 확률(기댓값 가중) = (1 − s(θ))·exp(−n/τ).
@@ -4041,7 +4284,7 @@ class BotSimulator:
 
     def _v24_dock_shift(self, state: GameState) -> int:
         """[bot v2.4 dock_rel] 잠긴 독 칸 수(7칸 기준 임계를 잠기지 않은 칸 기준으로 옮기는 양). 항목 꺼짐 → 0."""
-        if "dock_rel" not in self._v24:
+        if not self._v24.intersection(("dock_rel", "public_gimmick_planning")):
             return 0
         return sum(1 for sl in state.dock if sl.is_locked)
 
@@ -4175,6 +4418,15 @@ class BotSimulator:
         if exposure is not None:
             n = float(exposure.get(gimmick, 0))
             p *= 1.0 - (1.0 - cfg["l0"]) * math.exp(-n / cfg["tau"])
+        if gimmick == "grass" and "grass_skill_attention" in self._v24:
+            # Behaviour hypothesis, not an AF-fitted probability. Keep theta<=.55
+            # unchanged, then raise the attention floor to .9 at theta>=1.2.
+            # Awareness is never guaranteed; this preserves human-like misses.
+            cap = float(cfg.get("grass_attention_cap", .9))
+            if not 0.0 < cap < 1.0:
+                raise ValueError("grass_attention_cap must be strictly between 0 and 1")
+            skill = max(0.0, min(1.0, (theta - 0.55) / 0.65))
+            p = min(cap, max(p, cap * skill * skill * (3.0 - 2.0 * skill)))
         return p
 
     def _v21_draw_awareness(self, state: GameState, profile: BotProfile) -> None:
@@ -4200,6 +4452,18 @@ class BotSimulator:
                         grass_imm = True
         if has_grass:
             aware["grass"] = self._rng.random() < self._v21_p_aware("grass", profile, grass_imm)
+            if "grass_risk_memory" in self._v24:
+                theta = float((profile.gimmick_awareness or {}).get("theta", 1.0))
+                skill = max(0., min(1., (theta - .55) / .65))
+                if aware["grass"]:
+                    state._grass_attention_ttl = 2 + int(3 * skill + 1e-9)
+                else:
+                    ttl = getattr(state, "_grass_attention_ttl", 0)
+                    remembered = ttl > 0 and self._rng.random() < .55 + .30 * skill
+                    aware["grass"] = remembered
+                    state._grass_attention_ttl = ttl - 1 if remembered else 0
+        elif "grass_risk_memory" in self._v24:
+            state._grass_attention_ttl = 0
         if state.bomb_tiles:
             min_rem = None
             for bomb_key, remaining in state.bomb_tiles.items():
@@ -4211,6 +4475,36 @@ class BotSimulator:
                     min_rem = remaining if min_rem is None else min(min_rem, remaining)
             if min_rem is not None:
                 aware["bomb"] = self._rng.random() < self._v21_p_aware("bomb", profile, min_rem <= 1)
+            if "bomb_threat_memory" in self._v24:
+                # Experiment (default OFF): once a visible bomb counter was noticed, the player keeps
+                # watching it on later turns with skill-based retention (same constants as grass memory,
+                # not fitted). Retention can fail -> memory cleared; never guaranteed for any skill.
+                exposed = set()
+                for bomb_key in state.bomb_tiles:
+                    parts = bomb_key.split('_')
+                    if len(parts) < 3:
+                        continue
+                    tile = state.tiles.get(int(parts[0]), {}).get(f"{parts[1]}_{parts[2]}")
+                    if tile is not None and not tile.picked and not self._is_blocked_by_upper(state, tile):
+                        exposed.add(bomb_key)
+                noticed = set(getattr(state, "_bomb_noticed", ())) & exposed
+                if aware.get("bomb"):
+                    noticed |= exposed
+                elif noticed:
+                    theta = float((profile.gimmick_awareness or {}).get("theta", 1.0))
+                    skill = max(0., min(1., (theta - .55) / .65))
+                    mem_rng = getattr(state, "_bomb_mem_rng", None)
+                    if mem_rng is None:
+                        # No game-start RNG (direct call): derive one without touching the main RNG.
+                        mem_rng = random.Random()
+                        mem_rng.setstate(self._rng.getstate())
+                        mem_rng.seed(mem_rng.getrandbits(128) ^ 0x424F4D425F5448524541545F4D454D4F5259)
+                        state._bomb_mem_rng = mem_rng
+                    if mem_rng.random() < .55 + .30 * skill:
+                        aware["bomb"] = True
+                    else:
+                        noticed = set()
+                state._bomb_noticed = frozenset(noticed)
         if self._par and "chain_aware" in self._par:
             # 잠긴 체인이 있으면 인지 추첨. 임박 = 남은 수평 이웃이 1개(한 번 더 옆을 집으면 못 푸는 상태).
             has_chain, chain_imm = False, False
@@ -4227,6 +4521,8 @@ class BotSimulator:
                             chain_imm = True
             if has_chain:
                 aware["chain"] = self._rng.random() < self._v21_p_aware("chain", profile, chain_imm)
+        if self._v24 and "bomb_count_awareness" in self._v24 and state.bomb_tiles:
+            aware["bomb"] = True     # [C] 위 본판 추첨은 그대로 소비하되 게이트로 쓰지 않는다 — 긴급도가 인지한 폭탄만 본다
         self._v21_aware = aware
 
     def _chain_unlock_bonus(self, base_score: float, move: Move, state: GameState, profile: BotProfile,
@@ -4447,6 +4743,69 @@ class BotSimulator:
             base_score += grass_reduce_bonus
         return base_score
 
+    def _public_grass_plan(self, move: Move, state: GameState, profile: BotProfile) -> float:
+        """Finite, noticed-only geometry preference; never reads hidden tile types.
+
+        Linked picks are one action. A stack top does not vacate its cell while
+        another layer remains. The real rule engine alone reduces grass layers.
+        """
+        if not (getattr(self, "_v21_aware", None) or {}).get("grass"):
+            return 0.0
+        picked = [move.tile_state] if move.tile_state is not None else []
+        for li, pos in move.linked_tiles:
+            t = state.tiles.get(li, {}).get(pos)
+            if t is not None and not t.picked and all(t is not x for x in picked):
+                picked.append(t)
+        # Only cells whose final visible tile is removed become empty. Unknown
+        # inner *types* are irrelevant; a visible stack's remaining height is not.
+        vacated = set()
+        for t in picked:
+            under = state.stacked_tiles.get(t.under_stacked_tile_key)
+            if under is None or under.picked:
+                vacated.add((t.layer_idx, t.x_idx, t.y_idx))
+        picked_ids = {self._v23_ident(t) for t in picked}
+        unpicked = self._v23_unpicked_idents(state)
+        after_ids = unpicked - picked_ids
+        def box_live_after(cell):
+            return any(t is not None and not t.picked and not t.is_crafted
+                       and self._v23_ident(t) not in picked_ids
+                       for k in state.craft_boxes.get(f"{cell[0]}_{cell[1]}_{cell[2]}", ())
+                       for t in [state.stacked_tiles.get(k)])
+        score = 0.0
+        for li, layer in state.tiles.items():
+            for grass in layer.values():
+                remaining = grass.effect_data.get("remaining", 0)
+                if grass.picked or grass.effect_type != TileEffectType.GRASS or remaining <= 0:
+                    continue
+                if not self._is_blocked_by_upper(state, grass):
+                    continue
+                neighbors = [(li, grass.x_idx + dx, grass.y_idx + dy)
+                             for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))]
+                if "near_identity" in self._par:
+                    alive = {cell for cell in neighbors if self._v23_cell_alive(unpicked, *cell)}
+                    lost = {cell for cell in alive if not self._v23_cell_alive(after_ids, *cell)}
+                else:
+                    alive = {cell for cell in neighbors
+                             if (n := layer.get(f"{cell[1]}_{cell[2]}")) is not None and not n.picked}
+                    lost = alive & vacated
+                covers = set()
+                for ul, x, y in self._v23_cover_positions(state, li, grass.x_idx, grass.y_idx):
+                    t = state.tiles.get(ul, {}).get(f"{x}_{y}")
+                    box = f"{ul}_{x}_{y}"
+                    if ((t is not None and not t.picked)
+                            or (box in state.craft_boxes and self._v23_box_live(state, box))):
+                        covers.add((ul, x, y))
+                # Craft containers can still cover after their emitted tile leaves.
+                removed = {c for c in covers & vacated if not box_live_after(c)}
+                still_covered = bool(covers - removed) or not covers
+                if still_covered and lost and len(alive - lost) < remaining:
+                    score -= 800.0 * profile.blocking_awareness
+                if removed and len(alive) <= remaining + 1:
+                    # Modest progress preference, not a forced safe action. A
+                    # noticed threat can still lose to a match, overflow or mistake.
+                    score += 12.0 * profile.blocking_awareness * len(removed) / max(1, len(covers))
+        return score
+
     def _grass_isolation_penalty(self, base_score: float, state: GameState, profile: BotProfile,
                                  tile_state) -> float:
         # ============================================================
@@ -4512,8 +4871,83 @@ class BotSimulator:
                     base_score -= 800.0 * profile.blocking_awareness
         return base_score
 
+    @staticmethod
+    def _public_craft_count(state: GameState, box_key: str) -> int:
+        return sum(1 for key in state.craft_boxes.get(box_key, [])
+                   if (inner := state.stacked_tiles.get(key)) is not None
+                   and not inner.picked and not inner.is_crafted)
+
+    def _public_bomb_deadline(self, score: float, state: GameState, move: Move) -> float:
+        """Public exposed deadlines only; called behind existing notice gate.
+
+        A later bomb must not borrow an earlier bomb's urgency. Linked picks
+        remove both endpoints in one action. Values preserve legacy magnitude.
+        """
+        picked = {(move.layer_idx, move.position), *move.linked_tiles}
+        own, left = [], []
+        for key, remaining in state.bomb_tiles.items():
+            parts = key.split('_')
+            if len(parts) < 3:
+                continue
+            li, pos = int(parts[0]), f'{parts[1]}_{parts[2]}'
+            tile = state.tiles.get(li, {}).get(pos)
+            if tile is None or tile.picked or self._is_blocked_by_upper(state, tile):
+                continue
+            (own if (li, pos) in picked else left).append(remaining)
+        if own:
+            n = min(own)
+            score += 500.0 if n <= 1 else 200.0 if n <= 2 else 100.0 if n <= 3 else 50.0
+        if left:
+            n = min(left)
+            score -= 300.0 if n <= 1 else 100.0 if n <= 2 else 30.0 if n <= 3 else 0.0
+        return score
+
     def _bomb_urgency(self, base_score: float, state: GameState, tile_state) -> float:
         """Bomb urgency score (original 'bomb_noticed' branch; the caller decides whether the threat is noticed)."""
+        if self._v24 and "bomb_count_awareness" in self._v24:
+            # [C] 플레이어 모델에는 인지한 폭탄만 있다
+            full = state.bomb_tiles
+            noticed = getattr(state, "_c_noticed", frozenset())
+            state.bomb_tiles = {k: v for k, v in full.items() if k in noticed}
+            try:
+                return self._bomb_urgency_core(base_score, state, tile_state)
+            finally:
+                state.bomb_tiles = full
+        return self._bomb_urgency_core(base_score, state, tile_state)
+
+    def _v24_c_exposed_bombs(self, state: GameState) -> List[str]:
+        out = []
+        for bomb_key in sorted(state.bomb_tiles):
+            parts = bomb_key.split('_')
+            if len(parts) < 3:
+                continue
+            tile = state.tiles.get(int(parts[0]), {}).get(f"{parts[1]}_{parts[2]}")
+            if tile is not None and not tile.picked and not self._is_blocked_by_upper(state, tile):
+                out.append(bomb_key)
+        return out
+
+    def _v24_c_p(self, profile: BotProfile, counter: int) -> float:
+        """[C] 기존 v2.1 인지 확률에서 임박 항을 γ/카운트로 (카운트 1이면 기존 임박 값과 같다)."""
+        import dataclasses as _dc
+        cfg = dict(profile.gimmick_awareness or {})
+        gamma = dict(cfg.get("gamma") or {})
+        gamma["bomb"] = float(gamma.get("bomb", 0.0)) / max(1, int(counter))
+        cfg["gamma"] = gamma
+        return BotSimulator._v21_p_aware(self, "bomb", _dc.replace(profile, gimmick_awareness=cfg), True)
+
+    def _v24_c_update(self, state: GameState) -> None:
+        """[C] 미인지 노출 폭탄마다 전용 RNG로 인지 시도, 판에서 사라진 폭탄은 집합에서 뺀다. 본판 RNG 미사용."""
+        rng = getattr(state, "_c_rng", None)
+        profile = getattr(self, "_c_profile", None)
+        if rng is None or profile is None:
+            return
+        noticed = set(getattr(state, "_c_noticed", ())) & set(state.bomb_tiles)
+        for k in self._v24_c_exposed_bombs(state):
+            if k not in noticed and rng.random() < self._v24_c_p(profile, state.bomb_tiles[k]):
+                noticed.add(k)
+        state._c_noticed = frozenset(noticed)
+
+    def _bomb_urgency_core(self, base_score: float, state: GameState, tile_state) -> float:
         # Find exposed bombs and their urgency
         critical_bomb_move = False
         min_bomb_remaining = float('inf')
@@ -4903,8 +5337,11 @@ class BotSimulator:
                 return savvy
 
         # [bot v2] θ>1.0 확장 등급: 독이 3칸 이상 찼을 때 후보 수마다 짧은 롤아웃으로 실제 결과를 본다.
-        if is_v2 and getattr(profile, "search_rollouts", 0) > 0 and len(state.dock_tiles) >= 3:
-            return self._v2_search_select(moves, state, profile)
+        if is_v2 and self._plan_budget(profile)[0] > 0 and len(state.dock_tiles) >= 3:
+            searched = self._v2_search_select(moves, state, profile)
+            if searched is not None:
+                return searched
+            # Unsupported public belief retains normal public lookahead below.
 
         # CRITICAL: Filter out dangerous moves that would cause game over
         # Score threshold: -100 indicates critical danger (e.g., chain isolation)
@@ -5029,6 +5466,23 @@ class BotSimulator:
         n.dock_tiles = [self._v2_shallow(t) for t in state.dock_tiles]
         n.goals_remaining = state.goals_remaining.copy()
         n.moves_used = state.moves_used
+        n._grass_attention_ttl = getattr(state, "_grass_attention_ttl", 0)
+        n._bomb_noticed = getattr(state, "_bomb_noticed", frozenset())
+        n._dig_box = getattr(state, "_dig_box", None)
+        mem_rng = getattr(state, "_bomb_mem_rng", None)
+        if mem_rng is not None:
+            n._bomb_mem_rng = random.Random()
+            n._bomb_mem_rng.setstate(mem_rng.getstate())
+        else:
+            n._bomb_mem_rng = None
+        n._container_style = getattr(state, "_container_style", 1.0)
+        n._c_noticed = getattr(state, "_c_noticed", frozenset())
+        c_rng = getattr(state, "_c_rng", None)
+        if c_rng is not None:
+            n._c_rng = random.Random()
+            n._c_rng.setstate(c_rng.getstate())
+        else:
+            n._c_rng = None
         n.max_moves = state.max_moves
         n.combo_count = state.combo_count
         n.total_tiles_cleared = state.total_tiles_cleared
@@ -5045,7 +5499,13 @@ class BotSimulator:
         n.all_tile_type_counts = state.all_tile_type_counts.copy()
         n._max_layer_idx = state._max_layer_idx
         n.curtain_memory = {}
-        n.stacked_tiles = {k: self._v2_shallow(v) for k, v in state.stacked_tiles.items()} if state.stacked_tiles else {}
+        stack_copy = self._v2_tile_copy if "hidden_common_samples" in self._v24 else self._v2_shallow
+        n.stacked_tiles = {k: stack_copy(v) for k, v in state.stacked_tiles.items()} if state.stacked_tiles else {}
+        if "hidden_common_samples" in self._v24:
+            board_copies = {t.full_key: t for layer in n.tiles.values() for t in layer.values()}
+            for key, tile in n.stacked_tiles.items():
+                if tile.full_key in board_copies:
+                    n.stacked_tiles[key] = board_copies[tile.full_key]
         if state._blocking_map is not None:
             n._blocking_map = state._blocking_map
             n._reverse_blocking_map = state._reverse_blocking_map
@@ -5074,12 +5534,14 @@ class BotSimulator:
         if tile is None:
             return False
         bombs, curtains = self._v2_exposed_before(state)
+        dig_info = self._cdc_before_move(state, move, tile)
         self._apply_move(state, Move(
             layer_idx=move.layer_idx, position=move.position, tile_type=move.tile_type,
             tile_state=tile, attribute=move.attribute, match_count=move.match_count,
             will_match=move.will_match, score=move.score, linked_tiles=move.linked_tiles,
         ))
         state.moves_used += 1
+        self._cdc_after_move(state, dig_info)
         self._process_move_effects(state, bombs, curtains)
         return True
 
@@ -5098,34 +5560,93 @@ class BotSimulator:
             return self._rng.choice(moves[:3])
         return moves[0]
 
-    def _v24_determinize(self, state: GameState) -> None:
+    def _v24_determinize(self, state: GameState) -> Optional[bool]:
         """[bot v2.4 unknown_hide] 롤아웃 사본에서 가려진 unknown 타일끼리 타입을 섞는다(실제 배치를 모르는 상태로 굴림)."""
         hidden = [t for li in sorted(state.tiles) for t in state.tiles[li].values()
                   if not t.picked and t.effect_type == TileEffectType.UNKNOWN and self._v24_type_hidden(state, t)]
-        if "curtain_memory_v24" in self._v24:          # 잊었거나 본 적 없는 닫힌 커튼도 모르는 타일로 섞는다
+        public_samples = "hidden_common_samples" in self._v24
+        if "curtain_memory_v24" in self._v24 or (public_samples and "curtain_hide" in self._v24):
             hidden += [t for li in sorted(state.tiles) for t in state.tiles[li].values()
                        if not t.picked and t.effect_type == TileEffectType.CURTAIN and self._v24_type_hidden(state, t)]
         if "stack_hide" in self._v24 and state.stacked_tiles:   # 스택 아래 장(맨 위 제외)은 타입이 안 보인다(Q5)
             on_board = {t.full_key for layer in state.tiles.values() for t in layer.values()}
             hidden += [t for k, t in sorted(state.stacked_tiles.items())        # 보드 위(맨 위 장)가 아닌 미픽 스택 타일
                        if not t.picked and t.is_stack_tile and not t.is_craft_tile and t.full_key not in on_board]
-        if len(hidden) >= 2:
+        craft_belief = public_samples and "public_craft_belief" in self._v24
+        if craft_belief and state.stacked_tiles:
+            # [public_craft_belief] unspawned craft contents: only the box remain counter is public; their
+            # types are sampled with the triplet rule below like other hidden tiles (true types never read).
+            board_ids = {id(t) for layer in state.tiles.values() for t in layer.values()}
+            board_keys = {t.full_key for layer in state.tiles.values() for t in layer.values()}
+            known = {id(t) for t in hidden}
+            hidden += [t for k, t in sorted(state.stacked_tiles.items())
+                       if not t.picked and t.is_craft_tile and not t.is_crafted and id(t) not in board_ids
+                       and t.full_key not in board_keys and id(t) not in known]
+        if public_samples:
+            # Infer a triplet-consistent belief from public counts, never from
+            # hidden contents. Unsupported/inconsistent inventories skip search.
+            hidden_ids = {id(t) for t in hidden}
+            remaining = [t for layer in state.tiles.values() for t in layer.values() if not t.picked]
+            seen = {t.full_key for t in remaining}
+            remaining += [t for t in state.stacked_tiles.values() if not t.picked and t.full_key not in seen]
+            key_plan = "public_key_stack_plan" in self._v24 and "key_locks" in self._par
+            locked = sum(slot.is_locked for slot in state.dock)
+            if ((not craft_belief and any(t.is_craft_tile for t in remaining))
+                    or (locked and not key_plan)):
+                return False
+            observed = sorted(t.tile_type for t in remaining if id(t) not in hidden_ids
+                              and not self._v24_type_hidden(state, t))
+            observed += sorted(t.tile_type for t in state.dock_tiles)
+            if "t16" in observed or ("key" in observed and not key_plan):
+                return False
+            hidden_keys = 3 * locked - observed.count("key") if key_plan else 0
+            if hidden_keys < 0 or hidden_keys > len(hidden):
+                return False
+            observed = [tt for tt in observed if tt != "key"]
+            counts = Counter(observed)
+            types = ["key"] * hidden_keys + [tt for tt in sorted(counts) for _ in range((-counts[tt]) % 3)]
+            spare = len(hidden) - len(types)
+            if spare < 0 or spare % 3 or (spare and not observed):
+                return False
+            for _ in range(spare // 3):
+                types.extend([self._rng.choice(observed)] * 3)
+            self._rng.shuffle(types)
+            for tile, tt in zip(hidden, types):
+                tile.tile_type = tt
+            state.all_tile_type_counts = dict(Counter(t.tile_type for t in remaining))
+            return True
+        elif len(hidden) >= 2:
             types = [t.tile_type for t in hidden]
             self._rng.shuffle(types)
             for t, tt in zip(hidden, types):
                 t.tile_type = tt
 
-    def _v2_rollout_value(self, state: GameState, move: Move, profile: BotProfile) -> float:
+    def _plan_budget(self, profile: BotProfile) -> Tuple[int, int]:
+        """(rollouts, horizon). Default = (search_rollouts, V2_SEARCH_LEN) - unchanged.
+        [skill_planning, experiment] theta<=1 profiles with lookahead_depth>=1 get 1 rollout of horizon
+        2 x lookahead_depth (derived: theta1.0 depth5 -> 10 = V2_SEARCH_LEN). Mistakes/awareness untouched."""
+        rollouts = getattr(profile, "search_rollouts", 0)
+        if rollouts <= 0 and self._v24 and "skill_planning" in self._v24 and profile.lookahead_depth >= 1:
+            return 1, min(self.V2_SEARCH_LEN, 2 * int(profile.lookahead_depth))
+        return rollouts, self.V2_SEARCH_LEN
+
+    def _v2_rollout_value(self, state: GameState, move: Move, profile: BotProfile,
+                          rollout_seeds=None) -> Optional[float]:
         total = 0.0
-        for _ in range(profile.search_rollouts):
+        n_rollouts, horizon = self._plan_budget(profile)
+        for sample_index in range(n_rollouts):
+            if rollout_seeds is not None:
+                self._rng.seed(rollout_seeds[sample_index])
             s = self._v2_copy_state(state)
             if self._v24 and ("unknown_hide" in self._v24 or "curtain_memory_v24" in self._v24
-                              or "stack_hide" in self._v24):
+                              or "stack_hide" in self._v24
+                              or ("hidden_common_samples" in self._v24 and "curtain_hide" in self._v24)):
                 s._v24_cmem_keys = getattr(state, "_v24_cmem_keys", None)
-                self._v24_determinize(s)
+                if self._v24_determinize(s) is False:
+                    return None
             if not self._v2_step(s, move):
                 return -1.0
-            for _k in range(self.V2_SEARCH_LEN):
+            for _k in range(horizon):
                 if self._is_game_over(s):
                     break
                 nxt = self._v2_rollout_move(s, profile)
@@ -5140,19 +5661,32 @@ class BotSimulator:
                 total += 1.0 if won else 0.0
             else:
                 total += 0.5 - 0.06 * len(s.dock_tiles)
-        return total / profile.search_rollouts
+        return total / n_rollouts
 
-    def _v2_search_select(self, moves: List[Move], state: GameState, profile: BotProfile) -> Move:
+    def _v2_search_select(self, moves: List[Move], state: GameState, profile: BotProfile) -> Optional[Move]:
         safe = sorted([m for m in moves if m.score > -100.0] or moves, key=lambda m: m.score, reverse=True)
         matching = [m for m in safe if m.will_match][:3]
         cands = (matching + [m for m in safe if not m.will_match])[:self.V2_SEARCH_WIDTH]
         if len(cands) == 1:
             return cands[0]
         best, best_v = cands[0], float("-inf")
-        for m in cands:
-            v = self._v2_rollout_value(state, m, profile) + m.score * 1e-4  # tie-break by heuristic score
-            if v > best_v:
-                best, best_v = m, v
+        common = "hidden_common_samples" in self._v24
+        parent_rng = self._rng
+        seeds = [parent_rng.getrandbits(64) for _ in range(self._plan_budget(profile)[0])] if common else None
+        if common:
+            self._rng = random.Random()
+        try:
+            for m in cands:
+                value = self._v2_rollout_value(state, m, profile, seeds)
+                if value is None:
+                    if "public_gimmick_planning" in self._v24:
+                        return None  # caller continues ordinary public-information choice
+                    return cands[0]  # no valid public-information belief; no oracle fallback
+                v = value + m.score * 1e-4
+                if v > best_v:
+                    best, best_v = m, v
+        finally:
+            self._rng = parent_rng
         return best
 
     def _get_adaptive_depth(self, state: GameState) -> int:
@@ -5586,7 +6120,7 @@ class BotSimulator:
                 total_remaining = type_counts.get(tile_type, 0)
             else:
                 # Legacy behavior: use all tile counts (hidden info)
-                total_remaining = state.all_tile_type_counts.get(tile_type, 0)
+                total_remaining = self._decision_tile_counts(state).get(tile_type, 0)
             after_pick = dock_has + 1
             needed_for_match = 3 - after_pick
             return total_remaining - 1 >= needed_for_match
@@ -5713,7 +6247,7 @@ class BotSimulator:
                     type_counts = self._get_accessible_type_counts(state)
                     total_count = type_counts.get(blocking_type, 0)
                 else:
-                    total_count = state.all_tile_type_counts.get(blocking_type, 0)
+                    total_count = self._decision_tile_counts(state).get(blocking_type, 0)
                 in_dock = dock_counts.get(blocking_type, 0)
 
                 # Need at least 3 total to make a match eventually
@@ -5763,7 +6297,7 @@ class BotSimulator:
                     type_counts = self._get_accessible_type_counts(state)
                     total_count = type_counts.get(blocking_type, 0)
                 else:
-                    total_count = state.all_tile_type_counts.get(blocking_type, 0)
+                    total_count = self._decision_tile_counts(state).get(blocking_type, 0)
 
                 # Need at least 3 total to make a match eventually
                 if total_count >= 3:
@@ -5935,7 +6469,7 @@ class BotSimulator:
             all_tile_counts = dict(self._get_accessible_type_counts(state))
         else:
             # Legacy behavior: use all tile counts (hidden info)
-            all_tile_counts = dict(state.all_tile_type_counts)
+            all_tile_counts = dict(self._decision_tile_counts(state))
         if move_type in all_tile_counts:
             all_tile_counts[move_type] = max(0, all_tile_counts[move_type] - 1)
         # Also decrement for matched tiles
@@ -6175,7 +6709,7 @@ class BotSimulator:
                 # Check hidden tiles (perfect information for optimal bot)
                 # Phase 3: When ENABLE_HIDDEN_INFO_BLOCK is enabled, skip hidden tile analysis
                 if not BotSimulatorConfig.ENABLE_HIDDEN_INFO_BLOCK:
-                    total_of_type = state.all_tile_type_counts.get(dock_type, 0)
+                    total_of_type = self._decision_tile_counts(state).get(dock_type, 0)
                     # Hidden = total - pickable - in_dock - this_tile
                     hidden_of_type = total_of_type - same_type_pickable - new_dock_count
                     if hidden_of_type >= 1:
@@ -6196,7 +6730,7 @@ class BotSimulator:
                 # Phase 3: When ENABLE_HIDDEN_INFO_BLOCK is enabled, skip hidden tile analysis
                 if not BotSimulatorConfig.ENABLE_HIDDEN_INFO_BLOCK:
                     # Check for hidden tiles
-                    total_of_type = state.all_tile_type_counts.get(dock_type, 0)
+                    total_of_type = self._decision_tile_counts(state).get(dock_type, 0)
                     hidden_of_type = total_of_type - same_type_pickable - 1  # -1 for this tile
                     if hidden_of_type >= 1:
                         score += 5.0  # One pickable + one hidden = can match
@@ -6208,7 +6742,7 @@ class BotSimulator:
                 # No more pickable - check hidden
                 # Phase 3: When ENABLE_HIDDEN_INFO_BLOCK is enabled, skip hidden tile analysis
                 if not BotSimulatorConfig.ENABLE_HIDDEN_INFO_BLOCK:
-                    total_of_type = state.all_tile_type_counts.get(dock_type, 0)
+                    total_of_type = self._decision_tile_counts(state).get(dock_type, 0)
                     hidden_of_type = total_of_type - 1  # -1 for this tile
                     if hidden_of_type >= 2:
                         score += 3.0  # 2 hidden tiles can complete match
@@ -6246,7 +6780,7 @@ class BotSimulator:
             tile_counts_to_iterate = pickable_by_type
         else:
             # Legacy behavior: use all tile counts (hidden info)
-            tile_counts_to_iterate = state.all_tile_type_counts
+            tile_counts_to_iterate = self._decision_tile_counts(state)
 
         for tile_type, total_count in tile_counts_to_iterate.items():
             if tile_type not in self.MATCHABLE_TYPES:

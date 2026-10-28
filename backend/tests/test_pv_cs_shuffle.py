@@ -509,4 +509,10 @@ def test_golden_g5_bot_reads_resolved_map(row, res, shim):
         assert got is not None, f"bot has no tile at {key}"
         # bot spells keys "key"; client resolved maps write "t16" (see 05_p0_report F-G5-1)
         want_str = "t16" if want == 16 else f"t{want}"
-        assert got == want_str, f"{key}: bot={got} golden={want_str}"
+        # 2026-10-27 key parity: ONLY with unlockTile>0 the bot normalises "t16" -> "key" itself
+        # (test_bot_key_parity.py). unlockTile=0 must stay byte-identical to the legacy reading ("t16").
+        if lj["unlockTile"] > 0:
+            ok = got == want_str or (want == 16 and got == "key")
+        else:
+            ok = got == want_str
+        assert ok, f"{key}: bot={got} golden={want_str}"

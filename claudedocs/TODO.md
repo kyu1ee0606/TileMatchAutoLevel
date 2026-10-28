@@ -2,6 +2,8 @@
 
 ## 봇 계획 능력·craft 공개 추론 (2026-10-27)
 
+- [x] **(2026-10-28)** 문서 70 dock_reserve_play D3 PREREG 6,144판 **미지지**(채택 안 함, 코어 a89a29ab… 불변) · 문서 71 보정모델 재학습 판단 **조건부**(5단계 재측정 승인 후) · DDA 공용 측정 프로필 `bot_measure_profile.py` + 래퍼 `dda_aligned_games_20261028.py`(검증 192/192). 누적 약 136,984/195,000. 재개: [resume_note_20261028](difficulty_personalization/resume_note_20261028.md). 남은 일: 5단계 재측정 승인(한도 약 210,000 필요)·후속 기믹 후보 보류·push 승인.
+
 - [ ] **(재개 대기 2026-10-27 20:00)** A 완료(dev 96행·2,048판, pick **D3**) · B-1 코어 정렬 완료(코어 a89a29ab…, parity 통과), B-2 DDA 프로필 정렬 미착수(계획만). 남은 C(문서 70 PREREG, 다음 주)→D→E: [resume_note_20261027_2000](difficulty_personalization/resume_note_20261027_2000.md). 누적 약 130,456/195,000.
 
 - [x] `skill_planning`(#1)·`public_craft_belief`(#2) opt-in 구현, 테스트, 비용 측정(판당 ≤0.5초). 코어 4196e75a. [56](difficulty_personalization/56_bot_planning_craft_belief_20261027.md).

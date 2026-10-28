@@ -20,7 +20,7 @@ POP_OR_DATA = {'pv_sandbox/af_calibration/bot_v22', 'pv_sandbox/pv_20261002_live
 BOT_ONLY = {'key_parity_invariance_20261027', 'key_placement_golden_20261027', 'key_unlock_diag_20261027', 'grass_bomb_cost_20261027',
             'grass_bomb_cost_v2_20261027', 'plan_cost_20261027', 'play_summary_check_20261027', 'plan_summary_dist_20261027',
             'k1c_port_20261027',
-            'p2_adopt_20261027', 'key_refusal_20261027', 'l82_trace_20261027'}
+            'p2_adopt_20261027', 'key_refusal_20261027', 'l82_trace_20261027', 'b_align_20261027'}
 
 
 def lv(v):

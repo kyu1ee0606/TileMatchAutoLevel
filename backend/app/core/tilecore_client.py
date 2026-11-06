@@ -600,30 +600,138 @@ def _sample_compare(path, level_json, profile, iterations, max_moves, seed, hono
         logger.warning("[tilecore_client] sample compare failed: %s", exc)
 
 
-def sweep_points(tasks: List[dict], path: str = "sweep") -> List[dict]:
-    """Same dicts as ``mc_difficulty.sweep_point_task``. Points go to C# concurrently; any point C# cannot do
-    (off/unsupported/error/timeout/bot_version != v1) is run by the original Python ``sweep_point_task``."""
+# ───────────────────────── sweep (rl_sim._parallel_point_sweep) ─────────────────────────
+class _RecordingSim(BotSimulator):
+    """BotSimulator that also records [cleared, moves, combo, tiles_cleared] of every game (picklable, top level)."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.rec_games: List[list] = []
+
+    def _play_game(self, state, profile):
+        f = super()._play_game(state, profile)
+        self.rec_games.append([bool(f.cleared), int(f.moves_used), int(f.combo_count), int(f.total_tiles_cleared)])
+        return f
+
+
+def _sweep_params(args: dict):
     from . import mc_difficulty as mc
+    theta = float(args["theta"])
+    return (theta, mc.make_skill_profile(theta, args.get("bot_version", "v1")),
+            max(4, min(500, int(args.get("rollouts", mc.DEFAULT_ROLLOUTS_PER_POINT)))),
+            args.get("seed", mc.DEFAULT_BASE_SEED))
 
-    def one(args: dict) -> dict:
-        if path_mode(path) == "off" or args.get("bot_version", "v1") != "v1":
-            return mc.sweep_point_task(args)
+
+def _point_dict(args: dict, theta: float, res) -> dict:
+    """Same dict/rounding as mc_difficulty.sweep_point_task (res: BotSimulationResult)."""
+    from . import mc_difficulty as mc
+    return {"key": args.get("key"), "error": None, "theta": round(theta, 4),
+            "clear_rate": round(res.clear_rate, 4), "iterations": res.iterations,
+            "ci_half_width": round(mc._wilson_half_width(res.clear_rate, res.iterations), 4),
+            "avg_moves": round(res.avg_moves, 2), "avg_tiles_cleared": round(res.avg_tiles_cleared, 2)}
+
+
+def sweep_point_task_recorded(args: dict) -> dict:
+    """Pool task for shadow: python result exactly like ``sweep_point_task`` + per-game records.
+    Returns {"point": <sweep_point_task dict>, "games": [[cleared,moves,combo,tiles],...], "py_s": float}."""
+    from . import mc_difficulty as mc
+    t0 = time.perf_counter()
+    try:
+        theta, profile, iters, seed = _sweep_params(args)
+        sim = _RecordingSim()
+        res = sim.simulate_with_profile(args["level_json"], profile, iterations=iters, max_moves=args.get("max_moves"),
+                                        seed=seed, honor_zero_seed=False, early_termination=True)
+        return {"point": _point_dict(args, theta, res), "games": sim.rec_games, "py_s": time.perf_counter() - t0}
+    except Exception:
+        return {"point": mc.sweep_point_task(args), "games": None, "py_s": time.perf_counter() - t0}
+
+
+def _cs_point(args: dict, path: str = "sweep"):
+    """One sweep point on C# (gen mode, seed given). Returns (point_dict, games) or raises Serve*/TimeoutError.
+    Pre-rejects (ServeUnsupported): bot_version != v1."""
+    if args.get("bot_version", "v1") != "v1":
+        raise ServeUnsupported("bot_version != v1")
+    theta, profile, iters, seed = _sweep_params(args)
+    lj = args["level_json"]
+    mm = resolve_max_moves(lj, args.get("max_moves"))
+    games, _ = _cs_call(path, lj, profile, iters, mm, int(seed), True, None)
+    return _point_dict(args, theta, _build_result(profile, games, mm)), games
+
+
+def _cs_many(tasks: List[dict], path: str):
+    """Pipeline tasks to the resident worker. Returns list aligned with tasks: (point, games) | Exception."""
+    n = max(1, int(_env_float("TILECORE_SERVE_THREADS_SWEEP", _DEFAULT_THREADS["sweep"])))
+
+    def one(a):
         try:
-            sim = BotSimulator()
-            theta = float(args["theta"])
-            profile = mc.make_skill_profile(theta, args.get("bot_version", "v1"))
-            res = simulate(sim, args["level_json"], profile,
-                           iterations=max(4, min(500, int(args.get("rollouts", mc.DEFAULT_ROLLOUTS_PER_POINT)))),
-                           max_moves=args.get("max_moves"), seed=args.get("seed", mc.DEFAULT_BASE_SEED),
-                           honor_zero_seed=False, early_termination=True, path=path)
-            return {"key": args.get("key"), "error": None, "theta": round(theta, 4),
-                    "clear_rate": round(res.clear_rate, 4), "iterations": res.iterations,
-                    "ci_half_width": round(mc._wilson_half_width(res.clear_rate, res.iterations), 4),
-                    "avg_moves": round(res.avg_moves, 2), "avg_tiles_cleared": round(res.avg_tiles_cleared, 2)}
-        except Exception:
-            return mc.sweep_point_task(args)
+            return _cs_point(a, path)
+        except Exception as exc:
+            return exc
+    with cf.ThreadPoolExecutor(max_workers=n) as ex:
+        return list(ex.map(one, tasks))
 
+
+def sweep_points(tasks: List[dict], path: str = "sweep", fallback_map=None) -> List[dict]:
+    """Same dicts, same order as ``mc_difficulty.sweep_point_task`` over ``tasks``. Points go to C# concurrently; any
+    point C# cannot do (unsupported/error/timeout/bot_version != v1) goes to ``fallback_map(list_of_tasks)`` (default:
+    sequential in-process ``sweep_point_task``)."""
+    from . import mc_difficulty as mc
+    if fallback_map is None:
+        fallback_map = lambda ts: [mc.sweep_point_task(t) for t in ts]    # noqa: E731
     if not tasks:
         return []
-    with cf.ThreadPoolExecutor(max_workers=max(1, int(_env_float("TILECORE_SERVE_THREADS_SWEEP", 4)))) as ex:
-        return list(ex.map(one, tasks))
+    if path_mode(path) == "off":                  # switch off: C# never touched
+        return fallback_map(list(tasks))
+    out: List[Optional[dict]] = [None] * len(tasks)
+    redo = []
+    for i, r in enumerate(_cs_many(tasks, path)):
+        if isinstance(r, Exception):
+            _classify(path, r)
+            _count(path, "fallback")
+            redo.append(i)
+        else:
+            _count(path, "cs_ok")
+            out[i] = r[0]
+    if redo:
+        for i, p in zip(redo, fallback_map([tasks[i] for i in redo])):
+            out[i] = p
+    return out   # type: ignore[return-value]
+
+
+def _shadow_sweep(pool, tasks: List[dict], path: str) -> List[dict]:
+    recs = list(pool.map(sweep_point_task_recorded, tasks, chunksize=1))
+    points = [r["point"] for r in recs]
+    try:
+        cs = _cs_many(tasks, path)
+        for a, rec, r in zip(tasks, recs, cs):
+            row = {"ts": time.time(), "path": path, "lvl": _lvl_hash(a["level_json"]), "theta": a.get("theta"),
+                   "seed": a.get("seed"), "py_s": round(rec["py_s"], 4)}
+            if isinstance(r, Exception):
+                row["category"] = {"unsupported": "cs_unsupported", "timeout": "timeout"}.get(_classify(path, r),
+                                                                                              "cs_error")
+                row["error"] = str(r)[:200]
+            else:
+                _count(path, "cs_ok")
+                same = rec["games"] is not None and [[g["cleared"], g["moves"], g["combo"], g["tiles_cleared"]]
+                                                     for g in r[1]] == rec["games"] and r[0] == rec["point"]
+                row["category"] = "same" if same else "mismatch"
+                _count(path, "shadow_same" if same else "shadow_mismatch")
+            _shadow_log(path, row)
+    except Exception as exc:      # shadow must never break the service
+        logger.warning("[tilecore_client] sweep shadow failed: %s", exc)
+    return points
+
+
+def run_sweep(pool, tasks: List[dict], path: str = "sweep") -> List[dict]:
+    """Single call site in rl_sim._parallel_point_sweep: replaces
+    ``list(pool.map(sweep_point_task, tasks, chunksize=1))``.
+      off    -> exactly that expression (C# never touched)
+      on     -> C# first; unsupported/failed points go through ``pool`` (python)
+      shadow -> python via pool (records games) is the result; C# replay compared & logged"""
+    from . import mc_difficulty as mc
+    mode = path_mode(path)
+    if mode == "off":
+        return list(pool.map(mc.sweep_point_task, tasks, chunksize=1))
+    if mode == "shadow":
+        return _shadow_sweep(pool, tasks, path)
+    return sweep_points(tasks, path, fallback_map=lambda ts: list(pool.map(mc.sweep_point_task, ts, chunksize=1)))

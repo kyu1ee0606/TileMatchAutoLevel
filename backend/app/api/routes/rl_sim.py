@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from ...core import tilecore_client
 from ...core.mc_difficulty import (
     DEFAULT_ROLLOUTS_PER_POINT,
     DEFAULT_SKILL_GRID,
@@ -105,7 +106,7 @@ def _parallel_point_sweep(
             })
 
     pool = _get_pool()
-    raw_points = list(pool.map(sweep_point_task, tasks, chunksize=1))
+    raw_points = tilecore_client.run_sweep(pool, tasks)  # TILECORE_SWEEP off(기본)=pool.map(sweep_point_task) 그대로
 
     by_key: Dict[Any, List[Dict[str, Any]]] = {}
     for p in raw_points:

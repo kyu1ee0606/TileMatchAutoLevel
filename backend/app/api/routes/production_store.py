@@ -436,16 +436,32 @@ def _enforce_rule_gate(levels: List[Dict[str, Any]]) -> List[int]:
     return flagged
 
 
-def _current_version(batch_id: str) -> Optional[int]:
-    """저장된 배치의 현재 버전(없으면 None)."""
+def _current_version_doc(batch_id: str):
+    """(현재 버전, 파싱한 문서 또는 None). 버전은 _index.json 항목이 파일 (mtime,size)와 일치하면
+    거기서 읽고(배치 전체 json.load 생략), 불일치/없음이면 파일을 파싱해 doc 도 함께 돌려준다."""
     fp = _path(batch_id)
-    if not os.path.exists(fp):
-        return None
+    try:
+        st = os.stat(fp)
+    except OSError:
+        return None, None
+    try:
+        ent = _load_index().get(batch_id)
+        if (isinstance(ent, dict) and ent.get("_mtime") == st.st_mtime
+                and ent.get("size_bytes") == st.st_size and isinstance(ent.get("version"), int)):
+            return ent["version"], None
+    except Exception:  # noqa: BLE001
+        pass
     try:
         with open(fp, "r", encoding="utf-8") as f:
-            return int(json.load(f).get("version", 0))
+            doc = json.load(f)
+        return int(doc.get("version", 0)), doc
     except Exception:
-        return None
+        return None, None
+
+
+def _current_version(batch_id: str) -> Optional[int]:
+    """저장된 배치의 현재 버전(없으면 None)."""
+    return _current_version_doc(batch_id)[0]
 
 
 def read_batch_file(batch_id: str) -> Optional[Dict[str, Any]]:
@@ -466,7 +482,7 @@ def save_batch(batch_id: str, req: SaveBatchRequest) -> SaveBatchResponse:
     """배치 전체(메타+레벨)를 로컬 파일에 저장(덮어쓰기). 원자적 쓰기 + 낙관적 동시성 버전 검사."""
     _ensure_dir()
     bid = _safe_id(batch_id)
-    cur = _current_version(bid)
+    cur, _cur_doc = _current_version_doc(bid)
     # 충돌 검사: base_version이 주어졌고 서버에 이미 있으며 버전이 다르면 거부(다른 브라우저 선수정).
     if req.base_version is not None and cur is not None and req.base_version != cur:
         raise HTTPException(
@@ -490,8 +506,10 @@ def save_batch(batch_id: str, req: SaveBatchRequest) -> SaveBatchResponse:
                 "message": "서버에 배치가 없습니다 — 최초 저장은 전체(partial=false)여야 합니다",
             })
         try:
-            with open(fp, "r", encoding="utf-8") as f:
-                base_levels: List[Dict[str, Any]] = json.load(f).get("levels") or []
+            if _cur_doc is None:  # 버전을 인덱스에서 읽어 아직 파싱 전 — 여기서 요청당 1회 로드
+                with open(fp, "r", encoding="utf-8") as f:
+                    _cur_doc = json.load(f)
+            base_levels: List[Dict[str, Any]] = _cur_doc.get("levels") or []
         except Exception as ex:  # noqa: BLE001
             # 기존본을 못 읽으면 델타만 남아 1500개가 날아간다 → 저장 자체를 거부한다.
             raise HTTPException(status_code=409, detail={

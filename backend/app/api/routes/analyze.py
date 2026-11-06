@@ -1,4 +1,5 @@
 """Level analysis API routes."""
+import pickle
 import time
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -300,7 +301,7 @@ def calculate_target_clear_rates(target_difficulty: float) -> Dict[str, float]:
 
 
 @router.post("/analyze", response_model=AnalyzeResponse)
-async def analyze_level(
+def analyze_level(
     request: AnalyzeRequest,
     analyzer: LevelAnalyzer = Depends(get_level_analyzer),
 ) -> AnalyzeResponse:
@@ -1942,7 +1943,7 @@ async def turtle_bases_delete(base_id: str):
 
 
 @router.post("/debug/turtle-bases/{base_id}/measure")
-async def turtle_bases_measure(base_id: str, iterations: int = 120):
+def turtle_bases_measure(base_id: str, iterations: int = 120):
     """[등껍질 바닥] 난이도 실측 — V(색 종류) 6/9/12 에서 봇 클리어율.
 
     측정 프로토콜은 `scripts/measure_turtle_difficulty.py` 와 동일:
@@ -2428,7 +2429,7 @@ class BossTemplateGenerateRequest(_BaseModel):
 
 
 @router.post("/generate/from-boss-template")
-async def generate_from_boss_template(req: BossTemplateGenerateRequest):
+def generate_from_boss_template(req: BossTemplateGenerateRequest):
     """보스 템플릿(다층 t0 모양)으로 레벨 생성.
 
     반자동: 템플릿 = 모양(t0)만. 여기서 useTileCount(레벨 그래프)+randSeed 세팅 후
@@ -2737,10 +2738,22 @@ from pydantic import BaseModel as _BaseModel  # noqa: E402 — 아래 섹션들�
 LEVEL_TEMPLATES_PATH = os.path.join(os.path.dirname(CUSTOM_PATTERNS_PATH), "level_templates.json")
 
 
+# 1.5MB 파일을 요청마다 json 파싱하던 것 → (mtime_ns,size) 가 같으면 피클 바이트에서 복원.
+# 호출자들이 반환 dict 를 제자리 수정·저장하므로 매번 독립 사본(pickle.loads)을 돌려준다.
+_LT_CACHE: Dict[str, Any] = {"sig": None, "blob": None}
+
+
 def _load_level_templates() -> Dict[str, Any]:
     try:
+        st = os.stat(LEVEL_TEMPLATES_PATH)
+        sig = (st.st_mtime_ns, st.st_size)
+        if _LT_CACHE["sig"] == sig and _LT_CACHE["blob"] is not None:
+            return pickle.loads(_LT_CACHE["blob"])
         with open(LEVEL_TEMPLATES_PATH, "r") as f:
-            return json_module.load(f)
+            data = json_module.load(f)
+        _LT_CACHE["blob"] = pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL)
+        _LT_CACHE["sig"] = sig
+        return data
     except (FileNotFoundError, json_module.JSONDecodeError):
         return {"templates": {}}
 
@@ -3060,7 +3073,7 @@ class LevelTemplateFromTemplateRequest(_BaseModel):
 
 
 @router.post("/generate/from-template")
-async def generate_from_template(request: LevelTemplateFromTemplateRequest):
+def generate_from_template(request: LevelTemplateFromTemplateRequest):
     """템플릿 기반 프로덕션 레벨 생성. 기믹·위치·레이어 구조 보존, 일반 타일만 t1~t6 재할당.
     응답은 GenerateResponse와 호환 (level_json + actual_difficulty + grade)."""
     import copy
@@ -3207,7 +3220,7 @@ async def generate_from_template(request: LevelTemplateFromTemplateRequest):
 
 
 @router.post("/debug/level-template/{template_id}/measure")
-async def debug_level_template_measure(template_id: str, iterations: int = 100):
+def debug_level_template_measure(template_id: str, iterations: int = 100):
     """템플릿 저장 데이터로 봇 시뮬레이션 + 난이도 측정 + 자동 저장.
     level_json의 문자열 숫자 필드를 내부에서 정규화하여 분석기에 전달."""
     from ...models.schemas import AutoPlayRequest
@@ -3992,7 +4005,7 @@ class TestLevelRequest(_BaseModel):
 
 
 @router.post("/debug/test-level")
-async def debug_test_level(request: TestLevelRequest):
+def debug_test_level(request: TestLevelRequest):
     """패턴 + 레이어별 그리드 크기로 테스트 레벨 1개 생성. 레이어별 배치 시각화 포함."""
     generator = LevelGenerator()
     num_layers = len(request.layers)

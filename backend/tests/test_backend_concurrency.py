@@ -112,9 +112,16 @@ def _boss_req(seed):
                                      gimmicks={p: "bomb" for p in pos[:6]})])
 
 
+def _run_boss(seed):
+    # generate_from_boss_template 는 async def(이벤트 루프 직렬화). 스레드별 루프로 호출해도
+    # 본문 안의 _BOSS_GEN_LOCK 이 보스 요청끼리 직렬화해야 한다.
+    import asyncio
+    return asyncio.run(AN.generate_from_boss_template(_boss_req(seed)))
+
+
 def test_boss_generate_seed_deterministic_under_concurrency(monkeypatch):
     seeds = [11, 22, 33, 44]
-    base = {s: json.dumps(AN.generate_from_boss_template(_boss_req(s)), sort_keys=True, default=str) for s in seeds}
+    base = {s: json.dumps(_run_boss(s), sort_keys=True, default=str) for s in seeds}
     assert len(set(base.values())) > 1, "seed 마다 결과가 달라야 테스트가 의미 있음"
     def _slow(orig):
         def f(*a, **k):
@@ -126,7 +133,7 @@ def test_boss_generate_seed_deterministic_under_concurrency(monkeypatch):
     out = {}
 
     def run(s, i):
-        out[(s, i)] = json.dumps(AN.generate_from_boss_template(_boss_req(s)), sort_keys=True, default=str)
+        out[(s, i)] = json.dumps(_run_boss(s), sort_keys=True, default=str)
     ts = [threading.Thread(target=run, args=(s, i)) for s in seeds for i in range(2)]
     [t.start() for t in ts]; [t.join() for t in ts]
     bad = [k for k, v in out.items() if v != base[k[0]]]

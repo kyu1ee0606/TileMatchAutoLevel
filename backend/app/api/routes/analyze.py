@@ -1995,7 +1995,7 @@ def turtle_bases_measure(base_id: str, iterations: int = 120):
         avgs.append(rates["avg"])
     diff = {"ref": "turtle_base", "by_v": by_v,
             "coef": round(1.0 - sum(avgs) / len(avgs), 3)}
-    if not TB.set_difficulty(base_id, diff, expect_cells=entry.get("cells") or []):
+    if not TB.set_difficulty(base_id, diff, expect_cells=entry.get("cells") or [], expect_grid=grid):
         return {"ok": False, "error": "base_changed", "id": base_id,
                 "message": "측정 중 바닥이 편집/삭제되어 결과를 저장하지 않았습니다 — 다시 측정하세요"}
     return {"ok": True, "id": base_id, "difficulty": diff}
@@ -2436,9 +2436,10 @@ _BOSS_GEN_LOCK = threading.Lock()
 
 
 @router.post("/generate/from-boss-template")
-def generate_from_boss_template(req: BossTemplateGenerateRequest):
-    """보스 템플릿 생성 — 전역 random.seed 를 쓰므로 본문 전체를 전용 잠금으로 직렬화
-    (def=스레드풀이라 이벤트 루프는 막지 않음). 같은 seed → 같은 결과 보장."""
+async def generate_from_boss_template(req: BossTemplateGenerateRequest):
+    """보스 템플릿 생성 — 전역 random.seed 를 쓰므로 async def(이벤트 루프 직렬화, 최적화 전 동작)로 둔다.
+    def(스레드풀)로 두면 다른 def 라우트(/debug/test-level 등)의 전역 random 소비와 교차해 같은 seed 재현이 깨질 수 있다.
+    _BOSS_GEN_LOCK 은 보스 요청끼리 방어용으로 유지(루프 위에선 경합 없음)."""
     with _BOSS_GEN_LOCK:
         return _generate_from_boss_template_impl(req)
 

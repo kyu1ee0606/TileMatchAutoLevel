@@ -151,6 +151,14 @@ export function TurtleBaseLibrary() {
     setMsg({ kind: 'ok', text: `${id} 난이도 측정 중… (V 6/9/12, 봇 시뮬)` });
     try {
       const r = await apiClient.post(`/debug/turtle-bases/${id}/measure?iterations=100`);
+      if (r.data?.ok === false || r.data?.error) {
+        // 서버는 HTTP 200 + {ok:false,error:'base_changed'} 로 '측정 중 등껍질이 바뀌어 저장 안 함'을 알린다.
+        setMsg({ kind: 'err', text: r.data?.error === 'base_changed'
+          ? `${id} 측정 중 등껍질이 바뀌어 저장하지 않음 — 다시 측정하세요`
+          : `${id} 측정 실패: ${r.data?.message || r.data?.error}` });
+        await load();
+        return;
+      }
       const d = r.data?.difficulty;
       setMsg({ kind: 'ok', text: `${id} 측정 완료 — coef ${d?.coef} (V9 avg ${d?.by_v?.['9']?.avg})` });
       await load();

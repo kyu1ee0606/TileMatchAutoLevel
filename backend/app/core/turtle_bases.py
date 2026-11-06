@@ -191,13 +191,17 @@ def delete_base(base_id: str) -> bool:
 
 @_locked
 def set_difficulty(base_id: str, difficulty: Dict[str, Any],
-                   expect_cells: Optional[List[str]] = None) -> bool:
+                   expect_cells: Optional[List[str]] = None,
+                   expect_grid: Optional[int] = None) -> bool:
     """난이도 저장. 저장 직전 최신본을 읽어 이 항목의 difficulty 만 갱신(타 항목 변경·삭제 보존).
-    expect_cells 가 주어지고 최신 cells 와 다르면(측정 중 모양 편집) 저장하지 않고 False."""
+    expect_cells / expect_grid 가 주어지고 최신본과 다르면(측정 중 모양·격자 편집) 저장하지 않고 False.
+    grid 도 측정 입력이다(generator 가 base_col 로 레이어 크기·침식 범위 계산)."""
     d = _load()
     if base_id not in d:
         return False
     if expect_cells is not None and sorted(set(expect_cells)) != sorted(set(d[base_id].get("cells") or [])):
+        return False
+    if expect_grid is not None and int(d[base_id].get("grid") or 8) != int(expect_grid):
         return False
     d[base_id]["difficulty"] = difficulty
     _save(d)

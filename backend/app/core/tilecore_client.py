@@ -109,6 +109,7 @@ class ServeWorker:
         self._proc: Optional[subprocess.Popen] = None
         self._pending: Dict[str, cf.Future] = {}
         self._plock = threading.Lock()
+        self._wlock = threading.Lock()         # serializes pipe writes (taken outside _lock)
         self._ids = itertools.count(1)
         self._hello: Optional[dict] = None
         self._hello_ev = threading.Event()
@@ -132,23 +133,28 @@ class ServeWorker:
             if not f.done():
                 f.set_exception(exc)
 
+    @staticmethod
+    def _reap(p: subprocess.Popen) -> None:
+        """kill + wait + close pipes. kill comes first so a writer blocked on a full pipe is released (BrokenPipe)."""
+        try:
+            p.kill()
+        except OSError:
+            pass
+        try:
+            p.wait(timeout=2)
+        except Exception:
+            pass
+        for s in (p.stdin, p.stdout):
+            try:
+                if s:
+                    s.close()
+            except Exception:
+                pass
+
     def _kill_locked(self, why: str) -> None:
         p, self._proc = self._proc, None
         if p is not None:
-            try:
-                p.kill()
-            except OSError:
-                pass
-            try:
-                p.wait(timeout=2)
-            except Exception:
-                pass
-            for s in (p.stdin, p.stdout):
-                try:
-                    if s:
-                        s.close()
-                except Exception:
-                    pass
+            self._reap(p)
         self._hello = None
         self._fail_all(ServeUnavailable(why))
 
@@ -179,12 +185,21 @@ class ServeWorker:
         except Exception:
             pass
         finally:
-            with self._lock:
-                if self._proc is proc:     # unexpected end (crash/EOF): schedule restart, fail waiters
-                    self._proc = None
-                    self._hello = None
-                    self._note_failure_locked()
-                    self._fail_all(ServeUnavailable("serve process ended"))
+            # stdout ended (crash/EOF/reader error): the process may still be alive (stdout closed only) -> reap it
+            try:
+                proc.kill()                # outside _lock: releases a writer blocked on a full pipe
+            except OSError:
+                pass
+            if self._lock.acquire(timeout=5):
+                try:
+                    if self._proc is proc:     # schedule restart, fail waiters
+                        self._proc = None
+                        self._hello = None
+                        self._note_failure_locked()
+                        self._fail_all(ServeUnavailable("serve process ended"))
+                finally:
+                    self._lock.release()
+            self._reap(proc)
             hello_ev.set()
 
     def _start_locked(self) -> None:
@@ -228,11 +243,20 @@ class ServeWorker:
         self._fails = 0
 
     def request(self, msg: dict, timeout_s: float) -> dict:
-        """Send msg (id assigned here) and wait. Raises ServeUnavailable / ServeUnsupported / ServeError /
-        TimeoutError. A timeout kills the process (other in-flight requests fail too -> callers fall back)."""
+        """Send msg (id assigned here) and wait. ONE deadline covers lock wait, process start, write and reply.
+        Raises ServeUnavailable / ServeUnsupported / ServeError / TimeoutError. A timeout kills the process (other
+        in-flight requests fail too -> callers fall back). The pipe write happens outside ``_lock`` and a watchdog
+        timer kills the process at the deadline, so a full pipe (peer not reading) cannot block anything else."""
+        t_end = time.monotonic() + timeout_s
         rid = f"r{next(self._ids)}"
         fut: cf.Future = cf.Future()
-        with self._lock:
+
+        def remaining() -> float:
+            return max(0.0, t_end - time.monotonic())
+
+        if not self._lock.acquire(timeout=remaining()):
+            raise TimeoutError("serve lock wait timeout")
+        try:
             if self._proc is not None and self._proc.poll() is not None:
                 self._kill_locked("process died")
                 self._note_failure_locked()
@@ -241,32 +265,66 @@ class ServeWorker:
             proc = self._proc
             with self._plock:
                 self._pending[rid] = fut
-            body = dict(msg, id=rid)
-            body.setdefault("deadline_ms", int(timeout_s * 1000))
+        finally:
+            self._lock.release()
+
+        body = dict(msg, id=rid)
+        body.setdefault("deadline_ms", int(timeout_s * 1000))
+        line = json.dumps(body, ensure_ascii=False, separators=(",", ":")) + "\n"
+        watchdog = threading.Timer(remaining(), self._expire, args=(proc,))
+        watchdog.daemon = True
+        watchdog.start()
+        try:
             try:
-                proc.stdin.write(json.dumps(body, ensure_ascii=False, separators=(",", ":")) + "\n")
-                proc.stdin.flush()
+                if not self._wlock.acquire(timeout=remaining()):
+                    raise TimeoutError("serve write lock wait timeout")
+                try:
+                    proc.stdin.write(line)
+                    proc.stdin.flush()
+                finally:
+                    self._wlock.release()
+            except TimeoutError:
+                self._expire(proc)
+                with self._plock:
+                    self._pending.pop(rid, None)
+                raise
             except (OSError, ValueError):
                 with self._plock:
                     self._pending.pop(rid, None)
-                self._kill_locked("write failed")
-                self._note_failure_locked()
+                timed_out = time.monotonic() >= t_end          # watchdog killed us mid-write
+                self._expire(proc)
+                if timed_out:
+                    raise TimeoutError("serve write timeout")
                 raise ServeUnavailable("write failed")
-        try:
-            resp = fut.result(timeout=timeout_s)
-        except cf.TimeoutError:
-            with self._lock:
-                if self._proc is proc:
-                    self._kill_locked("timeout")
-                    self._note_failure_locked()
-            with self._plock:
-                self._pending.pop(rid, None)
-            raise TimeoutError(f"serve request timeout {timeout_s}s")
+            try:
+                resp = fut.result(timeout=remaining())
+            except cf.TimeoutError:
+                self._expire(proc)
+                with self._plock:
+                    self._pending.pop(rid, None)
+                raise TimeoutError(f"serve request timeout {timeout_s}s")
+        finally:
+            watchdog.cancel()
         if not resp.get("ok"):
             if resp.get("unsupported"):
                 raise ServeUnsupported(str(resp.get("error", "")))
             raise ServeError(str(resp.get("error", "")))
         return resp
+
+    def _expire(self, proc: subprocess.Popen) -> None:
+        """Deadline hit or write failed: kill ``proc`` right away (no lock -> frees a blocked write), then clean the
+        shared state if it is still the current process."""
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        if self._lock.acquire(timeout=5):
+            try:
+                if self._proc is proc:
+                    self._kill_locked("expired")
+                    self._note_failure_locked()
+            finally:
+                self._lock.release()
 
     def close(self) -> None:
         with self._lock:
@@ -316,9 +374,10 @@ def shutdown_all() -> None:
 
 
 def _after_fork_child() -> None:   # a forked child must never touch the parent's pipes
-    global _wlock, _clock
+    global _wlock, _clock, _SLOCK
     _wlock = threading.Lock()
     _clock = threading.Lock()
+    _SLOCK = threading.Lock()
     _workers.clear()
 
 

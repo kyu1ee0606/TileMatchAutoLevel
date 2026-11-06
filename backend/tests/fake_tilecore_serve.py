@@ -7,6 +7,8 @@ Faults:  --delay-ms   sleep before each sim reply (per-request thread, so replie
          --crash-after N  exit(3) while handling the (N+1)-th sim request, without replying
          --unsupported / --error  reply ok:false for every sim
          --no-hello   never send hello; --no-state  omit rng_state_out
+         --no-read    after hello never read stdin (pipe fills -> blocked writer)
+         --close-stdout  after hello close stdout but keep running
 Game generation (`fake_games`) is importable so tests can compute the expected C# answer.
 Stdlib only; stdin EOF -> exit 0.
 """
@@ -47,6 +49,8 @@ def main():
     ap.add_argument("--error", action="store_true")
     ap.add_argument("--no-hello", action="store_true")
     ap.add_argument("--no-state", action="store_true")
+    ap.add_argument("--no-read", action="store_true")
+    ap.add_argument("--close-stdout", action="store_true")
     a = ap.parse_args()
 
     out_lock = threading.Lock()
@@ -60,6 +64,12 @@ def main():
         send({"type": "hello", "proto": a.proto, "engine": a.engine, "rules": a.rules, "dll_sha256": a.sha,
               "src_commit": "fake", "threads": 1, "pid": 0})
     sims = 0
+    if a.no_read:                       # never read stdin -> a big request fills the pipe, the writer blocks
+        time.sleep(3600)
+    if a.close_stdout:                  # close stdout but stay alive (reader sees EOF, process would leak)
+        import os
+        os.close(1)                     # sys.stdout.close() would NOT close fd 1 (closefd=False)
+        time.sleep(3600)
 
     def handle(req):
         if a.hang:

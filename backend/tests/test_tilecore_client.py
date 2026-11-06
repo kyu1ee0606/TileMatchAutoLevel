@@ -329,3 +329,89 @@ def test_sweep_on_uses_cs(serve):
                            tc.resolve_max_moves(LEVEL, None))
     assert r["error"] is None and r["clear_rate"] == round(exp.clear_rate, 4) and r["iterations"] == exp.iterations
     assert r["avg_tiles_cleared"] == round(exp.avg_tiles_cleared, 2)
+
+
+# ───────── review fixes (Codex cross-review) — each has a hard time cap (join timeouts / alarm) ─────────
+def _big_level():
+    lv = copy.deepcopy(LEVEL)
+    lv["pad"] = "x" * 3_000_000          # >> pipe buffer (64 KB): write blocks when the peer never reads
+    return lv
+
+
+def test_blocked_write_does_not_hang_or_block_others(serve, profile, monkeypatch):
+    """#1: peer never reads stdin; big request fills the pipe. Deadline must still fire (kill); 2nd caller not stuck."""
+    serve("--no-read")
+    monkeypatch.setenv("TILECORE_TIMEOUT_S", "1")
+    out, t_done = {}, {}
+
+    def run(i):
+        out[i] = tc.simulate(BotSimulator(), _big_level(), profile, iterations=5, seed=7)
+        t_done[i] = time.time()
+    t0 = time.time()
+    ts = [threading.Thread(target=run, args=(i,), daemon=True) for i in range(2)]
+    [t.start() for t in ts]
+    [t.join(15) for t in ts]
+    assert len(out) == 2, "caller stuck on blocked pipe write"
+    assert max(t_done.values()) - t0 < 8
+    expect = _py(profile, 7)[0]           # 'pad' key is unused by the python sim
+    assert all(v == expect for v in out.values())
+    assert tc.get_worker("gen")._proc is None and tc.counters()["gen"]["fallback"] == 2
+
+
+def test_reader_eof_with_live_process_is_reaped(serve, profile, monkeypatch):
+    """#2: stdout closed but process alive -> process must be killed/reaped, not leaked or respawned."""
+    procs = []
+    real = subprocess.Popen
+
+    def rec(*a, **k):
+        p = real(*a, **k)
+        procs.append(p)
+        return p
+    monkeypatch.setattr(subprocess, "Popen", rec)
+    serve("--close-stdout")
+    monkeypatch.setenv("TILECORE_START_TIMEOUT_S", "2")
+    try:
+        res = tc.simulate(BotSimulator(), copy.deepcopy(LEVEL), profile, iterations=5, seed=7)
+        assert res == _py(profile, 7)[0]
+        assert procs, "serve was never spawned"
+        deadline = time.time() + 5
+        while time.time() < deadline and any(p.poll() is None for p in procs):
+            time.sleep(0.05)
+        assert all(p.poll() is not None for p in procs), "serve process leaked after stdout EOF"
+        assert len(procs) == 1
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs fork")
+def test_fork_child_gets_fresh_shadow_lock(tmp_path, monkeypatch):
+    """#3: fork while another thread holds _SLOCK -> child must not deadlock in _shadow_log (alarm = 5 s cap)."""
+    import signal
+    monkeypatch.setenv("TILECORE_SHADOW_DIR", str(tmp_path))
+    tc._SLOCK.acquire()
+    held = tc._SLOCK
+    pid = os.fork()
+    if pid == 0:                              # child: never returns into pytest
+        code = 1
+        try:
+            signal.alarm(5)                   # deadlock -> SIGALRM kills child (status != 0)
+            tc._shadow_log("gen", {"child": True})
+            code = 0
+        finally:
+            os._exit(code)
+    held.release()
+    deadline = time.time() + 15
+    status = None
+    while time.time() < deadline:
+        p, st = os.waitpid(pid, os.WNOHANG)
+        if p:
+            status = st
+            break
+        time.sleep(0.05)
+    if status is None:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+    assert status == 0, "forked child deadlocked on _SLOCK"
+    assert '"child": true' in (tmp_path / "gen_shadow_diff.jsonl").read_text()

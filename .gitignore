@@ -64,3 +64,6 @@ backend/data/pv_sandbox/
 
 # 분석 전용 가상환경 (sklearn·lightgbm·shap — requirements-analysis.txt)
 analysis_venv/
+
+# 허들 구간 추천 실행 출력·작업 상태(range_rec 맵툴 실행분)
+backend/data/hurdle_rec/

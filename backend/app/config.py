@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     gboost_api_key: Optional[str] = None
     gboost_project_id: Optional[str] = "6d126f4db852"
 
+    # 게임 레포 경로(허들 구간 추천 도구 tools/dda_hurdle_mix/range_rec 실행 위치, 읽기 전용) — env GAME_REPO_PATH
+    game_repo_path: str = "~/sp_meowsgarden"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

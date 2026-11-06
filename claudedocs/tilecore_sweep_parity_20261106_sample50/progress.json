@@ -1,0 +1,27 @@
+{
+ "updated": "2026-11-06 16:38:21",
+ "target": 50,
+ "finished": 50,
+ "elapsed_s": 72,
+ "new_this_run": 50,
+ "summary": {
+  "levels": 50,
+  "points": 400,
+  "points_same": 344,
+  "points_mismatch": 0,
+  "points_unsupported": 56,
+  "points_error": 0,
+  "games_py": 7892,
+  "gen_state_calls": 50,
+  "gen_same": 43,
+  "gen_mismatch": 0,
+  "gen_unsupported": 7,
+  "gen_error": 0,
+  "py_sweep_s": 251.53,
+  "cs_sweep_s": 3.71,
+  "py_gen_s": 12.38,
+  "cs_gen_s": 0.29,
+  "first_mismatch": null,
+  "all_identical": false
+ }
+}

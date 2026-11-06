@@ -10,6 +10,7 @@ from .config import get_settings
 from .api.routes import analyze, generate, gboost, assess, simulate, leveling, rl_sim, production_store, tune, study, pv_play, dda_seeds
 from .api.routes import dda_seed_ledger  # DDA 시드 이력 장부
 from .api.routes import live_backup  # 라이브 levels 전체 백업·복원
+from .api.routes import hurdle_rec  # 허들 구간 추천(게임 레포 range_rec 실행·결과)
 
 _diag_logger = logging.getLogger("diag.422")
 
@@ -66,6 +67,7 @@ app.include_router(pv_play.router)
 app.include_router(dda_seeds.router)
 app.include_router(dda_seed_ledger.router)
 app.include_router(live_backup.router)
+app.include_router(hurdle_rec.router)
 
 
 @app.get("/")

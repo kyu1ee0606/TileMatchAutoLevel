@@ -63,6 +63,7 @@ import { BatchVerifyPanel } from './BatchVerifyPanel';
 import { MetaIntegrityPanel, checkTileDivisibility, detectOOBTiles } from './MetaIntegrityPanel';
 import { LevelDistributionChart } from './LevelDistributionChart';
 import { PvSeedPlayPanel } from './PvSeedPlayPanel';
+import { HurdleRangeRecPanel } from './HurdleRangeRecPanel';
 import { DdaSeedRefreshPanel } from './DdaSeedRefreshPanel';
 // PatternSelector import removed - using inline grid instead
 import { getPatternByIndex, BOSS_PATTERNS, SPECIAL_PATTERNS, PATTERN_CATEGORIES } from '../../constants/patterns';
@@ -541,7 +542,7 @@ function findLevelsWithWrongTileCount(levels: ProductionLevel[]): ProductionLeve
   });
 }
 
-type DashboardTab = 'overview' | 'generate' | 'verify' | 'test' | 'playtest' | 'review' | 'export' | 'pvplay';
+type DashboardTab = 'overview' | 'generate' | 'verify' | 'test' | 'playtest' | 'review' | 'export' | 'pvplay' | 'hurdlerec';
 
 // [등껍질 침식] GET /debug/turtle-patterns 응답 항목.
 // coef = 1 − mean(avg봇 클리어율)  … 클수록 어려움. by_v = 색 종류(V)별 실측 클리어율.
@@ -2540,6 +2541,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
           { id: 'review', label: '검토' },
           { id: 'export', label: '내보내기' },
           { id: 'pvplay', label: '시드 변형 플레이' },
+          { id: 'hurdlerec', label: '허들 구간 추천' },
         ].map((tab) => (
           <button
             key={tab.id}
@@ -2647,7 +2649,9 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
 
         {activeTab === 'pvplay' && <PvSeedPlayPanel />}
 
-        {!selectedBatch && !isLoading && activeTab !== 'pvplay' && (
+        {activeTab === 'hurdlerec' && <HurdleRangeRecPanel />}
+
+        {!selectedBatch && !isLoading && activeTab !== 'pvplay' && activeTab !== 'hurdlerec' && (
           <div className="flex flex-col items-center justify-center h-64 text-gray-500">
             <p>배치가 없습니다.</p>
             <p className="text-sm mt-2">위의 버튼으로 새 1500 레벨 배치를 생성하세요.</p>

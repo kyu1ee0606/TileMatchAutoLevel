@@ -22,9 +22,11 @@
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import tempfile
+import threading
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 _THIS = os.path.dirname(os.path.abspath(__file__))
@@ -139,11 +141,24 @@ def list_bases(enabled_only: bool = False, with_shape: bool = True) -> List[Dict
     return out
 
 
+# 파일 전체 read-modify-write 직렬화(라우트가 스레드풀·이벤트루프에서 겹침). 계산은 잠금 밖.
+_TB_LOCK = threading.RLock()
+
+
+def _locked(fn):
+    @functools.wraps(fn)
+    def _w(*a, **kw):
+        with _TB_LOCK:
+            return fn(*a, **kw)
+    return _w
+
+
 def get_base(base_id: str) -> Optional[Dict[str, Any]]:
     v = _load().get(base_id)
     return dict(v, id=base_id) if isinstance(v, dict) else None
 
 
+@_locked
 def put_base(base_id: str, name: str, grid: int, cells: List[str],
              enabled: bool = True, source: str = "manual") -> Dict[str, Any]:
     d = _load()
@@ -164,6 +179,7 @@ def put_base(base_id: str, name: str, grid: int, cells: List[str],
     return dict(entry, id=base_id)
 
 
+@_locked
 def delete_base(base_id: str) -> bool:
     d = _load()
     if base_id not in d:
@@ -173,9 +189,15 @@ def delete_base(base_id: str) -> bool:
     return True
 
 
-def set_difficulty(base_id: str, difficulty: Dict[str, Any]) -> bool:
+@_locked
+def set_difficulty(base_id: str, difficulty: Dict[str, Any],
+                   expect_cells: Optional[List[str]] = None) -> bool:
+    """난이도 저장. 저장 직전 최신본을 읽어 이 항목의 difficulty 만 갱신(타 항목 변경·삭제 보존).
+    expect_cells 가 주어지고 최신 cells 와 다르면(측정 중 모양 편집) 저장하지 않고 False."""
     d = _load()
     if base_id not in d:
+        return False
+    if expect_cells is not None and sorted(set(expect_cells)) != sorted(set(d[base_id].get("cells") or [])):
         return False
     d[base_id]["difficulty"] = difficulty
     _save(d)

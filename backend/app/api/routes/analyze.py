@@ -1995,7 +1995,9 @@ def turtle_bases_measure(base_id: str, iterations: int = 120):
         avgs.append(rates["avg"])
     diff = {"ref": "turtle_base", "by_v": by_v,
             "coef": round(1.0 - sum(avgs) / len(avgs), 3)}
-    TB.set_difficulty(base_id, diff)
+    if not TB.set_difficulty(base_id, diff, expect_cells=entry.get("cells") or []):
+        return {"ok": False, "error": "base_changed", "id": base_id,
+                "message": "측정 중 바닥이 편집/삭제되어 결과를 저장하지 않았습니다 — 다시 측정하세요"}
     return {"ok": True, "id": base_id, "difficulty": diff}
 
 
@@ -2430,8 +2432,18 @@ class BossTemplateGenerateRequest(_BaseModel):
     layers: Optional[List[BossTemplateLayer]] = None  # 인라인 레이어(난이도 파악 미리보기). 있으면 저장분 조회 대신 사용.
 
 
+_BOSS_GEN_LOCK = threading.Lock()
+
+
 @router.post("/generate/from-boss-template")
 def generate_from_boss_template(req: BossTemplateGenerateRequest):
+    """보스 템플릿 생성 — 전역 random.seed 를 쓰므로 본문 전체를 전용 잠금으로 직렬화
+    (def=스레드풀이라 이벤트 루프는 막지 않음). 같은 seed → 같은 결과 보장."""
+    with _BOSS_GEN_LOCK:
+        return _generate_from_boss_template_impl(req)
+
+
+def _generate_from_boss_template_impl(req: BossTemplateGenerateRequest):
     """보스 템플릿(다층 t0 모양)으로 레벨 생성.
 
     반자동: 템플릿 = 모양(t0)만. 여기서 useTileCount(레벨 그래프)+randSeed 세팅 후
@@ -2772,6 +2784,13 @@ def _load_level_templates() -> Dict[str, Any]:
             return data
         except (FileNotFoundError, json_module.JSONDecodeError):
             return {"templates": {}}
+
+
+def _template_shape_fp(level_json: Any) -> str:
+    """템플릿 level_json 내용 지문(측정 시작/저장 시점 비교용)."""
+    import hashlib
+    return hashlib.sha1(json_module.dumps(level_json, sort_keys=True, ensure_ascii=False,
+                                          default=str).encode("utf-8")).hexdigest()
 
 
 def _save_level_templates(data: Dict[str, Any]):
@@ -3255,6 +3274,8 @@ def debug_level_template_measure(template_id: str, iterations: int = 100):
     raw_level_json = entry.get("level_json") or {}
     if not isinstance(raw_level_json, dict):
         return {"error": "invalid_level_json", "template_id": template_id}
+    # 측정 시작 시점 모양 지문 — 저장 직전 최신본과 다르면(측정 중 편집·재생성) 결과를 버린다.
+    start_fp = _template_shape_fp(raw_level_json)
 
     # 정규화 (string → int for layer/col/row/num/goalCount/max_moves)
     normalized_lj = _normalize_level_json_strings(raw_level_json)
@@ -3276,6 +3297,9 @@ def debug_level_template_measure(template_id: str, iterations: int = 100):
         entry = templates.get(template_id)
         if entry is None:  # 측정 중 삭제됨 — 되살리지 않는다
             return {"error": "not_found", "template_id": template_id}
+        if _template_shape_fp(entry.get("level_json")) != start_fp:  # 측정 중 모양이 바뀜
+            return {"error": "template_changed", "template_id": template_id,
+                    "message": "측정 중 템플릿이 편집되어 결과를 저장하지 않았습니다 — 다시 측정하세요"}
         entry["measured_difficulty"] = measured
         entry["static_score"] = autoplay_resp.static_score
         entry["static_grade"] = autoplay_resp.static_grade

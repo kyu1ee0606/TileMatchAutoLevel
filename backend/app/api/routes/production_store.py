@@ -13,6 +13,7 @@ import logging
 import os
 import time
 import tempfile
+import threading
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -437,20 +438,12 @@ def _enforce_rule_gate(levels: List[Dict[str, Any]]) -> List[int]:
 
 
 def _current_version_doc(batch_id: str):
-    """(현재 버전, 파싱한 문서 또는 None). 버전은 _index.json 항목이 파일 (mtime,size)와 일치하면
-    거기서 읽고(배치 전체 json.load 생략), 불일치/없음이면 파일을 파싱해 doc 도 함께 돌려준다."""
+    """(현재 버전, 파싱한 문서 또는 None). 버전의 권위는 항상 실제 배치 파일(파싱)이다.
+    _index.json 은 목록용 캐시일 뿐 — 동시 저장 때 (mtime,size)와 버전이 잘못 결합될 수 있어
+    409 판정에 쓰지 않는다. doc 는 델타 병합에서 재사용(요청당 파일 로드 1회)."""
     fp = _path(batch_id)
-    try:
-        st = os.stat(fp)
-    except OSError:
+    if not os.path.exists(fp):
         return None, None
-    try:
-        ent = _load_index().get(batch_id)
-        if (isinstance(ent, dict) and ent.get("_mtime") == st.st_mtime
-                and ent.get("size_bytes") == st.st_size and isinstance(ent.get("version"), int)):
-            return ent["version"], None
-    except Exception:  # noqa: BLE001
-        pass
     try:
         with open(fp, "r", encoding="utf-8") as f:
             doc = json.load(f)
@@ -477,9 +470,22 @@ def read_batch_file(batch_id: str) -> Optional[Dict[str, Any]]:
     return {"doc": doc, "version": int(doc.get("version", 0) or 0), "sha256": hashlib.sha256(raw).hexdigest()}
 
 
+_BATCH_LOCKS: Dict[str, threading.Lock] = {}
+_BATCH_LOCKS_GUARD = threading.Lock()
+
+
 @router.put("/batches/{batch_id}", response_model=SaveBatchResponse)
 def save_batch(batch_id: str, req: SaveBatchRequest) -> SaveBatchResponse:
-    """배치 전체(메타+레벨)를 로컬 파일에 저장(덮어쓰기). 원자적 쓰기 + 낙관적 동시성 버전 검사."""
+    """배치 전체(메타+레벨)를 로컬 파일에 저장(덮어쓰기). 원자적 쓰기 + 낙관적 동시성 버전 검사.
+    같은 배치의 버전검사→파일·인덱스 갱신은 프로세스 내 배치별 잠금으로 직렬화(스레드풀 동시 실행 대비)."""
+    bid0 = _safe_id(batch_id)
+    with _BATCH_LOCKS_GUARD:
+        lk = _BATCH_LOCKS.setdefault(bid0, threading.Lock())
+    with lk:
+        return _save_batch_locked(batch_id, req)
+
+
+def _save_batch_locked(batch_id: str, req: SaveBatchRequest) -> SaveBatchResponse:
     _ensure_dir()
     bid = _safe_id(batch_id)
     cur, _cur_doc = _current_version_doc(bid)
@@ -506,7 +512,7 @@ def save_batch(batch_id: str, req: SaveBatchRequest) -> SaveBatchResponse:
                 "message": "서버에 배치가 없습니다 — 최초 저장은 전체(partial=false)여야 합니다",
             })
         try:
-            if _cur_doc is None:  # 버전을 인덱스에서 읽어 아직 파싱 전 — 여기서 요청당 1회 로드
+            if _cur_doc is None:  # 버전 판정에서 파싱 실패한 경우만 재시도(실패 시 아래서 409)
                 with open(fp, "r", encoding="utf-8") as f:
                     _cur_doc = json.load(f)
             base_levels: List[Dict[str, Any]] = _cur_doc.get("levels") or []

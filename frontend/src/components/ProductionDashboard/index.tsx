@@ -45,6 +45,7 @@ import {
   listProductionBatches,
   saveProductionLevels,
   getProductionLevelsByBatch,
+  getProductionLevelsByNumbers,
   getProductionLevelNumbersByBatch,
   getPlaytestQueue,
   addPlaytestResult,
@@ -815,6 +816,17 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
   const [batches, setBatches] = useState<ProductionBatch[]>([]);
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
   const [stats, setStats] = useState<ProductionStats | null>(null);
+  // 통계 재계산 디바운스(1초 트레일링) — 저장이 잦을 때 level_json 포함 전체 로드가 연속 실행되는 것 방지.
+  // 수동 새로고침·배치 선택(1072)은 이 경로를 쓰지 않고 즉시 계산.
+  const statsDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleStatsUpdate = useCallback((batchId: string) => {
+    if (statsDebounceRef.current) clearTimeout(statsDebounceRef.current);
+    statsDebounceRef.current = setTimeout(async () => {
+      statsDebounceRef.current = null;
+      try { setStats(await calculateProductionStats(batchId)); } catch (e) { console.error('stats update failed:', e); }
+    }, 1000);
+  }, []);
+  useEffect(() => () => { if (statsDebounceRef.current) clearTimeout(statsDebounceRef.current); }, []);
   const [isLoading, setIsLoading] = useState(true);
   const [showGimmickInfo, setShowGimmickInfo] = useState(false);
 
@@ -1062,6 +1074,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
 
   // Load stats when batch changes
   useEffect(() => {
+    if (statsDebounceRef.current) { clearTimeout(statsDebounceRef.current); statsDebounceRef.current = null; } // 이전 배치 예약 취소
     async function loadStats() {
       if (!selectedBatchId) {
         setStats(null);
@@ -2593,10 +2606,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             <BatchVerifyPanel
               batchId={selectedBatchId}
               onComplete={() => setActiveTab('review')}
-              onStatsUpdate={async () => {
-                const newStats = await calculateProductionStats(selectedBatchId);
-                setStats(newStats);
-              }}
+              onStatsUpdate={() => scheduleStatsUpdate(selectedBatchId)}
             />
           </div>
         )}
@@ -2608,10 +2618,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
             tileTypeProfile={tileTypeProfile}
             rlSkillMean={rlSkillMean}
             unitAssembly={unitAssembly}
-            onStatsUpdate={async () => {
-              const newStats = await calculateProductionStats(selectedBatchId);
-              setStats(newStats);
-            }}
+            onStatsUpdate={() => scheduleStatsUpdate(selectedBatchId)}
           />
         )}
 
@@ -2626,10 +2633,7 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
           <ReviewTab
             batchId={selectedBatchId}
             onLevelSelect={onLevelSelect}
-            onStatsUpdate={async () => {
-              const newStats = await calculateProductionStats(selectedBatchId);
-              setStats(newStats);
-            }}
+            onStatsUpdate={() => scheduleStatsUpdate(selectedBatchId)}
           />
         )}
 
@@ -4683,7 +4687,7 @@ function TestTab({
     const interval = setInterval(() => {
       // 테스트 진행 중이면 스킵 (정신없음 방지)
       if (isAutoTesting || isPlaying) return;
-      loadLevels();
+      loadLevels(true);
     }, 5000);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -4827,7 +4831,28 @@ function TestTab({
     }
   }, [selectedLevel]);
 
-  const loadLevels = async () => {
+  // 폴링 변경감지용 시그니처 — 같으면 setLevels(1500행 리렌더) 생략
+  const levelsSigRef = useRef('');
+  const levelsSig = (arr: ProductionLevel[]): string => {
+    let out = String(arr.length);
+    for (const l of arr) {
+      const m = l.meta as ProductionLevelMeta & { status?: string; status_updated_at?: string };
+      out += `|${m.level_number}:${m.generated_at}:${m.status ?? ''}:${m.status_updated_at ?? ''}:${m.match_score ?? ''}:${m.verified ?? ''}`;
+    }
+    return out;
+  };
+
+  const loadLevels = async (quiet = false) => {
+    if (quiet) {
+      // 폴링 경로: 변경 없으면 상태 갱신·스크롤 처리 전부 생략 (진행 표시는 변경 시 그대로 갱신)
+      try {
+        const isStatusFilter = filter !== 'all' && filter !== 'low_match' && filter !== 'untested';
+        const options = isStatusFilter ? { status: filter as LevelStatus, limit: 2000 } : { limit: 2000 };
+        const polled = await getProductionLevelsByBatch(batchId, options);
+        const sig = levelsSig(polled);
+        if (sig === levelsSigRef.current) return;
+      } catch { return; }
+    }
     // 스크롤 위치 보존을 위해 현재 위치 저장 (onScroll 핸들러보다 먼저)
     const savedScrollTop = levelListRef.current?.scrollTop || levelListScrollTopRef.current;
 
@@ -4840,6 +4865,7 @@ function TestTab({
       const isStatusFilter = filter !== 'all' && filter !== 'low_match' && filter !== 'untested';
       const options = isStatusFilter ? { status: filter as LevelStatus, limit: 2000 } : { limit: 2000 };
       const loadedLevels = await getProductionLevelsByBatch(batchId, options);
+      levelsSigRef.current = levelsSig(loadedLevels);
       setLevels(loadedLevels);
 
       // 스크롤 위치 복원 (DOM 업데이트 후)
@@ -5443,8 +5469,8 @@ function TestTab({
     let pending = targetLevelNumbers.filter(ln => !passedSet.has(ln));
     for (let round = 1; round <= MAX_ROUNDS && !signal.aborted; round++) {
       addNotification('info', `순차검증 라운드 ${round}: ${pending.length}개 측정…`);
-      // 재생성 반영된 최신 디스크본 로드(라운드당 1회 벌크)
-      const fresh = await getProductionLevelsByBatch(batchId);
+      // 재생성 반영된 최신 디스크본 로드 — 이번 라운드 pending 번호만(배치 전체 getAll 회피)
+      const fresh = await getProductionLevelsByNumbers(batchId, pending);
       const byLn = new Map<number, ProductionLevel>(fresh.map((l: ProductionLevel) => [l.meta.level_number, l]));
       // 페이즈 A: 측정만 (동시 2 = RL pool 8코어 포화, 초과구독 방지)
       await runPool(pending, (ln) => measureOneLevel(ln, round, byLn), VERIFY_CONCURRENCY);

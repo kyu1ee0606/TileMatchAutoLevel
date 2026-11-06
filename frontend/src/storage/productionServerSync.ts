@@ -261,6 +261,9 @@ export async function syncBidirectional(): Promise<{ pushed: number; pulled: num
 // ── 자동 push (디바운스) + 충돌 처리 ─────────────────────────────────────────
 const PUSH_DEBOUNCE_MS = 4000;
 const pushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** 배치별 '첫 예약 시각' — 디바운스가 계속 밀려도 PUSH_MAX_WAIT_MS 넘으면 즉시 push (maxWait). */
+const pushFirstScheduledAt = new Map<string, number>();
+const PUSH_MAX_WAIT_MS = 30000;
 const inFlightPush = new Set<string>();   // 배치당 push 진행중 여부(직렬화)
 const pendingPush = new Set<string>();    // 진행중에 들어온 재요청 → 완료 후 1회 실행
 let conflictHandler: ((batchId: string, serverVersion: number) => void) | null = null;
@@ -292,10 +295,17 @@ export function schedulePush(batchId: string): void {
   if (!batchId || _syncing) return; // pull로 인한 쓰기는 push 트리거 금지(피드백 방지)
   const existing = pushTimers.get(batchId);
   if (existing) clearTimeout(existing);
-  pushTimers.set(batchId, setTimeout(() => {
+  const now = Date.now();
+  const first = pushFirstScheduledAt.get(batchId) ?? now;
+  pushFirstScheduledAt.set(batchId, first);
+  const fire = () => {
     pushTimers.delete(batchId);
+    pushFirstScheduledAt.delete(batchId);
     void runSerializedPush(batchId);
-  }, PUSH_DEBOUNCE_MS));
+  };
+  // maxWait: 첫 예약 후 30초 넘게 밀렸으면 지금 바로 push (쓰기 지속 시 무한 연기 방지)
+  if (now - first >= PUSH_MAX_WAIT_MS) { fire(); return; }
+  pushTimers.set(batchId, setTimeout(fire, Math.min(PUSH_DEBOUNCE_MS, PUSH_MAX_WAIT_MS - (now - first))));
 }
 
 /**

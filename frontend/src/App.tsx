@@ -3,22 +3,23 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { GridEditor } from './components/GridEditor';
 import { DifficultyPanel } from './components/DifficultyPanel';
 import { GeneratorPanel } from './components/GeneratorPanel';
-import { GBoostPanel } from './components/GBoostPanel';
+const GBoostPanel = lazy(() => import('./components/GBoostPanel').then(m => ({ default: m.GBoostPanel })));
 import { LevelBrowser } from './components/GridEditor/LevelBrowser';
 import { LocalLevelBrowser } from './components/GridEditor/LocalLevelBrowser';
-import { SimulationViewer } from './components/SimulationViewer';
-import { PlayTab } from './components/PlayTab';
+const SimulationViewer = lazy(() => import('./components/SimulationViewer').then(m => ({ default: m.SimulationViewer })));
+const PlayTab = lazy(() => import('./components/PlayTab').then(m => ({ default: m.PlayTab })));
 import { ProductionDashboard } from './components/ProductionDashboard';
-import { BenchmarkDashboard } from './components/BenchmarkDashboard';
-import { PatternDebugPanel } from './components/PatternDebugPanel';
-import { ColorBalancePanel } from './components/ColorBalancePanel';
-import { PatternImportPanel } from './components/PatternImportPanel';
-import { BossTemplatePanel } from './components/BossTemplatePanel';
+const BenchmarkDashboard = lazy(() => import('./components/BenchmarkDashboard').then(m => ({ default: m.BenchmarkDashboard })));
+const PatternDebugPanel = lazy(() => import('./components/PatternDebugPanel').then(m => ({ default: m.PatternDebugPanel })));
+const ColorBalancePanel = lazy(() => import('./components/ColorBalancePanel').then(m => ({ default: m.ColorBalancePanel })));
+const PatternImportPanel = lazy(() => import('./components/PatternImportPanel').then(m => ({ default: m.PatternImportPanel })));
+const BossTemplatePanel = lazy(() => import('./components/BossTemplatePanel').then(m => ({ default: m.BossTemplatePanel })));
 // [지연로딩] 신규 패널은 141개 미니그리드를 그리므로 초기 번들에서 분리.
+const tabFallback = <div className="text-center text-gray-500 py-10">패널 로딩 중…</div>;
 const LevelShapesPanel = lazy(() => import('./components/LevelShapesPanel'));
 import { RemoteComputeToggle } from './components/RemoteComputeToggle';
-import { RLSimulationPanel } from './components/RLSimulationPanel';
-import { SolvabilityPanel } from './components/SolvabilityPanel';
+const RLSimulationPanel = lazy(() => import('./components/RLSimulationPanel').then(m => ({ default: m.RLSimulationPanel })));
+const SolvabilityPanel = lazy(() => import('./components/SolvabilityPanel').then(m => ({ default: m.SolvabilityPanel })));
 import { useLevelStore } from './stores/levelStore';
 import { useUIStore, type TabId } from './stores/uiStore';
 import { useSimulationStore } from './stores/simulationStore';
@@ -417,7 +418,9 @@ function AppContent() {
           </div>
         )}
         {activeTab === 'simulation' && (
-          <SimulationViewer />
+          <Suspense fallback={tabFallback}>
+            <SimulationViewer />
+          </Suspense>
         )}
         {activeTab === 'local' && (
           <div className="flex flex-col gap-4">
@@ -438,7 +441,9 @@ function AppContent() {
         )}
         {activeTab === 'gboost' && (
           <div className="max-w-2xl mx-auto">
-            <GBoostPanel />
+            <Suspense fallback={tabFallback}>
+              <GBoostPanel />
+            </Suspense>
           </div>
         )}
         <div className="max-w-6xl mx-auto" style={{ display: activeTab === 'production' ? 'block' : 'none' }}>
@@ -446,22 +451,30 @@ function AppContent() {
         </div>
         {activeTab === 'pattern-debug' && (
           <div className="max-w-6xl mx-auto">
-            <PatternDebugPanel />
+            <Suspense fallback={tabFallback}>
+              <PatternDebugPanel />
+            </Suspense>
           </div>
         )}
         {activeTab === 'color-balance' && (
           <div className="max-w-4xl mx-auto">
-            <ColorBalancePanel />
+            <Suspense fallback={tabFallback}>
+              <ColorBalancePanel />
+            </Suspense>
           </div>
         )}
         {activeTab === 'pattern-import' && (
           <div className="max-w-5xl mx-auto">
-            <PatternImportPanel />
+            <Suspense fallback={tabFallback}>
+              <PatternImportPanel />
+            </Suspense>
           </div>
         )}
         {activeTab === 'boss-template' && (
           <div className="max-w-6xl mx-auto">
-            <BossTemplatePanel />
+            <Suspense fallback={tabFallback}>
+              <BossTemplatePanel />
+            </Suspense>
           </div>
         )}
         {activeTab === 'level-shapes' && (
@@ -473,25 +486,33 @@ function AppContent() {
         )}
         {activeTab === 'rl-sim' && (
           <div className="max-w-6xl mx-auto">
-            <RLSimulationPanel />
+            <Suspense fallback={tabFallback}>
+              <RLSimulationPanel />
+            </Suspense>
           </div>
         )}
         {activeTab === 'solvability' && (
           <div className="max-w-6xl mx-auto">
-            <SolvabilityPanel />
+            <Suspense fallback={tabFallback}>
+              <SolvabilityPanel />
+            </Suspense>
           </div>
         )}
         {activeTab === 'benchmark' && (
           <div className="max-w-6xl mx-auto">
-            <BenchmarkDashboard />
+            <Suspense fallback={tabFallback}>
+              <BenchmarkDashboard />
+            </Suspense>
           </div>
         )}
         {activeTab === 'play' && (
           <div className="h-[calc(100vh-200px)]">
-            <PlayTab
+            <Suspense fallback={tabFallback}>
+              <PlayTab
               initialLevelId={playLevelId}
               onLevelLoaded={() => setPlayLevelId(null)}
             />
+            </Suspense>
           </div>
         )}
       </main>

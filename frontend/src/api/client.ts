@@ -22,6 +22,10 @@ export const getRemoteComputeUrl = (): string => {
 };
 
 // Request interceptor for logging (suppress high-frequency generation endpoints)
+/** 요청 로그는 localStorage 'debug_api' 가 있을 때만 (장시간 devtools 로그 누적 방지). */
+const isApiDebug = (): boolean => {
+  try { return !!localStorage.getItem('debug_api'); } catch { return false; }
+};
 const LOG_SUPPRESSED_URLS = ['/generate', '/generate/validated'];
 
 apiClient.interceptors.request.use(
@@ -31,7 +35,7 @@ apiClient.interceptors.request.use(
     if (remote && REMOTE_COMPUTE_PREFIXES.some(p => config.url?.startsWith(p))) {
       config.baseURL = `${remote}/api`;
     }
-    if (!LOG_SUPPRESSED_URLS.some(u => config.url?.startsWith(u))) {
+    if (isApiDebug() && !LOG_SUPPRESSED_URLS.some(u => config.url?.startsWith(u))) {
       console.log(`[API] ${config.method?.toUpperCase()} ${config.url}${config.baseURL !== API_BASE_URL ? ' →원격' : ''}`);
     }
     return config;

@@ -560,19 +560,26 @@ def _run_bot_sim_chunk(args: Tuple) -> Dict[str, Any]:
     """
     profile_name, level_json, iterations, max_moves, seed, early_term = args
     from ...core.bot_simulator import BotSimulator
+    from ...core import tilecore_bot
     from ...models.bot_profile import get_profile
-    simulator = BotSimulator()
     profile = get_profile(profile_name)
-    result = simulator.simulate_with_profile(
-        level_json=level_json,
-        profile=profile,
-        iterations=iterations,
-        max_moves=max_moves,
-        seed=seed,
-        early_termination=early_term,
-    )
+    tc_record = None
+    if tilecore_bot.mode() == "off":
+        simulator = BotSimulator()
+        result = simulator.simulate_with_profile(
+            level_json=level_json,
+            profile=profile,
+            iterations=iterations,
+            max_moves=max_moves,
+            seed=seed,
+            early_termination=early_term,
+        )
+    else:
+        # TILECORE shadow: 같은 파이썬 계산 + 판별 클리어 기록(결과 값 동일). C# 재실행은 요청 프로세스 백그라운드.
+        result, tc_record = tilecore_bot.run_python_recorded(
+            level_json, profile, iterations, max_moves, seed, early_termination=early_term)
     n = result.iterations
-    return {
+    out = {
         "profile": profile_name,
         "n": n,
         "cleared": round(result.clear_rate * n),
@@ -584,6 +591,9 @@ def _run_bot_sim_chunk(args: Tuple) -> Dict[str, Any]:
         # 표본분산 → M2 (Chan 병합용). n<=1이면 0.
         "m2_moves": (result.std_moves ** 2) * (n - 1) if n > 1 else 0.0,
     }
+    if tc_record is not None:
+        out["tc_shadow"] = tc_record
+    return out
 
 
 def _run_profiles_parallel(
@@ -625,6 +635,12 @@ def _run_profiles_parallel(
     # [B] 검증 전용 autoplay 풀 (생성 gen 풀과 분리 → 생성-검증 경합 제거)
     pool = _get_autoplay_pool()
     raw = list(pool.map(_run_bot_sim_chunk, tasks))
+
+    # TILECORE shadow: 같은 입력(rngSeed seed+i, 파이썬이 실제 돌린 n판)을 C# 로 재실행 → 백그라운드 큐, 로그만.
+    tc_records = [r.pop("tc_shadow") for r in raw if "tc_shadow" in r]
+    if tc_records:
+        from ...core import tilecore_bot
+        tilecore_bot.submit(level_json, max_moves, tc_records, kind="autoplay")
 
     # 프로파일별 병합
     merged: Dict[str, Dict[str, Any]] = {}

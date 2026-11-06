@@ -203,6 +203,25 @@ def solve_level(
     node_budget: int = DEFAULT_NODE_BUDGET,
     time_budget_s: float = DEFAULT_TIME_BUDGET_S,
 ) -> Dict[str, Any]:
+    """레벨 클리어 가능성 판정 (반환 형식은 _solve_level_py 참고).
+
+    TILECORE 환경변수: 없음/off(기본) = 파이썬 판정만. shadow = 파이썬 결과를 그대로 반환하고,
+    같은 레벨을 C# FastJudge 로도 판정해 차이만 로그(tilecore_shadow.py). 서비스 결과는 항상 파이썬.
+    """
+    from . import tilecore_shadow
+    if tilecore_shadow.mode() == "off":
+        return _solve_level_py(level_json, node_budget, time_budget_s)
+    t_py = time.perf_counter()
+    result = _solve_level_py(level_json, node_budget, time_budget_s)
+    tilecore_shadow.shadow_solve(level_json, result, time.perf_counter() - t_py, node_budget, time_budget_s)
+    return result
+
+
+def _solve_level_py(
+    level_json: Dict[str, Any],
+    node_budget: int = DEFAULT_NODE_BUDGET,
+    time_budget_s: float = DEFAULT_TIME_BUDGET_S,
+) -> Dict[str, Any]:
     """
     레벨 클리어 가능성 판정. 반환:
     {

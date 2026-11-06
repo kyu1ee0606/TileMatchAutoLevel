@@ -125,6 +125,8 @@ class SaveBatchResponse(BaseModel):
     header_oob_levels: List[int] = []       # 해당 레벨 번호(앞 50)
     rule_flagged: int = 0                  # 규칙 위반(사슬/폭탄/튜토리얼/timea)으로 강제된 레벨 수
     rule_levels: List[int] = []             # 해당 레벨 번호(앞 50)
+    key_div3_flagged: int = 0              # 규칙 위반 중 key_not_div3(t0 0 · 열쇠 %3≠0) 레벨 수
+    key_div3_levels: List[int] = []         # 해당 레벨 번호(앞 50)
 
 
 def _enforce_divisibility_gate(levels: List[Dict[str, Any]]) -> List[int]:
@@ -247,6 +249,7 @@ def _scan_rule_violations(lj: Dict[str, Any], level_number: Optional[int]) -> Di
       timea_tight        : 제한시간이 가장 촉박한 티어 예산보다도 부족 (물리적 클리어 불가)
       oversized_grid     : 층 헤더 col/row 가 8 초과 (디바이스 가독성 한계 — 타일이 너무 작아짐)
       gimmick_unlock_violation : 해당 레벨에서 미해금 기믹이 배치됨
+      key_not_div3       : t0 칸 0 인데 명시 열쇠 합계 %3 != 0 (남는 열쇠 영구 잔존 → 클리어 불가)
     """
     out: Dict[str, Any] = {}
     try:
@@ -395,6 +398,16 @@ def _scan_rule_violations(lj: Dict[str, Any], level_number: Optional[int]) -> Di
     except Exception:  # noqa: BLE001
         pass
 
+    # 7) 열쇠 수 3배수 — t0 칸이 0 인 레벨에서 명시 열쇠 합계 % 3 != 0 이면 남는 1~2장을 영구히 못 지움
+    #    (게임은 t0 가 있을 때만 열쇠 포함 전 종류를 3배수로 보충 — DB_Level.cs:1123-1153).
+    #    판정은 LevelGenerator._key_div3_scan (isKeyTile · CTileStackInfo 규칙) 단일 구현.
+    try:
+        ks = LevelGenerator._key_div3_scan(lj)
+        if ks["violation"]:
+            out["key_not_div3"] = {"keys": ks["keys"], "t0": ks["t0"], "remainder": ks["keys"] % 3}
+    except Exception:  # noqa: BLE001
+        pass
+
     return out
 
 
@@ -433,6 +446,19 @@ def _current_version(batch_id: str) -> Optional[int]:
             return int(json.load(f).get("version", 0))
     except Exception:
         return None
+
+
+def read_batch_file(batch_id: str) -> Optional[Dict[str, Any]]:
+    """[DDA 시드만 v2] 저장된 배치 파일 읽기 전용. 없으면 None.
+    반환 {"doc": 배치 JSON, "version": int, "sha256": 파일 바이트 sha256}. 쓰기·인덱스 갱신 없음."""
+    import hashlib
+    fp = _path(batch_id)
+    if not os.path.exists(fp):
+        return None
+    with open(fp, "rb") as f:
+        raw = f.read()
+    doc = json.loads(raw.decode("utf-8"))
+    return {"doc": doc, "version": int(doc.get("version", 0) or 0), "sha256": hashlib.sha256(raw).hexdigest()}
 
 
 @router.put("/batches/{batch_id}", response_model=SaveBatchResponse)
@@ -505,6 +531,11 @@ def save_batch(batch_id: str, req: SaveBatchRequest) -> SaveBatchResponse:
     # [안전망] 규칙 게이트 — 사슬 해제불가 / 폭탄 범위 / 튜토리얼 기믹 누락 / timea 부족.
     # RL 검증은 클리어율만 보므로 규칙 위반은 여기서 잡아 재검증·재생성으로 되돌린다.
     rule_flagged = _enforce_rule_gate(req.levels)
+    key_div3 = [l["meta"]["level_number"] for l in req.levels
+                if isinstance(l, dict) and isinstance(l.get("meta"), dict)
+                and isinstance(l["meta"].get("rule_violations"), dict)
+                and "key_not_div3" in l["meta"]["rule_violations"]
+                and isinstance(l["meta"].get("level_number"), int)]
     # 게이트는 req.levels(델타)에 플래그를 **제자리로** 찍는다. merged_levels 는 같은 dict 를
     # 참조하므로 플래그가 그대로 반영된다 — 따로 옮길 필요 없다.
     out_levels = merged_levels if merged_levels is not None else req.levels
@@ -540,7 +571,9 @@ def save_batch(batch_id: str, req: SaveBatchRequest) -> SaveBatchResponse:
                              header_oob_flagged=len(oob_flagged),
                              header_oob_levels=oob_flagged[:50],
                              rule_flagged=len(rule_flagged),
-                             rule_levels=rule_flagged[:50])
+                             rule_levels=rule_flagged[:50],
+                             key_div3_flagged=len(key_div3),
+                             key_div3_levels=key_div3[:50])
 
 
 @router.get("/batches", response_model=List[BatchSummary])

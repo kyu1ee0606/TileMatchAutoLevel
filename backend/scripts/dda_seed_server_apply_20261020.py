@@ -37,6 +37,7 @@ from app.api.routes.gboost import _convert_to_townpop_format as conv  # noqa: E4
 import aiohttp  # noqa: E402
 from app.clients.gboost import GBoostClient, GBoostLookupError  # noqa: E402
 from app.core import dda_seed_catalog as c  # noqa: E402
+from app.core import dda_seed_only_v1_legacy as c_v1  # noqa: E402  (2026-11-03: v1 시드만 판정 이동)
 
 BOARD = c.DDA_BOARD_ID
 SEEDS = c.SEED_FIELDS
@@ -106,7 +107,7 @@ def classify(lid: str, lj: dict, srv_row) -> dict:
     level = int(lid.split("_")[1])
     entry = c.load_catalog()["_byLevel"].get(level)
     tp = conv(copy.deepcopy(lj))
-    plan = c.seed_only_plan(lid, lj, tp, srv_row)
+    plan = c_v1.seed_only_plan(lid, lj, tp, srv_row)
     plan.pop("payload", None)
     out = {"level": level, "id": lid}
     if srv_row is not None:
@@ -304,7 +305,7 @@ async def cmd_apply(a):
                 elif st != "same":
                     log(f"STOP: {lid} {f} state={st}")
                     return 6
-        c.assert_partial_payload(payload)
+        c_v1.assert_partial_payload(payload)
         (audit / "rows" / f"{lid}.before.json").write_bytes(dump({"keys": keys_before, "row": raw_before}))
         (audit / "rows" / f"{lid}.payload.json").write_bytes(dump(payload))
         r = await cli.update_existing_level(BOARD, lid, payload)

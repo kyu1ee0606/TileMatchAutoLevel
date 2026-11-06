@@ -16,6 +16,16 @@ export interface LevelLayer {
 }
 
 // Complete level JSON structure
+/** 시드 판정 근거 — 백엔드 dda_seed_catalog.SEED_EVIDENCE_KEY. sp_meowsgarden tools/dda_seed_verify proof 형식과 같다. */
+export interface DdaSeedVerdicts {
+  binding: { mapSha256: string; useTileCount: string | number };
+  ddaEasy2Seeds?: DdaSeedVerdict[];
+  ddaEasySeeds?: DdaSeedVerdict[];
+  ddaHardSeeds?: DdaSeedVerdict[];
+  ddaHard2Seeds?: DdaSeedVerdict[];
+}
+export interface DdaSeedVerdict { seed: number; verdict: 'PATH' | 'PATH_BOT' | string; nodes?: number; source?: string }
+
 export interface LevelJSON {
   layer: number;
   timeAttack?: number;  // Time attack seconds (0 = disabled)
@@ -23,9 +33,17 @@ export interface LevelJSON {
   useTileCount?: number;  // 타일 종류 수 (1-15)
   randSeed?: number;  // 랜덤 시드 = 배치/그룹 시드
   visualTileSeed?: number;  // 비주얼 타일 시드: 배치 고정 후 스프라이트 인덱스만 t1~15 풀에서 재매핑 (>=0 결정적/-1 런타임랜덤/없음=리맵 안 함)
-  // [DDA 문서 47] 검증된 시드 5개(쉼표 구분·공백 없음). 'DDA 시드 갱신' 버튼만 채운다. 익스포트는 유효할 때만 값, 아니면 "".
+  // [DDA 2026-11-02] 서버 levels 시드 4열과 같은 키. 값 = 쉼표 구분 양의 Int32 3개(±1 은 옛 5개도 허용).
+  // levels 익스포트는 값이 있고 형식이 맞는 열만 보내고, 없으면 키를 생략한다(서버 기존 값 유지 — "" 로 지우지 않음).
+  // 옛 v1 목록 값(5개)은 문서 47 판정이 유효일 때만 보낸다. 'DDA 시드 갱신' 버튼은 ±1 두 열만 채운다.
+  ddaEasy2Seeds?: string;
   ddaEasySeeds?: string;
   ddaHardSeeds?: string;
+  ddaHard2Seeds?: string;
+  // 무한 사본(infinity_N) 전용 시드(확장 지점). 무한 사본은 정식 루트 시드를 보내지 않고, 여기 그 id 값이 있을 때만 보낸다.
+  ddaInfinitySeeds?: Record<string, Partial<Record<'ddaEasy2Seeds' | 'ddaEasySeeds' | 'ddaHardSeeds' | 'ddaHard2Seeds', string>> & { ddaSeedVerdicts?: DdaSeedVerdicts }>;
+  // [2026-11-02] 시드 클리어 가능 판정 근거(서버로 안 보냄). 서버 값과 다른 새 시드는 이 근거가 있어야 업로드된다.
+  ddaSeedVerdicts?: DdaSeedVerdicts;
   unlockTile?: number;  // key 기믹: 버퍼 잠금 슬롯 수 (key 타일 3개로 1칸 해제)
   timea?: number;  // time_attack 기믹: 제한 시간 (초)
   rewardCoin?: number;  // GBoost 업로드용 리워드 코인 (없으면 백엔드 기본값 10)
@@ -159,6 +177,8 @@ export interface LevelMetadata {
   thumbnail_data?: LevelJSON; // For thumbnail preview
   dda_easy_seeds?: string | null; // [DDA 문서 47] 서버 levels.ddaEasySeeds 현재 값 (컬럼 없으면 null/없음)
   dda_hard_seeds?: string | null;
+  dda_easy2_seeds?: string | null; // 서버 levels.ddaEasy2Seeds / ddaHard2Seeds 현재 값 (컬럼 없으면 null/없음)
+  dda_hard2_seeds?: string | null;
 }
 
 // Tile type definitions

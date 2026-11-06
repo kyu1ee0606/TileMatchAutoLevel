@@ -25,6 +25,7 @@ import {
 import type { LevelJSON, DifficultyGrade, GenerationParams } from '../../types';
 import { Button } from '../ui';
 import { useUIStore } from '../../stores/uiStore';
+import { getApiErrorDetail } from '../../utils/helpers';
 
 interface LevelSetGeneratorProps {
   onLevelSetCreated?: (levelSet: LevelSet) => void;
@@ -813,7 +814,7 @@ export function LevelSetGenerator({ onLevelSetCreated }: LevelSetGeneratorProps)
                   ? {
                       ...r,
                       status: 'failed',
-                      error: `생성 실패: ${err instanceof Error ? err.message : '알 수 없는 오류'}`,
+                      error: `생성 실패: ${getApiErrorDetail(err)}`,
                     }
                   : r
               ),

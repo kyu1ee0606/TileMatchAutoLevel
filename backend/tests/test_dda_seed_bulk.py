@@ -17,6 +17,7 @@ sys.path.insert(0, str(BACKEND / "scripts"))
 from app.api.deps import get_gboost  # noqa: E402
 from app.api.routes.gboost import _convert_to_townpop_format as conv  # noqa: E402
 from app.core import dda_seed_catalog as c  # noqa: E402
+from app.core import infinity_relabel as _inf_relabel  # noqa: E402
 from app.main import app  # noqa: E402
 import dda_seed_bulk_20261020 as B  # noqa: E402
 import dda_seed_server_apply_20261020 as base  # noqa: E402
@@ -59,7 +60,13 @@ def test_normal_upload_payload_unchanged_vs_golden():
             assert client.post(f"/api/gboost/{g['board']}/{g['id']}", json={"level_json": j}).status_code == 200
             p = saved[-1]
             p.pop("etime", None)
-            assert p == g["payload"], g["id"]
+            # [2026-11-02] 시드 열은 "" 로 보내지 않고 키를 생략한다 → golden 의 "" 시드 키만 빼고 비교(나머지 불변)
+            exp = {k: v for k, v in g["payload"].items() if not (k in c.EXPORT_SEED_FIELDS and v == "")}
+            # [무한 그림 치환 v1] infinity_N 행 map = golden(원본 복사) map 에 같은 규칙 적용(나머지 열 불변)
+            if _inf_relabel.infinity_slot(g["id"]):
+                exp["map"] = _inf_relabel.relabel_level_json(exp["map"], _inf_relabel.infinity_slot(g["id"]))[0]
+                assert exp["map"] != g["payload"]["map"]
+            assert p == exp, g["id"]
     finally:
         app.dependency_overrides[get_gboost] = prev
 

@@ -452,7 +452,9 @@ class GBoostClient:
                                         # [DDA 문서 47] 서버 현재 시드 값 — 익스포트 미리보기에서 비움/변경 경고용.
                                         # 컬럼이 없으면 키 생략(None), 있으면 문자열로 전달.
                                         for src_key, dst_key in (("ddaEasySeeds", "dda_easy_seeds"),
-                                                                 ("ddaHardSeeds", "dda_hard_seeds")):
+                                                                 ("ddaHardSeeds", "dda_hard_seeds"),
+                                                                 ("ddaEasy2Seeds", "dda_easy2_seeds"),
+                                                                 ("ddaHard2Seeds", "dda_hard2_seeds")):
                                             if src_key in value:
                                                 v = value[src_key]
                                                 level_info[dst_key] = "" if v is None else str(v)

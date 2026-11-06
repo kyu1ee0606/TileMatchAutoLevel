@@ -2,7 +2,8 @@
 DDA 시드 개발용 목록 + 레벨별 판정 (문서 47).
 
 - 목록: backend/data/dda_seeds/dda_t0_seed_catalog.v1.json (sha256 고정 — 다르면 로드 거부).
-  서버 컬럼이 아니다. 서버로 가는 값은 levels.ddaEasySeeds / ddaHardSeeds 두 문자열뿐.
+  서버 컬럼이 아니다. 목록 판정 대상은 levels.ddaEasySeeds / ddaHardSeeds 두 문자열뿐.
+  [2026-11-02] 일반 익스포트는 4열(EXPORT_SEED_FIELDS)을 레벨 데이터 값으로만 보내고 없으면 생략 — export_fields.
 - 판정 입력의 `townpop` 은 gboost._convert_to_townpop_format(level_json) 결과 —
   익스포트와 같은 변환으로 map 해시/useTileCount 를 본다(이 모듈은 routes 를 import 하지 않음).
 - 새 시드를 만들거나 고르지 않는다. 목록 값과 정확히 같은 값만 유지/보충/익스포트한다.
@@ -85,12 +86,27 @@ def is_valid_seed_str(value: Any) -> bool:
     return len(toks) == 5 and all(_SEED_TOKEN.match(t) and int(t) <= _INT32_MAX for t in toks)
 
 
+def is_runtime_seed_str(field: str, value: Any) -> bool:
+    """게임 DdaVariantCatalog.TryParseSeeds 와 같은 형식: 3개(±1 두 열은 옛 5개도 허용), 쉼표 구분·공백 없음,
+    각 1..Int32.Max, 부호·선행0·빈 토큰·중복 불허."""
+    if not isinstance(value, str) or not value:
+        return False
+    toks = value.split(",")
+    if not (len(toks) == 3 or (field in SEED_FIELDS and len(toks) == 5)):
+        return False
+    if not all(_SEED_TOKEN.match(t) and int(t) <= _INT32_MAX for t in toks):
+        return False
+    return len(set(int(t) for t in toks)) == len(toks)
+
+
 def classify(value: Any, expected: str) -> str:
-    """match(정답) / missing(없음·빈 값) / invalid(형식 오류) / other(정상 형식·다른 값)."""
+    """match(정답) / missing(없음·빈 값) / invalid(형식 오류) / other(정상 형식·다른 값).
+    [2026-11-02] 현행 3개 형식(서버·게임 정본)의 정상 값도 other — 'DDA 시드 갱신'이 검증된 3개 시드를
+    옛 5개 목록 값으로 덮어쓰지 않게 한다(conflict → 건너뜀)."""
     if value is None or value == "":
         return "missing"
     if not is_valid_seed_str(value):
-        return "invalid"
+        return "other" if is_runtime_seed_str("ddaEasy2Seeds", value) else "invalid"
     return "match" if value == expected else "other"
 
 
@@ -161,20 +177,183 @@ def _seed_values(level_number: int, level_json: Dict[str, Any], townpop: Dict[st
     return {"ddaEasySeeds": "", "ddaHardSeeds": "", "reason": reason}
 
 
+# ── 일반 익스포트 시드 열 (2026-11-02 개정) ──────────────────────────────────────
+# 서버 levels 시드 4열(게임 DdaVariantCatalog.cs:35-39). 열마다 독립: 레벨 데이터(level_json 루트, 서버와 같은 키)에
+# 유효 값이 있으면 보내고, 없거나 쓸 수 없으면 키 자체를 생략한다 → real_array save(new=0)는 보내지 않은 컬럼을
+# 서버 기존 값으로 유지한다(근거: READBACK_RULES "unsent", 2026-10-28 시드만 2,262행 전송·전 행 재조회 무변경).
+# "" 로 덮어써 서버 시드를 지우는 경로는 없다.
+EXPORT_SEED_FIELDS = ("ddaEasy2Seeds", "ddaEasySeeds", "ddaHardSeeds", "ddaHard2Seeds")
+# 무한 사본(infinity_N)은 정식 level_{500+N} 의 level_json 을 복사해 올린다. 무한 행은 자기 시드를 가지므로
+# (2026-10-28 결정) 정식 시드를 보내지 않는다. 확장 지점: 원본 level_json 루트의
+#   "ddaInfinitySeeds": {"infinity_N": {"ddaEasySeeds": "a,b,c", ...}}
+# 에 그 무한 행 값이 있으면 그 열만 보낸다(형식 검사 동일). 없으면 4열 모두 생략.
+INFINITY_SEEDS_KEY = "ddaInfinitySeeds"
+_INF_ID = re.compile(r"^infinity_([0-9]+)$")
+# 옛 v1 목록(5개) 값을 문서 47 판정 유효 시 보낼지. 기본 False(생략).
+# 근거(2026-11-02 실측, LIVE 일치본 배치 × 11:55 서버 readback, UI 기본 설정): 판정 유효 1,214행×2열 중
+# 서버와 같음 1,102열 · 서버가 이후 값을 가짐 1,326열/664행(10-28 무작위 3개 662행·L65/L95 순서 다른 5개 2행) · 서버 빈 값 0.
+# 즉 보내면 최신 서버 시드를 옛 목록 값으로 되돌리기만 한다(운영 DDA 는 목록을 참조하지 않음 — IMPL_SPEC :264).
+LEGACY_CATALOG_EXPORT = False
+
+# ── 클리어 가능 판정 근거 (2026-11-02, 사용자 지시 "시드는 최소한 클리어 가능한 것으로") ──────────────
+# 서버 값과 '다른' 시드(새 값)는 판정 근거가 있을 때만 보낸다. 근거가 없으면 그 열을 생략(서버 값 유지)한다.
+# 근거 = level_json 루트(무한 행은 ddaInfinitySeeds[id] 안)의 "ddaSeedVerdicts" — 서버로는 보내지 않는다
+# (_convert_to_townpop_format 은 이 키를 복사하지 않음).
+#   "ddaSeedVerdicts": {
+#     "binding": {"mapSha256": map_sha256(변환된 행), "useTileCount": "<변환된 행 useTileCount>"},
+#     "ddaHardSeeds": [{"seed": 950941980, "verdict": "PATH", "nodes": 9, "source": "dda_seed_verify/20261029/replace"}, ...],
+#     ...
+#   }
+# 형식은 sp_meowsgarden tools/dda_seed_verify 의 v4_seed_patch.json proof 항목({seed, verdict, nodes})·
+# results.csv / bot_results.csv 의 verdict 와 같다. 통과 판정 = PATH(검증된 클리어 경로) / PATH_BOT(봇 30판 중 1판 이상 클리어).
+# binding 이 지금 변환 결과(map·useTileCount)와 다르면 맵이 바뀐 뒤의 옛 근거이므로 무효.
+# 게임은 시드 문자열의 앞 3개만 쓴다(DdaVariantCatalog.cs:97,123 — ±1 옛 5개 값도 앞 3개) → 앞 3개 각각에 통과 판정 필요.
+SEED_EVIDENCE_KEY = "ddaSeedVerdicts"
+SEED_PASS_VERDICTS = ("PATH", "PATH_BOT")
+SEED_EVIDENCE_REQUIRED = True
+_GAME_SEED_COUNT = 3
+
+
+def seed_evidence(field: str, value: Any, ev: Any, townpop: Dict[str, Any]) -> str:
+    """열 값의 판정 근거 상태: ok / none / binding_mismatch / partial:<통과수>/<필요수>."""
+    if not isinstance(ev, dict):
+        return "none"
+    b = ev.get("binding")
+    if not isinstance(b, dict) or b.get("mapSha256") != map_sha256(townpop) \
+            or str(b.get("useTileCount")) != str(townpop.get("useTileCount")):
+        return "binding_mismatch"
+    lst = ev.get(field)
+    if not isinstance(lst, list):
+        return "none"
+    passed = set()
+    for x in lst:
+        if isinstance(x, dict) and x.get("verdict") in SEED_PASS_VERDICTS:
+            try:
+                passed.add(int(x.get("seed")))
+            except (TypeError, ValueError):
+                pass
+    used = [int(t) for t in str(value).split(",")[:_GAME_SEED_COUNT]]
+    n = sum(1 for t in used if t in passed)
+    return "ok" if n == len(used) else f"partial:{n}/{len(used)}"
+
+
+def _attach_evidence(out: Dict[str, Any], ev: Any, townpop: Dict[str, Any]) -> None:
+    out["fieldEvidence"] = {f: seed_evidence(f, out[f], ev, townpop) for f in EXPORT_SEED_FIELDS if f in out}
+
+
+def evidence_gate(existing_row: Any, payload: Dict[str, Any], field_evidence: Dict[str, str]) -> Dict[str, str]:
+    """서버 값과 다르고 판정 근거(ok)가 없는 시드 열을 payload 에서 뺀다(생략 = 서버 값 유지).
+    반환 {열: 사유} = 뺀 열. existing_row 가 dict 가 아니면(새 행) 서버 값 "" 로 본다."""
+    dropped: Dict[str, str] = {}
+    if not SEED_EVIDENCE_REQUIRED:
+        return dropped
+    srv = existing_row if isinstance(existing_row, dict) else {}
+    for f in EXPORT_SEED_FIELDS:
+        if f not in payload:
+            continue
+        if _norm(srv.get(f)) == _norm(payload[f]):
+            continue                                    # 서버와 같은 값 — 새로 정하는 시드 아님
+        st = (field_evidence or {}).get(f, "none")
+        if st != "ok":
+            payload.pop(f)
+            dropped[f] = st
+    return dropped
+
+
+def _pick_fields(src: Dict[str, Any], tag: str) -> Dict[str, Any]:
+    """src 의 4열 중 보낼 값만 고른다. 반환 {열: 값, ..., "fieldReasons": {열: 사유}}."""
+    out: Dict[str, Any] = {}
+    why: Dict[str, str] = {}
+    for f in EXPORT_SEED_FIELDS:
+        v = src.get(f)
+        if v is None or v == "":
+            why[f] = "absent"
+        elif not is_runtime_seed_str(f, v):
+            why[f] = "invalid_format"
+        else:
+            out[f] = v
+            why[f] = tag
+    out["fieldReasons"] = why
+    return out
+
+
+def _is_legacy_catalog_value(level: int, field: str, value: Any) -> Optional[bool]:
+    """옛 v1 목록(5개) 값인가. 목록 로드 실패면 None(판단 불가)."""
+    try:
+        e = load_catalog()["_byLevel"].get(level)
+    except CatalogError:
+        return None
+    return bool(e) and value == e.get(field)
+
+
 def export_fields(board_id: str, level_id: str, level_json: Dict[str, Any],
                   townpop: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """일반(전체 행) GameBoost 익스포트에 넣을 두 필드. None = 이 보드엔 필드를 추가하지 않음.
+    """일반(전체 행) GameBoost 익스포트에 넣을 시드 열(0~4개). None = 이 보드엔 필드를 추가하지 않음.
 
-    levels 보드면 항상 두 키를 명시한다: 유효 후보면 값, 아니면 "" (+reason).
-    [P1] 유효 후보라도 이번 업로드 행(다른 컬럼)이 검증 기준 원본 행과 다르면 "" (row_changed) —
-    행이 바뀌면 런타임 조건 해시가 달라져 시드가 무효이기 때문. 일반 편집 값은 그대로 둔다(덮어쓰지 않음).
+    반환: 보낼 열만 키로 포함 + "reason"(요약) + "fieldReasons"(열별). 키가 없는 열 = 전송 생략(서버 값 유지).
+    - level_N: level_json 의 열 값이 게임 형식(3개, ±1 은 5개도)이면 보냄.
+      단 ddaEasySeeds/ddaHardSeeds 의 5개 값이 그 레벨 v1 목록 값과 같으면 기본 생략(LEGACY_CATALOG_EXPORT=False).
+      True 이면 그 레벨 v1 목록 값이고 기존 문서 47 판정(_legacy_export_fields)이 유효일 때만 보냄. 어느 쪽도 "" 는 안 보냄.
+    - infinity_N: 정식 시드 미사용. ddaInfinitySeeds[level_id] 가 있을 때만 그 값.
+    - 그 외 id: 생략.
     """
     if board_id != DDA_BOARD_ID:
         return None
+    if _INF_ID.match(level_id or ""):
+        src = level_json.get(INFINITY_SEEDS_KEY)
+        ent = src.get(level_id) if isinstance(src, dict) else None
+        if not isinstance(ent, dict):
+            return {"reason": "infinity_omitted",
+                    "fieldReasons": {f: "infinity_omitted" for f in EXPORT_SEED_FIELDS}}
+        out = _pick_fields(ent, "infinity_data")
+        out["reason"] = "infinity_data"
+        _attach_evidence(out, ent.get(SEED_EVIDENCE_KEY), townpop)
+        return out
     m = _LEVEL_ID.match(level_id or "")
     if not m:
-        return {"ddaEasySeeds": "", "ddaHardSeeds": "", "reason": "not_level_row"}
-    f = _seed_values(int(m.group(1)), level_json, townpop)
+        return {"reason": "not_level_row", "fieldReasons": {f: "not_level_row" for f in EXPORT_SEED_FIELDS}}
+    level = int(m.group(1))
+    out = _pick_fields(level_json, "level_data")
+    why = out["fieldReasons"]
+    legacy: Optional[Dict[str, Any]] = None
+    for f in SEED_FIELDS:
+        if f not in out:
+            continue
+        if len(str(out[f]).split(",")) != 5:
+            continue                                   # 현행 3개 형식 → 레벨 데이터 값 그대로
+        # 5개 형식: 그 레벨 v1 목록 값과 같으면 옛 목록 값(기본 생략, LEGACY_CATALOG_EXPORT).
+        # 목록 값과 다르면 레벨 데이터 값(예: 배치 보정에서 토큰 일부를 바꾼 검증 값) → 그대로 보냄.
+        is_legacy = _is_legacy_catalog_value(level, f, out[f])
+        if is_legacy is None:
+            out.pop(f)
+            why[f] = "legacy_unverifiable:catalog_error"
+        elif not is_legacy:
+            continue
+        else:
+            if legacy is None:
+                legacy = _legacy_export_fields(level_id, level, level_json, townpop)
+            if legacy["reason"] == "valid" and LEGACY_CATALOG_EXPORT:
+                out[f] = legacy[f]
+                why[f] = "legacy_valid"
+            elif legacy["reason"] == "valid":
+                out.pop(f)
+                why[f] = "legacy_valid_not_sent"
+            else:
+                out.pop(f)
+                why[f] = "legacy:" + legacy["reason"]
+    sent = [f for f in EXPORT_SEED_FIELDS if f in out]
+    out["reason"] = ("send:" + ",".join(sent)) if sent else "omitted"
+    _attach_evidence(out, level_json.get(SEED_EVIDENCE_KEY), townpop)
+    return out
+
+
+def _legacy_export_fields(level_id: str, level: int, level_json: Dict[str, Any],
+                          townpop: Dict[str, Any]) -> Dict[str, Any]:
+    """[문서 47 옛 판정] 두 필드: 유효 후보면 값, 아니면 "" (+reason). 호출부는 "" 를 보내지 않고 생략한다.
+    [P1] 유효 후보라도 이번 업로드 행(다른 컬럼)이 검증 기준 원본 행과 다르면 "" (row_changed) —
+    행이 바뀌면 런타임 조건 해시가 달라져 시드가 무효이기 때문. 일반 편집 값은 그대로 둔다(덮어쓰지 않음).
+    """
+    f = _seed_values(level, level_json, townpop)
     if f["reason"] != "valid":
         return f
     try:
@@ -191,14 +370,29 @@ def export_fields(board_id: str, level_id: str, level_json: Dict[str, Any],
     return f
 
 
+def apply_export_fields_with_evidence(board_id: str, level_id: str, level_json: Dict[str, Any],
+                                      townpop: Dict[str, Any]):
+    """apply_export_fields + 열별 판정 근거 상태. 반환 (townpop, fieldEvidence)."""
+    f = export_fields(board_id, level_id, level_json, townpop)
+    if f is None:
+        return townpop, {}
+    for k in EXPORT_SEED_FIELDS:
+        townpop.pop(k, None)
+        if k in f:
+            townpop[k] = f[k]
+    return townpop, dict(f.get("fieldEvidence") or {})
+
+
 def apply_export_fields(board_id: str, level_id: str, level_json: Dict[str, Any],
                         townpop: Dict[str, Any]) -> Dict[str, Any]:
-    """townpop 에 두 필드를 넣어 반환 (levels 보드 외엔 그대로)."""
+    """townpop 에 보낼 시드 열만 넣어 반환 (levels 보드 외엔 그대로). 보내지 않을 열은 키를 넣지 않는다."""
     f = export_fields(board_id, level_id, level_json, townpop)
     if f is None:
         return townpop
-    townpop["ddaEasySeeds"] = f["ddaEasySeeds"]
-    townpop["ddaHardSeeds"] = f["ddaHardSeeds"]
+    for k in EXPORT_SEED_FIELDS:
+        townpop.pop(k, None)
+        if k in f:
+            townpop[k] = f[k]
     return townpop
 
 
@@ -274,91 +468,224 @@ def row_digest(row: Any) -> str:
     return hashlib.sha256(dump(row)).hexdigest()
 
 
-def seed_only_plan(level_id: str, level_json: Dict[str, Any], townpop: Dict[str, Any],
-                   server_row: Any) -> Dict[str, Any]:
-    """'시드만 내보내기' — 서버 현재 행을 그대로 두고 두 컬럼만 바꾼 payload.
-
-    신뢰 조건(하나라도 실패하면 blocked, 기본값 추정 없음):
-      levels 행 id · 원본 행 스냅샷 존재 · 서버 행 존재·dict·두 컬럼 존재 ·
-      서버 행(map/시드/etime/id 제외)이 스냅샷과 같음 · 서버 map 해시 = sourceMapSha256.
-    payload = 두 시드 필드만 (부분 수정, §9). 서버 행 전체 재전송은 하지 않는다.
-    """
-    res: Dict[str, Any] = {"target_id": level_id, "blocked": True}
-    m = _LEVEL_ID.match(level_id or "")
-    if not m:
-        res["reason"] = "not_level_row"
-        return res
-    level = int(m.group(1))
-    try:
-        snap = load_source_rows()["rows"].get(level_id)
-        entry = load_catalog()["_byLevel"].get(level)
-    except CatalogError as e:
-        res.update({"reason": "catalog_error", "detail": str(e)})
-        return res
-    if snap is None or entry is None:
-        res["reason"] = "no_snapshot"
-        return res
-    if server_row is None:
-        res["reason"] = "no_server_row"
-        return res
-    if not isinstance(server_row, dict):
-        res["reason"] = "server_row_invalid"
-        return res
-    if any(f not in server_row for f in SEED_FIELDS):
-        res["reason"] = "no_seed_column"
-        return res
-    diff = row_diff(server_row, snap)
-    if diff:
-        res.update({"reason": "server_row_differs", "detail": ",".join(diff[:8])})
-        return res
-    msha = _server_map_sha(server_row.get("map"))
-    if msha is None:
-        res["reason"] = "server_map_unverifiable"
-        return res
-    if msha != entry["sourceMapSha256"]:
-        res["reason"] = "server_map_differs"
-        return res
-    seeds = _seed_values(level, level_json, townpop)
-    # [§9] 전체 행 재전송 금지 — 2026-10-20 L159 시험에서 null rewardList 가 [["null",0,0,0]] 로 바뀌었다.
-    # payload 는 두 시드 필드만(부분 수정). 실제 전송은 PARTIAL_UPDATE_VERIFIED 가 True 일 때만.
-    payload = {"ddaEasySeeds": seeds["ddaEasySeeds"], "ddaHardSeeds": seeds["ddaHardSeeds"]}
-    before = (_norm(server_row.get("ddaEasySeeds")), _norm(server_row.get("ddaHardSeeds")))
-    after = (seeds["ddaEasySeeds"], seeds["ddaHardSeeds"])
-    change = ("same" if before == after else "clear" if after == ("", "") else
-              "fill" if before == ("", "") else "change")
-    res.update({"blocked": False, "reason": seeds["reason"], "change": change,
-                "server": {"ddaEasySeeds": before[0], "ddaHardSeeds": before[1]},
-                "ddaEasySeeds": after[0], "ddaHardSeeds": after[1],
-                "serverDigest": row_digest(server_row), "payload": payload})
-    return res
-
-
 def write_guard(existing_row: Any, payload: Dict[str, Any], confirm: bool) -> Optional[str]:
-    """실제 업로드 직전 안전 조건. 서버의 비어 있지 않은 시드를 비우거나 다른 값으로 바꾸려면 confirm 필요.
+    """실제 업로드 직전 안전 조건(4열). 서버의 비어 있지 않은 시드를 빈 값으로 바꾸려면 confirm 필요.
+    payload 에 키가 없는 열(생략 = 서버 값 유지)·서버와 같은 값·비어 있지 않은 다른 값은 막지 않는다.
     반환: None=통과, 문자열=차단 사유."""
     if not isinstance(existing_row, dict):
         return None                      # 새 행(서버 값 없음)
-    srv = tuple(_norm(existing_row.get(f)) for f in SEED_FIELDS)
-    new = tuple(_norm(payload.get(f)) for f in SEED_FIELDS)
-    if srv != ("", "") and srv != new and not confirm:
-        return "needs_dda_confirm"
+    for f in EXPORT_SEED_FIELDS:
+        if f not in payload:
+            continue
+        if _norm(existing_row.get(f)) != "" and _norm(payload.get(f)) == "" and not confirm:
+            return "needs_dda_confirm"
     return None
 
 
+# ── 시드만 내보내기 v2 (2026-11-03, PLAN_DDA_SEED_ONLY_EXPORT_FIX_20261103) ───────────────────
+# 값 출처 = 맵툴 배치 파일(서버 저장본) level_json → export_fields(일반 업로드와 같은 4열 판정) → evidence_gate.
+# 서버 행은 보드 전체 1회 조회(load_board_rows) 결과로 판정한다. 보낼 payload = 서버와 다르고 근거 ok 인 시드 열만.
+# 신뢰 조건: 서버 행 존재 · 4열 컬럼 존재 · 서버 map(빈 층 []→{} 정규화) = 배치 변환 map · useTileCount 같음.
+# 옛 v1(두 열·v1 목록·출시 스냅샷) 판정은 dda_seed_only_v1_legacy.py 로 옮겼다(10-20 스크립트 전용).
+
 # ── 부분 수정 게이트 (§9) ────────────────────────────────────────────────────────
-# real_array save(new=0)가 '보내지 않은 컬럼'을 보존한다는 근거(코드·문서·관측)가 아직 없다.
-# 근거가 확보되고 사용자 승인이 나기 전까지 실제 부분 수정 전송은 차단한다(미리보기/dry-run 은 허용).
+# 관측 근거: 2026-10-28 시드 전송 2,262행(1~4열 부분 payload, update_existing_level)이 행마다 전체 행 재조회 =
+# 직전 행+payload (sp_meowsgarden/tools/out/dda_seed_random_20261028/upload/results.jsonl ok 2,262/2,262).
+# 그래도 이 경로의 전체 전송은 '시험 1행 통과 기록'(PARTIAL_TRIAL_DIR, 현재 코드 해시에 묶임)이 있을 때만 연다.
+# 상수 True 는 시험 기록 없이 여는 수동 우회(기본 False, 바꾸지 말 것).
 PARTIAL_UPDATE_VERIFIED = False
+PARTIAL_TRIAL_DIR = os.path.normpath(os.path.join(os.path.dirname(CATALOG_PATH), "partial_update_trials"))
+PARTIAL_TRIAL_KIND = "dda_seed_partial_update_trial.v1"
+SEED_ONLY_CELL_STATES = ("send", "same", "kept", "unverified", "blocked")
 
 
-def assert_partial_payload(payload: Dict[str, Any]) -> None:
-    """전송 payload 는 정확히 두 시드 필드만, 각 값은 5개 시드 문자열 또는 "" 여야 한다."""
-    if set(payload) != set(SEED_FIELDS):
-        raise ValueError(f"partial payload keys must be exactly {SEED_FIELDS}: {sorted(payload)}")
-    for f in SEED_FIELDS:
-        if payload[f] != "" and not is_valid_seed_str(payload[f]):
-            raise ValueError(f"invalid seed value for {f}")
+def code_fingerprint_files(paths: list, settings: Dict[str, Any]) -> str:
+    """시드만 전송 경로 코드 해시 — 관련 모듈 파일 전체 바이트 + 판정 설정 값. 하나라도 바뀌면 시험 기록이 무효."""
+    h = hashlib.sha256()
+    for pth in sorted(os.path.normpath(str(x)) for x in paths):
+        h.update(os.path.basename(pth).encode())
+        h.update(b"\0")
+        with open(pth, "rb") as fh:
+            h.update(hashlib.sha256(fh.read()).digest())
+    h.update(json.dumps(settings, sort_keys=True, default=str).encode())
+    return h.hexdigest()
 
+
+def seed_settings_snapshot() -> Dict[str, Any]:
+    """코드 해시에 넣는 런타임 판정 설정(모듈 상수의 현재 값)."""
+    return {"SEED_EVIDENCE_REQUIRED": SEED_EVIDENCE_REQUIRED, "SEED_PASS_VERDICTS": list(SEED_PASS_VERDICTS),
+            "LEGACY_CATALOG_EXPORT": LEGACY_CATALOG_EXPORT, "EXPORT_SEED_FIELDS": list(EXPORT_SEED_FIELDS),
+            "CATALOG_SHA256": CATALOG_SHA256, "GAME_SEED_COUNT": _GAME_SEED_COUNT, "DDA_BOARD_ID": DDA_BOARD_ID,
+            "INFINITY_SEEDS_KEY": INFINITY_SEEDS_KEY, "SEED_EVIDENCE_KEY": SEED_EVIDENCE_KEY}
+
+
+def normalize_gb_target(base_url: Any, project_id: Any, board_id: Any) -> Dict[str, str]:
+    """GameBoost 대상 식별값: base_url(스킴·호스트 소문자, 끝 '/' 제거, 기본 포트 제거) · project_id · board_id."""
+    from urllib.parse import urlsplit
+    u = str(base_url or "").strip()
+    try:
+        sp = urlsplit(u)
+        host = (sp.hostname or "").lower()
+        port = sp.port
+        scheme = (sp.scheme or "").lower()
+        if port and not ((scheme == "https" and port == 443) or (scheme == "http" and port == 80)):
+            host = f"{host}:{port}"
+        norm = f"{scheme}://{host}{sp.path.rstrip('/')}" if scheme and host else u.rstrip("/").lower()
+    except ValueError:
+        norm = u.rstrip("/").lower()
+    return {"base_url": norm, "project_id": str(project_id or "").strip(), "board_id": str(board_id or "").strip()}
+
+
+def normalize_map(m: Any) -> Optional[Any]:
+    """서버/변환 map 비교용 정규화. 문자열이면 JSON 파싱, layer_* 의 빈 tiles 목록([])은 {} 로.
+    파싱 불가·dict 아님 → None. 값은 바꾸지 않은 사본을 돌려준다(비교 전용)."""
+    if isinstance(m, str):
+        try:
+            m = json.loads(m)
+        except ValueError:
+            return None
+    if not isinstance(m, dict):
+        return None
+    out = {}
+    for k, v in m.items():
+        if isinstance(k, str) and k.startswith("layer_") and isinstance(v, dict) \
+                and isinstance(v.get("tiles"), list) and not v["tiles"]:
+            v = {**v, "tiles": {}}
+        out[k] = v
+    return out
+
+
+def map_compare_sha(m: Any) -> Optional[str]:
+    n = normalize_map(m)
+    return None if n is None else hashlib.sha256(json.dumps(n, ensure_ascii=False, sort_keys=True,
+                                                            separators=(",", ":")).encode()).hexdigest()
+
+
+def seed_only_plan_v2(target_id: str, level_json: Dict[str, Any], townpop: Dict[str, Any],
+                      server_row: Any, board_keys: Optional[list] = None) -> Dict[str, Any]:
+    """v2 판정. level_json = 배치 원본(무한이면 relabel 후), townpop = 그 변환본(시드 열 넣기 전/후 무관).
+
+    반환: target_id · blocked · reason · detail · serverDigest · change(same/fill/change) ·
+          cells{열: {state: send|same|kept|unverified|blocked, server, value?, why?, kind?}} · payload(send 열만).
+    """
+    res: Dict[str, Any] = {"target_id": target_id, "blocked": True, "reason": "", "cells": {}}
+
+    def _block(reason: str, detail: str = "") -> Dict[str, Any]:
+        res.update({"blocked": True, "reason": reason, **({"detail": detail} if detail else {})})
+        res["cells"] = {f: {"state": "blocked", "why": reason} for f in EXPORT_SEED_FIELDS}
+        res["payload"] = {}
+        return res
+
+    if not (_LEVEL_ID.match(target_id or "") or _INF_ID.match(target_id or "")):
+        return _block("not_seed_row")
+    if server_row is None:
+        return _block("no_server_row")
+    if not isinstance(server_row, dict):
+        return _block("server_row_invalid")
+    res["serverDigest"] = row_digest(server_row)
+    keys = set(board_keys) if board_keys is not None else set(server_row)
+    missing = [f for f in EXPORT_SEED_FIELDS if f not in keys or f not in server_row]
+    if missing:
+        return _block("no_seed_column", ",".join(missing))
+    s_sha = map_compare_sha(server_row.get("map"))
+    if s_sha is None:
+        return _block("server_map_unverifiable")
+    if s_sha != map_compare_sha(townpop.get("map")):
+        return _block("server_map_differs")
+    if _norm(server_row.get("useTileCount")) != _norm(townpop.get("useTileCount")):
+        return _block("server_map_differs", f"useTileCount server={_norm(server_row.get('useTileCount'))} "
+                                            f"batch={_norm(townpop.get('useTileCount'))}")
+    f = export_fields(DDA_BOARD_ID, target_id, level_json, townpop) or {}
+    ev = dict(f.get("fieldEvidence") or {})
+    why = dict(f.get("fieldReasons") or {})
+    cells: Dict[str, Dict[str, Any]] = {}
+    payload: Dict[str, Any] = {}
+    for fld in EXPORT_SEED_FIELDS:
+        sv = _norm(server_row.get(fld))
+        if fld not in f:
+            cells[fld] = {"state": "kept", "server": sv, "why": why.get(fld, "absent")}
+            continue
+        v = f[fld]
+        if sv == _norm(v):
+            cells[fld] = {"state": "same", "server": sv, "value": v}
+        elif SEED_EVIDENCE_REQUIRED and ev.get(fld, "none") != "ok":
+            cells[fld] = {"state": "unverified", "server": sv, "value": v, "why": ev.get(fld, "none")}
+        else:
+            cells[fld] = {"state": "send", "server": sv, "value": v, "kind": "fill" if sv == "" else "change"}
+            payload[fld] = v
+    kinds = {c.get("kind") for c in cells.values() if c["state"] == "send"}
+    res.update({"blocked": False, "reason": f.get("reason", ""), "cells": cells, "payload": payload,
+                "change": "change" if "change" in kinds else "fill" if "fill" in kinds else "same"})
+    return res
+
+
+def assert_seed_payload(payload: Dict[str, Any]) -> None:
+    """v2 전송 payload: 키 1개 이상 ⊆ 시드 4열, 값마다 게임 형식(is_runtime_seed_str). "" 금지(서버 시드 비우기 없음)."""
+    if not payload or not set(payload) <= set(EXPORT_SEED_FIELDS):
+        raise ValueError(f"seed payload keys must be a non-empty subset of {EXPORT_SEED_FIELDS}: {sorted(payload)}")
+    for k, v in payload.items():
+        if not is_runtime_seed_str(k, v):
+            raise ValueError(f"invalid seed value for {k}")
+
+
+def _row_wo_etime(row: Any) -> Any:
+    return {k: v for k, v in row.items() if k != "etime"} if isinstance(row, dict) else row
+
+
+def judge_partial_trial(target_id: str, payload: Dict[str, Any], before_rows: Dict[str, Any],
+                        after_rows: Dict[str, Any]) -> Dict[str, Any]:
+    """시험 1행 재조회 대조(같은 보드 조회 경로 전후). 통과 = 대상 행(etime 제외) == 직전 행+payload 이고
+    다른 모든 행 digest·행 id 집합 불변."""
+    before = before_rows.get(target_id)
+    after = after_rows.get(target_id)
+    expected = _row_wo_etime({**before, **payload}) if isinstance(before, dict) else None
+    target_ok = isinstance(after, dict) and dump(_row_wo_etime(after)) == dump(expected)
+    bad_keys = [] if target_ok or not isinstance(after, dict) or expected is None else sorted(
+        k for k in set(after) | set(expected) if k != "etime" and dump(after.get(k)) != dump(expected.get(k)))
+    others_changed = sorted(i for i in set(before_rows) | set(after_rows) if i != target_id
+                            and row_digest(before_rows.get(i)) != row_digest(after_rows.get(i)))
+    return {"targetOk": target_ok, "badKeys": bad_keys[:20], "othersChanged": len(others_changed),
+            "othersChangedSample": others_changed[:10],
+            "expectedDigest": row_digest(expected) if expected is not None else None,
+            "afterDigest": row_digest(_row_wo_etime(after)) if isinstance(after, dict) else None,
+            "passed": bool(target_ok and not others_changed)}
+
+
+def write_partial_trial_record(rec: Dict[str, Any]) -> str:
+    """시험 결과 기록(통과/실패 모두). 'x' 모드 — 덮어쓰지 않는다. 반환 경로."""
+    os.makedirs(PARTIAL_TRIAL_DIR, exist_ok=True)
+    import time as _t
+    stamp = _t.strftime("%Y%m%dT%H%M%S")
+    path = os.path.join(PARTIAL_TRIAL_DIR, f"trial_{stamp}_{rec.get('target_id', 'x')}.json")
+    with open(path, "x", encoding="utf-8") as fh:
+        json.dump({"kind": PARTIAL_TRIAL_KIND, **rec}, fh, ensure_ascii=False, indent=1)
+    return path
+
+
+def partial_update_allowed(code_hash: str, gb_target: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """전체 전송 허용 여부. 상수 우회 또는 '현재 코드 해시 + 같은 GameBoost 대상(base_url·project·board)'의
+    통과 기록(대상 행·대조 결과 자체 일관)이 있어야 한다. gb_target 이 None 이면 기록 불일치로 본다."""
+    if PARTIAL_UPDATE_VERIFIED:
+        return {"allowed": True, "by": "constant"}
+    try:
+        names = sorted(os.listdir(PARTIAL_TRIAL_DIR))
+    except OSError:
+        names = []
+    for n in reversed(names):
+        if not n.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(PARTIAL_TRIAL_DIR, n), encoding="utf-8") as fh:
+                r = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        j = r.get("judge") or {}
+        if (r.get("kind") == PARTIAL_TRIAL_KIND and r.get("codeHash") == code_hash and r.get("target_id")
+                and gb_target is not None and r.get("gbTarget") == gb_target
+                and r.get("payload") and j.get("passed") is True and j.get("targetOk") is True
+                and j.get("othersChanged") == 0 and j.get("afterDigest") and j.get("afterDigest") == j.get("expectedDigest")):
+            return {"allowed": True, "by": "trial", "record": n, "target_id": r.get("target_id")}
+    return {"allowed": False, "by": None}
 
 # ── 업로드 후 서버 읽기값 예측 (§13) ─────────────────────────────────────────────
 # 근거: 2026-10-20 18:58 L159 실측(backend/data/dda_seeds/server_apply_20261020_1822/l159_upload_via_existing/step2/compare.json)

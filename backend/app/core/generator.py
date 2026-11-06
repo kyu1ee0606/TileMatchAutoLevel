@@ -3958,6 +3958,10 @@ class LevelGenerator:
                 if total_target < 30:
                     total_target = 30
 
+                # [타일 하한] 자동 선택 목표도 처음부터 K종 하한 이상으로 (분포 변경: 저K/저난이도 레벨의 하한 미달분만 상향)
+                from ..utils.tile_floor import min_tile_count_for_kinds
+                total_target = max(total_target, min_tile_count_for_kinds(level.get("useTileCount", 0) or 0))
+
             # Build per-layer tile counts with random variation for diversity
             layer_tile_counts = {}
             tiles_per_layer = total_target // len(active_layers)
@@ -13506,6 +13510,12 @@ class LevelGenerator:
             level = self._repair_clearability(level)
         except Exception as exc:  # noqa: BLE001 — 복구 실패로 생성을 막지는 않는다
             logger.warning(f"[CLEARABILITY] 최종 복구 실패(무시): {exc}")
+        # [KEY_DIV3] t0 0 레벨의 명시 열쇠 %3 — 게임이 보충하지 않아 남는 열쇠는 영구히 못 지운다.
+        # ÷3 복구(위) 뒤에 돈다: 그 단계가 baked key 수를 바꿀 수 있고, 여기선 종류별 부족분만 채운다.
+        try:
+            level = self._repair_key_divisibility(level)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[KEY_DIV3] 보정 실패(무시): {exc}")
         # [GOAL_COUNT 정합] 선언된 목표(goalCount)와 보드의 실제 컨테이너를 일치시킨다.
         #
         # 보드에 없는 목표가 선언돼 있으면 **타일을 다 치워도 클리어가 안 된다**.
@@ -13765,6 +13775,109 @@ class LevelGenerator:
             f"(명시 키 {explicit_keys}장, t0 없음 → 게임이 키를 추가 생성 못 함). "
             f"그대로 두면 잠금 슬롯 {unlock - supported}칸이 영구히 안 열린다"
         )
+        return level
+
+    @staticmethod
+    def _key_div3_scan(level: Dict[str, Any]) -> Dict[str, Any]:
+        """명시 열쇠 수 · t0 수 (게임 규칙). 반환 {"keys", "t0", "refs", "violation"}.
+
+        - 열쇠: DB_Level.cs:234 isKeyTile — id "t16" / "key"(대소문자 무시) 또는 effect "key".
+        - 컨테이너(stack_/craft_): 내부 문자열 토큰 수 == td[2][0] 일 때만 명시 내부 채택
+          (DB_Level.cs:159-166 CTileStackInfo). 안의 key/t16 = 열쇠, t0 = t0. 수가 다르거나 없으면 내부 전체 t0.
+        - t0 가 1장이라도 있으면 게임이 GetToAddIndexList(DB_Level.cs:1123-1153)로 열쇠 포함 모든 종류를
+          3배수로 보충한다. t0 == 0 이면 보충이 없어 명시 열쇠 % 3 장이 영구히 남는다
+          (잠금 칸 = 열쇠/3 버림, Dock.cs:893 · TileGroup.cs:1333-1338) → violation.
+        refs: 열쇠 위치 — ("board", td, None) / ("inner", td[2], 토큰 인덱스).
+        층 범위는 업로드 변환(_convert_to_townpop_format)과 같은 layer_0..layer-1.
+        """
+        keys = 0
+        t0 = 0
+        refs: List[Tuple[str, Any, Any]] = []
+        for i in range(int(level.get("layer", 0) or 0)):
+            ld = level.get(f"layer_{i}")
+            tiles = ld.get("tiles") if isinstance(ld, dict) else None
+            if not isinstance(tiles, dict):
+                continue
+            for td in tiles.values():
+                if not (isinstance(td, list) and td and isinstance(td[0], str)):
+                    continue
+                tt = td[0]
+                gim = td[1] if len(td) > 1 and isinstance(td[1], str) else ""
+                if tt.startswith("craft_") or tt.startswith("stack_"):
+                    si = td[2] if len(td) > 2 else None
+                    if not (isinstance(si, list) and si):
+                        continue
+                    n0 = si[0]
+                    if isinstance(n0, bool):
+                        continue
+                    try:
+                        n = int(n0) if isinstance(n0, (int, float)) else int(str(n0).strip())
+                    except (TypeError, ValueError):
+                        continue
+                    inner = si[1] if len(si) > 1 and isinstance(si[1], str) else ""
+                    ids = inner.split("_") if inner else []
+                    if inner and len(ids) == n:
+                        for k, s in enumerate(ids):
+                            if s == "t16" or s.lower() == "key":
+                                keys += 1
+                                refs.append(("inner", si, k))
+                            elif s == "t0":
+                                t0 += 1
+                    else:
+                        t0 += max(n, 0)
+                    continue
+                if tt == "t16" or tt.lower() == "key" or gim.lower() == "key":
+                    keys += 1
+                    refs.append(("board", td, None))
+                elif tt == "t0":
+                    t0 += 1
+        return {"keys": keys, "t0": t0, "refs": refs, "violation": t0 == 0 and keys % 3 != 0}
+
+    def _repair_key_divisibility(self, level: Dict[str, Any]) -> Dict[str, Any]:
+        """[KEY_DIV3] t0 0 이고 명시 열쇠 % 3 != 0 이면 남는 열쇠(1~2장)를 같은 위치의 일반 타일로 바꾼다.
+
+        종류별 3배수를 지키는 경우만 바꾼다: 3배수에서 모자란 종류(c % 3 != 0)의 부족분에 정확히 맞춰
+        넣는다(r=1 → 부족 1 인 종류 1개 / r=2 → 부족 2 인 종류 1개 또는 부족 1 인 종류 2개).
+        모든 종류가 이미 3배수면 열쇠를 일반 타일로 바꾸는 순간 그 종류가 깨지므로 고치지 않고
+        _last_playability_warning 을 세운다(저장 게이트 key_not_div3 · 배포 게이트가 막는다).
+        unlockTile 은 바꾸지 않는다(_repair_unlock_tile 이 이미 열쇠/3 버림 이하로 맞춤 — 남는 열쇠를 빼도 같음).
+        """
+        st = self._key_div3_scan(level)
+        if not st["violation"]:
+            return level
+        r = st["keys"] % 3
+        from .solver import _clearability_type_counts
+        counts = _clearability_type_counts(level)
+        need = {t: 3 - c % 3 for t, c in counts.items() if c % 3}
+        plan: Optional[List[str]] = None
+        if r == 1:
+            one = sorted(t for t, v in need.items() if v == 1)
+            plan = one[:1] or None
+        else:
+            two = sorted(t for t, v in need.items() if v == 2)
+            one = sorted(t for t, v in need.items() if v == 1)
+            plan = [two[0], two[0]] if two else (one[:2] if len(one) >= 2 else None)
+        if not plan:
+            logger.error(
+                f"[KEY_DIV3] t0 없음 · 명시 열쇠 {st['keys']}장(%3={r}) — 종류별 3배수를 지키며 바꿀 칸이 없어 "
+                f"보정 못 함(종류별 부족 {need or '없음'}). 남는 열쇠 {r}장은 게임에서 지울 수 없다")
+            self._last_playability_warning = True
+            return level
+        # 뒤쪽 열쇠부터(보드 → 내부 순서 무관, 결정적) 바꾼다
+        for (kind, obj, k), dest in zip(list(reversed(st["refs"]))[:r], plan):
+            if kind == "board":
+                obj[0] = dest
+                if len(obj) > 1 and isinstance(obj[1], str) and obj[1].lower() == "key":
+                    obj[1] = ""
+            else:
+                parts = obj[1].split("_")
+                parts[k] = dest
+                obj[1] = "_".join(parts)
+        after = self._key_div3_scan(level)
+        bad = {t: c for t, c in _clearability_type_counts(level).items() if c % 3}
+        logger.warning(f"[KEY_DIV3] 남는 열쇠 {r}장 → {plan} (열쇠 {st['keys']}→{after['keys']}, ÷3 위반 {bad or '없음'})")
+        if after["violation"] or bad:
+            self._last_playability_warning = True
         return level
 
     @staticmethod

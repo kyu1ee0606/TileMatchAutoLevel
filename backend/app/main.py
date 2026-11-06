@@ -8,6 +8,8 @@ from fastapi.responses import JSONResponse
 
 from .config import get_settings
 from .api.routes import analyze, generate, gboost, assess, simulate, leveling, rl_sim, production_store, tune, study, pv_play, dda_seeds
+from .api.routes import dda_seed_ledger  # DDA 시드 이력 장부
+from .api.routes import live_backup  # 라이브 levels 전체 백업·복원
 
 _diag_logger = logging.getLogger("diag.422")
 
@@ -62,6 +64,8 @@ app.include_router(tune.router)
 app.include_router(study.router)
 app.include_router(pv_play.router)
 app.include_router(dda_seeds.router)
+app.include_router(dda_seed_ledger.router)
+app.include_router(live_backup.router)
 
 
 @app.get("/")

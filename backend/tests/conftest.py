@@ -109,6 +109,11 @@ def _fake_update(base_url: str, api_key: str, project_id: str):
 
 
 def pytest_configure(config):
+    # [DDA 시드 이력 장부] 테스트의 업로드 경로 기록이 실제 backend/data/dda_seed_ledger 에 쌓이지 않게 임시 폴더로 격리
+    import os
+    import tempfile
+    os.environ["DDA_SEED_LEDGER_DIR"] = tempfile.mkdtemp(prefix="dda_seed_ledger_test_")
+    os.environ["LIVE_BACKUP_DIR"] = tempfile.mkdtemp(prefix="live_backup_test_")
     socket.socket.connect = _connect
     socket.socket.connect_ex = _connect_ex
     socket.socket.sendto = _sendto

@@ -19,6 +19,7 @@ from app.api.routes.gboost import _convert_to_townpop_format as conv
 from app.clients import gboost as gb_client_mod
 from app.clients.gboost import GBoostLookupError
 from app.core import dda_seed_catalog as c
+from app.core import dda_seed_only_v1_legacy as L1
 from app.main import app
 
 FIX = os.path.join(os.path.dirname(__file__), "fixtures", "dda_seeds", "levels_fixture.json")
@@ -104,17 +105,6 @@ def server():
     app.dependency_overrides[get_gboost] = prev
 
 
-@pytest.fixture
-def partial_on(monkeypatch):
-    """부분 수정 전송 게이트를 시험용으로만 연다(기본값 False 는 실서버 근거 확보 전 차단)."""
-    monkeypatch.setattr(c, "PARTIAL_UPDATE_VERIFIED", True)
-
-
-def seed_export(targets, dry_run=True, confirm=False):
-    return client.post("/api/gboost/dda-seed-export",
-                       json={"targets": targets, "dry_run": dry_run, "confirm": confirm}).json()["results"]
-
-
 # ── 스냅샷 신뢰 기준 ─────────────────────────────────────────────────────────
 
 def test_source_rows_pinned_and_bound_to_catalog():
@@ -125,54 +115,8 @@ def test_source_rows_pinned_and_bound_to_catalog():
     assert c.source_condition_hash(snap) == c.load_catalog()["_byLevel"][158]["sourceConditionHash"]
 
 
-# ── 시드만 내보내기: 두 컬럼만 변경 ───────────────────────────────────────────
-
-@pytest.mark.parametrize("stringify,map_as_str,empty", [
-    (False, False, ""), (True, False, ""), (False, True, None), (True, True, "")])
-def test_seed_only_changes_only_two_columns(server, partial_on, stringify, map_as_str, empty):
-    row = server_row(158, easy=empty, hard=empty, stringify=stringify, map_as_str=map_as_str)
-    if empty is None:                       # null 값(키는 있음)
-        row["ddaEasySeeds"] = None
-        row["ddaHardSeeds"] = None
-    s = server(FakeServer({"level_158": row}))
-    t = [{"target_id": "level_158", "level_json": lv(158, ddaEasySeeds=E158, ddaHardSeeds=H158)}]
-    pre = seed_export(t)
-    assert pre[0]["status"] == "preview" and pre[0]["change"] == "fill" and not s.saved
-    t[0]["expected_server_digest"] = pre[0]["serverDigest"]
-    res = seed_export(t, dry_run=False)
-    assert res[0]["status"] == "saved"
-    (board, lid, payload), = s.saved
-    assert (board, lid) == ("levels", "level_158")
-    # [§9] 부분 수정: 정확히 두 시드 필드만 전송 (다른 컬럼·map·etime·rewardList 미전송)
-    assert payload == {"ddaEasySeeds": E158, "ddaHardSeeds": H158}
-    assert all(("thumbnail" not in x) for x in s.saved)
-
-
-def test_seed_only_same_value_not_sent(server):
-    s = server(FakeServer({"level_158": server_row(158, easy=E158, hard=H158)}))
-    t = [{"target_id": "level_158", "level_json": lv(158, ddaEasySeeds=E158, ddaHardSeeds=H158)}]
-    pre = seed_export(t)
-    assert pre[0]["change"] == "same"
-    t[0]["expected_server_digest"] = pre[0]["serverDigest"]
-    assert seed_export(t, dry_run=False)[0]["status"] == "unchanged" and not s.saved
-
-
-@pytest.mark.parametrize("internal,server_vals,change", [
-    ({}, (E158, H158), "clear"),                                               # 내부 값 없음 → 서버 값 비움
-    ({"ddaEasySeeds": E158, "ddaHardSeeds": H158}, ("1,2,3,4,5", "6,7,8,9,10"), "change"),
-])
-def test_seed_only_clear_or_change_needs_confirm(server, partial_on, internal, server_vals, change):
-    s = server(FakeServer({"level_158": server_row(158, easy=server_vals[0], hard=server_vals[1])}))
-    t = [{"target_id": "level_158", "level_json": lv(158, **internal)}]
-    pre = seed_export(t)
-    assert pre[0]["change"] == change
-    t[0]["expected_server_digest"] = pre[0]["serverDigest"]
-    r = seed_export(t, dry_run=False, confirm=False)
-    assert (r[0]["status"], r[0]["reason"]) == ("blocked", "needs_dda_confirm") and not s.saved
-    assert seed_export(t, dry_run=False, confirm=True)[0]["status"] == "saved"
-    assert s.saved[0][2] == ({"ddaEasySeeds": "", "ddaHardSeeds": ""} if change == "clear"
-                             else {"ddaEasySeeds": E158, "ddaHardSeeds": H158})
-
+# ── [옛 v1] 시드만 판정 — 10-20 스크립트 전용으로 dda_seed_only_v1_legacy 에 보존(동작 무변경 확인) ──────
+# 맵툴 /dda-seed-export v2 는 tests/test_dda_seed_only_v2.py.
 
 @pytest.mark.parametrize("mutate,reason", [
     (lambda r: r.update(rewardCoin=6), "server_row_differs"),
@@ -182,50 +126,19 @@ def test_seed_only_clear_or_change_needs_confirm(server, partial_on, internal, s
     (lambda r: r["map"]["layer_0"]["tiles"].update({"0_0": ["t2", ""]}), "server_map_differs"),
     (lambda r: r.update(map="not json"), "server_map_unverifiable"),
 ])
-def test_seed_only_blocks_untrusted_server_row(server, mutate, reason):
+def test_seed_only_blocks_untrusted_server_row(mutate, reason):
     row = server_row(158)
     mutate(row)
-    s = server(FakeServer({"level_158": row}))
-    t = [{"target_id": "level_158", "level_json": lv(158, ddaEasySeeds=E158, ddaHardSeeds=H158)}]
-    r = seed_export(t)
-    assert (r[0]["blocked"], r[0]["reason"]) == (True, reason)
-    t[0]["expected_server_digest"] = "x"
-    assert seed_export(t, dry_run=False, confirm=True)[0]["status"] == "blocked" and not s.saved
+    j = lv(158, ddaEasySeeds=E158, ddaHardSeeds=H158)
+    r = L1.seed_only_plan("level_158", j, conv(dict(j)), row)
+    assert (r["blocked"], r["reason"]) == (True, reason)
 
 
-def test_seed_only_lookup_fail_missing_row_and_stale_preview(server):
-    row = server_row(158)
-    s = server(FakeServer({"level_158": row}, fail_ids={"level_159"}))
-    t = [{"target_id": "level_158", "level_json": lv(158, ddaEasySeeds=E158, ddaHardSeeds=H158)},
-         {"target_id": "level_159", "level_json": lv(159)},
-         {"target_id": "level_5", "level_json": lv(5)}]
-    pre = {x["target_id"]: x for x in seed_export(t)}
-    assert pre["level_159"]["reason"] == "lookup_failed"
-    assert pre["level_5"]["reason"] == "no_snapshot"
-    # 재시도에 묵은 digest 사용 → 서버 행이 바뀌었으면 차단
-    t[0]["expected_server_digest"] = pre["level_158"]["serverDigest"]
-    row["etime"] = "1790000001"
-    r = seed_export(t[:1], dry_run=False)
-    assert r[0]["reason"] == "server_changed_since_preview" and not s.saved
-    t[0].pop("expected_server_digest")
-    assert seed_export(t[:1], dry_run=False)[0]["reason"] == "server_changed_since_preview"
-    s.rows.pop("level_158")
-    assert seed_export(t[:1])[0]["reason"] == "no_server_row"
-    assert all(strict for _, strict in s.loads)                   # 모든 조회 strict
-
-
-def test_seed_only_l1466_and_hold_levels(server):
-    """L1466: 에디터 map ≠ 출시 → 시드 "" + 서버 map(에디터 기준)도 출시와 달라 차단. 보류/제외는 "" 로만."""
-    rows = {"level_1466": server_row(1466), "level_322": server_row(322, easy=E158, hard=H158),
-            "level_40": server_row(40)}
-    server(FakeServer(rows))
-    r = {x["target_id"]: x for x in seed_export([
-        {"target_id": "level_1466", "level_json": lv(1466, ddaEasySeeds=E158, ddaHardSeeds=H158)},
-        {"target_id": "level_322", "level_json": lv(322)},
-        {"target_id": "level_40", "level_json": lv(40)}])}
-    assert r["level_1466"]["reason"] == "server_map_differs"
-    assert (r["level_322"]["change"], r["level_322"]["reason"]) == ("clear", "partial_hold")
-    assert (r["level_40"]["change"], r["level_40"]["reason"]) == ("same", "excluded")
+def test_legacy_v1_plan_unchanged_for_valid_row():
+    j = lv(158, ddaEasySeeds=E158, ddaHardSeeds=H158)
+    r = L1.seed_only_plan("level_158", j, conv(dict(j)), server_row(158))
+    assert (r["blocked"], r["change"], r["payload"]) == (False, "fill", {"ddaEasySeeds": E158, "ddaHardSeeds": H158})
+    assert L1.seed_only_plan("infinity_1", j, conv(dict(j)), server_row(158))["reason"] == "not_level_row"
 
 
 # ── 일반 업로드 경로 fail-closed (단일 · 일괄) ─────────────────────────────────
@@ -235,10 +148,10 @@ def test_single_save_fail_closed(server):
     s = server(FakeServer({"level_158": server_row(158, easy=E158, hard=H158)}, fail_ids={"level_159"}))
     r = client.post("/api/gboost/levels/level_159", json={"level_json": lv(159)})
     assert r.status_code == 502 and not s.saved                    # 조회 실패 → 업로드 안 함
+    # [2026-11-02] 레벨 데이터에 시드가 없으면 키 생략 → 서버 시드를 지우지 않으므로 확인 없이 통과
     r = client.post("/api/gboost/levels/level_158", json={"level_json": j})
-    assert r.status_code == 409 and not s.saved                    # 서버 시드 비움 → 확인 필요
-    r = client.post("/api/gboost/levels/level_158", json={"level_json": j, "dda_confirm": True})
     assert r.status_code == 200 and s.saved[0][1] == "level_158"
+    assert not any(k in s.saved[0][2] for k in c.EXPORT_SEED_FIELDS)
     s.saved.clear()
     r = client.post("/api/gboost/levels/level_777", json={"level_json": lv(159)})
     assert r.status_code == 200                                     # 새 행(서버 값 없음)
@@ -253,7 +166,7 @@ def test_general_edit_values_preserved_in_normal_export(server):
     assert client.post("/api/gboost/levels/level_158", json={"level_json": j}).status_code == 200
     p = [x for x in s.saved if x[0] == "levels"][0][2]
     assert (p["rewardCoin"], p["tileSkin"]) == ("7", "2")
-    assert (p["ddaEasySeeds"], p["ddaHardSeeds"]) == ("", "")
+    assert "ddaEasySeeds" not in p and "ddaHardSeeds" not in p    # [2026-11-02] 옛 목록 값·무효 → 생략
 
 
 def test_upload_local_fail_closed(server, monkeypatch, tmp_path):
@@ -265,9 +178,7 @@ def test_upload_local_fail_closed(server, monkeypatch, tmp_path):
             "custom_names": {"l158": "level_158", "l159": "level_159"}, "overwrite": True}
     r = client.post("/api/gboost/upload-local", json=body).json()
     st = {x["target_id"]: x["status"] for x in r["results"]}
-    assert st == {"level_158": "skipped", "level_159": "failed"} and not s.saved
-    r = client.post("/api/gboost/upload-local", json={**body, "dda_confirm": True}).json()
-    st = {x["target_id"]: x["status"] for x in r["results"]}
+    # [2026-11-02] 시드 키 생략 → 서버 시드 유지라 확인 불필요(이전: skipped). 조회 실패는 그대로 failed.
     assert st == {"level_158": "success", "level_159": "failed"}
     assert [x[1] for x in s.saved if x[0] == "levels"] == ["level_158"]
 
@@ -320,19 +231,6 @@ def test_client_strict_lookup_distinguishes_error_from_absent(monkeypatch, statu
     assert asyncio.run(cli.load_level("levels", "level_1")) is None        # 비strict 는 기존대로 None
 
 
-def test_seed_only_server_idx_excluded_and_preserved_out_of_payload(server, partial_on):
-    """서버가 레코드 번호 idx 를 돌려줘도 비교·payload 에서 제외(서버 관리 키, 기존 업로드도 보내지 않음)."""
-    row = server_row(158)
-    row["idx"] = 4242
-    s = server(FakeServer({"level_158": row}))
-    t = [{"target_id": "level_158", "level_json": lv(158, ddaEasySeeds=E158, ddaHardSeeds=H158)}]
-    pre = seed_export(t)
-    assert pre[0]["change"] == "fill"
-    t[0]["expected_server_digest"] = pre[0]["serverDigest"]
-    assert seed_export(t, dry_run=False)[0]["status"] == "saved"
-    assert set(s.saved[0][2]) == {"ddaEasySeeds", "ddaHardSeeds"}
-
-
 @pytest.mark.parametrize("status,head,ok", [(200, "level_158=upt", True), (200, "level_158=new", False),
                                             (200, "", False), (500, "level_158=upt", False)])
 def test_update_existing_level_no_new_record_fallback(monkeypatch, status, head, ok):
@@ -375,45 +273,10 @@ def test_update_existing_level_no_new_record_fallback(monkeypatch, status, head,
 
 
 
-def test_server_extra_column_field4_blocks(server):
-    """[18:3x 사용자 지시] 서버 추가 키(field4 등)는 기준 완화 없이 차단 유지."""
-    row = server_row(158)
-    row["field4"] = ""
-    server(FakeServer({"level_158": row}))
-    pre = seed_export([{"target_id": "level_158", "level_json": lv(158, ddaEasySeeds=E158, ddaHardSeeds=H158)}])
-    assert (pre[0]["blocked"], pre[0]["reason"]) == (True, "server_row_differs")
-
-
-
-def test_partial_update_blocked_by_default_no_post(server):
-    """[§9] 기본(PARTIAL_UPDATE_VERIFIED=False): 검증을 다 통과해도 실제 POST 0 — partial_update_unverified."""
-    assert c.PARTIAL_UPDATE_VERIFIED is False
-    s = server(FakeServer({"level_158": server_row(158)}))
-    t = [{"target_id": "level_158", "level_json": lv(158, ddaEasySeeds=E158, ddaHardSeeds=H158)}]
-    pre = seed_export(t)
-    assert pre[0]["change"] == "fill"
-    t[0]["expected_server_digest"] = pre[0]["serverDigest"]
-    r = seed_export(t, dry_run=False, confirm=True)
-    assert (r[0]["status"], r[0]["reason"]) == ("blocked", "partial_update_unverified") and not s.saved
-
-
 def test_partial_payload_guard_rejects_extra_keys_or_bad_values():
-    c.assert_partial_payload({"ddaEasySeeds": E158, "ddaHardSeeds": ""})
+    L1.assert_partial_payload({"ddaEasySeeds": E158, "ddaHardSeeds": ""})
     for bad in ({"ddaEasySeeds": E158}, {"ddaEasySeeds": E158, "ddaHardSeeds": H158, "rewardList": None},
                 {"ddaEasySeeds": "1,2", "ddaHardSeeds": H158}):
         with pytest.raises(ValueError):
-            c.assert_partial_payload(bad)
+            L1.assert_partial_payload(bad)
 
-
-def test_partial_mode_race_and_lookup_errors_block(server, partial_on):
-    row = server_row(158)
-    s = server(FakeServer({"level_158": row}, fail_ids={"level_159"}))
-    t = [{"target_id": "level_158", "level_json": lv(158, ddaEasySeeds=E158, ddaHardSeeds=H158)},
-         {"target_id": "level_159", "level_json": lv(159)}]
-    pre = {x["target_id"]: x for x in seed_export(t)}
-    t[0]["expected_server_digest"] = pre["level_158"]["serverDigest"]
-    row["etime"] = "1790000099"                                   # 미리보기 후 서버 행 변경
-    r = {x["target_id"]: x for x in seed_export(t, dry_run=False, confirm=True)}
-    assert r["level_158"]["reason"] == "server_changed_since_preview"
-    assert r["level_159"]["reason"] == "lookup_failed"
-    assert not s.saved

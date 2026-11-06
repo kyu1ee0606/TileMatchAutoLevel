@@ -121,6 +121,60 @@ export function validateTileCount(level: LevelJSON): TileValidationResult {
 }
 
 /**
+ * 타일 수 하한: 3 × ceil(1.5 × min(K+2, 15)), K = 쓰는 타일 종류 수(useTileCount).
+ * 백엔드 backend/app/utils/tile_floor.py 와 같은 값이어야 한다. (K=8→45, 9→51, 10→54, 11→60, 12→63, 13+→69)
+ */
+export function getMinTileCount(kinds: number): number {
+  const k = Math.max(0, Math.floor(kinds));
+  return 3 * Math.ceil(1.5 * Math.min(k + 2, 15));
+}
+
+export interface TileFloorResult {
+  kinds: number;
+  minTiles: number;
+  totalTiles: number;
+  isBelow: boolean;
+  message: string;
+}
+
+/**
+ * 타일 수 하한 검사 (경고용). 총 장수는 validateTileCount 와 동일 방식.
+ * K = level.useTileCount(>0) 우선, 없으면 레이어에 실제 쓰인 t1~t15 종류 수.
+ */
+export function checkTileFloor(level: LevelJSON): TileFloorResult {
+  const totalTiles = validateTileCount(level).totalTiles;
+  let kinds = typeof level.useTileCount === 'number' && level.useTileCount > 0 ? level.useTileCount : 0;
+  if (kinds === 0) {
+    const used = new Set<string>();
+    for (let i = 0; i < level.layer; i++) {
+      const layer = level[`layer_${i}` as `layer_${number}`];
+      if (!layer?.tiles) continue;
+      for (const tileData of Object.values(layer.tiles)) {
+        const t = tileData[0];
+        if (/^t\d+$/.test(t) && t !== 't0') used.add(t);
+      }
+    }
+    kinds = used.size;
+  }
+  const minTiles = getMinTileCount(kinds);
+  const isBelow = totalTiles > 0 && totalTiles < minTiles;
+  return {
+    kinds,
+    minTiles,
+    totalTiles,
+    isBelow,
+    message: `타일 수 하한 미달: 종류 K=${kinds}, 최소 타일 수 ${minTiles}개, 현재 ${totalTiles}개`,
+  };
+}
+
+/** axios 오류에서 백엔드 detail 문자열을 꺼낸다 (없으면 err.message). */
+export function getApiErrorDetail(err: unknown): string {
+  const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+  if (typeof detail === 'string' && detail) return detail;
+  return err instanceof Error ? err.message : '알 수 없는 오류';
+}
+
+/**
  * Get active layer count from a level.
  */
 export function getActiveLayerCount(level: LevelJSON): number {

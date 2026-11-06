@@ -11,6 +11,7 @@ import { Button, Tooltip } from '../ui';
 import { PatternSelector } from '../common/PatternSelector';
 import clsx from 'clsx';
 import { Pencil, Play, RotateCcw, CheckCircle, AlertCircle } from 'lucide-react';
+import { getApiErrorDetail } from '../../utils/helpers';
 
 type GeneratorTab = 'single' | 'set';
 
@@ -478,7 +479,7 @@ export function GeneratorPanel({ className }: GeneratorPanelProps) {
       }
     } catch (error) {
       console.error('Generation failed:', error);
-      addNotification('error', '레벨 생성에 실패했습니다');
+      addNotification('error', `레벨 생성 실패: ${getApiErrorDetail(error)}`);
     } finally {
       setIsGenerating(false);
     }

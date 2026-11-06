@@ -9,7 +9,7 @@ import { useUIStore } from '../../stores/uiStore';
 import { Button, Tooltip } from '../ui';
 import { Eye, EyeOff, FileJson, RotateCcw, ZoomIn, Grid3X3, Map, AlertTriangle, CheckCircle, Undo2, Redo2, Copy, Clipboard, Trash2 } from 'lucide-react';
 import clsx from 'clsx';
-import { validateTileCount } from '../../utils/helpers';
+import { validateTileCount, checkTileFloor } from '../../utils/helpers';
 import type { LevelJSON, LevelLayer, TileData } from '../../types';
 
 // Gimmick counting helper
@@ -138,6 +138,7 @@ export function GridEditor({ className }: GridEditorProps) {
 
   // Validate tile count
   const tileValidation = useMemo(() => validateTileCount(level), [level]);
+  const tileFloor = useMemo(() => checkTileFloor(level), [level]);
 
   // Helper to count tiles including hidden tiles in craft/stack boxes
   const countTilesInLayer = (layerData: typeof level[`layer_${number}`] | undefined): number => {
@@ -226,6 +227,14 @@ export function GridEditor({ className }: GridEditorProps) {
           </div>
         )}
       </div>
+
+      {/* 타일 수 하한 경고 (경고만 — 저장/업로드는 막지 않음) */}
+      {tileFloor.isBelow && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm bg-amber-900/30 border border-amber-600 text-amber-300">
+          <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+          <span>{tileFloor.message}</span>
+        </div>
+      )}
 
       {/* Gimmick counts display */}
       {activeGimmicks.length > 0 && (

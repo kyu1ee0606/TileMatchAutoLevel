@@ -227,6 +227,7 @@ class GBoostSaveRequest(BaseModel):
     """Request schema for saving level to GBoost."""
     level_json: Dict[str, Any] = Field(..., description="Level JSON to save")
     dda_confirm: bool = Field(default=False, description="[DDA 문서 47] levels 보드에서 서버의 비어 있지 않은 시드를 비우거나 바꾸는 것을 사용자가 확인함")
+    infinity_relabel: bool = Field(default=True, description="[무한 그림 치환 v1] level_id 가 infinity_N 이면 변환 전 일반 타일 그림을 1:1 치환(app.core.infinity_relabel). 기본 켬")
 
 
 class GBoostSaveResponse(BaseModel):
@@ -249,6 +250,8 @@ class LevelListItem(BaseModel):
     difficulty: Optional[float] = Field(default=None, description="Cached difficulty score")
     dda_easy_seeds: Optional[str] = Field(default=None, description="서버 levels.ddaEasySeeds 현재 값 (컬럼 없으면 null)")
     dda_hard_seeds: Optional[str] = Field(default=None, description="서버 levels.ddaHardSeeds 현재 값 (컬럼 없으면 null)")
+    dda_easy2_seeds: Optional[str] = Field(default=None, description="서버 levels.ddaEasy2Seeds 현재 값 (컬럼 없으면 null)")
+    dda_hard2_seeds: Optional[str] = Field(default=None, description="서버 levels.ddaHard2Seeds 현재 값 (컬럼 없으면 null)")
 
 
 class GBoostListResponse(BaseModel):
@@ -261,6 +264,7 @@ class UploadLocalToGBoostRequest(BaseModel):
     board_id: str = Field(..., description="Target board ID on GBoost server")
     level_ids: List[str] = Field(..., description="List of local level IDs to upload")
     dda_confirm: bool = Field(default=False, description="[DDA 문서 47] 서버 시드 비움/변경 확인")
+    infinity_relabel: bool = Field(default=True, description="[무한 그림 치환 v1] 대상 id 가 infinity_N 이면 그림 치환. 기본 켬")
     target_prefix: str = Field(default="level_", description="Prefix for target level IDs on GBoost")
     rename_strategy: str = Field(
         default="keep",

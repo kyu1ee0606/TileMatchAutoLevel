@@ -121,7 +121,8 @@ export async function pushBatchToServer(
   // 리로드 직후에도 영속 버전으로 충돌 감지 가능(과거엔 null → 무조건 강제 덮어쓰기였음).
   const base_version = opts?.force ? null : (knownVersions.get(batchId) ?? batch.__server_version ?? null);
   try {
-    const r = await apiClient.put<{ version: number; divisibility_flagged?: number; divisibility_levels?: number[] }>(`/production/batches/${batchId}`, {
+    const r = await apiClient.put<{ version: number; divisibility_flagged?: number; divisibility_levels?: number[];
+      key_div3_flagged?: number; key_div3_levels?: number[] }>(`/production/batches/${batchId}`, {
       batch_id: batchId,
       batch,
       levels,
@@ -141,6 +142,9 @@ export async function pushBatchToServer(
     // 서버 ÷3 게이트가 클리어 불가 레벨을 검출하면 경고(저장은 됐으나 해당 레벨은 verification_passed=false 강제됨).
     if (r.data.divisibility_flagged && r.data.divisibility_flagged > 0) {
       divisibilityWarningHandler?.(batchId, r.data.divisibility_flagged, r.data.divisibility_levels ?? []);
+    }
+    if (r.data.key_div3_flagged && r.data.key_div3_flagged > 0) {
+      keyDiv3WarningHandler?.(batchId, r.data.key_div3_flagged, r.data.key_div3_levels ?? []);
     }
     return true;
   } catch (e: unknown) {
@@ -271,6 +275,13 @@ let divisibilityWarningHandler: ((batchId: string, flagged: number, levels: numb
 /** 저장 시 서버가 ÷3 위반(클리어 불가) 레벨을 검출하면 UI 경고 콜백 등록. */
 export function setDivisibilityWarningHandler(cb: (batchId: string, flagged: number, levels: number[]) => void): void {
   divisibilityWarningHandler = cb;
+}
+
+let keyDiv3WarningHandler: ((batchId: string, flagged: number, levels: number[]) => void) | null = null;
+
+/** 저장 시 서버 규칙 게이트가 key_not_div3(t0 0 · 열쇠 %3≠0) 레벨을 검출하면 UI 경고 콜백 등록. */
+export function setKeyDiv3WarningHandler(cb: (batchId: string, flagged: number, levels: number[]) => void): void {
+  keyDiv3WarningHandler = cb;
 }
 
 /**

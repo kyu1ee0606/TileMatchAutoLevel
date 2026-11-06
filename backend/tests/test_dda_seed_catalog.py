@@ -85,7 +85,9 @@ def test_catalog_tamper_rejected(monkeypatch, tmp_path):
     r = plan(158, lv(158))
     assert (r["action"], r["reason"]) == ("skip", "catalog_error")
     f = c.export_fields("levels", "level_158", lv(158, ddaEasySeeds=E158, ddaHardSeeds=H158), conv(lv(158)))
-    assert (f["ddaEasySeeds"], f["ddaHardSeeds"], f["reason"]) == ("", "", "catalog_error")
+    # [2026-11-02] 목록 판단 불가인 5개 값은 "" 대신 생략
+    assert "ddaEasySeeds" not in f and "ddaHardSeeds" not in f and f["reason"] == "omitted"
+    assert f["fieldReasons"]["ddaEasySeeds"] == "legacy_unverifiable:catalog_error"
     monkeypatch.setattr(c, "_cache", None)   # 다음 테스트는 원본 목록으로 다시 로드
 
 
@@ -139,7 +141,10 @@ def test_other_valid_value_is_conflict_both_skipped():
     assert r["fields"]["ddaEasySeeds"]["after"] == other
     assert r["fields"]["ddaHardSeeds"]["after"] == ""            # 부족한 쪽도 건너뜀
     f = c.export_fields("levels", "level_158", lv(158, ddaEasySeeds=other, ddaHardSeeds=H158), conv(lv(158)))
-    assert (f["ddaEasySeeds"], f["ddaHardSeeds"], f["reason"]) == ("", "", "conflict")
+    # [2026-11-02] 목록과 다른 5개 값 → 레벨 데이터 값으로 보냄, 목록 값(H158)은 옛 판정(conflict) → 생략
+    assert f["ddaEasySeeds"] == other and "ddaHardSeeds" not in f
+    assert f["fieldReasons"] == {"ddaEasy2Seeds": "absent", "ddaEasySeeds": "level_data",
+                                 "ddaHardSeeds": "legacy:conflict", "ddaHard2Seeds": "absent"}
 
 
 @pytest.mark.parametrize("n,reason", [
@@ -147,8 +152,8 @@ def test_other_valid_value_is_conflict_both_skipped():
 def test_non_candidates_skipped_with_reason(n, reason):
     r = plan(n, lv(n, ddaEasySeeds=E158, ddaHardSeeds=H158))
     assert (r["action"], r["reason"]) == ("skip", reason)
-    f = c.export_fields("levels", f"level_{n}", lv(n, ddaEasySeeds=E158, ddaHardSeeds=H158), conv(lv(n)))
-    assert (f["ddaEasySeeds"], f["ddaHardSeeds"]) == ("", "")
+    f = c.export_fields("levels", f"level_{n}", lv(n), conv(lv(n)))
+    assert not any(k in f for k in c.EXPORT_SEED_FIELDS) and f["reason"] == "omitted"   # 시드 없음 → 키 생략
 
 
 def test_map_changed_is_skipped():
@@ -168,7 +173,16 @@ def test_n_mismatch_is_skipped():
 
 # ── 익스포트 ─────────────────────────────────────────────────────────────────
 
-def test_export_valid_and_preserves_existing_columns(snap158_matches_editor):
+def test_legacy_valid_not_sent_by_default(snap158_matches_editor):
+    """[2026-11-02] 옛 목록 값은 판정 유효여도 기본 생략(LEGACY_CATALOG_EXPORT=False)."""
+    j = lv(158, ddaEasySeeds=E158, ddaHardSeeds=H158)
+    f = c.export_fields("levels", "level_158", j, conv(dict(j)))
+    assert not any(k in f for k in c.EXPORT_SEED_FIELDS)
+    assert f["fieldReasons"]["ddaEasySeeds"] == f["fieldReasons"]["ddaHardSeeds"] == "legacy_valid_not_sent"
+
+
+def test_export_valid_and_preserves_existing_columns(snap158_matches_editor, monkeypatch):
+    monkeypatch.setattr(c, "LEGACY_CATALOG_EXPORT", True)            # 옛 판정 경로 회귀 확인
     j = lv(158, ddaEasySeeds=E158, ddaHardSeeds=H158)
     before = copy.deepcopy(j)
     base = conv(dict(j))
@@ -186,7 +200,9 @@ def test_normal_export_row_changed_vs_shipped_row_blanks_seeds():
     """[P1 원인] 에디터 일반 익스포트 행은 출시 행과 다르다 → 유효 시드라도 "" (row_changed)."""
     j = lv(158, ddaEasySeeds=E158, ddaHardSeeds=H158)
     f = c.export_fields("levels", "level_158", j, conv(dict(j)))
-    assert (f["ddaEasySeeds"], f["ddaHardSeeds"]) == ("", "")
+    assert "ddaEasySeeds" not in f and "ddaHardSeeds" not in f          # [2026-11-02] "" 대신 생략
+    f = {"reason": f["fieldReasons"]["ddaEasySeeds"]}
+    assert f["reason"].startswith("legacy:row_changed:")
     # [§13] L159 실측 규칙으로 표현 차이(backgroundIndex/tileSkin "0"→null, rewardList "[]"→null, 미전송 visualTileSeed)는
     # 동치로 보고, 실제 값 차이(rewardCoin 기본 10 vs 출시 5, difficulty 미측정 -1 vs 61)만 남는다
     assert "rewardCoin" in f["reason"] and "difficulty" in f["reason"], f["reason"]
@@ -197,13 +213,16 @@ def test_normal_export_row_changed_vs_shipped_row_blanks_seeds():
 def test_export_blank_cases_and_serialization():
     tp = conv(lv(158))
     one_side = c.export_fields("levels", "level_158", lv(158, ddaEasySeeds=E158), tp)
-    assert (one_side["ddaEasySeeds"], one_side["ddaHardSeeds"], one_side["reason"]) == ("", "", "missing")
+    assert not any(k in one_side for k in c.EXPORT_SEED_FIELDS)
+    assert one_side["fieldReasons"] == {"ddaEasy2Seeds": "absent", "ddaEasySeeds": "legacy:missing",
+                                        "ddaHardSeeds": "absent", "ddaHard2Seeds": "absent"}
     inf = c.export_fields("levels", "infinity_1", lv(158, ddaEasySeeds=E158, ddaHardSeeds=H158), tp)
-    assert (inf["ddaEasySeeds"], inf["ddaHardSeeds"], inf["reason"]) == ("", "", "not_level_row")
+    assert not any(k in inf for k in c.EXPORT_SEED_FIELDS) and inf["reason"] == "infinity_omitted"
     assert c.export_fields("other_board", "level_158", lv(158), tp) is None
     out = c.apply_export_fields("levels", "level_40", lv(40, ddaEasySeeds=E158, ddaHardSeeds=H158), conv(lv(40)))
-    s = json.dumps({"level_40": out})
-    assert '"ddaEasySeeds": ""' in s and '"ddaHardSeeds": ""' in s
+    assert not any(out.get(k) == "" for k in c.EXPORT_SEED_FIELDS)              # 빈 값 시드 키 없음
+    # L40 목록 값이 아닌 5개 값(L158 값) = 레벨 데이터 값 → 보냄
+    assert (out["ddaEasySeeds"], out["ddaHardSeeds"]) == (E158, H158)
 
 
 # ── API (실서버 호출 없음) ──────────────────────────────────────────────────
@@ -228,8 +247,9 @@ def test_preview_and_export_preview_routes():
         "board_id": "levels",
         "levels": [{"target_id": "level_158", "level_json": lv(158, ddaEasySeeds=E158, ddaHardSeeds=H158)},
                    {"target_id": "infinity_3", "level_json": lv(158)}]}).json()
-    assert [(x["target_id"], x["ddaEasySeeds"]) for x in r2["results"]] == [("level_158", ""), ("infinity_3", "")]
-    assert r2["results"][0]["reason"].startswith("row_changed:")
+    assert [(x["target_id"], x.get("ddaEasySeeds")) for x in r2["results"]] == [("level_158", None), ("infinity_3", None)]
+    assert r2["results"][0]["fieldReasons"]["ddaEasySeeds"].startswith("legacy:row_changed:")
+    assert r2["results"][1]["reason"] == "infinity_omitted"
 
 
 class _FakeClient:
@@ -249,7 +269,9 @@ class _FakeClient:
         return None                                          # 새 행 (서버 값 없음)
 
 
-def test_gboost_save_route_payload_has_fields(snap158_matches_editor):
+def test_gboost_save_route_payload_has_fields(snap158_matches_editor, monkeypatch):
+    monkeypatch.setattr(c, "LEGACY_CATALOG_EXPORT", True)            # 옛 판정 경로 회귀 확인
+    monkeypatch.setattr(c, "SEED_EVIDENCE_REQUIRED", False)          # 판정 근거 게이트는 test_dda_seed_evidence 에서
     fake = _FakeClient()
     prev = app.dependency_overrides.get(get_gboost)
     app.dependency_overrides[get_gboost] = lambda: fake
@@ -261,7 +283,7 @@ def test_gboost_save_route_payload_has_fields(snap158_matches_editor):
         _restore_override(prev)
     p = {(b, lid): pl for b, lid, pl in fake.saved}
     assert (p[("levels", "level_158")]["ddaEasySeeds"], p[("levels", "level_158")]["ddaHardSeeds"]) == (E158, H158)
-    assert (p[("levels", "level_322")]["ddaEasySeeds"], p[("levels", "level_322")]["ddaHardSeeds"]) == ("", "")
+    assert not any(k in p[("levels", "level_322")] for k in c.EXPORT_SEED_FIELDS)   # 시드 없음 → 키 생략
     assert "ddaEasySeeds" not in p[("other", "level_158")]
     assert c.map_sha256(p[("levels", "level_158")]) == c.load_catalog()["_byLevel"][158]["sourceMapSha256"]
 
@@ -308,3 +330,82 @@ def test_list_levels_reads_server_seed_columns(monkeypatch):
     by = {x["id"]: x for x in r["levels"]}
     assert (by["level_158"]["dda_easy_seeds"], by["level_158"]["dda_hard_seeds"]) == (E158, H158)
     assert (by["level_159"]["dda_easy_seeds"], by["level_159"]["dda_hard_seeds"]) == ("", "")
+
+
+# ── 2026-11-02: 4열 운반 · 생략 · 무한 · 가드 · useTileCount ─────────────────────
+
+S3 = {"ddaEasy2Seeds": "11,12,13", "ddaEasySeeds": "21,22,23", "ddaHardSeeds": "31,32,33", "ddaHard2Seeds": "41,42,43"}
+
+
+def test_export_sends_level_data_four_columns_and_omits_missing():
+    f = c.export_fields("levels", "level_40", lv(40, **S3), conv(lv(40)))
+    assert {k: f[k] for k in c.EXPORT_SEED_FIELDS} == S3 and f["reason"].startswith("send:")
+    part = {"ddaEasySeeds": "21,22,23", "ddaHard2Seeds": "41,42,43"}
+    out = c.apply_export_fields("levels", "level_40", lv(40, **part), conv(lv(40)))
+    assert {k: out[k] for k in c.EXPORT_SEED_FIELDS if k in out} == part      # 없는 열은 키 없음
+    assert "ddaEasy2Seeds" not in out and "ddaHardSeeds" not in out
+
+
+@pytest.mark.parametrize("bad", ["1,2", "1,2,3,4", "0,1,2", "1,1,2", "01,2,3", "1, 2,3", "2147483648,1,2", 123])
+def test_export_invalid_format_omitted(bad):
+    f = c.export_fields("levels", "level_40", lv(40, ddaEasy2Seeds=bad), conv(lv(40)))
+    assert "ddaEasy2Seeds" not in f and f["fieldReasons"]["ddaEasy2Seeds"] == "invalid_format"
+
+
+def test_plus_minus2_rejects_five_tokens():
+    five = "1,2,3,4,5"
+    assert c.is_runtime_seed_str("ddaEasySeeds", five) and not c.is_runtime_seed_str("ddaHard2Seeds", five)
+
+
+def test_infinity_never_sends_regular_seeds_but_extension_map_works():
+    j = lv(158, **S3)
+    inf = c.apply_export_fields("levels", "infinity_3", j, conv(dict(j)))
+    assert not any(k in inf for k in c.EXPORT_SEED_FIELDS)
+    j2 = lv(158, **S3, ddaInfinitySeeds={"infinity_3": {"ddaHardSeeds": "7,8,9", "ddaEasySeeds": "bad"}})
+    f = c.export_fields("levels", "infinity_3", j2, conv(dict(j2)))
+    assert f.get("ddaHardSeeds") == "7,8,9" and "ddaEasySeeds" not in f and "ddaEasy2Seeds" not in f
+    assert not any(k in c.export_fields("levels", "infinity_4", j2, conv(dict(j2))) for k in c.EXPORT_SEED_FIELDS)
+    assert "ddaInfinitySeeds" not in conv(dict(j2))                          # 확장 키 자체는 서버로 안 감
+
+
+def test_write_guard_only_blocks_nonempty_to_empty():
+    srv = {"ddaEasySeeds": "1,2,3", "ddaHardSeeds": "", "ddaEasy2Seeds": "4,5,6"}
+    assert c.write_guard(srv, {}, False) is None                              # 전부 생략
+    assert c.write_guard(srv, {"ddaEasySeeds": "1,2,3"}, False) is None       # 같은 값
+    assert c.write_guard(srv, {"ddaEasySeeds": "7,8,9"}, False) is None       # 다른 비어있지 않은 값
+    assert c.write_guard(srv, {"ddaHardSeeds": "", "ddaHard2Seeds": ""}, False) is None   # 빈→빈
+    assert c.write_guard(srv, {"ddaEasy2Seeds": ""}, False) == "needs_dda_confirm"
+    assert c.write_guard(srv, {"ddaEasy2Seeds": ""}, True) is None
+    assert c.write_guard(None, {"ddaEasySeeds": ""}, False) is None
+
+
+def test_refresh_button_does_not_overwrite_three_token_seeds():
+    r = plan(158, lv(158, ddaEasySeeds="21,22,23", ddaHardSeeds="31,32,33"))
+    assert (r["action"], r["reason"]) == ("conflict", "conflict")
+    assert r["fields"]["ddaEasySeeds"]["after"] == "21,22,23"
+
+
+def _utc_level(tiles0):
+    return {"layer": 1, "useTileCount": 2, "layer_0": {"col": "7", "row": "7", "tiles": tiles0}}
+
+
+def test_use_tile_count_includes_container_inner_types():
+    tiles = {"0_0": ["t1", ""], "1_0": ["t2", ""], "2_0": ["stack_n", "", [3, "t3_t5_t1"]],
+             "3_0": ["craft_e", "", [2, "t0_t16"]], "4_0": ["stack_s", "", [3]], "5_0": ["stack_w", "", [2, "key_t15"]]}
+    assert conv(_utc_level(tiles))["useTileCount"] == "5"                     # t1,t2,t3,t5,t15 (t0·t16·key 제외)
+    assert conv(_utc_level({"0_0": ["t1", ""], "1_0": ["t2", ""]}))["useTileCount"] == "2"
+    assert conv(_utc_level({"0_0": ["stack_n", "", [3]]}))["useTileCount"] == "2"   # 종류 없음 → 저장값
+
+
+def test_use_tile_count_excludes_board_keys_like_game_iskey():
+    """DdaMapTransformer.IsKey: id t16 / "key" 또는 effect "key" — 보드 칸도 제외. 내부 토큰 수 ≠ n 이면 내부 미집계."""
+    base = {"0_0": ["t1", ""], "1_0": ["t2", ""]}
+    assert conv(_utc_level({**base, "2_0": ["key", ""]}))["useTileCount"] == "2"
+    assert conv(_utc_level({**base, "2_0": ["KEY", "ice"]}))["useTileCount"] == "2"
+    assert conv(_utc_level({**base, "2_0": ["t16", ""]}))["useTileCount"] == "2"
+    assert conv(_utc_level({**base, "2_0": ["t7", "key"]}))["useTileCount"] == "2"        # effect key 일반 id
+    assert conv(_utc_level({**base, "2_0": ["t7", "Key"]}))["useTileCount"] == "2"
+    assert conv(_utc_level({**base, "2_0": ["t7", "ice"]}))["useTileCount"] == "3"
+    assert conv(_utc_level({**base, "2_0": ["t17", ""], "3_0": ["t01", ""]}))["useTileCount"] == "2"
+    assert conv(_utc_level({**base, "2_0": ["stack_n", "", [2, "t3_t4_t5"]]}))["useTileCount"] == "2"   # 수 불일치
+    assert conv(_utc_level({**base, "2_0": ["stack_n", "", ["3", "t3_key_t5"]]}))["useTileCount"] == "4"

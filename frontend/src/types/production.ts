@@ -222,6 +222,9 @@ export interface ProductionLevelMeta {
   infinity_id?: string;            // 예: 'infinity_1'
   infinity_index?: number;         // 1부터
   infinity_source_level?: number;  // 복사 원본 레벨 번호
+  // [무한 그림 치환 v1] 사본 level_json 을 백엔드 규칙으로 치환했을 때만: 규칙명·{원래: 새} 매핑
+  infinity_relabel?: string;                    // 'relabel.v1'
+  infinity_relabel_mapping?: Record<string, string>;
 }
 
 /**
@@ -340,6 +343,8 @@ export interface InfinityExportConfig {
   prefix: string;        // 기본 'infinity_'
   sourceStart: number;   // 기본 501
   sourceEnd: number;     // 기본 1500
+  /** [무한 그림 치환 v1] 사본(infinity_N)의 일반 타일 그림을 1:1 치환(백엔드 /dda-seeds/infinity-relabel). 기본 켬 */
+  relabel?: boolean;
 }
 
 /**

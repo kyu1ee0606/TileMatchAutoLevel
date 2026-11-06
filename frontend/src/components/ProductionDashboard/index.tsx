@@ -55,7 +55,7 @@ import {
   renameProductionBatch,
   recalculateBatchCounts,
 } from '../../storage/productionStorage';
-import { syncBidirectional, pushBatchToServer, registerAutoSync, setConflictHandler, setDivisibilityWarningHandler, SyncConflictError, listServerBatches, pullBatchToLocal } from '../../storage/productionServerSync';
+import { syncBidirectional, pushBatchToServer, registerAutoSync, setConflictHandler, setDivisibilityWarningHandler, setKeyDiv3WarningHandler, SyncConflictError, listServerBatches, pullBatchToLocal } from '../../storage/productionServerSync';
 import { ProductionExport } from './ProductionExport';
 import { BatchApprovalPanel } from './BatchApprovalPanel';
 import { BatchVerifyPanel } from './BatchVerifyPanel';
@@ -1025,6 +1025,8 @@ export function ProductionDashboard({ onLevelSelect }: ProductionDashboardProps)
     // 저장 시 서버 ÷3 게이트가 클리어 불가(÷3 위반) 레벨을 검출하면 경고.
     setDivisibilityWarningHandler((_bid, flagged, levels) =>
       addNotification('warning', `⚠️ ÷3 위반(클리어 불가) ${flagged}개 레벨 검출 → verification_passed=false 처리됨${levels.length ? ` (예: ${levels.slice(0, 10).join(', ')}${levels.length > 10 ? '…' : ''})` : ''}. 재생성 필요.`));
+    setKeyDiv3WarningHandler((_bid, flagged, levels) =>
+      addNotification('warning', `⚠️ 열쇠 수 3배수 아님(t0 없음 → 남는 열쇠 못 지움, 클리어 불가) ${flagged}개 레벨 → verification_passed=false 처리됨${levels.length ? ` (예: ${levels.slice(0, 10).join(', ')}${levels.length > 10 ? '…' : ''})` : ''}. 열쇠 수 수정 필요.`));
 
     async function init() {
       try {

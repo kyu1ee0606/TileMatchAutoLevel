@@ -74,11 +74,16 @@ export async function saveToGBoost(
   levelId: string,
   levelJson: LevelJSON,
   /** [DDA 문서 47] levels 보드에서 서버의 비어 있지 않은 시드를 비우거나 바꾸는 것을 사용자가 미리보기로 확인함 */
-  ddaConfirm: boolean = false
+  ddaConfirm: boolean = false,
+  /** [무한 그림 치환 v1] levelId 가 infinity_N 이면 백엔드가 변환 전에 그림 번호를 치환(기본 켬) */
+  infinityRelabel: boolean = true,
+  /** [DDA 시드 이력] 장부 세션 id — 백엔드가 실제 전송 payload 를 이 세션에 기록(없으면 자동 세션) */
+  ledgerSession?: string
 ): Promise<GBoostSaveResponse> {
   const response = await apiClient.post<GBoostSaveResponse>(
     `/gboost/${boardId}/${levelId}`,
-    { level_json: levelJson, dda_confirm: ddaConfirm }
+    { level_json: levelJson, dda_confirm: ddaConfirm, infinity_relabel: infinityRelabel },
+    ledgerSession ? { params: { ledger_session: ledgerSession } } : undefined
   );
   return response.data;
 }
@@ -190,25 +195,58 @@ export async function uploadThumbnail(
   return response.data;
 }
 
-// [DDA 문서 47 §5] 시드만 내보내기 — levels 보드 기존 행에서 두 컬럼만 변경 (read-modify-write)
+// [DDA 시드만 v2 · 2026-11-03] levels 보드 기존 행의 시드 4열 중 '바뀌고 근거 있는' 열만 update(new=0).
+// 값 출처 = 맵툴 배치 파일(백엔드가 직접 읽음). 탭은 행 id·원본 레벨 번호·자기가 아는 배치 버전만 보낸다.
+export type DdaSeedField = 'ddaEasy2Seeds' | 'ddaEasySeeds' | 'ddaHardSeeds' | 'ddaHard2Seeds';
+export type DdaSeedCellState = 'send' | 'same' | 'kept' | 'unverified' | 'blocked';
+export interface DdaSeedCell {
+  state: DdaSeedCellState;
+  server?: string;
+  value?: string;
+  why?: string;
+  kind?: 'fill' | 'change';
+}
 export interface DdaSeedExportResult {
   target_id: string;
+  source_level?: number;
   blocked: boolean;
   status?: 'preview' | 'blocked' | 'saved' | 'failed' | 'unchanged';
   reason: string;
   detail?: string;
-  change?: 'same' | 'fill' | 'change' | 'clear';
-  server?: { ddaEasySeeds: string; ddaHardSeeds: string };
-  ddaEasySeeds?: string;
-  ddaHardSeeds?: string;
+  change?: 'same' | 'fill' | 'change';
+  cells?: Partial<Record<DdaSeedField, DdaSeedCell>>;
   serverDigest?: string;
+  sent?: DdaSeedField[];
+}
+export interface DdaSeedExportResponse {
+  dry_run: boolean;
+  preview_id: string | null;
+  gbTarget?: { base_url: string; project_id: string; board_id: string };
+  trial: (Record<string, unknown> & { judge?: { passed?: boolean }; recordPath?: string }) | null;
+  batchVersion: number;
+  batchFileSha256: string;
+  boardRawSha256?: string;
+  partialUpdate: { allowed: boolean; by: string | null; codeHash: string; record?: string; target_id?: string };
+  summary: { cells: Record<DdaSeedCellState, number>; rows: Record<string, number> };
+  results: DdaSeedExportResult[];
 }
 
 export async function ddaSeedExport(request: {
-  targets: Array<{ target_id: string; level_json: LevelJSON; expected_server_digest?: string }>;
+  batch_id: string;
+  expected_batch_version: number;
+  expected_batch_sha256?: string;
+  targets: Array<{ target_id: string; source_level: number; expected_server_digest?: string }>;
   dry_run: boolean;
   confirm?: boolean;
-}): Promise<{ dry_run: boolean; results: DdaSeedExportResult[] }> {
-  const response = await apiClient.post('/gboost/dda-seed-export', request, { timeout: 600000 });
+  trial?: boolean;
+  infinity_relabel?: boolean;
+  client_unsynced_edits?: number;
+  preview_id?: string;
+  selection?: Record<string, string | number | boolean | null>;
+}, ledgerSession?: string): Promise<DdaSeedExportResponse> {
+  const response = await apiClient.post('/gboost/dda-seed-export', request, {
+    timeout: 600000,
+    params: ledgerSession ? { ledger_session: ledgerSession } : undefined,
+  });
   return response.data;
 }

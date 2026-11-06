@@ -54,7 +54,8 @@ export function SolvabilityPanel() {
   const [rangeStart, setRangeStart] = useState(1);
   const [rangeEnd, setRangeEnd] = useState(50);
 
-  const [timeBudget, setTimeBudget] = useState(3);
+  // [2026-11-03] 기본 5 s — solve_level_task 가 time_budget_s 를 실제로 쓰게 된 뒤에도 예전(항상 5 s) 결과 유지
+  const [timeBudget, setTimeBudget] = useState(5);
   const [nodeBudget, setNodeBudget] = useState(40000);
 
   const [isRunning, setIsRunning] = useState(false);

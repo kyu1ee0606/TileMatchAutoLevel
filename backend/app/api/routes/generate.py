@@ -30,6 +30,7 @@ from ...models.gimmick_profile import (
     get_all_profiles_info,
 )
 from ..deps import get_level_generator, get_level_simulator
+from ...utils.tile_floor import check_tile_floor
 import random
 
 
@@ -113,7 +114,57 @@ def shutdown_gen_pool() -> None:
         _autoplay_process_pool = None
 
 
+def _tile_floor_violation(level_json: Any, level_number: int | None) -> str | None:
+    """새 생성 결과의 타일 수 하한 검사. 튜토리얼 고정 레벨(get_tutorial_config)은 제외."""
+    if not isinstance(level_json, dict) or get_tutorial_config(level_number):
+        return None
+    return check_tile_floor(level_json)
+
+
+TILE_FLOOR_MAX_ATTEMPTS = 5  # 하한 미달 시 자동 재생성 총 시도 횟수(첫 시도 포함)
+
+
+def _retry_on_tile_floor(gen_once, level_number: int | None, explicit_total: int | None, label: str):
+    """gen_once() 를 하한 통과까지 최대 TILE_FLOOR_MAX_ATTEMPTS 회 반복.
+
+    gen_once() -> (ok, payload, floor_msg). floor_msg 가 있으면 하한 미달 결과.
+    명시 total_tile_count 자체가 K 하한보다 작으면 재시도 무의미 → 즉시 반환(메시지에 이유 추가).
+    반환: (ok, payload, floor_msg, attempts)
+    """
+    from ...utils.tile_floor import level_kind_count, min_tile_count_for_kinds
+    ok, payload, msg = False, None, None
+    for attempt in range(1, TILE_FLOOR_MAX_ATTEMPTS + 1):
+        ok, payload, msg = gen_once()
+        if not msg:
+            return ok, payload, None, attempt
+        if explicit_total is not None and isinstance(payload, dict):
+            need = min_tile_count_for_kinds(level_kind_count(payload))
+            if explicit_total < need:
+                return (False, payload,
+                        f"{msg} — 지정한 total_tile_count={explicit_total} 자체가 최소 {need}개보다 작아 재시도하지 않음",
+                        attempt)
+        logger.info(f"[TILE_FLOOR] {label} attempt {attempt}/{TILE_FLOOR_MAX_ATTEMPTS} 하한 미달 → 재생성: {msg}")
+    return False, payload, f"{msg} ({TILE_FLOOR_MAX_ATTEMPTS}회 시도 모두 하한 미달)", TILE_FLOOR_MAX_ATTEMPTS
+
+
 def _generate_core_worker(request_dict: dict) -> dict:
+    """하한 미달이면 최대 N회 자동 재생성(워커마다 os.urandom 재시드라 시도마다 결과가 다름)."""
+    holder: dict = {}
+
+    def once():
+        res = _generate_core_once(request_dict)
+        holder["res"] = res
+        lj = getattr(res.get("response"), "level_json", None) if res.get("ok") else None
+        return res.get("ok", False), lj, res.get("floor_msg")
+
+    ok, lj, msg, _n = _retry_on_tile_floor(
+        once, request_dict.get("level_number"), request_dict.get("total_tile_count"), "generate")
+    if msg:
+        return {"ok": False, "status": 422, "detail": msg}
+    return holder["res"]
+
+
+def _generate_core_once(request_dict: dict) -> dict:
     """
     프로세스 풀 워커 — 단일 레벨 생성 전체(_generate_level_impl)를 별도 프로세스에서 실행.
 
@@ -177,6 +228,10 @@ def _generate_core_worker(request_dict: dict) -> dict:
                     # (스냅샷 후보 일괄 변환 → 서로의 앵커를 덮을 수 있음). 반환 직전 재적용 필수.
                     _lj = generator._finalize_level(_lj)
                     response.level_json = _lj
+        # [타일 하한] 새 생성은 하한 미달이면 거부 (튜토리얼 고정 레벨 제외)
+        _floor_msg = _tile_floor_violation(getattr(response, "level_json", None), request.level_number)
+        if _floor_msg:
+            return {"ok": True, "response": response, "floor_msg": _floor_msg}
         return {"ok": True, "response": response}
     except HTTPException as he:
         return {"ok": False, "status": he.status_code, "detail": str(he.detail)}
@@ -1497,6 +1552,26 @@ def simulate_level(
 def generate_validated_level(
     request: ValidatedGenerateRequest,
     generator: LevelGenerator = Depends(get_level_generator),
+) -> ValidatedGenerateResponse:
+    """검증 생성 + 타일 수 하한 게이트 (미달이면 422). 본체는 _generate_validated_level_impl."""
+    holder: dict = {}
+
+    def once():
+        resp = _generate_validated_level_impl(request, generator)
+        holder["resp"] = resp
+        lj = getattr(resp, "level_json", None)
+        return True, lj, _tile_floor_violation(lj, request.level_number)
+
+    _ok, _lj, msg, _n = _retry_on_tile_floor(
+        once, request.level_number, getattr(request, "total_tile_count", None), "validated")
+    if msg:
+        raise HTTPException(status_code=422, detail=msg)
+    return holder["resp"]
+
+
+def _generate_validated_level_impl(
+    request: ValidatedGenerateRequest,
+    generator: LevelGenerator,
 ) -> ValidatedGenerateResponse:
     """
     Generate a level with simulation-based validation.

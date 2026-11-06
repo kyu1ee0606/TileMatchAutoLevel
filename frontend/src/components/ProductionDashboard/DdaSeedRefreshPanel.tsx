@@ -140,12 +140,12 @@ export function DdaSeedRefreshPanel({
           onClick={runCheck}
           disabled={busy || working}
           className="px-3 py-1.5 text-sm rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 disabled:cursor-not-allowed"
-          title="검증된 DDA 시드(easy/hard 각 5개)를 레벨 설정에 채울지 미리 확인합니다. 이 단계에서는 아무것도 바꾸지 않습니다."
+          title="옛 v1 목록 DDA 시드(easy/hard 각 5개)를 레벨 설정에 채울지 미리 확인합니다. 클리어 가능 판정(PATH/PATH_BOT)을 거친 값이 아닙니다. 이 단계에서는 아무것도 바꾸지 않습니다."
         >
           {phase === 'checking' ? '검사 중…' : '🎚️ DDA 시드 갱신'}
         </button>
         <span className="text-[11px] text-gray-400">
-          미리보기 → 확인 후 맵에디터 내부 레벨 설정만 저장 (서버 전송 없음). 준비된 시드 ≠ 실제 난이도/Unity 검증 완료
+          미리보기 → 확인 후 맵에디터 내부 레벨 설정만 저장 (서버 전송 없음). <b className="text-yellow-300">미검증</b>: 클리어 가능 판정 없는 옛 목록 값 — 내보내기에서 서버로 보내지 않음
         </span>
         {busy && <span className="text-[11px] text-yellow-400">다른 작업 진행 중 — 대기</span>}
       </div>

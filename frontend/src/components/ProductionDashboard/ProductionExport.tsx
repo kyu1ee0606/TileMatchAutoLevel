@@ -8,18 +8,23 @@ import { ProductionStats, ProductionExportConfig, ProductionLevel, PRODUCTION_MA
 import { TileData, LevelJSON } from '../../types';
 import { Button } from '../ui';
 import { useUIStore } from '../../stores/uiStore';
-import { exportProductionLevels, getProductionLevelsByBatch, renameProductionBatch, saveProductionLevel } from '../../storage/productionStorage';
+import { exportProductionLevels, getProductionBatch, getProductionLevelsByBatch, renameProductionBatch, saveProductionLevel } from '../../storage/productionStorage';
+import { getDirtyCount, getKnownVersion } from '../../storage/productionServerSync';
 import { saveLevelSetToStorage, saveLocalLevelToStorage } from '../../storage/levelStorage';
 import { checkGBoostHealth, listFromGBoost, loadFromGBoost, saveToGBoost } from '../../api/gboost';
-import { previewDdaExport } from '../../api/ddaSeeds';
+import { previewDdaExport, DDA_EXPORT_SEED_FIELDS, type DdaExportSeedField } from '../../api/ddaSeeds';
 import { DdaSeedOnlyExport } from './DdaSeedOnlyExport';
+import { DdaSeedLedgerPanel } from './DdaSeedLedgerPanel';
+import { LiveBackupPanel } from './LiveBackupPanel';
+import { openLedgerSession, addLedgerNote, finalizeLedgerSession } from '../../api/ddaSeedLedger';
 import { simulateLevelSkillSweep } from '../../api/rlSim';
 
 // ─────────────────────────────────────────────────────────────────────
 // [배포 게이트] 게임에 나가면 안 되는 레벨 판정. **순수함수** — 네트워크 try 밖에서 평가해
 // 예외로 게이트 전체가 무력화(fail-OPEN)되는 일이 없게 한다.
 // 모든 배포 경로(JSON 내보내기 / GBoost 업로드 / 백업업로드 / 로컬저장)가 공유해야 한다.
-// 백엔드 규칙 미러: BOMB 3~5, timea 정수산술, 기믹 언락 첫 스테이지 표.
+// 백엔드 규칙 미러: BOMB 3~5, timea 정수산술, 기믹 언락 첫 스테이지 표, 열쇠 3배수(key_not_div3).
+//   key_not_div3 = backend generator.LevelGenerator._key_div3_scan 와 같은 판정(게임 isKeyTile · CTileStackInfo).
 // ─────────────────────────────────────────────────────────────────────
 const DEPLOY_BOMB_MIN = 3;
 const DEPLOY_BOMB_MAX = 5;
@@ -48,6 +53,17 @@ function deployScanLevel(levelNumber: number, lv: unknown): string[] {
   let tutFound = 0;
   const tut = DEPLOY_TUTORIAL_GIMMICKS[levelNumber];
   let collectable = 0;
+  // 열쇠 3배수: 게임은 t0 가 있을 때만 열쇠 포함 전 종류를 3배수로 보충(DB_Level.cs:1123-1153).
+  // t0 0 이면 명시 열쇠 %3 장이 영구히 남는다. 열쇠 = id t16/key(대소문자 무시) 또는 effect key.
+  // 컨테이너 내부 문자열은 토큰 수 == td[2][0] 일 때만 채택(CTileStackInfo), 아니면 내부 전체 t0.
+  let keyCount = 0;
+  let t0Count = 0;
+  const isKeyId = (s: string) => s === 't16' || s.toLowerCase() === 'key';
+  const toInt = (x: unknown): number | null => {
+    if (typeof x === 'number' && Number.isFinite(x)) return Math.trunc(x);
+    if (typeof x === 'string' && /^\s*[+-]?\d+\s*$/.test(x)) return parseInt(x.trim(), 10);
+    return null;
+  };
 
   for (let i = 0; i < n; i++) {
     const layer = lj[`layer_${i}`] as { col?: unknown; row?: unknown; tiles?: Record<string, unknown> } | undefined;
@@ -78,6 +94,20 @@ function deployScanLevel(levelNumber: number, lv: unknown): string[] {
         }
       }
       if (tut && (t0.startsWith(tut) || a.startsWith(tut))) tutFound++;
+      if (t0.startsWith('craft_') || t0.startsWith('stack_')) {
+        const si = Array.isArray(d) ? (d as unknown[])[2] : undefined;
+        if (Array.isArray(si) && si.length) {
+          const cnt = toInt(si[0]);
+          if (cnt !== null) {
+            const inner = si.length > 1 && typeof si[1] === 'string' ? si[1] as string : '';
+            const ids = inner ? inner.split('_') : [];
+            if (inner && ids.length === cnt) {
+              for (const x of ids) { if (isKeyId(x)) keyCount++; else if (x === 't0') t0Count++; }
+            } else t0Count += Math.max(cnt, 0);
+          }
+        }
+      } else if (isKeyId(t0) || a.toLowerCase() === 'key') keyCount++;
+      else if (t0 === 't0') t0Count++;
       // 수집 타일 수(탭 횟수)
       if (t0.startsWith('craft_') || t0.startsWith('stack_')) {
         const extra = Array.isArray(d) ? (d as unknown[])[2] : undefined;
@@ -110,6 +140,7 @@ function deployScanLevel(levelNumber: number, lv: unknown): string[] {
   }
 
   if (tut && tut !== 'key' && tutFound === 0) reasons.push(`tutorial_missing:${tut}`);
+  if (t0Count === 0 && keyCount % 3 !== 0) reasons.push(`key_not_div3:${keyCount}`);
 
   const ta = parseInt(String(lj.timea ?? 0), 10) || 0;
   if (ta > 0 && collectable > 0) {
@@ -307,6 +338,15 @@ export function ProductionExport({
   const INFINITY_SOURCE_START_DEFAULT = 501;
   const [infinitySourceStart, setInfinitySourceStart] = useState(INFINITY_SOURCE_START_DEFAULT);
   const [infinitySourceEnd, setInfinitySourceEnd] = useState(PRODUCTION_MAX_LEVEL);
+  // [무한 그림 치환 v1] 사본(infinity_N)은 정식 맵을 그대로 복사하지 않고 일반 타일 그림 번호만 1:1 치환해 보낸다.
+  // 실행 위치는 백엔드 한 곳(app.core.infinity_relabel) — 업로드·DDA 미리보기·JSON 내보내기 모두 이 값을 넘긴다. 기본 켬.
+  const INFINITY_RELABEL_KEY = 'prod_export_infinity_relabel_v1';
+  const [infinityRelabel, setInfinityRelabel] = useState<boolean>(() => {
+    try { return localStorage.getItem(INFINITY_RELABEL_KEY) !== 'off'; } catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(INFINITY_RELABEL_KEY, infinityRelabel ? 'on' : 'off'); } catch { /* ignore */ }
+  }, [infinityRelabel]);
   const [gboostHealthy, setGboostHealthy] = useState(false);
 
   // Range selection
@@ -348,15 +388,20 @@ export function ProductionExport({
   const [gboostPhase, setGboostPhase] = useState<GBoostPhase>('config');
   const [gboostProgress, setGboostProgress] = useState({ current: 0, total: 0 });
   const [conflictingLevels, setConflictingLevels] = useState<ConflictInfo[]>([]);
-  // [DDA 문서 47] 덮어쓸 행의 서버 ddaEasySeeds/ddaHardSeeds 와 이번 업로드 값 비교 (경고만, 차단 안 함)
+  // [DDA 2026-11-02] 덮어쓸 행의 서버 시드 4열과 이번 업로드가 보낼 열 비교 (경고만). 보내지 않는 열 = 서버 값 유지.
   const [ddaWarn, setDdaWarn] = useState<{
-    clear: string[]; change: string[]; fill: number; noColumn: number; error?: string;
+    clear: string[]; change: string[]; fill: number; noColumn: number; same: number; kept: number; unverified: string[]; error?: string;
   } | null>(null);
   // [DDA 문서 47 fail-closed] 직전 '충돌 검사'가 통과했는지. handleUpload 가 1회 소비 → 재시도는 새 검사 필요.
   // confirm = 사용자가 DDA 비움/변경 경고를 본 상태(충돌 단계)에서 업로드를 눌렀음 → 백엔드 dda_confirm.
   const ddaCheckRef = useRef<{ ok: boolean; confirm: boolean } | null>(null);
   const [backupProgress, setBackupProgress] = useState({ current: 0, total: 0 });
   const [uploadResult, setUploadResult] = useState({ success: 0, failed: 0, skipped: 0 });
+  // [DDA 시드 이력] 업로드 1회 = 장부 스냅샷 1개(백엔드 파일). 메모/버전 태그는 사용자가 업로드 전에 적는다.
+  const [ledgerMemo, setLedgerMemo] = useState('');
+  const [ledgerTag, setLedgerTag] = useState('');
+  const [ledgerInfo, setLedgerInfo] = useState<string>('');
+  const [ledgerRefresh, setLedgerRefresh] = useState(0);
 
   // Migration state
   const [isMigrating, setIsMigrating] = useState(false);
@@ -399,7 +444,7 @@ export function ProductionExport({
       setDdaWarn(null);
       setUploadResult({ success: 0, failed: 0, skipped: 0 });
     }
-  }, [gboostBoardId, gboostLevelPrefix, gboostStartIndex, useRange, rangeStart, rangeEnd]);
+  }, [gboostBoardId, gboostLevelPrefix, gboostStartIndex, useRange, rangeStart, rangeEnd, infinityRelabel]);
 
   // 미리보기 ID 계산 — config 변경 시마다 실제 업로드 대상 산출
   useEffect(() => {
@@ -529,7 +574,7 @@ export function ProductionExport({
         // [무한 레벨] 켜져 있으면 원본 뒤에 infinity_* 사본을 덧붙인다(원본은 불변).
         infinity: infinityEnabled
           ? { enabled: true, only: infinityMode === 'only', prefix: infinityPrefix,
-              sourceStart: infinitySourceStart, sourceEnd: infinitySourceEnd }
+              sourceStart: infinitySourceStart, sourceEnd: infinitySourceEnd, relabel: infinityRelabel }
           : undefined,
       };
 
@@ -595,6 +640,14 @@ export function ProductionExport({
       }
 
       exportableLevels.sort((a, b) => a.meta.level_number - b.meta.level_number);
+
+      // [배포 게이트] 로컬 세트 저장도 다른 배포 경로(JSON/업로드)와 같은 판정으로 막는다.
+      const _bad = findUndeployableLevels(exportableLevels);
+      if (_bad.length > 0) {
+        const nums = _bad.slice(0, 12).map(b => `${b.levelNumber}(${b.reasons[0]})`).join(', ');
+        addNotification('error', `❌ 로컬 저장 차단 — 배포 불가 ${_bad.length}개 포함 (예: ${nums}${_bad.length > 12 ? '…' : ''}). 재검증/재생성으로 통과시킨 뒤 저장하세요.`);
+        return;
+      }
 
       const result = saveLevelSetToStorage({
         name: localSetName.trim(),
@@ -678,13 +731,16 @@ export function ProductionExport({
         uploadTargetsForCheck.map(t => (t.isInfinity ? infinityPrefix : gboostLevelPrefix))));
       const fetchLimit = Math.max(targetIds.length + 100, 2000);
       const existingIds = new Set<string>();
-      const serverDda = new Map<string, { easy?: string | null; hard?: string | null }>();
+      const serverDda = new Map<string, Partial<Record<DdaExportSeedField, string | null | undefined>>>();
       for (const px of prefixes) {
         // strict: 조회 실패를 '없음'으로 오인해 경고 없이 덮어쓰지 않도록 오류로 받는다
         const res = await listFromGBoost(gboostBoardId, px, fetchLimit, true);
         res.levels.forEach(l => {
           existingIds.add(l.id);
-          serverDda.set(l.id, { easy: l.dda_easy_seeds, hard: l.dda_hard_seeds });
+          serverDda.set(l.id, {
+            ddaEasySeeds: l.dda_easy_seeds, ddaHardSeeds: l.dda_hard_seeds,
+            ddaEasy2Seeds: l.dda_easy2_seeds, ddaHard2Seeds: l.dda_hard2_seeds,
+          });
         });
       }
 
@@ -699,24 +755,30 @@ export function ProductionExport({
           const conflictSet = new Set(conflicts.map(c => c.targetId));
           const dp = await previewDdaExport(gboostBoardId, uploadTargetsForCheck
             .filter(t => conflictSet.has(t.targetId))
-            .map(t => ({ target_id: t.targetId, level_json: t.level.level_json })));
+            .map(t => ({ target_id: t.targetId, level_json: t.level.level_json })), infinityRelabel);
           if (dp.applies) {
-            const w = { clear: [] as string[], change: [] as string[], fill: 0, noColumn: 0 };
+            // 열 단위 비교. 백엔드는 "" 를 보내지 않으므로 clear 는 0 이 정상(방어용으로 남김).
+            const w = { clear: [] as string[], change: [] as string[], fill: 0, noColumn: 0, same: 0, kept: 0, unverified: [] as string[] };
             for (const r of dp.results) {
-              const s = serverDda.get(r.target_id);
-              if (!s || (s.easy === undefined && s.hard === undefined)) { w.noColumn++; continue; }
-              const srvE = s.easy ?? '', srvH = s.hard ?? '';
-              const srvHas = srvE !== '' || srvH !== '';
-              const newHas = r.ddaEasySeeds !== '' || r.ddaHardSeeds !== '';
-              if (srvHas && !newHas) w.clear.push(`${r.target_id}(${r.reason})`);
-              else if (srvHas && (srvE !== r.ddaEasySeeds || srvH !== r.ddaHardSeeds)) w.change.push(r.target_id);
-              else if (!srvHas && newHas) w.fill++;
+              const s = serverDda.get(r.target_id) ?? {};
+              for (const f of DDA_EXPORT_SEED_FIELDS) {
+                const nv = r[f];
+                if (nv === undefined) { w.kept++; continue; }            // 생략 → 서버 값 유지
+                if (s[f] === undefined) { w.noColumn++; continue; }      // 보낼 열인데 서버 컬럼 미확인
+                const sv = s[f] ?? '';
+                if (sv !== '' && nv === '') w.clear.push(`${r.target_id}.${f}`);
+                else if (sv === nv) w.same++;
+                // 서버와 다른 새 값인데 클리어 가능 판정 근거가 없으면 백엔드가 그 열을 보내지 않는다(서버 값 유지)
+                else if ((r.fieldEvidence?.[f] ?? 'none') !== 'ok') w.unverified.push(`${r.target_id}.${f}(${r.fieldEvidence?.[f] ?? 'none'})`);
+                else if (sv === '') w.fill++;
+                else w.change.push(`${r.target_id}.${f}`);
+              }
             }
             setDdaWarn(w);
             ddaOk = w.noColumn === 0;          // 부분 누락(서버 컬럼 미확인) → 차단
           }
         } catch (e) {
-          setDdaWarn({ clear: [], change: [], fill: 0, noColumn: 0, error: (e as Error).message });
+          setDdaWarn({ clear: [], change: [], fill: 0, noColumn: 0, same: 0, kept: 0, unverified: [], error: (e as Error).message });
           ddaOk = false;                       // DDA 사전검사 실패 → 차단
         }
       }
@@ -927,12 +989,29 @@ export function ProductionExport({
 
       // 원본 + (옵션) 무한 사본. 무한 사본은 targetId 만 다르고 페이로드/규칙은 원본과 동일.
       const uploadTargets = buildUploadTargets(exportableLevels);
+      // [DDA 시드 이력] levels 보드 업로드 기록 세션. 실패해도 업로드는 그대로 진행(백엔드가 자동 세션에 기록).
+      let ledgerSid: string | undefined;
+      const ledgerSkipped: string[] = [];
+      setLedgerInfo('');
+      if (gboostBoardId === 'levels') {
+        try {
+          ledgerSid = (await openLedgerSession({
+            board: gboostBoardId, memo: ledgerMemo, tag: ledgerTag, batch_id: batchId, batch_name: batchName,
+            source: 'export_tab',
+            options: { infinityMode, infinityRelabel, overwrite, useRange, rangeStart, rangeEnd,
+              infinitySourceStart, infinitySourceEnd, ddaConfirm: ddaGate.confirm, targets: uploadTargets.length },
+          })).id;
+        } catch (e) {
+          addNotification('warning', `DDA 시드 이력 세션 생성 실패 — 업로드는 계속(자동 세션에 기록): ${(e as Error).message}`);
+        }
+      }
       for (let i = 0; i < uploadTargets.length; i++) {
         const { targetId, level, slotNumber } = uploadTargets[i];
 
         // overwrite=false이고 충돌이 있으면 건너뛰기
         if (!overwrite && conflictIds.has(targetId)) {
           skippedCount++;
+          ledgerSkipped.push(targetId);
           setGboostProgress({ current: i + 1, total: uploadTargets.length });
           continue;
         }
@@ -956,7 +1035,8 @@ export function ProductionExport({
 
         try {
           // saveToGBoost는 level_json을 직접 받아서 TownPop 변환 및 썸네일 생성
-          await saveToGBoost(gboostBoardId, targetId, uploadJson, ddaGate.confirm);
+          // 무한 사본 그림 치환은 백엔드가 변환 전에 한다(원본 level_json 을 그대로 보냄 — 두 번 치환 금지)
+          await saveToGBoost(gboostBoardId, targetId, uploadJson, ddaGate.confirm, infinityRelabel, ledgerSid);
           successCount++;
         } catch (err) {
           console.error(`Failed to upload ${targetId}:`, err);
@@ -966,6 +1046,19 @@ export function ProductionExport({
         setGboostProgress({ current: i + 1, total: uploadTargets.length });
       }
 
+      // [DDA 시드 이력] 마감: 업로드 후 서버 재조회(읽기만) → 스냅샷 파일 생성. 실패해도 업로드 결과엔 영향 없음.
+      if (ledgerSid) {
+        try {
+          if (ledgerSkipped.length > 0) await addLedgerNote(ledgerSid, { skippedConflicts: ledgerSkipped });
+          const fin = await finalizeLedgerSession(ledgerSid,
+            { success: successCount, failed: failCount, skipped: skippedCount, targets: uploadTargets.length });
+          setLedgerInfo(`DDA 시드 이력 저장: ${fin.id} (${fin.counts?.total ?? 0}행`
+            + `${fin.readbackResult?.ok ? ', 업로드 후 재조회 포함' : ', 재조회 실패 — 전송 값 기준'})`);
+        } catch (e) {
+          setLedgerInfo(`DDA 시드 이력 마감 실패(기록은 일지에 남음 — 이력 패널에서 '미마감'으로 보임): ${(e as Error).message}`);
+        }
+        setLedgerRefresh(x => x + 1);
+      }
       setUploadResult({ success: successCount, failed: failCount, skipped: skippedCount });
       setGboostPhase('complete');
       // 실제로 올라간 게 있을 때만 표시(전부 스킵/실패면 배포로 치지 않는다)
@@ -1223,7 +1316,12 @@ export function ProductionExport({
                         {(() => {
                           const inf = previewTargetIds.filter(id => id.startsWith(infinityPrefix));
                           return inf.length > 0
-                            ? <>업로드될 무한 사본: {inf[0]} ~ {inf[inf.length - 1]} ({inf.length}개) · 규칙 {infinityPrefix}N = 원본 {infinitySourceStart - 1}+N</>
+                            ? <>업로드될 무한 사본: {inf[0]} ~ {inf[inf.length - 1]} ({inf.length}개) · 규칙 {infinityPrefix}N = 원본 {infinitySourceStart - 1}+N
+                                {' · '}{infinityRelabel && infinityPrefix === 'infinity_'
+                                  ? <span className="text-emerald-300">그림 치환 v1</span>
+                                  : infinityRelabel
+                                    ? <span className="text-amber-300">그림 치환 미적용(프리픽스가 infinity_ 가 아님)</span>
+                                    : <span className="text-amber-300">그림 치환 끔(원본 그대로 복사)</span>}</>
                             : <>원본 {infinitySourceStart}~{infinitySourceEnd} 중 업로드할 무한 사본 없음</>;
                         })()}
                       </span>
@@ -1251,6 +1349,12 @@ export function ProductionExport({
                             className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-xs text-white" />
                         </div>
                       </div>
+                      <label className="flex items-center gap-2 text-[11px] text-gray-300"
+                        title="infinity_N 사본의 일반 타일 그림(t1~t15)만 1:1 치환해 보냅니다. 칸·층·기믹·종류별 개수·useTileCount 는 그대로. 규칙 키 infinity_N|relabel.v1 (FNV-1a → zWellRandom → Sattolo)">
+                        <input type="checkbox" checked={infinityRelabel}
+                          onChange={(e) => setInfinityRelabel(e.target.checked)} />
+                        무한 사본 그림 치환 v1 (배치 그대로, 그림 번호만 바꿈 · 업로드/미리보기/JSON 공통)
+                      </label>
                       <p className="text-[11px] text-purple-300">
                         {infinityMode === 'only'
                           ? '⚠️ 무한 사본만 업로드/저장합니다 — 원본(level_*)은 포함되지 않습니다.'
@@ -1506,6 +1610,20 @@ export function ProductionExport({
                   )}
                 </div>
 
+                {/* [되돌리기 준비] 업로드 전 라이브 levels 보드 전체 백업(읽기만) — 권장 안내·경고만, 업로드 차단 안 함 */}
+                {gboostBoardId === 'levels' && <LiveBackupPanel enabled={gboostHealthy} />}
+
+                {/* [DDA 시드 이력] 이번 업로드 스냅샷의 메모/버전 태그 */}
+                {gboostBoardId === 'levels' && (
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="text-teal-300 whitespace-nowrap">시드 이력</span>
+                    <input value={ledgerTag} onChange={(e) => setLedgerTag(e.target.value)} placeholder="버전 태그 (예 1.1.2)"
+                      className="w-32 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white" />
+                    <input value={ledgerMemo} onChange={(e) => setLedgerMemo(e.target.value)} placeholder="메모 (예 1.1.2 업데이트)"
+                      className="flex-1 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white" />
+                  </div>
+                )}
+
                 <Button
                   onClick={handleCheckConflicts}
                   disabled={previewTargetIds.length === 0}
@@ -1557,7 +1675,7 @@ export function ProductionExport({
 
                 {ddaWarn && (
                   <div className="bg-orange-900/30 border border-orange-600 rounded-lg p-2 text-xs space-y-1">
-                    <div className="text-orange-300 font-semibold">DDA 시드 (ddaEasySeeds/ddaHardSeeds)</div>
+                    <div className="text-orange-300 font-semibold">DDA 시드 (ddaEasy2/Easy/Hard/Hard2Seeds, 열 단위)</div>
                     {ddaWarn.error ? (
                       <div className="text-red-300">서버 값 비교 실패: {ddaWarn.error} — 비움/변경 대상을 확인하지 못했습니다.</div>
                     ) : (
@@ -1570,10 +1688,14 @@ export function ProductionExport({
                           서버 값과 다른 값으로 변경 {ddaWarn.change.length}
                           {ddaWarn.change.length > 0 && `: ${ddaWarn.change.slice(0, 10).join(', ')}${ddaWarn.change.length > 10 ? ' …' : ''}`}
                         </div>
-                        <div className="text-gray-400">신규 기입 {ddaWarn.fill}{ddaWarn.noColumn > 0 && ` · 서버 컬럼 미확인 ${ddaWarn.noColumn}`}</div>
+                        <div className={ddaWarn.unverified.length ? 'text-yellow-300' : 'text-gray-400'}>
+                          클리어 판정 근거 없는 새 시드 → 보내지 않음(서버 값 유지) {ddaWarn.unverified.length}
+                          {ddaWarn.unverified.length > 0 && `: ${ddaWarn.unverified.slice(0, 8).join(', ')}${ddaWarn.unverified.length > 8 ? ' …' : ''}`}
+                        </div>
+                        <div className="text-gray-400">신규 기입 {ddaWarn.fill} · 서버와 같은 값 {ddaWarn.same} · 보내지 않음(서버 값 유지) {ddaWarn.kept}{ddaWarn.noColumn > 0 && ` · 서버 컬럼 미확인 ${ddaWarn.noColumn}`}</div>
                       </>
                     )}
-                    <div className="text-gray-500">유효 후보가 아니면 두 필드를 빈 문자열로 보냅니다(오래된 서버 값 제거). 에디터 내부 값은 바꾸지 않습니다.</div>
+                    <div className="text-gray-500">레벨 데이터에 형식이 맞는 시드가 있는 열만 보내고, 없는 열은 보내지 않아 서버 값을 그대로 둡니다(빈 값으로 지우지 않음). 무한 사본(infinity_*)은 정식 레벨 시드를 보내지 않습니다. 에디터 내부 값은 바꾸지 않습니다.</div>
                     <div className="text-gray-500">주의: 재업로드로 행의 다른 컬럼이 바뀌면 런타임 조건 해시가 달라져 원본으로 폴백합니다 — 업로드·굽기 후 검증 목록 재생성이 필요합니다(문서 47).</div>
                   </div>
                 )}
@@ -1635,14 +1757,23 @@ export function ProductionExport({
               </div>
             )}
 
-            {/* [DDA 문서 47 §5] 시드만 내보내기 — 두 컬럼만 변경, 기존 행 보존 */}
+            {/* [DDA 시드만 v2] 시드 4열 중 바뀌고 근거 있는 열만 — 값 = 저장된 배치 파일, 대상 = 업로드와 같은 규칙(무한 포함) */}
             {gboostPhase === 'config' && (
               <DdaSeedOnlyExport
                 boardId={gboostBoardId}
-                enabled={gboostHealthy && gboostLevelPrefix === 'level_'}
-                getTargets={async () => (await getExportableLevels()).map(l => ({
-                  target_id: `level_${l.meta.level_number}`, level_json: l.level_json,
+                enabled={gboostHealthy && gboostLevelPrefix === 'level_' && (!infinityEnabled || infinityPrefix === 'infinity_')}
+                batchId={batchId}
+                infinityRelabel={infinityRelabel}
+                getTargets={async () => buildUploadTargets(await getExportableLevels()).map(t => ({
+                  target_id: t.targetId, source_level: t.sourceLevel,
                 }))}
+                getTabVersion={async () => getKnownVersion(batchId) ?? (await getProductionBatch(batchId))?.__server_version}
+                getUnsyncedEdits={() => getDirtyCount(batchId)}
+                selection={{
+                  batchId, board: gboostBoardId, levelPrefix: gboostLevelPrefix, useRange,
+                  rangeStart: useRange ? effectiveStart : null, rangeEnd: useRange ? effectiveEnd : null,
+                  infinityMode, infinityPrefix, infinitySourceStart, infinitySourceEnd, infinityRelabel,
+                }}
               />
             )}
 
@@ -1686,6 +1817,8 @@ export function ProductionExport({
                   </div>
                 </div>
 
+                {ledgerInfo && <div className="text-xs text-teal-300">{ledgerInfo}</div>}
+
                 <Button
                   onClick={handleResetGBoost}
                   variant="secondary"
@@ -1701,6 +1834,17 @@ export function ProductionExport({
             GBoost 연결을 먼저 설정해주세요. (GBoost 패널에서 설정)
           </p>
         )}
+
+        {/* [DDA 시드 이력] 스냅샷 목록·비교·타임라인 (서버 연결 없이도 열람 가능) */}
+        <DdaSeedLedgerPanel
+          batchId={batchId}
+          batchName={batchName}
+          infinityMode={infinityMode}
+          infinityRelabel={infinityRelabel}
+          infinitySourceStart={infinitySourceStart}
+          infinitySourceEnd={infinitySourceEnd}
+          refreshKey={ledgerRefresh}
+        />
       </div>
 
       {/* JSON Export Settings */}

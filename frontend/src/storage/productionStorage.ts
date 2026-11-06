@@ -16,6 +16,7 @@ import {
   ProductionExportConfig,
 } from '../types/production';
 import { LevelJSON, DifficultyGrade } from '../types';
+import { relabelInfinityLevels } from '../api/ddaSeeds';
 
 const DB_NAME = 'TileMatchProduction';
 const DB_VERSION = 1;
@@ -755,7 +756,7 @@ export async function exportProductionLevels(
       .sort((a, b) => a.meta.level_number - b.meta.level_number);
     // index 는 목록 순번(i+1)이 아니라 원본 번호로 계산한다. 순번으로 매기면 원본 일부가
     // 미승인으로 빠졌을 때 뒤쪽 사본 번호가 당겨져 기존 infinity_N 을 다른 레벨로 덮는다.
-    const copies = src.map(l => {
+    let copies: ProductionLevel[] = src.map(l => {
       const idx = l.meta.level_number - sourceStart + 1;
       return {
         ...l,
@@ -767,6 +768,27 @@ export async function exportProductionLevels(
         },
       };
     });
+    // [무한 그림 치환 v1] 업로드·DDA 미리보기와 같은 맵이 되도록 **백엔드 같은 함수**로 치환한다
+    // (app.core.infinity_relabel — 정식 원본에 한 번만 적용, 프론트 재구현 없음). 대상은 id 가 infinity_N 인 사본만.
+    // 실패 시 예외 → 내보내기 실패(치환 안 된 사본을 조용히 내보내지 않음).
+    if (config.infinity.relabel !== false && copies.length > 0) {
+      const CHUNK = 200;
+      const next: ProductionLevel[] = [];
+      for (let s = 0; s < copies.length; s += CHUNK) {
+        const part = copies.slice(s, s + CHUNK);
+        const r = await relabelInfinityLevels(
+          part.map(c => ({ target_id: c.meta.infinity_id as string, level_json: c.level_json })), true);
+        part.forEach((c, i) => {
+          const res = r.results[i];
+          if (!res || res.target_id !== c.meta.infinity_id) throw new Error(`그림 치환 응답 불일치: ${c.meta.infinity_id}`);
+          next.push(res.relabel
+            ? { ...c, level_json: res.level_json,
+                meta: { ...c.meta, infinity_relabel: res.relabel.rule, infinity_relabel_mapping: res.relabel.mapping } }
+            : c);
+        });
+      }
+      copies = next;
+    }
     // only=true 면 원본을 빼고 사본만 내보낸다(무한 레벨 단독 배포용).
     exportableLevels = only ? copies : exportableLevels.concat(copies);
   }

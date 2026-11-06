@@ -1,5 +1,7 @@
 """Level analysis API routes."""
+import functools
 import pickle
+import threading
 import time
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -2741,25 +2743,40 @@ LEVEL_TEMPLATES_PATH = os.path.join(os.path.dirname(CUSTOM_PATTERNS_PATH), "leve
 # 1.5MB 파일을 요청마다 json 파싱하던 것 → (mtime_ns,size) 가 같으면 피클 바이트에서 복원.
 # 호출자들이 반환 dict 를 제자리 수정·저장하므로 매번 독립 사본(pickle.loads)을 돌려준다.
 _LT_CACHE: Dict[str, Any] = {"sig": None, "blob": None}
+# 템플릿 파일 read-modify-write 직렬화용 전역 락(RLock: 데코레이터 안에서 _load 재진입).
+# 라우트가 스레드풀에서 겹쳐 돌므로 두 요청이 같은 파일을 읽고 각자 써서 한쪽 변경이 사라지는 것을 막는다.
+# 무거운 계산(봇 측정)은 락 밖에서 하고, 쓰기 직전에 최신본을 다시 읽어 병합한다.
+_LT_LOCK = threading.RLock()
+
+
+def _lt_locked(fn):
+    """읽기→수정→쓰기 전체를 _LT_LOCK 안에서 실행(동기 `def` 라우트 전용)."""
+    @functools.wraps(fn)
+    def _w(*a, **kw):
+        with _LT_LOCK:
+            return fn(*a, **kw)
+    return _w
 
 
 def _load_level_templates() -> Dict[str, Any]:
-    try:
-        st = os.stat(LEVEL_TEMPLATES_PATH)
-        sig = (st.st_mtime_ns, st.st_size)
-        if _LT_CACHE["sig"] == sig and _LT_CACHE["blob"] is not None:
-            return pickle.loads(_LT_CACHE["blob"])
-        with open(LEVEL_TEMPLATES_PATH, "r") as f:
-            data = json_module.load(f)
-        _LT_CACHE["blob"] = pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL)
-        _LT_CACHE["sig"] = sig
-        return data
-    except (FileNotFoundError, json_module.JSONDecodeError):
-        return {"templates": {}}
+    with _LT_LOCK:
+        try:
+            st = os.stat(LEVEL_TEMPLATES_PATH)
+            sig = (st.st_mtime_ns, st.st_size)
+            if _LT_CACHE["sig"] == sig and _LT_CACHE["blob"] is not None:
+                return pickle.loads(_LT_CACHE["blob"])
+            with open(LEVEL_TEMPLATES_PATH, "r") as f:
+                data = json_module.load(f)
+            _LT_CACHE["blob"] = pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL)
+            _LT_CACHE["sig"] = sig
+            return data
+        except (FileNotFoundError, json_module.JSONDecodeError):
+            return {"templates": {}}
 
 
 def _save_level_templates(data: Dict[str, Any]):
-    _atomic_json_dump(LEVEL_TEMPLATES_PATH, data)
+    with _LT_LOCK:
+        _atomic_json_dump(LEVEL_TEMPLATES_PATH, data)
 
 
 def _tile_effective_count(tile: Any) -> int:
@@ -2849,7 +2866,8 @@ class LevelTemplateSaveRequest(_BaseModel):
 
 
 @router.post("/debug/level-template-save")
-async def debug_level_template_save(request: LevelTemplateSaveRequest):
+@_lt_locked
+def debug_level_template_save(request: LevelTemplateSaveRequest):
     """레벨 JSON을 통째로 템플릿으로 저장. 기믹·위치 완전 보존."""
     data = _load_level_templates()
     templates = data.get("templates") or {}
@@ -2878,7 +2896,8 @@ async def debug_level_template_save(request: LevelTemplateSaveRequest):
 
 
 @router.get("/debug/level-templates")
-async def debug_level_templates_list():
+@_lt_locked
+def debug_level_templates_list():
     """레벨 템플릿 목록 조회 — level_json은 제외하고 메타만 반환.
     저장된 summary가 stale이면 즉시 재계산 + 저장 (num 필드 권위 기반)."""
     data = _load_level_templates()
@@ -2957,7 +2976,8 @@ class LevelTemplateUpdateRequest(_BaseModel):
 
 
 @router.post("/debug/level-template/{template_id}/update")
-async def debug_level_template_update(template_id: str, request: LevelTemplateUpdateRequest):
+@_lt_locked
+def debug_level_template_update(template_id: str, request: LevelTemplateUpdateRequest):
     """템플릿 레이어별 편집 — 추가/삭제된 셀을 diff로 받아 반영. 기믹 보존."""
     data = _load_level_templates()
     templates = data.get("templates") or {}
@@ -3247,19 +3267,25 @@ def debug_level_template_measure(template_id: str, iterations: int = 100):
     except Exception as ex:
         return {"error": "measurement_failed", "template_id": template_id, "reason": str(ex)}
 
-    # 결과를 템플릿 메타에 저장
+    # 결과를 템플릿 메타에 저장 — 락 안에서 최신본을 다시 읽어 이 템플릿 항목만 병합(동시 저장 유실 방지)
     measured = (autoplay_resp.autoplay_score or 0) / 100.0
     bot_rates = {b.profile: b.clear_rate for b in autoplay_resp.bot_stats}
-    entry["measured_difficulty"] = measured
-    entry["static_score"] = autoplay_resp.static_score
-    entry["static_grade"] = autoplay_resp.static_grade
-    entry["autoplay_score"] = autoplay_resp.autoplay_score
-    entry["autoplay_grade"] = autoplay_resp.autoplay_grade
-    entry["bot_clear_rates"] = bot_rates
-    entry["difficulty_measured_at"] = int(time.time() * 1000)
-    templates[template_id] = entry
-    data["templates"] = templates
-    _save_level_templates(data)
+    with _LT_LOCK:
+        data = _load_level_templates()
+        templates = data.get("templates") or {}
+        entry = templates.get(template_id)
+        if entry is None:  # 측정 중 삭제됨 — 되살리지 않는다
+            return {"error": "not_found", "template_id": template_id}
+        entry["measured_difficulty"] = measured
+        entry["static_score"] = autoplay_resp.static_score
+        entry["static_grade"] = autoplay_resp.static_grade
+        entry["autoplay_score"] = autoplay_resp.autoplay_score
+        entry["autoplay_grade"] = autoplay_resp.autoplay_grade
+        entry["bot_clear_rates"] = bot_rates
+        entry["difficulty_measured_at"] = int(time.time() * 1000)
+        templates[template_id] = entry
+        data["templates"] = templates
+        _save_level_templates(data)
 
     return {
         "measured": True,
@@ -3283,7 +3309,8 @@ class LevelTemplateDifficultyRequest(_BaseModel):
 
 
 @router.post("/debug/level-template/{template_id}/set-difficulty")
-async def debug_level_template_set_difficulty(template_id: str, request: LevelTemplateDifficultyRequest):
+@_lt_locked
+def debug_level_template_set_difficulty(template_id: str, request: LevelTemplateDifficultyRequest):
     """봇 시뮬 결과를 템플릿 메타에 저장. 프로덕션 자동 배치 시 사용."""
     data = _load_level_templates()
     templates = data.get("templates") or {}
@@ -3316,7 +3343,8 @@ async def debug_level_template_set_difficulty(template_id: str, request: LevelTe
 
 
 @router.delete("/debug/level-template/{template_id}")
-async def debug_level_template_delete(template_id: str):
+@_lt_locked
+def debug_level_template_delete(template_id: str):
     data = _load_level_templates()
     templates = data.get("templates") or {}
     if template_id in templates:

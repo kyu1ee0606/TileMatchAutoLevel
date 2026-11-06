@@ -204,8 +204,10 @@ def run_once(c: dict, mode: str) -> dict:
 
     def rec(simulator, level_json, profile, **kw):
         t = time.perf_counter()
+        ok0 = tilecore_client.counters().get("gen", {}).get("cs_ok", 0)
         res = orig_sim(simulator, level_json, profile, **kw)
-        calls.append({"it": kw.get("iterations"), "seed": kw.get("seed"), "res": list(tilecore_client._res_key(res)),
+        cs_used = tilecore_client.counters().get("gen", {}).get("cs_ok", 0) > ok0     # False = python ran (off/fallback)
+        calls.append({"cs": cs_used, "it": kw.get("iterations"), "seed": kw.get("seed"), "res": list(tilecore_client._res_key(res)),
                       "end": tilecore_client._state_hash(simulator._rng), "s": round(time.perf_counter() - t, 5)})
         return res
     tilecore_client.simulate = rec
@@ -253,6 +255,10 @@ def work(args) -> dict:
     same_calls = len(py["calls"]) == len(cs["calls"]) and all(
         x["res"] == y["res"] and x["end"] == y["end"] and x["it"] == y["it"] and x["seed"] == y["seed"]
         for x, y in zip(py["calls"], cs["calls"]))
+    # per-call C# equivalence counts only calls the C# worker actually answered (cs=True); fallbacks excluded
+    cs_calls = sum(1 for y in cs["calls"] if y.get("cs"))
+    cs_match = sum(1 for x, y in zip(py["calls"], cs["calls"]) if y.get("cs") and x["res"] == y["res"]
+                   and x["end"] == y["end"] and x["it"] == y["it"] and x["seed"] == y["seed"])
     first_diff = None
     if not same_calls:
         for i, (x, y) in enumerate(zip(py["calls"], cs["calls"])):
@@ -268,7 +274,8 @@ def work(args) -> dict:
     _WORKER_N[0] += 1
     return {
         "id": c["id"], "idx": c["idx"], "level": c["level_number"], "stratum": c["stratum"],
-        "selfcheck": selfcheck, "same_bytes": same_bytes, "same_calls": same_calls, "first_diff": first_diff,
+        "selfcheck": selfcheck, "cs_calls": cs_calls, "cs_match": cs_match,
+        "set_workaround": os.environ.get("GEN_REPLAY_SET_WORKAROUND") == "1", "same_bytes": same_bytes, "same_calls": same_calls, "first_diff": first_diff,
         "n_calls": len(py["calls"]), "n_it3": sum(1 for x in py["calls"] if x["it"] == 3),
         "n_it5": sum(1 for x in py["calls"] if x["it"] == 5), "n_instances": py["inst"], "bytes_len": len(py["body"]),
         "sha": hashlib.sha256(py["body"]).hexdigest()[:16], "t0_out": b'"t0"' in py["body"],
@@ -285,15 +292,25 @@ def pct(v, p):
     return v[min(len(v) - 1, int(round(p * (len(v) - 1))))] if v else float("nan")
 
 
-def report(outdir: Path, load_note: str = "") -> str:
+def report(outdir: Path, load_note: str = "", set_workaround: bool = False) -> str:
     rows = [json.loads(l) for l in open(outdir / "results.jsonl")] if (outdir / "results.jsonl").exists() else []
     rows = [r for r in rows if not r.get("selfcheck")]
     if not rows:
         return "no results"
     n = len(rows)
-    sb = sum(r["same_bytes"] for r in rows)
-    sc = sum(r["same_calls"] for r in rows)
     calls = sum(r["n_calls"] for r in rows)
+
+    def cs_n(r):        # calls answered by C# (new rows: recorded per call; legacy rows: level counter)
+        return r.get("cs_calls", r["cs_counters"].get("cs_ok", 0))
+
+    def cs_m(r):        # of those, calls whose result+end RNG state equal python (legacy: all if level same_calls)
+        return r["cs_match"] if "cs_match" in r else (cs_n(r) if r["same_calls"] else 0)
+    ver = [r for r in rows if cs_n(r) > 0]                      # at least one call really answered by C#
+    unver = [r for r in rows if cs_n(r) == 0]                   # python-vs-python only -> not evidence
+    full = [r for r in ver if cs_n(r) == r["n_calls"]]
+    sb = sum(r["same_bytes"] for r in ver)
+    sc = sum(r["same_calls"] for r in ver)
+    c_cs, c_match = sum(cs_n(r) for r in rows), sum(cs_m(r) for r in rows)
     agg = {k: sum(r["cs_counters"].get(k, 0) for r in rows) for k in
            ("cs_ok", "unsupported", "error", "timeout", "fallback")}
     lines0 = (f"calls by site: _quick_deadlock_check(5 games)={sum(r.get('n_it5', 0) for r in rows)}  "
@@ -304,20 +321,35 @@ def report(outdir: Path, load_note: str = "") -> str:
     bpy = [r["py_bot_s"] for r in steady]
     bcs = [r["cs_bot_s"] for r in steady]
     ncalls = [r["n_calls"] for r in rows]
+    wa_note = ("--set-workaround USED: C# requests serialized with sets->lists (tilecore_client.json.dumps fails on "
+               "set values otherwise => all C# calls would fall back)" if set_workaround
+               or any(r.get("set_workaround") for r in rows) else "set workaround not used")
     lines = [
-        f"levels={n}  json_byte_identical={sb}/{n}  per-call-identical levels={sc}/{n}  total_calls={calls}",
+        f"levels={n}  VERIFIED (>=1 call answered by C#)={len(ver)} (all calls by C#={len(full)})  "
+        f"UNVERIFIED (0 C# calls, python-vs-python)={len(unver)}",
+        f"  json byte identical among verified: {sb}/{len(ver)}   per-call-identical levels among verified: {sc}/{len(ver)}"
+        f"   (unverified, not counted as evidence: bytes-identical {sum(r['same_bytes'] for r in unver)}/{len(unver)})",
+        f"calls total={calls}: C#-answered={c_cs} (matching python result+end RNG state: {c_match})  "
+        f"fallback to python={calls - c_cs}",
         f"C# counters (on runs): {agg}  unsupported_ratio={agg['unsupported'] / max(1, calls):.4f}  "
         f"fallback_ratio={agg['fallback'] / max(1, calls):.4f}",
         f"levels with 0 bot calls={sum(1 for x in ncalls if x == 0)}  calls/level median={statistics.median(ncalls)} "
         f"max={max(ncalls)}",
-        f"generate() wall (excl. first case per process; n={len(steady)}) {load_note}",
-        f"  python total : median {statistics.median(tpy):.3f}s  p95 {pct(tpy, .95):.3f}s  sum {sum(tpy):.1f}s",
-        f"  C# total     : median {statistics.median(tcs):.3f}s  p95 {pct(tcs, .95):.3f}s  sum {sum(tcs):.1f}s",
-        f"  python bot-only: median {statistics.median(bpy):.3f}s  p95 {pct(bpy, .95):.3f}s",
-        f"  C# bot-only    : median {statistics.median(bcs):.3f}s  p95 {pct(bcs, .95):.3f}s",
-        f"  speedup total median-of-ratios {statistics.median([a / b for a, b in zip(tpy, tcs) if b > 0]):.2f}x  "
-        f"sum-ratio {sum(tpy) / max(1e-9, sum(tcs)):.2f}x",
+        wa_note,
     ]
+    if steady:
+        lines += [
+            f"generate() wall (excl. first case per process; n={len(steady)}) {load_note}",
+            f"  python total : median {statistics.median(tpy):.3f}s  p95 {pct(tpy, .95):.3f}s  sum {sum(tpy):.1f}s",
+            f"  C# total     : median {statistics.median(tcs):.3f}s  p95 {pct(tcs, .95):.3f}s  sum {sum(tcs):.1f}s",
+            f"  python bot-only: median {statistics.median(bpy):.3f}s  p95 {pct(bpy, .95):.3f}s",
+            f"  C# bot-only    : median {statistics.median(bcs):.3f}s  p95 {pct(bcs, .95):.3f}s",
+        ]
+        ratios = [a / b for a, b in zip(tpy, tcs) if b > 0]
+        lines.append(f"  speedup total median-of-ratios {statistics.median(ratios) if ratios else float('nan'):.2f}x  "
+                     f"sum-ratio {sum(tpy) / max(1e-9, sum(tcs)):.2f}x")
+    else:
+        lines.append("generate() wall: no timing sample (steady set empty, e.g. --n 1)")
     lines.insert(1, lines0)
     strata: dict = {}
     for r in rows:
@@ -329,7 +361,7 @@ def report(outdir: Path, load_note: str = "") -> str:
                  f"(identical among them: {sum(1 for r in rows if r.get('t0_out') and r['same_bytes'])})")
     lines.append("strata (n / identical):")
     lines += [f"  {k}: {v[0]} / {v[1]}" for k, v in sorted(strata.items())]
-    bad = [r for r in rows if not (r["same_bytes"] and r["same_calls"])]
+    bad = [r for r in ver if not (r["same_bytes"] and r["same_calls"])]
     if bad:
         lines.append(f"MISMATCH first: {json.dumps(bad[0], ensure_ascii=False)[:1500]}")
     text = "\n".join(lines)
@@ -352,7 +384,7 @@ def main() -> None:
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     if a.report:
-        print(report(out, a.note))
+        print(report(out, a.note, a.set_workaround))
         return
     if os.environ.get("PYTHONHASHSEED") != "0":           # re-exec so parent + spawned workers share a hash seed
         os.environ["PYTHONHASHSEED"] = "0"
@@ -376,7 +408,7 @@ def main() -> None:
                 print(f"[{k}/{len(cases)}] {r['id']} bytes={r['same_bytes']} calls={r['same_calls']} "
                       f"py={r['py_s']}s cs={r['cs_s']}s elapsed={time.time() - t0:.0f}s", flush=True)
     if not a.selfcheck:
-        print(report(out, a.note))
+        print(report(out, a.note, a.set_workaround))
 
 
 def _init(backend: str) -> None:

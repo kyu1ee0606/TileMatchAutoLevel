@@ -26,7 +26,8 @@ def fake_games(rng, n, early_termination, reseed=None):
     for i in range(n):
         if reseed is not None:
             rng.seed(reseed + i)
-        g = {"cleared": rng.random() < 0.6, "failed": "", "moves": rng.randint(10, 40),
+        c = rng.random() < 0.6
+        g = {"cleared": c, "failed": not c, "moves": rng.randint(10, 40),
              "combo": rng.randint(0, 9), "tiles_cleared": rng.randint(5, 60)}
         games.append(g)
         if early_termination and len(games) >= 5:
@@ -46,6 +47,7 @@ def main():
     ap.add_argument("--hang", action="store_true")
     ap.add_argument("--crash-after", type=int, default=-1)
     ap.add_argument("--unsupported", action="store_true")
+    ap.add_argument("--deadline-err", action="store_true")
     ap.add_argument("--error", action="store_true")
     ap.add_argument("--no-hello", action="store_true")
     ap.add_argument("--no-state", action="store_true")
@@ -62,7 +64,8 @@ def main():
 
     if not a.no_hello:
         send({"type": "hello", "proto": a.proto, "engine": a.engine, "rules": a.rules, "dll_sha256": a.sha,
-              "src_commit": "fake", "threads": 1, "pid": 0})
+              "src_commit": "fake", "threads": 1, "max_mem_mb": 0, "pid": 0,
+              "dotnet": "fake"})
     sims = 0
     if a.no_read:                       # never read stdin -> a big request fills the pipe, the writer blocks
         time.sleep(3600)
@@ -77,10 +80,17 @@ def main():
         if a.delay_ms:
             time.sleep(a.delay_ms / 1000)
         rid = req["id"]
-        if a.unsupported:
-            return send({"id": rid, "ok": False, "unsupported": True, "error": "fake unsupported"})
+        if req.get("max_moves") is None:
+            return send({"id": rid, "ok": False, "unsupported": False, "kind": "bad_request",
+                         "error": "max_moves required"})
+        if a.unsupported or req.get("honor_zero_seed"):
+            return send({"id": rid, "ok": False, "unsupported": True, "kind": "unsupported",
+                         "error": "fake unsupported"})
+        if a.deadline_err:
+            return send({"id": rid, "ok": False, "unsupported": False, "kind": "deadline",
+                         "error": "deadline exceeded after 0 games"})
         if a.error:
-            return send({"id": rid, "ok": False, "unsupported": False, "error": "fake error"})
+            return send({"id": rid, "ok": False, "unsupported": False, "kind": "error", "error": "fake error"})
         rng = random.Random()
         if req["mode"] == "gen":
             games = fake_games(rng, req["iterations"], req["early_termination"], reseed=req["seed"])
@@ -88,7 +98,7 @@ def main():
             st = req["rng_state"]
             rng.setstate((3, tuple(st["mt"]) + (st["index"],), None))
             games = fake_games(rng, req["iterations"], req["early_termination"])
-        resp = {"id": rid, "ok": True, "n": len(games), "games": games, "ms": 0.1, "rng_state_out": None}
+        resp = {"id": rid, "ok": True, "n": len(games), "games": games, "ms": 0.1}
         if req.get("want_state_out") and not a.no_state:
             _, internal, _ = rng.getstate()
             resp["rng_state_out"] = {"mt": list(internal[:624]), "index": internal[624]}
@@ -101,9 +111,9 @@ def main():
         req = json.loads(line)
         op = req.get("op")
         if op == "ping":
-            send({"id": req["id"], "ok": True, "pong": True, "inflight": 0, "rss_mb": 1})
+            send({"id": req["id"], "ok": True, "pong": True, "inflight": 0, "queued": 0, "rss_mb": 1})
         elif op == "shutdown":
-            send({"id": req["id"], "ok": True})
+            send({"id": req["id"], "ok": True, "bye": True})
             return
         elif op == "sim":
             if a.crash_after >= 0 and sims >= a.crash_after:

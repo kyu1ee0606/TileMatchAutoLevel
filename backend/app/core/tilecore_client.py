@@ -61,6 +61,10 @@ class ServeError(Exception):
     """C# answered ok:false (not unsupported) or a malformed reply."""
 
 
+class ServeDeadline(ServeError):
+    """C# answered kind:"deadline" (serve's own budget ran out; process is fine, counted as timeout)."""
+
+
 def path_mode(path: str) -> str:
     raw = (os.environ.get(_PATH_ENV.get(path, "")) or "off").strip().lower()
     return raw if raw in ("off", "shadow", "on") else "off"
@@ -173,6 +177,9 @@ class ServeWorker:
                 except ValueError:
                     continue
                 if not isinstance(msg, dict):
+                    continue
+                if msg.get("type") == "fatal":     # e.g. --max-mem-mb exceeded; serve exits 3 -> EOF handling restarts
+                    logger.warning("[tilecore_client] serve fatal: %s", msg.get("error"))
                     continue
                 if msg.get("type") == "hello":
                     self._hello = msg
@@ -308,7 +315,9 @@ class ServeWorker:
         if not resp.get("ok"):
             if resp.get("unsupported"):
                 raise ServeUnsupported(str(resp.get("error", "")))
-            raise ServeError(str(resp.get("error", "")))
+            if resp.get("kind") == "deadline":
+                raise ServeDeadline(str(resp.get("error", "")))
+            raise ServeError(f"{resp.get('kind', 'error')}: {resp.get('error', '')}")
         return resp
 
     def _expire(self, proc: subprocess.Popen) -> None:
@@ -397,7 +406,7 @@ def rng_state_to_json(rng: random.Random) -> Optional[dict]:
 
 def rng_state_from_json(rng: random.Random, st: dict) -> None:
     mt, idx = st["mt"], int(st["index"])
-    if len(mt) != 624 or not (0 < idx <= 624):
+    if len(mt) != 624 or not (0 <= idx <= 624):
         raise ValueError("bad rng_state")
     rng.setstate((3, tuple(int(x) for x in mt) + (idx,), None))
 
@@ -467,7 +476,7 @@ def _cs_call(path, level_json, profile, iterations, mm, seed, early_termination,
 
 
 def _classify(path: str, exc: Exception) -> str:
-    key = "unsupported" if isinstance(exc, ServeUnsupported) else "timeout" if isinstance(exc, TimeoutError) else "error"
+    key = "unsupported" if isinstance(exc, ServeUnsupported) else "timeout" if isinstance(exc, (TimeoutError, ServeDeadline)) else "error"
     _count(path, key)
     return key
 

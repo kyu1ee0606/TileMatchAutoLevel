@@ -331,6 +331,25 @@ def test_sweep_on_uses_cs(serve):
     assert r["avg_tiles_cleared"] == round(exp.avg_tiles_cleared, 2)
 
 
+# ───────── protocol freeze (SERVE_PROTOCOL.md) details ─────────
+def test_deadline_kind_counts_timeout_and_keeps_worker(serve, profile):
+    serve("--deadline-err")
+    res = tc.simulate(BotSimulator(), copy.deepcopy(LEVEL), profile, iterations=5, seed=7)
+    assert res == _py(profile, 7)[0]
+    c = tc.counters()["gen"]
+    assert c["timeout"] == 1 and c["fallback"] == 1 and tc.get_worker("gen")._proc is not None
+
+
+def test_rng_index_zero_accepted():
+    r = random.Random(1)
+    st = tc.rng_state_to_json(r)
+    st["index"] = 0
+    tc.rng_state_from_json(random.Random(), st)       # CPython accepts index 0 (protocol: 0..624)
+    st["index"] = 625
+    with pytest.raises(ValueError):
+        tc.rng_state_from_json(random.Random(), st)
+
+
 # ───────── review fixes (Codex cross-review) — each has a hard time cap (join timeouts / alarm) ─────────
 def _big_level():
     lv = copy.deepcopy(LEVEL)

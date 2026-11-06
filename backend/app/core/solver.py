@@ -28,6 +28,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_NODE_BUDGET = 60000
 DEFAULT_TIME_BUDGET_S = 5.0  # 벽시계 제한 — 큰 레벨에서 행 방지(초과 시 UNCERTAIN)
+# [2026-11-03] 시간 확인 간격(노드). 256 유지 — 실측(배치 v5 큰 40레벨): 제한 초과 최대 1.08 s(2~5 ms/노드).
+# 32 로 줄이면 초과는 0.27 s 로 줄지만, 기본 5 s 판정 81레벨 표본 중 3레벨(970·1331·1464)이 '초과 시간 안에 해 발견'
+# → UNCERTAIN 으로 바뀌어 기존 결과가 달라진다. 간격 변경은 별도 결정 사항(PLAN_DDA_SEED_ONLY_EXPORT_FIX_20261103 §7).
+_TIME_CHECK_EVERY = 256
 
 # 솔버(=봇 엔진)의 모델이 불완전/비결정적인 기믹.
 # 이런 기믹이 있으면 이동을 과소 생성해 '풀 수 있는데도 막다른 길'로 보일 수 있다(false dead-end).
@@ -307,7 +311,7 @@ def _solve_level_py(
     # time_budget_s <= 0 → 벽시계 무제한(노드 예산만으로 종료). 의심 레벨 정밀 검증용.
     no_time_limit = time_budget_s <= 0
     while heap and nodes < node_budget:
-        if not no_time_limit and nodes % 256 == 0 and (time.monotonic() - t_start) > time_budget_s:
+        if not no_time_limit and nodes % _TIME_CHECK_EVERY == 0 and (time.monotonic() - t_start) > time_budget_s:
             timed_out = True
             break
         remaining, _, _, state, depth = heapq.heappop(heap)
@@ -387,10 +391,28 @@ def _solve_level_py(
     }
 
 
+TASK_MAX_TIME_BUDGET_S = 60.0   # 배치 워커 1레벨 벽시계 상한(0=무제한 요청도 여기서 자름)
+
+
+def task_time_budget(tb: Any) -> float:
+    """solve_level_task 의 시간 예산: None → DEFAULT, 0 이하·상한 초과 → TASK_MAX_TIME_BUDGET_S, 그 외 그대로."""
+    if tb is None:
+        return DEFAULT_TIME_BUDGET_S
+    v = float(tb)
+    if v <= 0 or v > TASK_MAX_TIME_BUDGET_S:
+        return TASK_MAX_TIME_BUDGET_S
+    return v
+
+
 def solve_level_task(args: Dict[str, Any]) -> Dict[str, Any]:
-    """ProcessPool 워커 (레벨 단위 병렬). args: {level_number, level_json, node_budget}"""
+    """ProcessPool 워커 (레벨 단위 병렬). args: {level_number, level_json, node_budget, time_budget_s?}
+
+    [2026-11-03] time_budget_s 를 solve_level 에 넘긴다(예전엔 무시하고 항상 DEFAULT_TIME_BUDGET_S).
+    키가 없거나 None 이면 DEFAULT_TIME_BUDGET_S — 기존 호출(analyze 배치 기본 5.0)의 결과는 같다.
+    프로세스 풀 워커를 오래 붙잡지 않도록 0(무제한)·음수·TASK_MAX_TIME_BUDGET_S 초과는 TASK_MAX_TIME_BUDGET_S 로 자른다."""
     try:
-        result = solve_level(args["level_json"], node_budget=args.get("node_budget", DEFAULT_NODE_BUDGET))
+        result = solve_level(args["level_json"], node_budget=args.get("node_budget", DEFAULT_NODE_BUDGET),
+                             time_budget_s=task_time_budget(args.get("time_budget_s")))
         result["level_number"] = args.get("level_number")
         result["error"] = None
         return result

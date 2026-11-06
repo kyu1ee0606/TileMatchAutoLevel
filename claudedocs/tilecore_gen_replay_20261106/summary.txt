@@ -1,0 +1,37 @@
+levels=300  json_byte_identical=300/300  per-call-identical levels=299/300  total_calls=3924
+calls by site: _quick_deadlock_check(5 games)=1502  _fix_same_type_blocking(3 games)=2422
+C# counters (on runs): {'cs_ok': 3911, 'unsupported': 13, 'error': 0, 'timeout': 0, 'fallback': 13}  unsupported_ratio=0.0033  fallback_ratio=0.0033
+levels with 0 bot calls=0  calls/level median=4.5 max=137
+generate() wall (excl. first case per process; n=297) (load avg ~11-16 shared box, another session's 4 python procs running, mine 3 procs; warm runs only)
+  python total : median 0.852s  p95 4.686s  sum 477.0s
+  C# total     : median 0.081s  p95 1.106s  sum 118.8s
+  python bot-only: median 0.711s  p95 3.785s
+  C# bot-only    : median 0.024s  p95 0.188s
+  speedup total median-of-ratios 13.07x  sum-ratio 4.01x
+output has t0 tiles: 176/300 levels (identical among them: 176)
+strata (n / identical):
+  boss=False size8=False band=0 gimmick=False: 20 / 20
+  boss=False size8=False band=0 gimmick=True: 20 / 20
+  boss=False size8=False band=1 gimmick=False: 20 / 20
+  boss=False size8=False band=1 gimmick=True: 20 / 20
+  boss=False size8=False band=2 gimmick=False: 20 / 20
+  boss=False size8=False band=2 gimmick=True: 19 / 19
+  boss=False size8=False band=3 gimmick=False: 19 / 19
+  boss=False size8=False band=3 gimmick=True: 19 / 19
+  boss=False size8=True band=0 gimmick=True: 2 / 2
+  boss=False size8=True band=1 gimmick=False: 2 / 2
+  boss=False size8=True band=1 gimmick=True: 19 / 19
+  boss=False size8=True band=2 gimmick=False: 8 / 8
+  boss=False size8=True band=2 gimmick=True: 19 / 19
+  boss=False size8=True band=3 gimmick=False: 4 / 4
+  boss=False size8=True band=3 gimmick=True: 19 / 19
+  boss=True size8=False band=0 gimmick=False: 2 / 2
+  boss=True size8=False band=1 gimmick=True: 1 / 1
+  boss=True size8=True band=0 gimmick=False: 1 / 1
+  boss=True size8=True band=0 gimmick=True: 6 / 6
+  boss=True size8=True band=1 gimmick=False: 1 / 1
+  boss=True size8=True band=1 gimmick=True: 19 / 19
+  boss=True size8=True band=2 gimmick=False: 2 / 2
+  boss=True size8=True band=2 gimmick=True: 19 / 19
+  boss=True size8=True band=3 gimmick=True: 19 / 19
+MISMATCH first: {"id": "L14", "idx": 267, "level": 14, "stratum": {"boss": false, "size8": false, "band": 0, "gimmick": false}, "selfcheck": false, "same_bytes": true, "same_calls": false, "first_diff": {"call": 0, "py": {"it": 5, "seed": null, "res": [5, 1.0, 63, 63, 63, 0.0, 21, 63], "end": "74ae1071d0f24814", "s": 0.16399}, "cs": {"it": 5, "seed": null, "res": [5, 1.0, 63, 63, 63, 0.0, 21, 63], "end": "9639fc46ec360ba7", "s": 0.16287}}, "n_calls": 1, "n_it3": 0, "n_it5": 1, "n_instances": 1, "bytes_len": 1591, "sha": "778b4b8196fd01ce", "t0_out": true, "py_s": 0.1656, "cs_s": 0.1644, "order": "on", "first_in_proc": false, "cs_counters": {"cs_ok": 0, "unsupported": 1, "error": 0, "timeout": 0, "fallback": 1, "shadow_same": 0, "shadow_mismatch": 0}, "py_bot_s": 0.164, "cs_bot_s": 0.1629, "pid": 15981}

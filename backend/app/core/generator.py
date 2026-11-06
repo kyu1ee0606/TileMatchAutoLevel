@@ -7,6 +7,7 @@ from typing import Dict, List, Any, Optional, Tuple, Set
 from dataclasses import dataclass
 
 from .bot_simulator import BotSimulator, TileDistributor
+from . import tilecore_client
 from .pattern_templates import get_pattern_positions, get_pattern_name, PATTERN_TEMPLATES, is_layered_pattern, get_layered_pattern_positions
 
 logger = logging.getLogger(__name__)
@@ -16292,8 +16293,9 @@ class LevelGenerator:
                     # 빠른 시뮬레이션으로 클리어율 확인
                     from app.models.bot_profile import get_profile
                     profile = get_profile("optimal")
-                    result = simulator.simulate_with_profile(
-                        test_level, profile, iterations=3, max_moves=level.get("max_moves", 50)
+                    result = tilecore_client.simulate(
+                        simulator, test_level, profile, iterations=3, max_moves=level.get("max_moves", 50),
+                        path="gen"
                     )
 
                     # 클리어율이 더 높으면 채택
@@ -16416,12 +16418,14 @@ class LevelGenerator:
         # [v15.54] 5 iterations w/ 0.3 threshold — speed/accuracy 균형. v15.43에서 10으로
         # 늘렸으나 매 generate마다 ~30~50 sims가 누적되어 생성 시간이 3-7초로 급증함.
         # 5 iter + threshold 0.3은 noise 충분히 억제하면서 cost 50% 절감.
-        result = simulator.simulate_with_profile(
+        result = tilecore_client.simulate(
+            simulator,
             level_json=level,
             profile=profile,
             iterations=5,
             max_moves=max_moves,
-            seed=None
+            seed=None,
+            path="gen"
         )
 
         has_deadlock = result.clear_rate < 0.3

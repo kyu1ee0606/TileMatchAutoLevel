@@ -4838,11 +4838,24 @@ function TestTab({
     for (const l of arr) {
       const m = l.meta as ProductionLevelMeta & { status?: string; status_updated_at?: string };
       out += `|${m.level_number}:${m.generated_at}:${m.status ?? ''}:${m.status_updated_at ?? ''}:${m.match_score ?? ''}:${m.verified ?? ''}`;
+      // level_json 만 바뀌는 쓰기(중앙정렬·튜닝·다른 탭 편집)용 저렴한 표식 — 전체 stringify 없이
+      // 레이어별 col/row/num + 첫/마지막 타일 키. (전수 해시 아님: 타일 값만 바뀌고 키·레이어 크기가 같은 편집은
+      // 폴링으로 못 잡을 수 있음 → 수동 새로고침/탭 재진입 시 반영)
+      const j = l.level_json as unknown as Record<string, unknown>;
+      out += `~${j?.layer ?? ''}`;
+      for (let i = 0; i < (Number(j?.layer) || 0); i++) {
+        const ly = j[`layer_${i}`] as { col?: string; row?: string; num?: string; tiles?: Record<string, unknown> } | undefined;
+        if (!ly) continue;
+        let first = '', last = '', cnt = 0;
+        if (ly.tiles) for (const k in ly.tiles) { if (cnt === 0) first = k; last = k; cnt++; }
+        out += `,${ly.col}/${ly.row}/${ly.num}/${cnt}/${first}/${last}`;
+      }
     }
     return out;
   };
 
   const loadLevels = async (quiet = false) => {
+    let prefetched: ProductionLevel[] | null = null; // 폴링에서 이미 읽은 결과 재사용(2회 조회 방지)
     if (quiet) {
       // 폴링 경로: 변경 없으면 상태 갱신·스크롤 처리 전부 생략 (진행 표시는 변경 시 그대로 갱신)
       try {
@@ -4851,6 +4864,7 @@ function TestTab({
         const polled = await getProductionLevelsByBatch(batchId, options);
         const sig = levelsSig(polled);
         if (sig === levelsSigRef.current) return;
+        prefetched = polled;
       } catch { return; }
     }
     // 스크롤 위치 보존을 위해 현재 위치 저장 (onScroll 핸들러보다 먼저)
@@ -4864,7 +4878,7 @@ function TestTab({
       // API는 LevelStatus만 지원하므로 특수 필터(low_match, untested)는 제외
       const isStatusFilter = filter !== 'all' && filter !== 'low_match' && filter !== 'untested';
       const options = isStatusFilter ? { status: filter as LevelStatus, limit: 2000 } : { limit: 2000 };
-      const loadedLevels = await getProductionLevelsByBatch(batchId, options);
+      const loadedLevels = prefetched ?? await getProductionLevelsByBatch(batchId, options);
       levelsSigRef.current = levelsSig(loadedLevels);
       setLevels(loadedLevels);
 

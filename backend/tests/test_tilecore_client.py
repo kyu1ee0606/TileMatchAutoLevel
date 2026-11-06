@@ -331,6 +331,32 @@ def test_sweep_on_uses_cs(serve):
     assert r["avg_tiles_cleared"] == round(exp.avg_tiles_cleared, 2)
 
 
+# ───────── set in level json (generator _pattern_locked_positions) ─────────
+def test_set_in_level_json_goes_to_cs(serve, profile):
+    serve()
+    lv = copy.deepcopy(LEVEL)
+    lv["_pattern_locked_positions"] = {(1, 2), (0, 1)}            # tuples sortable
+    lv["_mixed"] = frozenset({1, "a"})                            # not orderable -> repr sort
+    before = copy.deepcopy(lv)
+    res = tc.simulate(BotSimulator(), lv, profile, iterations=5, seed=11)
+    assert res == _expected(profile, 11)[0]                       # fake answered (not python fallback)
+    c = tc.counters()["gen"]
+    assert c["cs_ok"] == 1 and c["fallback"] == 0 and c["serialize_error"] == 0
+    assert lv == before and isinstance(lv["_pattern_locked_positions"], set)   # python object untouched
+    assert tc._json_default({3, 1, 2}) == [1, 2, 3] and tc._json_default(frozenset({1, "a"})) == sorted([1, "a"], key=repr)
+
+
+def test_unserializable_object_is_serialize_error_fallback(serve, profile):
+    serve()
+    lv = copy.deepcopy(LEVEL)
+    lv["bad"] = object()
+    res = tc.simulate(BotSimulator(), lv, profile, iterations=5, seed=7)
+    assert res == _py(profile, 7)[0]
+    c = tc.counters()["gen"]
+    assert c["serialize_error"] == 1 and c["fallback"] == 1 and c["error"] == 0 and c["cs_ok"] == 0
+    assert not tc.get_worker("gen")._pending                       # nothing left registered
+
+
 # ───────── protocol freeze (SERVE_PROTOCOL.md) details ─────────
 def test_deadline_kind_counts_timeout_and_keeps_worker(serve, profile):
     serve("--deadline-err")

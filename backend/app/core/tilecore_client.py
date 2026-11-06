@@ -61,6 +61,21 @@ class ServeError(Exception):
     """C# answered ok:false (not unsupported) or a malformed reply."""
 
 
+class ServeSerializeError(ServeError):
+    """Request payload not JSON-serializable even after set/frozenset conversion (python fallback, own counter)."""
+
+
+def _json_default(o):
+    """C# request serialization only (python-side objects stay untouched): set/frozenset -> sorted list
+    (repr-sorted if elements are not mutually orderable). Anything else -> TypeError -> serialize_error."""
+    if isinstance(o, (set, frozenset)):
+        try:
+            return sorted(o)
+        except TypeError:
+            return sorted(o, key=repr)
+    raise TypeError(f"not JSON serializable: {type(o).__name__}")
+
+
 class ServeDeadline(ServeError):
     """C# answered kind:"deadline" (serve's own budget ran out; process is fine, counted as timeout)."""
 
@@ -78,7 +93,8 @@ def _env_float(name: str, default: float) -> float:
 
 
 # ───────────────────────── counters ─────────────────────────
-_COUNTER_KEYS = ("cs_ok", "unsupported", "error", "timeout", "fallback", "shadow_same", "shadow_mismatch")
+_COUNTER_KEYS = ("cs_ok", "unsupported", "error", "timeout", "fallback", "shadow_same", "shadow_mismatch",
+                 "serialize_error")
 _counters: Dict[str, Dict[str, int]] = {}
 _clock = threading.Lock()
 
@@ -257,6 +273,12 @@ class ServeWorker:
         t_end = time.monotonic() + timeout_s
         rid = f"r{next(self._ids)}"
         fut: cf.Future = cf.Future()
+        body = dict(msg, id=rid)
+        body.setdefault("deadline_ms", int(timeout_s * 1000))
+        try:    # before touching the process/pending table: a bad payload leaves no state behind
+            line = json.dumps(body, ensure_ascii=False, separators=(",", ":"), default=_json_default) + "\n"
+        except (TypeError, ValueError) as exc:
+            raise ServeSerializeError(f"{type(exc).__name__}: {exc}"[:200])
 
         def remaining() -> float:
             return max(0.0, t_end - time.monotonic())
@@ -275,9 +297,6 @@ class ServeWorker:
         finally:
             self._lock.release()
 
-        body = dict(msg, id=rid)
-        body.setdefault("deadline_ms", int(timeout_s * 1000))
-        line = json.dumps(body, ensure_ascii=False, separators=(",", ":")) + "\n"
         watchdog = threading.Timer(remaining(), self._expire, args=(proc,))
         watchdog.daemon = True
         watchdog.start()
@@ -476,7 +495,9 @@ def _cs_call(path, level_json, profile, iterations, mm, seed, early_termination,
 
 
 def _classify(path: str, exc: Exception) -> str:
-    key = "unsupported" if isinstance(exc, ServeUnsupported) else "timeout" if isinstance(exc, (TimeoutError, ServeDeadline)) else "error"
+    key = ("unsupported" if isinstance(exc, ServeUnsupported) else
+           "serialize_error" if isinstance(exc, ServeSerializeError) else
+           "timeout" if isinstance(exc, (TimeoutError, ServeDeadline)) else "error")
     _count(path, key)
     return key
 
@@ -556,7 +577,8 @@ def simulate(simulator: BotSimulator, level_json: dict, profile, *, iterations: 
             _count(path, "cs_ok")
             _count(path, "shadow_same" if ok else "shadow_mismatch")
         except Exception as exc:
-            rec["category"] = {"unsupported": "cs_unsupported", "timeout": "timeout"}.get(_classify(path, exc),
+            rec["category"] = {"unsupported": "cs_unsupported", "timeout": "timeout",
+                                                                      "serialize_error": "serialize_error"}.get(_classify(path, exc),
                                                                                            "cs_error")
             rec["error"] = str(exc)[:200]
         _shadow_log(path, rec)
@@ -707,7 +729,8 @@ def _shadow_sweep(pool, tasks: List[dict], path: str) -> List[dict]:
             row = {"ts": time.time(), "path": path, "lvl": _lvl_hash(a["level_json"]), "theta": a.get("theta"),
                    "seed": a.get("seed"), "py_s": round(rec["py_s"], 4)}
             if isinstance(r, Exception):
-                row["category"] = {"unsupported": "cs_unsupported", "timeout": "timeout"}.get(_classify(path, r),
+                row["category"] = {"unsupported": "cs_unsupported", "timeout": "timeout",
+                                                                      "serialize_error": "serialize_error"}.get(_classify(path, r),
                                                                                               "cs_error")
                 row["error"] = str(r)[:200]
             else:

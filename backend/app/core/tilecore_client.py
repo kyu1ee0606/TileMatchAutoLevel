@@ -525,6 +525,33 @@ def _state_hash(rng: random.Random) -> str:
     return hashlib.sha256(repr(rng.getstate()).encode()).hexdigest()[:16]
 
 
+def _gimmicks(level_json) -> List[str]:
+    """Shadow-log stratification tags (cheap scan): effects (ice/chain/grass/bomb/...), stack_/craft_ ids, t0, rs0
+    (randSeed<=0). Never raises."""
+    tags = set()
+    try:
+        if int(level_json.get("randSeed") or 0) <= 0:
+            tags.add("rs0")
+        for k, layer in level_json.items():
+            if not (isinstance(k, str) and k.startswith("layer_") and isinstance(layer, dict)):
+                continue
+            for t in (layer.get("tiles") or {}).values():
+                if not isinstance(t, (list, tuple)) or not t:
+                    continue
+                tid = str(t[0])
+                if tid == "t0":
+                    tags.add("t0")
+                elif tid.startswith(("stack", "craft")):
+                    tags.add(tid.split("_")[0])
+                    if "'t0'" in repr(t):
+                        tags.add("t0")
+                if len(t) > 1 and isinstance(t[1], str) and t[1]:
+                    tags.add(t[1].rstrip("0123456789_"))
+    except Exception:
+        pass
+    return sorted(tags)
+
+
 def _lvl_hash(level_json) -> str:
     return hashlib.sha256(json.dumps(level_json, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
@@ -558,7 +585,7 @@ def simulate(simulator: BotSimulator, level_json: dict, profile, *, iterations: 
         res = py()
         py_s = time.perf_counter() - t0
         end_hash = _state_hash(simulator._rng)
-        rec = {"ts": time.time(), "path": path, "lvl": _lvl_hash(level_json), "seed": seed, "n_req": iterations,
+        rec = {"ts": time.time(), "path": path, "lvl": _lvl_hash(level_json), "gim": _gimmicks(level_json), "seed": seed, "n_req": iterations,
                "profile": getattr(profile, "name", None), "py_s": round(py_s, 4)}
         try:
             t1 = time.perf_counter()
@@ -616,7 +643,7 @@ def _sample_compare(path, level_json, profile, iterations, max_moves, seed, hono
         same = _res_key(py_res) == _res_key(cs_res) and (seed is not None or
                                                          _state_hash(chk._rng) == _state_hash(cs_end_rng))
         _count(path, "shadow_same" if same else "shadow_mismatch")
-        _shadow_log(path, {"ts": time.time(), "path": path, "lvl": _lvl_hash(level_json), "seed": seed,
+        _shadow_log(path, {"ts": time.time(), "path": path, "lvl": _lvl_hash(level_json), "gim": _gimmicks(level_json), "seed": seed,
                            "category": "same" if same else "mismatch", "sampled_on": True})
     except Exception as exc:     # never break the service
         logger.warning("[tilecore_client] sample compare failed: %s", exc)
@@ -726,7 +753,7 @@ def _shadow_sweep(pool, tasks: List[dict], path: str) -> List[dict]:
     try:
         cs = _cs_many(tasks, path)
         for a, rec, r in zip(tasks, recs, cs):
-            row = {"ts": time.time(), "path": path, "lvl": _lvl_hash(a["level_json"]), "theta": a.get("theta"),
+            row = {"ts": time.time(), "path": path, "lvl": _lvl_hash(a["level_json"]), "gim": _gimmicks(a["level_json"]), "theta": a.get("theta"),
                    "seed": a.get("seed"), "py_s": round(rec["py_s"], 4)}
             if isinstance(r, Exception):
                 row["category"] = {"unsupported": "cs_unsupported", "timeout": "timeout",

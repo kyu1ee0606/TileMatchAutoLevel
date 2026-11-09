@@ -357,6 +357,20 @@ def test_unserializable_object_is_serialize_error_fallback(serve, profile):
     assert not tc.get_worker("gen")._pending                       # nothing left registered
 
 
+def test_gimmick_tags_and_shadow_log_field(serve, profile, tmp_path):
+    lv = copy.deepcopy(LEVEL)
+    lv["randSeed"] = 0
+    lv["layer_0"]["tiles"]["0_0"] = ["t0", ""]
+    lv["layer_0"]["tiles"]["1_0"] = ["t1", "ice"]
+    lv["layer_0"]["tiles"]["2_0"] = ["stack_s", "bomb_5"]
+    assert {"rs0", "t0", "ice", "stack", "bomb"} <= set(tc._gimmicks(lv))
+    assert tc._gimmicks({"randSeed": 5}) == [] and tc._gimmicks(None) == []      # never raises
+    serve(mode="shadow")
+    tc.simulate(BotSimulator(), copy.deepcopy(LEVEL), profile, iterations=5, seed=7)
+    rec = json.loads((tmp_path / "gen_shadow_diff.jsonl").read_text().splitlines()[0])
+    assert "gim" in rec
+
+
 # ───────── protocol freeze (SERVE_PROTOCOL.md) details ─────────
 def test_deadline_kind_counts_timeout_and_keeps_worker(serve, profile):
     serve("--deadline-err")

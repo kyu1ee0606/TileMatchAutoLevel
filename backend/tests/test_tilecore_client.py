@@ -371,6 +371,83 @@ def test_gimmick_tags_and_shadow_log_field(serve, profile, tmp_path):
     assert "gim" in rec
 
 
+# ───────── deadline classification: own deadline is ALWAYS a timeout, in either order ─────────
+def _sim_msg():
+    return {"op": "sim", "mode": "gen", "profile": {}, "level": {}, "iterations": 1, "seed": 1, "max_moves": 5}
+
+
+def _run_req(w, timeout, out, key):
+    try:
+        out[key] = w.request(_sim_msg(), timeout)
+    except BaseException as exc:      # noqa: BLE001
+        out[key] = exc
+
+
+def _wait_pending(w, n, limit=10):
+    t0 = time.time()
+    while len(w._pending) < n and time.time() - t0 < limit:
+        time.sleep(0.01)
+    assert len(w._pending) >= n
+
+
+def test_watchdog_fires_first_is_timeout_not_unavailable(serve):
+    serve("--hang")
+    w = tc.get_worker("gen")
+    out = {}
+    t = threading.Thread(target=_run_req, args=(w, 30, out, "a"), daemon=True)
+    t.start()
+    _wait_pending(w, 1)
+    rid = next(iter(w._pending))
+    w._on_deadline(w._proc, rid)                 # deterministic: the watchdog callback wins, before any wait-side timeout
+    t.join(10)
+    assert isinstance(out["a"], TimeoutError), out["a"]
+    assert not w._deadline_hit                   # bookkeeping cleaned up
+
+
+def test_wait_side_timeout_first_is_timeout(serve, monkeypatch):
+    serve("--hang")
+
+    class _NoTimer:                               # watchdog never fires -> only the wait side can time out
+        def __init__(self, *a, **k): pass
+        daemon = True
+        def start(self): pass
+        def cancel(self): pass
+    monkeypatch.setattr(tc.threading, "Timer", _NoTimer)
+    out = {}
+    t = threading.Thread(target=_run_req, args=(tc.get_worker("gen"), 0.4, out, "a"), daemon=True)
+    t.start()
+    t.join(10)
+    assert isinstance(out["a"], TimeoutError), out["a"]
+
+
+def test_other_waiting_request_stays_unavailable(serve):
+    serve("--hang")
+    w = tc.get_worker("gen")
+    out = {}
+    ts = [threading.Thread(target=_run_req, args=(w, 30, out, k), daemon=True) for k in ("a", "b")]
+    ts[0].start()
+    _wait_pending(w, 1)
+    first = next(iter(w._pending))
+    ts[1].start()
+    _wait_pending(w, 2)
+    w._on_deadline(w._proc, first)               # only request 'a' hit ITS deadline
+    [t.join(10) for t in ts]
+    assert isinstance(out["a"], TimeoutError)
+    assert isinstance(out["b"], tc.ServeUnavailable) and not isinstance(out["b"], TimeoutError), out["b"]
+
+
+def test_deadline_loop_repeated_never_error(serve, monkeypatch):
+    """Old flake: under load the watchdog could win the race and the call was counted as 'error'. 15 real rounds."""
+    serve("--hang")
+    monkeypatch.setenv("TILECORE_TIMEOUT_S", "0.2")
+    monkeypatch.setattr(tc, "_BACKOFF", (0.0,))
+    for _ in range(15):
+        tc.get_worker("gen")._retry_at = 0
+        tc.simulate(BotSimulator(), copy.deepcopy(LEVEL), get_profile(BotType.AVERAGE), iterations=5, seed=7)
+    c = tc.counters()["gen"]
+    assert c["timeout"] == 15 and c["error"] == 0 and c["fallback"] == 15
+
+
 # ───────── protocol freeze (SERVE_PROTOCOL.md) details ─────────
 def test_deadline_kind_counts_timeout_and_keeps_worker(serve, profile):
     serve("--deadline-err")

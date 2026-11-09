@@ -224,12 +224,90 @@ def test_on_sample_compare_marks_seeded(monkeypatch, profile, tmp_path):
     assert rec["seeded_copy"] is True and rec["sampled_on"] is True
 
 
-# ───────── report script separates the columns ─────────
-def test_report_separates_seeded_column(tmp_path):
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
-    import tilecore_shadow_report as rep
-    rows = [{"category": "same", "gim": ["ice"]}] * 3 + [{"category": "same", "seeded_copy": True, "gim": ["t0", "rs0"]}] * 2
-    nz, sd = rep.split_seeded(rows)
-    assert len(nz) == 3 and len(sd) == 2
-    a = rep.agg(nz)
-    assert a["same"] == 3
+# ───────── detection mirrors bot_simulator (negative seeds, unlock, layer range) ─────────
+def test_detection_matches_python_semantics():
+    neg = _lvl("top")
+    neg["randSeed"] = -5                                   # python: ``rand_seed if rand_seed > 0 else 0`` -> time seed
+    assert tc._needs_seeded_copy(neg)
+    none_seed = _lvl("top")
+    none_seed["randSeed"] = None                           # python itself raises on None > 0 -> not ours
+    assert not tc._needs_seeded_copy(none_seed)
+    # python: unlock = get("xUnlockTile", get("unlockTile", 0)); xUnlockTile present (even 0) wins over unlockTile
+    u1 = _lvl("top"); u1["xUnlockTile"] = 0; u1["unlockTile"] = 2
+    u2 = _lvl("top"); u2["unlockTile"] = 2
+    u3 = _lvl("top"); u3["xUnlockTile"] = 1
+    assert tc._needs_seeded_copy(u1) and not tc._needs_seeded_copy(u2) and not tc._needs_seeded_copy(u3)
+    # t0 beyond layer count is never read by python
+    far = _lvl("none")
+    far["layer_5"] = {"col": "3", "row": "3", "tiles": {"0_0": ["t0", ""]}}
+    assert not tc._needs_seeded_copy(far)
+
+
+def test_python_does_not_mutate_nested_level_objects(profile):
+    """Shallow copy is enough: a simulate_with_profile call leaves every nested object of the level unchanged."""
+    for kind in ("top", "stack", "craft"):
+        lv = _lvl(kind)
+        lv["randSeed"] = SEED
+        before = copy.deepcopy(lv)
+        BotSimulator().simulate_with_profile(lv, profile, iterations=3, seed=None)
+        assert lv == before, kind
+
+
+# ───────── report script: separated populations, required paths ─────────
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+import tilecore_shadow_report as rep  # noqa: E402
+
+
+def _write(d, path, rows):
+    with open(os.path.join(d, f"{path}_shadow_diff.jsonl"), "w") as f:
+        for r in rows:
+            f.write(json.dumps(dict({"ts": 1.0}, **r)) + "\n")
+
+
+def _rows(n_normal, n_seeded, seeded_cat="same", normal_cat="same"):
+    return ([{"category": normal_cat, "gim": ["ice"]}] * n_normal +
+            [{"category": seeded_cat, "seeded_copy": True, "gim": ["t0", "rs0"]}] * n_seeded)
+
+
+def test_report_never_merges_populations(tmp_path, capsys):
+    _write(tmp_path, "gen", _rows(6, 4))
+    _write(tmp_path, "sweep", _rows(6, 0))
+    rc = rep.main(["--dir", str(tmp_path), "--min-calls", "5", "--min-gimmick", "1", "--json", str(tmp_path / "o.json")])
+    out = capsys.readouterr().out
+    assert rc == 0
+    j = json.load(open(tmp_path / "o.json"))
+    g = j["gen"]
+    assert g["normal"]["n"] == 6 and g["normal"]["same"] == 6 and g["seeded_copy"]["n"] == 4 and g["seeded_copy"]["same"] == 4
+    assert "same" not in {k for k in g if k not in ("normal", "seeded_copy", "gimmicks")}        # no top-level merged same
+    assert set(g["gimmicks"]) == {"normal", "seeded_copy"}
+    assert "ice" in g["gimmicks"]["normal"] and "ice" not in g["gimmicks"]["seeded_copy"]        # gimmick tables split too
+    assert "t0" in g["gimmicks"]["seeded_copy"] and "t0" not in g["gimmicks"]["normal"]
+    assert "<normal" in out and "<seeded_copy" in out and "same=10" not in out
+    assert j["sweep"]["verdict_seeded_copy"] == "N/A"
+
+
+def test_report_seeded_mismatch_fails_even_if_normal_ok(tmp_path):
+    _write(tmp_path, "gen", _rows(6, 3, seeded_cat="mismatch"))
+    _write(tmp_path, "sweep", _rows(6, 0))
+    assert rep.main(["--dir", str(tmp_path), "--min-calls", "5"]) == 2
+
+
+def test_report_seeded_error_rate_is_its_own_condition(tmp_path):
+    _write(tmp_path, "gen", _rows(6, 10, seeded_cat="cs_error"))
+    _write(tmp_path, "sweep", _rows(6, 0))
+    assert rep.main(["--dir", str(tmp_path), "--min-calls", "5", "--json", str(tmp_path / "o.json")]) == 2
+    j = json.load(open(tmp_path / "o.json"))
+    assert j["gen"]["verdict_normal"] == "PASS" and j["gen"]["verdict_seeded_copy"].startswith("FAIL")
+
+
+def test_report_missing_path_is_no_data_and_nonzero(tmp_path, capsys):
+    _write(tmp_path, "gen", _rows(6, 0))
+    assert rep.main(["--dir", str(tmp_path), "--min-calls", "5"]) == 3          # sweep log missing -> not passed
+    assert "NO_DATA" in capsys.readouterr().out
+    assert rep.main(["--dir", str(tmp_path), "--min-calls", "5", "--paths", "gen"]) == 0
+    assert rep.main(["--dir", str(tmp_path / "nope")]) == 3
+
+
+def test_report_normal_not_comparable_over_5pct_fails(tmp_path):
+    _write(tmp_path, "gen", _rows(20, 0) + [{"category": "cs_unsupported", "gim": ["ice"]}] * 2)
+    assert rep.main(["--dir", str(tmp_path), "--min-calls", "5", "--paths", "gen"]) == 2

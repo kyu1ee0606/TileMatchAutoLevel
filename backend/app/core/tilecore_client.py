@@ -129,6 +129,7 @@ class ServeWorker:
         self._proc: Optional[subprocess.Popen] = None
         self._pending: Dict[str, cf.Future] = {}
         self._plock = threading.Lock()
+        self._deadline_hit: set = set()        # request ids whose OWN deadline fired (watchdog or wait side)
         self._wlock = threading.Lock()         # serializes pipe writes (taken outside _lock)
         self._ids = itertools.count(1)
         self._hello: Optional[dict] = None
@@ -297,7 +298,7 @@ class ServeWorker:
         finally:
             self._lock.release()
 
-        watchdog = threading.Timer(remaining(), self._expire, args=(proc,))
+        watchdog = threading.Timer(remaining(), self._on_deadline, args=(proc, rid))
         watchdog.daemon = True
         watchdog.start()
         try:
@@ -317,7 +318,7 @@ class ServeWorker:
             except (OSError, ValueError):
                 with self._plock:
                     self._pending.pop(rid, None)
-                timed_out = time.monotonic() >= t_end          # watchdog killed us mid-write
+                timed_out = rid in self._deadline_hit or time.monotonic() >= t_end   # watchdog killed us mid-write
                 self._expire(proc)
                 if timed_out:
                     raise TimeoutError("serve write timeout")
@@ -329,8 +330,16 @@ class ServeWorker:
                 with self._plock:
                     self._pending.pop(rid, None)
                 raise TimeoutError(f"serve request timeout {timeout_s}s")
+            except ServeUnavailable:
+                # The kill that failed this future may have been OUR OWN deadline (watchdog won the race against the
+                # wait-side timeout) -> always report that as a timeout. Other requests of the same process keep
+                # ServeUnavailable (their deadline did not fire).
+                if rid in self._deadline_hit or time.monotonic() >= t_end:
+                    raise TimeoutError(f"serve request timeout {timeout_s}s")
+                raise
         finally:
             watchdog.cancel()
+            self._deadline_hit.discard(rid)
         if not resp.get("ok"):
             if resp.get("unsupported"):
                 raise ServeUnsupported(str(resp.get("error", "")))
@@ -338,6 +347,11 @@ class ServeWorker:
                 raise ServeDeadline(str(resp.get("error", "")))
             raise ServeError(f"{resp.get('kind', 'error')}: {resp.get('error', '')}")
         return resp
+
+    def _on_deadline(self, proc: subprocess.Popen, rid: str) -> None:
+        """Watchdog callback: remember WHICH request's deadline fired (before the kill), then expire the process."""
+        self._deadline_hit.add(rid)
+        self._expire(proc)
 
     def _expire(self, proc: subprocess.Popen) -> None:
         """Deadline hit or write failed: kill ``proc`` right away (no lock -> frees a blocked write), then clean the
@@ -561,8 +575,9 @@ def _has_t0(level_json) -> bool:
     """Any t0 tile, mirroring BotSimulator._create_initial_state (bot_simulator.py:1229-1242): top-level id 't0', or a
     stack_/craft_ container whose ``tile[2]`` is a non-empty list ([count] = number of hidden t0 tiles inside)."""
     try:
-        for k, layer in level_json.items():
-            if not (isinstance(k, str) and k.startswith("layer_") and isinstance(layer, dict)):
+        for i in range(int(level_json.get("layer", 8))):      # python only reads layer_0..layer_{layer-1}
+            layer = level_json.get(f"layer_{i}", {})
+            if not isinstance(layer, dict):
                 continue
             for t in (layer.get("tiles") or {}).values():
                 if not (isinstance(t, (list, tuple)) and t):
@@ -582,9 +597,13 @@ def _needs_seeded_copy(level_json) -> bool:
     reproducible) and C# refuses ("t0 tile with randSeed<=0"). Excluded: unlockTile>0 - python takes its
     ``_client_key_resolve`` path only when randSeed != 0, so injecting a seed would change python semantics there."""
     try:
-        if int(level_json.get("randSeed") or 0) > 0:
+        # same reads as python: rand_seed = get("randSeed", 0), used as ``rand_seed if rand_seed > 0 else 0`` (so
+        # negatives are time-seeded too); a non-numeric value (None/str) makes python itself raise -> not our case
+        rs = level_json.get("randSeed", 0)
+        if isinstance(rs, bool) or not isinstance(rs, (int, float)) or rs > 0:
             return False
-        if (level_json.get("xUnlockTile") or level_json.get("unlockTile") or 0) > 0:
+        ut = level_json.get("xUnlockTile", level_json.get("unlockTile", 0))   # python: ``if unlock_tile and unlock_tile > 0``
+        if ut and ut > 0:
             return False
     except Exception:
         return False

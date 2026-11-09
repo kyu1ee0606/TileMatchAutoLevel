@@ -10,7 +10,9 @@ Categories per record: same | mismatch | cs_unsupported | timeout | cs_error | s
 PASS (per path) = mismatch == 0  AND  not_comparable / total < 5%  (plan line 196)  AND  volume enough
   (total >= --min-calls; every gimmick tag seen at least --min-gimmick times is reported, tags below it are flagged
   "thin" and listed, not failed).
-Also prints the not_comparable breakdown so 'rs0'(randSeed<=0, python time-seeded t0) can be seen separately.
+Rows with "seeded_copy": true (randSeed<=0 + t0 level compared on a per-call seeded copy, plan option (a)) are
+tabulated in their OWN column (<시드 고정 사본으로 비교>); the PASS line counts mismatches of both populations but the
+text never merges 'same' of the two. Also prints the not_comparable breakdown so 'rs0'(randSeed<=0, python time-seeded t0) can be seen separately.
 Exit code 0 = all paths PASS, 2 = something failed, 3 = no data.
 """
 import argparse
@@ -36,6 +38,14 @@ def load(path, since):
             continue
         rows.append(r)
     return rows
+
+
+def split_seeded(rows):
+    """(normal rows, rows compared on a per-call SEEDED COPY of a randSeed<=0 + t0 level). Never merged in the verdict
+    text: 'mismatch 0' must say which population it covers."""
+    nz = [r for r in rows if not r.get("seeded_copy")]
+    sd = [r for r in rows if r.get("seeded_copy")]
+    return nz, sd
 
 
 def agg(rows):
@@ -66,6 +76,8 @@ def main():
             continue
         any_data = True
         res = agg(rows)
+        nz, sd = split_seeded(rows)
+        res["normal"], res["seeded_copy"] = agg(nz), agg(sd)
         by_g = collections.defaultdict(list)
         for r in rows:
             for g in (r.get("gim") or ["(none)"]):
@@ -93,6 +105,10 @@ def main():
             print("   " + " ".join(f"{k}={res[k]}" for k in ("same", "mismatch") + NOT_COMPARABLE),
                   f"| not_comparable={res['not_comparable_pct']}% (rs0 {res['not_comparable_with_rs0']}, other "
                   f"{res['not_comparable_without_rs0']}) | py_s={res['py_s']} cs_s={res['cs_s']}")
+            for label, key in (("일반(원본 레벨 그대로 비교)", "normal"), ("시드 고정 사본으로 비교", "seeded_copy")):
+                v = res[key]
+                print(f"   <{label}> n={v['total']} same={v['same']} mismatch={v['mismatch']} "
+                      f"not_comparable={v['not_comparable']} py_s={v['py_s']} cs_s={v['cs_s']}")
             for g, v in res["gimmicks"].items():
                 print(f"   [{g}] n={v['total']} same={v['same']} mismatch={v['mismatch']} not_cmp={v['not_comparable']}"
                       f"{'  (thin)' if g in res['thin_gimmicks'] else ''}")

@@ -94,7 +94,7 @@ def _env_float(name: str, default: float) -> float:
 
 # ───────────────────────── counters ─────────────────────────
 _COUNTER_KEYS = ("cs_ok", "unsupported", "error", "timeout", "fallback", "shadow_same", "shadow_mismatch",
-                 "serialize_error")
+                 "serialize_error", "seeded_copy", "seeded_same", "seeded_mismatch")
 _counters: Dict[str, Dict[str, int]] = {}
 _clock = threading.Lock()
 
@@ -543,7 +543,7 @@ def _gimmicks(level_json) -> List[str]:
                     tags.add("t0")
                 elif tid.startswith(("stack", "craft")):
                     tags.add(tid.split("_")[0])
-                    if "'t0'" in repr(t):
+                    if len(t) > 2 and isinstance(t[2], list) and len(t[2]) > 0:     # hidden t0 tiles inside
                         tags.add("t0")
                 if len(t) > 1 and isinstance(t[1], str) and t[1]:
                     tags.add(t[1].rstrip("0123456789_"))
@@ -554,6 +554,56 @@ def _gimmicks(level_json) -> List[str]:
 
 def _lvl_hash(level_json) -> str:
     return hashlib.sha256(json.dumps(level_json, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
+# ───────────────────────── seeded copy (randSeed<=0 + t0) ─────────────────────────
+def _has_t0(level_json) -> bool:
+    """Any t0 tile, mirroring BotSimulator._create_initial_state (bot_simulator.py:1229-1242): top-level id 't0', or a
+    stack_/craft_ container whose ``tile[2]`` is a non-empty list ([count] = number of hidden t0 tiles inside)."""
+    try:
+        for k, layer in level_json.items():
+            if not (isinstance(k, str) and k.startswith("layer_") and isinstance(layer, dict)):
+                continue
+            for t in (layer.get("tiles") or {}).values():
+                if not (isinstance(t, (list, tuple)) and t):
+                    continue
+                if t[0] == "t0":
+                    return True
+                if isinstance(t[0], str) and t[0].startswith(("stack_", "craft_")) and len(t) > 2 \
+                        and isinstance(t[2], list) and len(t[2]) > 0:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _needs_seeded_copy(level_json) -> bool:
+    """randSeed missing/<=0 AND a t0 tile exists: python's TileDistributor then seeds from time.time() (not
+    reproducible) and C# refuses ("t0 tile with randSeed<=0"). Excluded: unlockTile>0 - python takes its
+    ``_client_key_resolve`` path only when randSeed != 0, so injecting a seed would change python semantics there."""
+    try:
+        if int(level_json.get("randSeed") or 0) > 0:
+            return False
+        if (level_json.get("xUnlockTile") or level_json.get("unlockTile") or 0) > 0:
+            return False
+    except Exception:
+        return False
+    return _has_t0(level_json)
+
+
+def _call_seed() -> int:
+    """Seed for a seeded copy = exactly what python itself would use: ``int(time.time()) & 0xFFFFFFFF``
+    (bot_simulator.zWellRandom.seed for seed==0). Wall clock only - consumes NO global ``random`` and NO sim RNG, so
+    generation results are unaffected; same-second calls share one seed like python's time seeding does.
+    0 is mapped to 1 (0 would mean 'time seed' again)."""
+    return (int(time.time()) & 0xFFFFFFFF) or 1
+
+
+def _with_seed(level_json: dict, seed: int) -> dict:
+    """Shallow copy with randSeed set; the original object is never modified (nothing below it is mutated)."""
+    d = dict(level_json)
+    d["randSeed"] = seed
+    return d
 
 
 # ───────────────────────── public adapter ─────────────────────────
@@ -579,6 +629,10 @@ def simulate(simulator: BotSimulator, level_json: dict, profile, *, iterations: 
     mm = resolve_max_moves(level_json, max_moves)
     pre_state = rng_state_to_json(simulator._rng) if seed is None else None
     pre_rng_state = simulator._rng.getstate()
+    seeded = _needs_seeded_copy(level_json)
+    cs_level = _with_seed(level_json, _call_seed()) if seeded else level_json
+    if seeded:
+        _count(path, "seeded_copy")
 
     if mode == "shadow":
         t0 = time.perf_counter()
@@ -587,12 +641,26 @@ def simulate(simulator: BotSimulator, level_json: dict, profile, *, iterations: 
         end_hash = _state_hash(simulator._rng)
         rec = {"ts": time.time(), "path": path, "lvl": _lvl_hash(level_json), "gim": _gimmicks(level_json), "seed": seed, "n_req": iterations,
                "profile": getattr(profile, "name", None), "py_s": round(py_s, 4)}
+        if seeded:
+            rec["seeded_copy"] = True
         try:
+            ref_res = res
+            if seeded:
+                # reference = python on the SAME seeded copy, on a separate simulator (the service sim's RNG/state stay
+                # exactly as the original-level run left them); costs one extra python run per seeded call
+                t2 = time.perf_counter()
+                ref_sim = BotSimulator()
+                ref_sim._rng.setstate(pre_rng_state)
+                ref_res = ref_sim.simulate_with_profile(cs_level, profile, iterations=iterations, max_moves=max_moves,
+                                                        seed=seed, honor_zero_seed=honor_zero_seed,
+                                                        early_termination=early_termination)
+                end_hash = _state_hash(ref_sim._rng)
+                rec["py_ref_s"] = round(time.perf_counter() - t2, 4)
             t1 = time.perf_counter()
-            games, st_out = _cs_call(path, level_json, profile, iterations, mm, seed, early_termination, pre_state)
+            games, st_out = _cs_call(path, cs_level, profile, iterations, mm, seed, early_termination, pre_state)
             rec["cs_s"] = round(time.perf_counter() - t1, 4)
             cs_res = _build_result(profile, games, mm)
-            same_res = _res_key(cs_res) == _res_key(res)
+            same_res = _res_key(cs_res) == _res_key(ref_res)
             same_state = False
             if st_out is not None:
                 chk = random.Random()
@@ -602,7 +670,7 @@ def simulate(simulator: BotSimulator, level_json: dict, profile, *, iterations: 
             ok = same_res and (same_state or seed is not None)
             rec.update(category="same" if ok else "mismatch", same_result=same_res, same_state=same_state)
             _count(path, "cs_ok")
-            _count(path, "shadow_same" if ok else "shadow_mismatch")
+            _count(path, ("seeded_" if seeded else "shadow_") + ("same" if ok else "mismatch"))
         except Exception as exc:
             rec["category"] = {"unsupported": "cs_unsupported", "timeout": "timeout",
                                                                       "serialize_error": "serialize_error"}.get(_classify(path, exc),
@@ -613,7 +681,7 @@ def simulate(simulator: BotSimulator, level_json: dict, profile, *, iterations: 
 
     # mode == "on"
     try:
-        games, st_out = _cs_call(path, level_json, profile, iterations, mm, seed, early_termination, pre_state)
+        games, st_out = _cs_call(path, cs_level, profile, iterations, mm, seed, early_termination, pre_state)
         res = _build_result(profile, games, mm)
         if seed is None and st_out is None:
             raise ServeError("rng_state_out missing")
@@ -627,13 +695,13 @@ def simulate(simulator: BotSimulator, level_json: dict, profile, *, iterations: 
     _count(path, "cs_ok")
     sample = _env_float("TILECORE_SHADOW_SAMPLE", 0.0)
     if sample > 0 and random.random() < sample:
-        _sample_compare(path, level_json, profile, iterations, max_moves, seed, honor_zero_seed, early_termination,
-                        pre_rng_state, res, simulator._rng)
+        _sample_compare(path, cs_level, profile, iterations, max_moves, seed, honor_zero_seed, early_termination,
+                        pre_rng_state, res, simulator._rng, seeded)
     return res
 
 
 def _sample_compare(path, level_json, profile, iterations, max_moves, seed, honor_zero_seed, early_termination,
-                    pre_rng_state, cs_res, cs_end_rng) -> None:
+                    pre_rng_state, cs_res, cs_end_rng, seeded: bool = False) -> None:
     try:
         chk = BotSimulator()
         chk._rng.setstate(pre_rng_state)
@@ -642,9 +710,12 @@ def _sample_compare(path, level_json, profile, iterations, max_moves, seed, hono
                                            early_termination=early_termination)
         same = _res_key(py_res) == _res_key(cs_res) and (seed is not None or
                                                          _state_hash(chk._rng) == _state_hash(cs_end_rng))
-        _count(path, "shadow_same" if same else "shadow_mismatch")
-        _shadow_log(path, {"ts": time.time(), "path": path, "lvl": _lvl_hash(level_json), "gim": _gimmicks(level_json), "seed": seed,
-                           "category": "same" if same else "mismatch", "sampled_on": True})
+        _count(path, ("seeded_" if seeded else "shadow_") + ("same" if same else "mismatch"))
+        row = {"ts": time.time(), "path": path, "lvl": _lvl_hash(level_json), "gim": _gimmicks(level_json), "seed": seed,
+               "category": "same" if same else "mismatch", "sampled_on": True}
+        if seeded:
+            row["seeded_copy"] = True
+        _shadow_log(path, row)
     except Exception as exc:     # never break the service
         logger.warning("[tilecore_client] sample compare failed: %s", exc)
 
@@ -733,7 +804,8 @@ def sweep_points(tasks: List[dict], path: str = "sweep", fallback_map=None) -> L
         return fallback_map(list(tasks))
     out: List[Optional[dict]] = [None] * len(tasks)
     redo = []
-    for i, r in enumerate(_cs_many(tasks, path)):
+    cs_tasks = _seeded_tasks(tasks, path)
+    for i, r in enumerate(_cs_many(cs_tasks, path)):
         if isinstance(r, Exception):
             _classify(path, r)
             _count(path, "fallback")
@@ -747,14 +819,38 @@ def sweep_points(tasks: List[dict], path: str = "sweep", fallback_map=None) -> L
     return out   # type: ignore[return-value]
 
 
+def _seeded_tasks(tasks: List[dict], path: str) -> List[dict]:
+    """Tasks as sent to C#: levels that need a seeded copy get one (ONE seed for the whole call = python's same-second
+    time seeding). Other tasks are passed through unchanged (same objects)."""
+    seed = _call_seed()
+    out = []
+    for t in tasks:
+        if _needs_seeded_copy(t["level_json"]):
+            out.append(dict(t, level_json=_with_seed(t["level_json"], seed), _seeded=True))
+            _count(path, "seeded_copy")
+        else:
+            out.append(t)
+    return out
+
+
 def _shadow_sweep(pool, tasks: List[dict], path: str) -> List[dict]:
     recs = list(pool.map(sweep_point_task_recorded, tasks, chunksize=1))
     points = [r["point"] for r in recs]
     try:
-        cs = _cs_many(tasks, path)
+        cs_tasks = _seeded_tasks(tasks, path)
+        sidx = [i for i, t in enumerate(cs_tasks) if t.get("_seeded")]
+        if sidx:      # python reference on the same seeded copies (extra python work for those points only)
+            for i, r in zip(sidx, pool.map(sweep_point_task_recorded, [cs_tasks[i] for i in sidx], chunksize=1)):
+                recs[i] = dict(recs[i], ref=r)
+        cs = _cs_many(cs_tasks, path)
         for a, rec, r in zip(tasks, recs, cs):
+            seeded = "ref" in rec
+            ref = rec["ref"] if seeded else rec
             row = {"ts": time.time(), "path": path, "lvl": _lvl_hash(a["level_json"]), "gim": _gimmicks(a["level_json"]), "theta": a.get("theta"),
                    "seed": a.get("seed"), "py_s": round(rec["py_s"], 4)}
+            if seeded:
+                row["seeded_copy"] = True
+                row["py_ref_s"] = round(ref["py_s"], 4)
             if isinstance(r, Exception):
                 row["category"] = {"unsupported": "cs_unsupported", "timeout": "timeout",
                                                                       "serialize_error": "serialize_error"}.get(_classify(path, r),
@@ -762,10 +858,10 @@ def _shadow_sweep(pool, tasks: List[dict], path: str) -> List[dict]:
                 row["error"] = str(r)[:200]
             else:
                 _count(path, "cs_ok")
-                same = rec["games"] is not None and [[g["cleared"], g["moves"], g["combo"], g["tiles_cleared"]]
-                                                     for g in r[1]] == rec["games"] and r[0] == rec["point"]
+                same = ref["games"] is not None and [[g["cleared"], g["moves"], g["combo"], g["tiles_cleared"]]
+                                                     for g in r[1]] == ref["games"] and r[0] == ref["point"]
                 row["category"] = "same" if same else "mismatch"
-                _count(path, "shadow_same" if same else "shadow_mismatch")
+                _count(path, ("seeded_" if seeded else "shadow_") + ("same" if same else "mismatch"))
             _shadow_log(path, row)
     except Exception as exc:      # shadow must never break the service
         logger.warning("[tilecore_client] sweep shadow failed: %s", exc)

@@ -151,3 +151,72 @@ def test_shadow_cs_failure_never_raises(env, tmp_path):
     _run()
     rows = [json.loads(l) for l in (tmp_path / "sweep_shadow_diff.jsonl").read_text().splitlines()]
     assert {r["category"] for r in rows} == {"cs_error"}
+
+
+# ───────── seeded copy (randSeed<=0 + t0) in the sweep path ─────────
+import time as _time  # noqa: E402
+
+_NOW = 1_700_000_000.5
+_SEED = int(_NOW) & 0xFFFFFFFF
+
+
+def _t0_level():
+    lv = copy.deepcopy(LEVEL)
+    lv["randSeed"] = 0
+    t = lv["layer_0"]["tiles"]
+    t["0_0"], t["1_0"], t["2_0"] = ["t0", ""], ["t0", ""], ["t0", ""]
+    return lv
+
+
+def _t0_tasks(lv, n=3):
+    return [{"key": "k", "theta": 0.2 + 0.2 * i, "level_json": lv, "rollouts": 8, "seed": 4242 + i * 1000}
+            for i in range(n)]
+
+
+def test_sweep_on_seeded_copy_sent_original_kept(env, monkeypatch):
+    pool, serve = env
+    monkeypatch.setattr(_time, "time", lambda: _NOW)
+    serve()
+    seen = []
+    real = tc._cs_call
+    monkeypatch.setattr(tc, "_cs_call", lambda path, level, *a, **k: (seen.append(level), real(path, level, *a, **k))[1])
+    lv = _t0_level()
+    before = copy.deepcopy(lv)
+    out = tc.run_sweep(pool, _t0_tasks(lv))
+    assert lv == before and len(out) == 3 and all(o["error"] is None for o in out)
+    assert len(seen) == 3 and all(s is not lv and s["randSeed"] == _SEED for s in seen)    # one seed for the whole call
+    c = tc.counters()["sweep"]
+    assert c["seeded_copy"] == 3 and c["cs_ok"] == 3 and c["fallback"] == 0 and pool.calls == []
+
+
+def test_sweep_on_fallback_uses_original_level(env, monkeypatch):
+    pool, serve = env
+    monkeypatch.setattr(_time, "time", lambda: _NOW)
+    serve("--unsupported")
+    lv = _t0_level()
+    got = tc.run_sweep(pool, _t0_tasks(lv))
+    assert pool.calls == [("sweep_point_task", 3)]
+    monkeypatch.setenv("TILECORE_SWEEP", "off")
+    assert got == tc.run_sweep(pool, _t0_tasks(lv))                  # == plain python on the original level
+
+
+def test_sweep_shadow_seeded_reference_and_service_result(env, monkeypatch, tmp_path):
+    pool, serve = env
+    monkeypatch.setattr(_time, "time", lambda: _NOW)
+    serve(mode="shadow")
+    lv = _t0_level()
+
+    def stub(path, level, profile, iterations, mm, seed, et, pre_state):     # C# := python on the level it is given
+        sim = tc._RecordingSim()
+        sim.simulate_with_profile(level, profile, iterations=iterations, max_moves=mm, seed=seed, early_termination=et)
+        return ([{"cleared": g[0], "failed": not g[0], "moves": g[1], "combo": g[2], "tiles_cleared": g[3]}
+                 for g in sim.rec_games], None)
+    monkeypatch.setattr(tc, "_cs_call", stub)
+    got = tc.run_sweep(pool, _t0_tasks(lv))
+    c = tc.counters()["sweep"]
+    assert c["seeded_copy"] == 3 and c["seeded_same"] == 3 and c["seeded_mismatch"] == 0
+    assert c["shadow_same"] == 0 and c["shadow_mismatch"] == 0
+    monkeypatch.setenv("TILECORE_SWEEP", "off")
+    assert got == tc.run_sweep(pool, _t0_tasks(lv))                  # service result = python on the ORIGINAL level
+    rows = [json.loads(l) for l in (tmp_path / "sweep_shadow_diff.jsonl").read_text().splitlines()]
+    assert len(rows) == 3 and all(r["seeded_copy"] and r["category"] == "same" for r in rows)

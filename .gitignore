@@ -67,3 +67,12 @@ analysis_venv/
 
 # 허들 구간 추천 실행 출력·작업 상태(range_rec 맵툴 실행분)
 backend/data/hurdle_rec/
+
+# DDA 시드: 카탈로그·원본 행 JSON(코드가 읽는 sha 고정 파일)만 추적, 나머지 dryrun/bulk 산출물은 제외 (외부 백업: ~/Backups/TileMatchAutoLevel/)
+backend/data/dda_seeds/*
+!backend/data/dda_seeds/dda_t0_seed_catalog.v1.json
+!backend/data/dda_seeds/dda_t0_source_rows.v1.json
+# DDA 시드 원장(45M, 운영 이력 — 외부 백업 필수)
+backend/data/dda_seed_ledger/
+# 서버 기동 로그
+logs/
